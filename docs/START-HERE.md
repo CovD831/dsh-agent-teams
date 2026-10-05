@@ -28,7 +28,7 @@ pnpm verify        # 期望 exit=0
 pnpm typecheck     # 期望 exit=0
 ```
 
-**已提交的九件事**（都可回退、都有验收）：
+**已提交的十七件事**（都可回退、都有验收）：
 
 | commit | 做了什么 |
 |---|---|
@@ -41,6 +41,28 @@ pnpm typecheck     # 期望 exit=0
 | `7cdf263` | ★ **把归属观察接进 update_task**（判据真的会开火，不再永远 unmeasured）|
 | `8851e6e` | 文档更正：切开「归属」与「版本」，worktree 仍然需要 |
 | `68ee2c8` | ★ **worktree 隔离**（每任务一个 detached 检出，解决"版本"）|
+| `0657f65` | ★ **`dispatch.worktree`**（隔离是机制：建不出就拒；降级要如实记录）|
+| `ebbacce` | ★ **`completion.r5`**（新测试必须先在父版本上红）|
+| `c396e71` | ★ **变异测试 L1/L2/L3 + mutation-guard** |
+| `27e9613` | ★ **`completion.backtest`**（基准不绿 ⇒ 无法归因）|
+| `cd52b09` | 注册表：「全跳过」不得与「都通过」同形 |
+| `3b4f0a8` | 装配契约 + `asRegistration()` 形状校验 |
+| `9183235` | ★ **注入面 + lifecycle 真证据**（`pnpm verify` 转绿）|
+| `0e63010` | 构建产物重建 |
+
+**判据层现状**（六条，全部在生产路径上真的会跑）：
+
+```
+dispatch:   dispatch.changed-paths | dispatch.worktree
+completion: completion.verify-rerun | completion.r5 | completion.mutation | completion.backtest
+（mutation-guard 是 guard，不进注册表）
+contract / delivery / runtime 三个位置仍为空
+```
+
+### ★ 但已装插件还是上游原始版本
+
+`file:` 安装是**拷贝**，所以上面六条判据**在真实运行中还没生效**。
+切换方式见 `docs/SELF-ITERATION.md`（需要写 profile，工作区外）。
 
 ---
 
