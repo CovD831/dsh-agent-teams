@@ -763,7 +763,7 @@ try {
     objective: 'Ship the parser',
     inScope: ['src/parser.ts'],
     acceptance: ['parser accepts empty input'],
-    verify: ['pnpm test'],
+    verify: ['test -d .'],
   })
   let missingContractRejected = false
   try {
@@ -804,7 +804,7 @@ try {
     output: 'parser shipped',
     changedPaths: ['src/parser.ts'],
     acceptanceResults: [{ criterion: 'parser accepts empty input', status: 'passed' }],
-    commandsRun: [{ command: 'pnpm test', status: 'passed' }],
+    commandsRun: [{ command: 'test -d .', status: 'passed' }],
   }, builder)
   const finishedBeforeEvidence = (await readTeam(stateRoot, 'quality-loop')).tasks.find(t => t.id === impl.task_id)
   const supplement = { task_id: impl.task_id, attempt_id: implClaim.attempt_id, status: 'completed', commandsRun: [{ command: 'independent recheck', status: 'passed', exitCode: 0 }] }
@@ -812,7 +812,7 @@ try {
   await call('agent_teams_update_task', supplement, builder)
   const supplemented = (await readTeam(stateRoot, 'quality-loop')).tasks.find(t => t.id === impl.task_id)
   check('issue159 terminal evidence is durable and duplicate submissions are idempotent', supplemented.supplementalEvidence?.length === 1 && supplemented.supplementalEvidence[0].commandsRun[0].command === 'independent recheck')
-  check('issue159 supplementary evidence preserves the original result and completion timestamp', supplemented.output === finishedBeforeEvidence.output && supplemented.updatedAt === finishedBeforeEvidence.updatedAt && supplemented.commandsRun[0].command === 'pnpm test')
+  check('issue159 supplementary evidence preserves the original result and completion timestamp', supplemented.output === finishedBeforeEvidence.output && supplemented.updatedAt === finishedBeforeEvidence.updatedAt && supplemented.commandsRun[0].command === 'test -d .')
   const captainSupplement = await call('agent_teams_update_task', { task_id: impl.task_id, evidence_note: 'Captain accepted independent evidence' })
   check('issue159 captain supplements terminal member work without takeover', captainSupplement.evidence_count === 2)
   const visibleEvidence = await call('agent_teams_status', {})

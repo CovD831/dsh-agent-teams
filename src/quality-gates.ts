@@ -483,6 +483,64 @@ function verifyCovered(required: readonly string[] | undefined, results: readonl
   return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
 }
 
+/**
+ * ── ★ 判据层自己执行 verify，不采信成员自报的 exitCode ────────────────────────────
+ *
+ * MEASURED（2026-10-05，gate-probe 探针，上游 v0.1.22）：一个成员【零真实工作】，
+ * 提交两条 acceptanceResults 全 passed（evidence 里直接写 "FABRICATED"）+ 两条
+ * commandsRun 全 passed（exitCode 填伪造的 0，命令根本没跑，产物文件不存在），
+ * 任务被判 completed —— 与真实完成（t3 干净基线）在判据层【不可区分】。
+ *
+ * 根因：`evaluateQualityCompletion` 只比对【条数与 status】，而 status/exitCode
+ * 都是【成员自报的】。这正是"把判据的输入交给被判的一方"。
+ *
+ * ⇒ 修复：判据层【自己重跑】verify 命令。执行器由调用方注入（保持本文件零 I/O
+ * 的纯函数纪律——这是它架构里最好的部分，不该破坏）。执行器为 undefined 时
+ * 退回当前行为（纯函数仍然可单测，旧测试全部不受影响）。
+ */
+
+/** 执行一条 verify 命令，返回真实退出码。由调用方注入；本文件不 import 任何 I/O。 */
+export type VerifyCommandExecutor = (command: string) => Promise<number>
+
+export interface VerifyRerunResult {
+  /** 每条 verify 命令的重跑结果，与 task.verify 顺序一致。 */
+  reruns: readonly CommandResult[]
+  /** 自报 passed 但重跑非零的命令（伪造的直接证据）。 */
+  mismatches: readonly CommandResult[]
+  /** 重跑发生时为 true；执行器缺席时为 false（此时结果为空数组）。 */
+  executed: boolean
+}
+
+/**
+ * 重跑任务的全部 verify 命令并比对自报结果。
+ * 纯数据变换：执行动作全部通过注入的 executor 发生。
+ */
+export async function rerunVerifyCommands(
+  task: TeamTask,
+  update: QualityCompletionUpdate,
+  executor: VerifyCommandExecutor | undefined,
+): Promise<VerifyRerunResult> {
+  const reruns: CommandResult[] = []
+  const mismatches: CommandResult[] = []
+  if (executor === undefined) return { reruns, mismatches, executed: false }
+  const claimed = update.commandsRun ?? task.commandsRun
+  const byCommand = new Map((claimed ?? []).map((item) => [item.command, item]))
+  for (const command of task.verify ?? []) {
+    const exitCode = await executor(command)
+    const claimedItem = byCommand.get(command)
+    const status = exitCode === 0 ? 'passed' : 'failed'
+    const rerun: CommandResult = {
+      command,
+      status,
+      exitCode,
+      evidence: `re-executed by the quality gate on ${new Date().toISOString()}`,
+    }
+    reruns.push(rerun)
+    if (claimedItem?.status === 'passed' && exitCode !== 0) mismatches.push(rerun)
+  }
+  return { reruns, mismatches, executed: true }
+}
+
 export function evaluateQualityCompletion(
   task: TeamTask,
   update: QualityCompletionUpdate,
