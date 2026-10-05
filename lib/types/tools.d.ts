@@ -78,6 +78,8 @@ export interface AgentTeamsRuntime {
         teamId: string;
     }>;
 }
+/** 派发时登记基准；判据层在完成时读它。 */
+export declare function rememberWorktreeBase(taskId: string, base: string): void;
 export declare function haltTeamWork(input: {
     ctx: Context;
     stateRoot: string;

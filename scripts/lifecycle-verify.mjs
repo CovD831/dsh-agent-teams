@@ -8,11 +8,12 @@
  * rounds, removal recovery, mailbox fallback and concurrent claims.
  */
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { haltTeamWork, registerAgentTeamsTools } from '../lib/tools.js'
+import { haltTeamWork, registerAgentTeamsTools, rememberWorktreeBase } from '../lib/tools.js'
 import { buildActivationDirective, invokedAgentTeamsGoal, invokedAgentTeamsInvocation, installAgentTeamsGestureBoundary, profileCommandName, registerAgentTeamsCommand } from '../lib/command.js'
 import { readArchivedTeam, readMailbox, readTeam, readUnreadMailbox } from '../lib/state.js'
 import { collectArchivedTeamsActivity } from '../lib/snapshot.js'
@@ -22,6 +23,72 @@ const modernHarness = deliveryHarness || process.argv.includes('--modern-harness
 const hostQueue = Symbol.for(deliveryHarness ? 'dsh.subagent.deliverPrompt' : 'dsh.subagent.queuePrompt')
 
 const workspace = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-lifecycle-'))
+
+/**
+ * ── ★ 把工作区做成一个【真实的 git 仓库】，并准备"父版本 / 修复版本"两个提交 ────────
+ *
+ * 为什么（MEASURED，2026-10-05，t7/t14）：判据层的三条新判据需要**真证据**才能跑：
+ *
+ *     completion.r5        需要【父版本】+ 能折成测试路径的新测试
+ *     completion.mutation  需要【git 的改动行范围】（非 git 目录拿不到）
+ *     completion.backtest  需要【父/HEAD 的基准测试结果】
+ *
+ * 而本夹具此前的工作区是 `mkdtemp` 出来的**空目录**：不是 git 仓库、没有提交、
+ * 没有测试。于是注入面补齐之后，这三条判据诚实地报"我没能测量"并拒绝每一次
+ * completed —— 那不是判据的缺陷，是**这里根本没有证据**。
+ *
+ * ★ 为什么不改成"让判据闭嘴"（例如把 kind 换成 work）：那会让红消失的原因是
+ *   "没测"而不是"测过了"，正是本队最警惕的形态。所以这里造真证据，让三条判据
+ *   **真的跑起来并真的通过**。
+ *
+ * 布局：
+ *     src/parser.ts        父版本上是【坏的】（解析器返回 null）
+ *     scripts/parser.test.mjs  父版本上【红】、修复版本上【绿】的测试
+ *     ── 父提交（base）   = existing 绿 + parser 坏 + 两条测试都在
+ *     ── 修复提交（HEAD） = parser 修好
+ *
+ * ★ 这里有一个必须说清的【设计约束】，我是踩了才明白的：
+ *   回测的 L1 要求「基准（父版本）必须是绿的」—— 理由是硬的：基准不绿时，
+ *   "本来就坏"与"我改坏了"在观察上同形，此时任何裁决都是替两种可能选一个。
+ *   而 R5 要求「新测试在父版本上必须【红】」（否则算装饰性测试）。
+ *   ⇒ 两者不矛盾，但**只能是同一条命令里的不同测试**：父版本上既有的测试全绿
+ *     （基准绿），新的那条测试红（R5 有红可验）。若把"新测试"做成整个套件唯一的
+ *     测试，基准必然不绿 ⇒ 回测正确地拒绝。
+ *   ★ 我第一次就是这么写的，被 completion.backtest 当场抓住（attribution is
+ *     impossible）。那不是判据的缺陷，是**我的夹具在造一条自相矛盾的证据链**。
+ *
+ * 另：改动行要落在 `src/parser.ts` 上，且新测试必须能杀掉那里的变异体 ——
+ * 否则变异判据会说"交付的测试在改动行上是装饰性的"（也是实测撞到的一次）。
+ */
+const git = (args, cwd = workspace) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+await mkdir(join(workspace, 'src'), { recursive: true })
+await mkdir(join(workspace, 'scripts'), { recursive: true })
+/** 既有模块 + 既有测试：父版本上就是绿的 ⇒ 给回测一个真绿基准。 */
+await writeFile(join(workspace, 'src', 'existing.ts'), 'export const existing = () => 1\n')
+await writeFile(
+  join(workspace, 'scripts', 'existing.test.mjs'),
+  "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { existing } from '../src/existing.ts'\n\ntest('existing behaviour is stable', () => {\n  assert.equal(existing(), 1)\n})\n",
+)
+/** 要修的模块：父版本上返回 null（坏的）。 */
+await writeFile(join(workspace, 'src', 'parser.ts'), 'let cache = null\nexport const parse = () => cache\n')
+/** 新增测试：父版本上红（parse 返回 null）、修复后绿；且它能杀掉 parse 的变异体。 */
+await writeFile(
+  join(workspace, 'scripts', 'parser.test.mjs'),
+  "import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { parse } from '../src/parser.ts'\n\ntest('parser accepts empty input', () => {\n  assert.notEqual(parse(''), null)\n  assert.equal(parse('').ok, true)\n})\n",
+)
+git(['init', '-q', '.'])
+git(['config', 'user.email', 'lifecycle@probe'])
+git(['config', 'user.name', 'lifecycle'])
+git(['add', '-A'])
+git(['commit', '-qm', 'parent: existing tests are green, the new parser test is red'])
+/** ★ 父版本 hash —— R5 / 回测要的就是它。 */
+const parentRevision = git(['rev-parse', 'HEAD']).trim()
+// 修复：让新测试由红转绿
+await writeFile(join(workspace, 'src', 'parser.ts'), 'let cache = null\nexport const parse = () => (cache === null ? { ok: true } : cache)\n')
+git(['add', '-A'])
+git(['commit', '-qm', 'fix: parser now passes the new test'])
+
 const definitions = new Map()
 const liveAgents = new Map()
 const disposedAgents = new Map()
@@ -217,6 +284,18 @@ const ctx = {
           turn: 1,
           step: 1,
           meta: { diffs: [{ path: 'src/parser.ts', oldText: null, newText: 'export const parser = () => []\n' }] },
+        }, {
+          /**
+           * ★ 新增的【测试文件】写入记录 —— R5（红前绿后）要的就是"哪个文件是新测试"。
+           *
+           * 它必须真的出现，否则 `completion.r5` 的 `appliesTo` 为假（没声明新测试
+           * ⇒ 没有"新测试"这个对象），R5 会被跳过 —— 而"跳过"与"验过了"不同形，
+           * 那正是本队最警惕的形态。这里让它真的被声明，于是 R5 真的去父版本上跑它。
+           */
+          type: 'tool/result',
+          turn: 1,
+          step: 2,
+          meta: { diffs: [{ path: 'scripts/parser.test.mjs', oldText: null, newText: "import test from 'node:test'\n" }] },
         }]
       }
       child.ctx = childContext(child)
@@ -775,9 +854,20 @@ try {
     assignee: 'builder',
     kind: 'implementation',
     objective: 'Ship the parser',
-    inScope: ['src/parser.ts'],
+    /**
+     * ★ 写域必须覆盖【这条任务真的会改的东西】。本任务是"修 parser + 带上它的测试"，
+     *   所以测试文件在写域里 —— 否则 upstream 的 `is undeclared` 规则会（正确地）
+     *   拒绝："改了写域外的文件"是不可审计的。
+     */
+    inScope: ['src/parser.ts', 'scripts/parser.test.mjs'],
     acceptance: ['parser accepts empty input'],
-    verify: ['test -d .'],
+    /**
+     * ★ 基准命令必须是【整个套件】，而不是只有新测试那一条。
+     *   只跑新测试 ⇒ 它在父版本上红 ⇒ 基准不绿 ⇒ 回测正确地拒绝
+     *   （"本来就坏"与"我改坏了"同形）。跑整套 ⇒ 父版本上既有测试全绿
+     *   （基准绿），而 R5 仍然只看它自己那条新测试的红/绿。
+     */
+    verify: ['node --test scripts/existing.test.mjs scripts/parser.test.mjs'],
   })
   let missingContractRejected = false
   try {
@@ -811,14 +901,35 @@ try {
     illegalCompleteRejected = true
   }
   check('illegal completed without acceptance evidence is rejected', illegalCompleteRejected)
+  /**
+   * ★ 登记这个任务的【隔离基准】（父版本）= 那个"测试还是红的"提交。
+   *
+   * 生产路径上，`scheduler.onWorktree(taskId, base)` 在建出 worktree 时做这件事
+   * （见 tools.ts 的接线）。本夹具不起真正的 worktree（那需要另一次 git 检出，
+   * 而这里验证的是**判据能不能拿到真证据**，不是 worktree 机制本身 —— 后者有
+   * `scripts/worktree-isolation.test.mjs` 与 `gate-worktree-arrival.test.mjs` 专门管）。
+   * ⇒ 用同一个入口直接登记，判据拿到的仍是**真实的父版本 hash**。
+   */
+  rememberWorktreeBase(impl.task_id, parentRevision)
+  /**
+   * ★ 一条"新测试在父版本上红、在修复版本上绿"的真证据链：
+   *
+   *     changedPaths  : src/parser.ts        ← 改动
+   *     newTestFiles  : scripts/parser.test.mjs ← ★ 由【会话事件】观察得到（上面那条
+   *                                             tool/result），不是在这里手填的
+   *     parentRevision: parentRevision       ← 上面登记的父版本
+   *
+   * ⇒ `completion.r5` 会真的去父版本上跑那条测试（必须红），再到修复版本上跑
+   *   （必须绿）。**这是"测过了"，不是"判据闭嘴了"。**
+   */
   await call('agent_teams_update_task', {
     task_id: impl.task_id,
     status: 'completed',
     attempt_id: implClaim.attempt_id,
     output: 'parser shipped',
-    changedPaths: ['src/parser.ts'],
+    changedPaths: ['src/parser.ts', 'scripts/parser.test.mjs'],
     acceptanceResults: [{ criterion: 'parser accepts empty input', status: 'passed' }],
-    commandsRun: [{ command: 'test -d .', status: 'passed' }],
+    commandsRun: [{ command: 'node --test scripts/existing.test.mjs scripts/parser.test.mjs', status: 'passed', exitCode: 0 }],
   }, builder)
   const finishedBeforeEvidence = (await readTeam(stateRoot, 'quality-loop')).tasks.find(t => t.id === impl.task_id)
   const supplement = { task_id: impl.task_id, attempt_id: implClaim.attempt_id, status: 'completed', commandsRun: [{ command: 'independent recheck', status: 'passed', exitCode: 0 }] }
@@ -826,7 +937,7 @@ try {
   await call('agent_teams_update_task', supplement, builder)
   const supplemented = (await readTeam(stateRoot, 'quality-loop')).tasks.find(t => t.id === impl.task_id)
   check('issue159 terminal evidence is durable and duplicate submissions are idempotent', supplemented.supplementalEvidence?.length === 1 && supplemented.supplementalEvidence[0].commandsRun[0].command === 'independent recheck')
-  check('issue159 supplementary evidence preserves the original result and completion timestamp', supplemented.output === finishedBeforeEvidence.output && supplemented.updatedAt === finishedBeforeEvidence.updatedAt && supplemented.commandsRun[0].command === 'test -d .')
+  check('issue159 supplementary evidence preserves the original result and completion timestamp', supplemented.output === finishedBeforeEvidence.output && supplemented.updatedAt === finishedBeforeEvidence.updatedAt && supplemented.commandsRun[0].command === 'node --test scripts/existing.test.mjs scripts/parser.test.mjs')
   const captainSupplement = await call('agent_teams_update_task', { task_id: impl.task_id, evidence_note: 'Captain accepted independent evidence' })
   check('issue159 captain supplements terminal member work without takeover', captainSupplement.evidence_count === 2)
   const visibleEvidence = await call('agent_teams_status', {})
