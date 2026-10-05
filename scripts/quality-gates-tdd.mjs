@@ -1060,6 +1060,18 @@ console.log('quality-gates TDD — tool-level closed loop')
     // blank optionals) on a repair task must be normalized to omitted instead
     // of persisted into team.json, where durable-state validation would brick
     // the whole team on reload.
+    //
+    // ★ t13（2026-10-05）：inScope 里补上 `lib/repair.js`。**被测对象没有变** ——
+    //   本用例测的仍然是「空字段归一化后不进 team.json」（reviewedTaskId:'' /
+    //   verify 里的 '' / inScope 里的 ''），补的只是一条**真实存在**的构建产物路径。
+    //
+    //   为什么必须补：本仓库强制 `lib/` 与 `src/` 同步（`scripts/git-artifacts.mjs`
+    //   判 stale），而硬约束要求改 src 后必须 `pnpm build`。于是「inScope 含
+    //   `src/repair.ts` 却不声明对应产物」这个形状**在真实流程里永远无法诚实完成**：
+    //   成员一 build 就产出 `lib/` 下的未声明改动 ⇒ 完成时被判 `undeclared`。
+    //   contract 位置的 `contract.build-artifact-scope` 判据就是为此而挂的，
+    //   它在**真实路径**上正确地拒绝了这条 fixture —— 那说明判据在干活。
+    //   ⇒ 修 fixture，不是修门（门不能为了让 fixture 好过而放宽）。
     const repair = await call('agent_teams_create_task', {
       subject: 'repair with blank optional',
       kind: 'repair',
@@ -1068,7 +1080,7 @@ console.log('quality-gates TDD — tool-level closed loop')
       reviewedTaskId: '',
       objective: 'Close F-1',
       acceptance: ['F-1 fixed'],
-      inScope: ['', 'src/repair.ts'],
+      inScope: ['', 'src/repair.ts', 'lib/repair.js'],
       verify: ['', 'pnpm verify'],
     })
     const persistedRepair = (await readTeam(join(workspace, '.agent-teams'), 'gates'))?.tasks.find((item) => item.id === repair.task_id)
@@ -1076,7 +1088,12 @@ console.log('quality-gates TDD — tool-level closed loop')
       'tdd.create.blank-optional-fields-normalized.tool',
       persistedRepair?.reviewedTaskId === undefined
         && persistedRepair?.objective === 'Close F-1'
-        && JSON.stringify(persistedRepair?.inScope) === JSON.stringify(['src/repair.ts'])
+        /**
+         * ★ 断言跟着 fixture 一起改，且**只改这一处**：空串条目仍然必须被丢掉
+         *   （`''` 不在结果里），而两条真实路径原样保留。
+         *   被测量的事实（"空字段被归一化掉"）一个字没动。
+         */
+        && JSON.stringify(persistedRepair?.inScope) === JSON.stringify(['src/repair.ts', 'lib/repair.js'])
         && JSON.stringify(persistedRepair?.verify) === JSON.stringify(['pnpm verify']),
     )
     check(

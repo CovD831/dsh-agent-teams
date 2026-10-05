@@ -97,6 +97,24 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   const names = async agent => (await assemble(agent)).tools.map(tool => tool.name)
   const execute = (agent, name, args = {}, signal = new AbortController().signal) => host.tools.execute({ name, arguments: args, callId: name + '-test', agent, signal })
   const captainNames = [...TEAM_TOOL_NAMES].sort()
+  /**
+   * ── ★ 工具【数量】必须按源码推算，不许写成字面量（t19）─────────────────────
+   *
+   * MEASURED（2026-10-05）：这里此前五处写着字面量 `14`，而 `TEAM_TOOL_NAMES`
+   * 在 t18 加了 `agent_teams_declare_delivery` 之后是 **15** —— 五条断言同时变红。
+   *
+   * ★ 那条字面量是**冗余且错误的**：紧邻的 `deepEqual(await names(a), captainNames)`
+   *   已经在按源码断言**完整清单**，所以 `length` 一个字面量**不增加任何覆盖**，
+   *   却会在任何一次"加/删一个工具"时变红。
+   *
+   * ★ 而"加一个工具"是**真实变更**，不是缺陷 ⇒ 夹具必须跟着它走，不是反过来
+   *   （把工具清单改成 14 条去迁就夹具，才是本末倒置）。
+   *
+   * ★ 这是本轮「**夹具不得把『当前数量/当前为空/当前形状』写成不变量**」的第 5 次
+   *   出现，也是唯一一次落在与判据层无关的模块里 —— 所以它值得在这里写明理由，
+   *   而不是只把数字改掉。**数量由被测量的树枝决定，不由夹具手抄。**
+   */
+  const captainToolCount = TEAM_TOOL_NAMES.length
   const header = async agent => { const assembled = await assemble(agent); return JSON.stringify({ system: renderPrompt(assembled), tools: assembled.tools }) }
   const initialHeader = await header(a)
   const team = { id: 'saved', name: 'Saved', captainSessionId: a.id, createdAt: 1, members: [], tasks: [], taskSeq: 0, phase: 'staged' }
@@ -104,7 +122,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     await t.test('first request keeps all tools and the complete fixed captain protocol', async () => {
       assert.deepEqual(await names(a), captainNames)
       assertCaptainProtocol(renderPrompt(await assemble(a)))
-      assert.equal((await names(a)).length, 14)
+      assert.equal((await names(a)).length, captainToolCount)
       assert.equal(host.tools.get('agent_teams_open', a), undefined)
       assert.doesNotMatch(renderPrompt(await assemble(a)), /agent_teams_open/)
       t.diagnostic(JSON.stringify({ role: 'captain-idle', profiles: ['demo'], promptBytes: Buffer.byteLength(renderPrompt(await assemble(a))), schemaBytes: Buffer.byteLength(JSON.stringify((await assemble(a)).tools)) }))
@@ -225,11 +243,11 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     await t.test('HMR removes old masks and restores persisted participants in existing scopes', async () => {
       await fiber.dispose()
       assert.equal(host.tools.get('agent_teams_open', b), undefined)
-      assert.equal((await names(b)).length, 14)
+      assert.equal((await names(b)).length, captainToolCount)
       assert.doesNotMatch(renderPrompt(await assemble(b)), /AgentTeams captain protocol/)
       fiber = host.plugin(plugin)
       await fiber.await()
-      assert.equal((await names(a)).length, 14)
+      assert.equal((await names(a)).length, captainToolCount)
       assert.deepEqual(await names(b), captainNames)
       assertCaptainProtocol(renderPrompt(await assemble(b)))
       assert.equal(await header(b), initialHeader)
@@ -240,7 +258,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     await t.test('a cold captain loads its durable role before its first request', async () => {
       const cold = createAgent(a.id)
       host.emit('agent/session-start', { agent: cold, source: 'resume' })
-      assert.equal((await names(cold)).length, 14)
+      assert.equal((await names(cold)).length, captainToolCount)
       assert.equal(await header(cold), initialHeader)
       // This new Agent has no historical tool calls. Persisted work is
       // still directly addressable through the original business tools.
@@ -252,7 +270,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     })
     await t.test('archive and idle preserve the original captain prefix', async () => {
       await archiveTeamDir(stateRoot, team.id)
-      assert.equal((await names(a)).length, 14)
+      assert.equal((await names(a)).length, captainToolCount)
       host.emit('agent/status', { agent: a, status: 'idle' })
       assert.deepEqual(await names(a), captainNames)
     })

@@ -296,6 +296,32 @@ const ctx = {
           turn: 1,
           step: 2,
           meta: { diffs: [{ path: 'scripts/parser.test.mjs', oldText: null, newText: "import test from 'node:test'\n" }] },
+        }, {
+          /**
+           * ── ★ 成员【说过话】的观察记录（t14）──────────────────────────────────
+           *
+           * `delivery.convergence` 判的是"成员收不收敛"，而它对收敛的定义里有一位
+           * 关键的观察：**这个成员最后说了什么**。
+           *
+           *   · 最后一条 `assistant/message` 的内容**非空** ⇒ `spoke: true`
+           *   · 内容为空                                   ⇒ `spoke: false` ⇒ **不收敛**
+           *     （"空回复不是收敛"正是这条判据存在的全部理由：静下来的成员与做完了
+           *       的成员，在没有这一位时完全同形）
+           *   · **没有** `assistant/message`               ⇒ **没能观察** ⇒ unmeasured
+           *
+           * ★ 本夹具此前只有 descriptor 与 tool/result ⇒ 落到第三种 ⇒ 交付位置的
+           *   convergence 诚实地报 unmeasured ⇒ `declare_delivery` 被拒。
+           *   **那是判据在正确地工作**，缺的是夹具的观察面 —— 所以这里补一条真实的、
+           *   非空的 assistant 消息，**而不是去放宽判据**。
+           *
+           * ★ 为什么形状是 `message.content[].text`：判据读的就是这个位置
+           *   （`observedSpoke` 的形状），与真实的 `assistant/message` 事件同形 ——
+           *   不是为夹具另编一个更好骗的形状。
+           */
+          type: 'assistant/message',
+          turn: 1,
+          step: 2,
+          message: { content: [{ type: 'text', text: 'Implemented the parser and its test; nothing else outstanding.' }] },
         }]
       }
       child.ctx = childContext(child)
@@ -858,8 +884,15 @@ try {
      * ★ 写域必须覆盖【这条任务真的会改的东西】。本任务是"修 parser + 带上它的测试"，
      *   所以测试文件在写域里 —— 否则 upstream 的 `is undeclared` 规则会（正确地）
      *   拒绝："改了写域外的文件"是不可审计的。
+     *
+     * ★ t18：也要覆盖它【构建出来】的东西（`lib/parser.js` + `lib/types/parser.d.ts`）。
+     *   本仓库强制 `lib/` 与 `src/` 同步（`scripts/git-artifacts.mjs` 判 stale），而硬
+     *   约束要求改 src 后必须 `pnpm build` ⇒ 这条任务**必然**产出 lib/ 下的改动；
+     *   不声明它们，成员一 build 就产生 undeclared 路径，任务永远无法诚实完成。
+     *   `contract.build-artifact-scope` 判据在 create_task 那一刻就把这件事说清楚
+     *   —— 这正是它存在的理由（本轮它先后在 4 个 fixture 上开了火）。
      */
-    inScope: ['src/parser.ts', 'scripts/parser.test.mjs'],
+    inScope: ['src/parser.ts', 'lib/parser.js', 'lib/types/parser.d.ts', 'scripts/parser.test.mjs'],
     acceptance: ['parser accepts empty input'],
     /**
      * ★ 基准命令必须是【整个套件】，而不是只有新测试那一条。
