@@ -359,3 +359,256 @@ test('⑯ 臂 3b ★ 「全跳过」与「unmeasured」必须不同形（都是"
   assert.equal(skipped.evaluated, 0)
   assert.equal(unmeasuredVerdict.evaluated, 1)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑰ 观察模式（t9）：新判据先只记录、不拒绝 —— 但必须【显式选择加入】
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★ 观察模式防的是什么失效
+ *
+ * 一条写错的新判据若立刻有否决权，会把**真实任务**卡死；而"被门禁坑过"的人学到
+ * 的不是"这条判据要修"，是"门禁可以忽略" —— 此后所有判据都白装。本队已经见过
+ * 这个形态（棘轮断言在成功路径上报错）。
+ *
+ * ⇒ 新判据可以先【进来观察】：照常求值、照常记录，裁决不阻止流程。
+ *
+ * ★ 而它自己最危险的失效是**方向反了**：一个缺省就放宽的实现会让"配置丢了"与
+ *   "判据通过了"在日志里同形。所以下面每一条臂都有一半在钉"缺省不放宽"。
+ */
+
+import { OBSERVE_GATES_ENV, observeIdsFromEnv } from '../lib/gates/registry.js'
+
+/** 一条会开火的探针（blocked），挂在一个位置上的注册表。 */
+function firingRegistry(point = 'completion') {
+  const r = createGateRegistry()
+  r.register({ id: 'shiny', point, description: 'a brand-new gate', gate: () => blocked('found a problem') })
+  return r
+}
+
+test('⑰ 臂 1 ★ 观察中的判据开火 ⇒ 被记录、但【不阻止流程】', async () => {
+  const r = firingRegistry()
+  assert.equal(r.isObserving('shiny'), false, '挂上去时它必须【不在】观察中（缺省有否决权）')
+  r.observe('shiny', { reason: 'first rollout' })
+  assert.equal(r.isObserving('shiny'), true)
+
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, true, '★ 观察中的判据不得拒绝流程 —— 这正是观察模式的定义')
+  assert.deepEqual(v.blockers, [], '★ 被放过的 blocker 不许并进 blockers：并进去就等于它进了裁决')
+  assert.equal(v.unmeasured, undefined)
+
+  /**
+   * ★ 但裁决必须【被记录】，且是三处不同形的记录：
+   *   ran 里那条条目、计数、以及裁决原文。
+   *   丢掉任何一处，观察期就变成"什么都看不见"，那时没人能从日志里决定
+   *   "这条判据该不该开火"。
+   */
+  assert.equal(v.ran.length, 1)
+  assert.equal(v.ran[0].verdict, 'blocked', '★ 它确实开火了 —— verdict 不许被改写成 ok')
+  assert.equal(v.ran[0].observed, true, '★ "开火了但被放过"必须写在这条条目上')
+  assert.equal(v.observedBlockers, 1, '★ 必须可计数（不是只能靠翻 ran 数组）')
+  assert.deepEqual(v.observed.blockers, ['[shiny] found a problem'], '★ 裁决原文必须留着')
+})
+
+test('⑰ 臂 2 ★ 对照臂：没在观察的同一条判据开火 ⇒ 照常阻止', async () => {
+  const r = firingRegistry()
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, false, '★ 缺省 = 今天的行为：有否决权')
+  assert.deepEqual(v.blockers, ['[shiny] found a problem'])
+  assert.equal(v.observedBlockers, undefined, '★ 没有观察 ⇒ 不许产出任何"放过"的痕迹')
+  assert.deepEqual(v.observed, { blockers: [], unmeasured: [] }, '★ observed 恒在场（空即空），但它是空的')
+  assert.equal(v.ran[0].observed, undefined, '★ 未观察的条目不许带 observed 标记')
+})
+
+test('⑰ 臂 3 ★ 观察中的判据 ok ⇒ 正常通过（且"放过"的概念在这里没有对象）', async () => {
+  const r = createGateRegistry()
+  r.register({ id: 'quiet', point: 'delivery', description: 'd', gate: () => ({ ok: true, produced: 'value' }) })
+  r.observe('quiet')
+
+  const v = await r.evaluate('delivery', {})
+  assert.equal(v.ok, true)
+  assert.equal(v.ran[0].verdict, 'ok')
+  /**
+   * ★ 一条通过的判据在观察模式下【不产出 observed 标记】—— 它没有任何裁决被拦下。
+   *   给它打标记会让"通过"与"开火被放过"在这条条目上同形，而后者才是要曝光的。
+   */
+  assert.equal(v.ran[0].observed, undefined)
+  assert.equal(v.observedBlockers, undefined)
+  assert.equal(v.ran[0].produced, true, '★ 观察模式放宽的是【否决权】，不是判据的结论：产出照常被采纳')
+  assert.deepEqual(v.outputs.quiet, { produced: 'value' })
+})
+
+test('⑰ 臂 3b ★ 观察中【未测量】⇒ 同样被记录、不阻止流程，且与 blocked 不同形', async () => {
+  const r = createGateRegistry()
+  r.register({ id: 'blind', point: 'completion', description: 'd', gate: () => unmeasured('no executor was injected') })
+  r.observe('blind')
+
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, true, '★ 观察模式对 unmeasured 同样成立 —— 它也不得把流程卡死')
+  assert.equal(v.unmeasured, undefined, '★ 被放过的 unmeasured 不许并进 unmeasured')
+  assert.equal(v.ran[0].verdict, 'unmeasured')
+  assert.equal(v.ran[0].observed, true)
+  assert.deepEqual(v.observed.unmeasured, ['[blind] no executor was injected'])
+  assert.deepEqual(v.observed.blockers, [], '★ "没能测量"不许被读成"发现了问题"')
+
+  // 与 blocked 的观察记录不同形（两者都在 observed 里，但躺在不同字段）
+  const blockedR = firingRegistry()
+  blockedR.observe('shiny')
+  const bv = await blockedR.evaluate('completion', {})
+  assert.deepEqual(bv.observed.blockers, ['[shiny] found a problem'])
+  assert.deepEqual(bv.observed.unmeasured, [])
+  assert.notDeepEqual(v.observed, bv.observed, '★ "开火"与"测不了"在观察记录里也必须不同形')
+})
+
+test('⑰ 臂 4 ★ 关掉观察 ⇒ 同一条判据恢复阻止流程（开关是运行时调用，不改代码）', async () => {
+  const r = firingRegistry()
+  r.observe('shiny')
+  assert.equal((await r.evaluate('completion', {})).ok, true, '观察中：放过')
+
+  assert.equal(r.unobserve('shiny'), true, '★ 关掉观察只是一次调用 —— 不需要 code change，也就不需要重新 build')
+  const after = await r.evaluate('completion', {})
+  assert.equal(after.ok, false, '★ 关掉之后立刻恢复阻止流程')
+  assert.deepEqual(after.blockers, ['[shiny] found a problem'])
+  assert.equal(after.observedBlockers, undefined)
+  assert.equal(r.unobserve('shiny'), false, '★ 二次关闭返回 false，不抛错（幂等）')
+})
+
+test('⑰ 臂 5 ★ 缺省方向：未显式开启观察的判据，行为与今天完全一致', async () => {
+  /**
+   * ★ 这条臂是本任务最重要的方向性断言。把"观察模式"实现成"默认放宽"是一个
+   *   很容易犯、而且**在成功路径上完全看不出来**的错：所有用例都绿，直到某天
+   *   有人发现门禁其实早就没在拦了。
+   */
+  const r = createGateRegistry()
+  r.register({ id: 'strict', point: 'completion', description: 'd', gate: () => blocked('missing acceptance evidence') })
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, false, '★ 显式观察之外的判据一律保留否决权')
+  assert.deepEqual(v.blockers, ['[missing acceptance evidence]'.replace('[missing acceptance evidence]', '[strict] missing acceptance evidence')])
+  assert.equal(r.observingIds().length, 0, '★ 没有人在观察 —— 名单必须是空的，不许有默认成员')
+  assert.deepEqual(v.observed, { blockers: [], unmeasured: [] })
+})
+
+test('⑰ 臂 6 ★ 开关来自环境变量 ⇒ 不改代码也能开、能关（且只增不减）', async () => {
+  /**
+   * ★ 需求原话是"开关本身不得需要一个 code change"。一个只有代码内部能调的
+   *   `observe()` 只满足一半 —— 关掉观察仍然要有人写一行代码并重新 build。
+   */
+  assert.equal(OBSERVE_GATES_ENV, 'AGENT_TEAMS_OBSERVE_GATES')
+  assert.deepEqual(observeIdsFromEnv(undefined), [], '★ 没设 ⇒ 空名单')
+  assert.deepEqual(observeIdsFromEnv(''), [], '★ 空串 ⇒ 空名单（一个空值不是"有人在观察"）')
+  assert.deepEqual(observeIdsFromEnv('  , ,'), [], '★ 全是空白 ⇒ 空名单')
+  assert.deepEqual(observeIdsFromEnv(' a , b ,,a '), ['a', 'b'], '★ 去空白、去重、保序')
+
+  const fromEnv = createGateRegistry({ observeFromEnv: 'shiny,not-registered-yet' })
+  fromEnv.register({ id: 'shiny', point: 'completion', description: 'd', gate: () => blocked('found a problem') })
+  const v = await fromEnv.evaluate('completion', {})
+  assert.equal(v.ok, true, '★ 环境变量把 shiny 放进了观察 ⇒ 开火但不拦')
+  assert.equal(v.observedBlockers, 1)
+
+  /**
+   * ★ 名字里有未注册的 id 不是错误（配置可以比注册表先就位），但必须【看得出来】：
+   *   `observingIds()` 里那条 `registered: false` 就是它。
+   */
+  const names = fromEnv.observingIds()
+  assert.deepEqual(names.map((entry) => entry.id).sort(), ['not-registered-yet', 'shiny'])
+  assert.equal(names.find((entry) => entry.id === 'shiny').registered, true)
+  assert.equal(
+    names.find((entry) => entry.id === 'not-registered-yet').registered,
+    false,
+    '★ "名单里有它、而它还没注册"必须与"已注册且在观察"不同形',
+  )
+
+  // 关掉：换一个不带它的名单（不加一行代码，只换一次配置）
+  const withoutIt = createGateRegistry({ observeFromEnv: '' })
+  withoutIt.register({ id: 'shiny', point: 'completion', description: 'd', gate: () => blocked('found a problem') })
+  assert.equal((await withoutIt.evaluate('completion', {})).ok, false, '★ 名单里没有它 ⇒ 恢复阻止流程')
+})
+
+test('⑰ 臂 7 ★ 环境变量只【增】不减：它不能把显式观察中的判据移出观察', async () => {
+  /**
+   * ★ 若环境变量能移除显式观察的 id，线上（设了变量）与本地（没设）就会跑出
+   *   两套不同的门禁，而两者的日志同形 —— 那正是最难归因的一类缺陷。
+   */
+  const r = createGateRegistry({ observeFromEnv: 'other' })
+  r.register({ id: 'shiny', point: 'completion', description: 'd', gate: () => blocked('found a problem') })
+  r.observe('shiny')
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, true, '★ 显式观察不因环境变量的内容而被撤销')
+  assert.equal(v.observedBlockers, 1)
+})
+
+test('⑰ 臂 8 ★ "开火了但被放过" 与 "根本没跑" 必须不同形', async () => {
+  /**
+   * ★ 本任务验收的第 2 条。两者在"没有拦住流程"这一点上一样，但成因与责任
+   *   完全不同：前者说"这条判据开火了，是我们选择先放过它"，后者说"这条判据
+   *   压根没跑"。混起来，人就没法回答"这条新判据到底动没动过"。
+   */
+  const observedFiring = firingRegistry()
+  observedFiring.observe('shiny')
+  const fired = await observedFiring.evaluate('completion', {})
+
+  const skippedR = createGateRegistry()
+  skippedR.register({ id: 'shiny', point: 'completion', description: 'd', appliesTo: () => false, gate: () => blocked('would have fired') })
+  const skipped = await skippedR.evaluate('completion', {})
+
+  assert.equal(fired.ok, true)
+  assert.equal(skipped.ok, true)
+  assert.deepEqual(
+    [fired.ran[0].verdict, fired.ran[0].observed, fired.observedBlockers, fired.skipped],
+    ['blocked', true, 1, 0],
+    '★ 开火了：verdict=blocked、observed=true、有计数、没有跳过',
+  )
+  assert.deepEqual(
+    [skipped.ran[0].verdict, skipped.ran[0].observed, skipped.observedBlockers, skipped.evaluated],
+    ['skipped', undefined, undefined, 0],
+    '★ 没跑：verdict=skipped、没有 observed 标记、没有计数、evaluated=0',
+  )
+
+  // 观察中的判据【确实跑了】⇒ evaluated 必须 ≥ 1（与全跳过的 0 不同形）
+  assert.equal(fired.evaluated, 1, '★ 观察不是跳过：判据真的跑了')
+})
+
+test('⑰ 臂 9 ★ 观察模式不许被实现成 appliesTo：那会让它根本不跑', async () => {
+  /**
+   * ★ 一个"看起来能用"的偷懒实现是把观察写成 `appliesTo: () => false`：
+   *   流程确实不被拦了，但判据【也不再运行】⇒ 观察期什么都看不见，
+   *   于是"观察"与"跳过"同形，而观察期的全部意义就是收集"它开火了吗"。
+   *   本臂用一个"计算过才发现不该跑"的判据把这条界线钉住。
+   */
+  const r = createGateRegistry()
+  let calls = 0
+  r.register({
+    id: 'shiny', point: 'completion', description: 'd',
+    gate: () => { calls += 1; return blocked('found a problem') },
+  })
+  r.observe('shiny')
+  const v = await r.evaluate('completion', {})
+  assert.equal(calls, 1, '★ 观察中的判据必须【真的被调用】—— 观察不等于跳过')
+  assert.equal(v.evaluated, 1)
+  assert.equal(v.skipped, 0)
+  assert.equal(v.skippedAll, undefined, '★ 观察不是"全跳过"，不许产出那句"这一步没被检查"')
+})
+
+test('⑰ 臂 10 ★ 控制台读得到观察状态（一条"开火了却不拦"的判据不许与正常判据同形）', () => {
+  const r = createGateRegistry()
+  r.register({ id: 'shiny', point: 'completion', description: 'new gate', gate: () => blocked('x') })
+  r.register({ id: 'plain', point: 'completion', description: 'old gate', gate: () => ok() })
+  r.observe('shiny', { reason: 'first rollout' })
+
+  const entries = r.list().completion
+  const shiny = entries.find((entry) => entry.id === 'shiny')
+  const plain = entries.find((entry) => entry.id === 'plain')
+  assert.equal(shiny.observing, true, '★ 清单必须说得出"这条在观察中"')
+  assert.equal(shiny.observeReason, 'first rollout', '★ 且要说得出为什么（否则没人敢把它放出来）')
+  assert.equal(plain.observing, false, '★ 没观察的判据如实为 false')
+  assert.equal(plain.observeReason, undefined, '★ 不许给没观察的判据编一个理由')
+
+  /**
+   * ★ 注销后观察标记必须一起撤掉：否则同一个 id 重新注册会**继承**上一代的观察期，
+   *   而"我观察过它"与"它现在在观察中"是两件事。
+   */
+  r.unregister('shiny')
+  assert.equal(r.isObserving('shiny'), false, '★ 注销连带撤掉观察标记')
+  r.register({ id: 'shiny', point: 'completion', description: 're-registered', gate: () => blocked('x') })
+  assert.equal(r.isObserving('shiny'), false, '★ 重新注册不许继承上一代的观察期（缺省一律有否决权）')
+})

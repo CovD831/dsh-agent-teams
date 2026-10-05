@@ -83,10 +83,24 @@ export declare function asRegistration(module: Record<string, unknown>): Paramet
 export declare function buildRegistry(): {
     register(registration: import("./registry.ts").GateRegistration): import("./registry.ts").GateRegistration;
     unregister(id: string): boolean;
+    observe(id: string, options?: import("./registry.ts").ObserveOptions): {
+        id: string;
+        registered: boolean;
+        reason: string;
+    };
+    unobserve(id: string): boolean;
+    isObserving(id: string): boolean;
+    observingIds(): Array<{
+        id: string;
+        reason: string;
+        registered: boolean;
+    }>;
     list(): Record<import("./registry.ts").InsertionPoint, Array<{
         id: string;
         description: string;
         hasAppliesTo: boolean;
+        observing: boolean;
+        observeReason?: string;
     }>>;
     count(point: import("./registry.ts").InsertionPoint): number;
     evaluate(point: import("./registry.ts").InsertionPoint, context: unknown): Promise<import("./registry.ts").GateEvaluation>;
@@ -95,10 +109,24 @@ export declare function buildRegistry(): {
 export declare const registry: {
     register(registration: import("./registry.ts").GateRegistration): import("./registry.ts").GateRegistration;
     unregister(id: string): boolean;
+    observe(id: string, options?: import("./registry.ts").ObserveOptions): {
+        id: string;
+        registered: boolean;
+        reason: string;
+    };
+    unobserve(id: string): boolean;
+    isObserving(id: string): boolean;
+    observingIds(): Array<{
+        id: string;
+        reason: string;
+        registered: boolean;
+    }>;
     list(): Record<import("./registry.ts").InsertionPoint, Array<{
         id: string;
         description: string;
         hasAppliesTo: boolean;
+        observing: boolean;
+        observeReason?: string;
     }>>;
     count(point: import("./registry.ts").InsertionPoint): number;
     evaluate(point: import("./registry.ts").InsertionPoint, context: unknown): Promise<import("./registry.ts").GateEvaluation>;

@@ -49,14 +49,30 @@ export interface GateRunEntry {
     verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped';
     count?: number;
     produced?: boolean;
+    /**
+     * ── ★ 这条判据【开火了，但裁决没有被采纳】（观察模式）────────────────────────
+     *
+     * 只在「判据交出了 blocked / unmeasured，而它处在观察模式」时为 `true`。
+     * 其余情形【缺席】—— 尤其：`ok` 的判据在观察模式下**不产出这个字段**。
+     *
+     * ★ 为什么不能只靠 `verdict` 表示：观察模式下这条判据的 verdict 仍是
+     *   `'blocked'`（它确实发现了问题，这件事本身是真的），而整体 `ok` 仍是
+     *   `true`（裁决没有被采纳）。**只读 verdict 的调用方会以为流程被拒了，
+     *   只读 ok 的调用方会以为这条判据温和。** ⇒ 必须有第三个字段说清
+     *   "它开火了，而它的裁决被按观察模式放过了"。
+     *
+     * ★ 为什么与 `verdict: 'skipped'` 不同形：跳过是"判据根本没跑"
+     *   （`appliesTo` 为假），这里是"跑了、开火了、被放过"。两者在日志里
+     *   都是"没有拦住流程"，但成因与责任完全不同。
+     */
+    observed?: boolean;
 }
 export interface GateEvaluation {
     ok: boolean;
     blockers: string[];
     unmeasured?: string;
     ran: GateRunEntry[];
-    outputs: Record<string, Record<string, unknown>>;
-    /**
+    outputs: Record<string, Record<string, unknown>>; /**
      * ── ★ 这一步【真的跑了】几条判据 ──────────────────────────────────────────────
      *
      * 该位置挂了【至少一条】判据、但全部被 `appliesTo` 跳过时，本字段是 `0`。
@@ -99,6 +115,36 @@ export interface GateEvaluation {
      *   不是"判据跑了说测不了"。空位置【不产出】它 —— 那是正常情形，不是异常。
      */
     skippedAll?: string;
+    /**
+     * ── ★ 观察模式：这一轮有几条判据【开火了，而裁决被放过】───────────────────────
+     *
+     * 只在至少一条观察中的判据开火时出现，且恒 `> 0`；其余情形缺席（对照臂钉住
+     * "都通过"那条路径不得产出它）。
+     *
+     * ★ 分布与 `observed` 的关系：整份清单（`observedGates`）是"**配置**说谁在观察"，
+     *   本字段是"**这一轮**谁真的开火了"。两者必须都能读到：
+     *
+     *     ① 观察中但没开火   —— 清单里有它，本计数不含它（它没说话）
+     *     ② 观察中且开了火   —— 两者都有（这是"放过了一条真实发现"，要曝光）
+     *     ③ 没观察、开了火   —— 清单里没有，本字段也不含它（它已经被采纳，流程被拒）
+     *
+     *   把 ①②③ 合成一个"有没有在观察"的布尔值，正是本队反复见过的合流形态。
+     */
+    observedBlockers?: number;
+    /**
+     * ── ★ 开火了、被观察模式放过的那些裁决【原文】─────────────────────────────────
+     *
+     * 与 `blockers` / `unmeasured` 的关系是刻意的：被放过的裁决**不并进**那两个字段
+     * （并进去就等于它进了裁决，而观察模式的定义就是"不进裁决"），但也**不许丢**
+     * —— 它是一条真实的发现，只是暂时没有否决权。丢掉它，观察期就变成了"什么都
+     * 看不见"，那时候没人能从日志里决定"这条判据该不该开火"。
+     */
+    observed: {
+        /** 被放过的 blocker，形状与原 blocker 一样（带 `[判据 id]` 前缀）。 */
+        blockers: string[];
+        /** 被放过的"没能测量"，形状与原 unmeasured 一样。 */
+        unmeasured: string[];
+    };
 }
 /** 五个【位置】，不是五个判据。一个位置可挂零到多条。 */
 export declare const INSERTION_POINTS: readonly string[];
@@ -130,7 +176,58 @@ export interface GateRegistration {
     appliesTo?: (context: any) => boolean;
     gate: (context: any) => GateVerdict | Promise<GateVerdict>;
 }
-export declare function createGateRegistry(): {
+/**
+ * ── ★ 观察模式（observe-only）：新判据先只记录、不拒绝 ─────────────────────────
+ *
+ * 由来（t9，契约 §3.5）：**判据误伤的代价比漏报更贵。** 一条写错的新判据若
+ * 立刻有否决权，会把真实任务卡死；而"被门禁坑过"的人学到的不是"这条判据要修"，
+ * 是"门禁可以忽略"—— 此后所有判据都白装。本队已经见过这个形态（棘轮断言在成功
+ * 路径上报错）。
+ *
+ * ⇒ 新判据可以先**进来观察**：照常求值、照常记录，但裁决不阻止流程；确认它不误伤
+ *   之后再把它移出观察集。
+ *
+ * ── 三条设计决定 ─────────────────────────────────────────────────────────────
+ *
+ * ① **缺省 = 今天的行为**（有否决权）。观察必须**显式选择加入**：漏读一个字段的
+ *    结果是"判据正常把关"，而不是"判据悄悄失效"。一个默认放宽的开关会让
+ *    "配置丢了"与"判据通过了"在日志里同形 —— 而那正是本注册表存在的理由。
+ *
+ * ② **开关不需要改代码**：观察集是**运行时数据**（`observe(id)` / `unobserve(id)`），
+ *    不是注册字段。关掉观察只是 `unobserve(id)` 一次调用 —— 没有 code change，
+ *    也就没有"改代码 → 漏了 build → 装的位置跑的是旧代码"那条窗口（本队实测过）。
+ *    ★ 且它**不是** `appliesTo`：把一条判据"观察着"写成 `appliesTo: () => false`
+ *      会让它【根本不跑】，于是观察期什么都看不见，而"观察"与"跳过"同形。
+ *
+ * ③ **开火与没跑不同形**：被放过的裁决进 `observed`，不进 `blockers`/`unmeasured`
+ *    （否则它就进了裁决）；同时 `ran[].observed === true` 与
+ *    `evaluation.observedBlockers` 让"开火了但被放过"可被计数。它与
+ *    `verdict: 'skipped'`（判据没跑）在形状上不同。
+ */
+export interface ObserveOptions {
+    /** 观察期说明（为什么这条判据先进来观察）；会被 `list()` 渲染出来。 */
+    reason?: string;
+}
+/**
+ * 观察名单的环境变量名：逗号分隔的判据 id。
+ *
+ * ★ 为什么给一个环境变量入口：**"不改代码就能开关"**是这条需求的原话，而一个只有
+ *   代码内部能调的 `observe()` 只满足了一半 —— 关掉观察仍然要有人写一行代码、
+ *   重新 build。环境变量让"把这条判据从观察里放出来"是一次部署改动。
+ *
+ * ★ 它**只增不减**：环境变量能往名单里【加】id，绝不能把已经显式观察的判据
+ *   移出去（一个"环境变量没设 ⇒ 全部有否决权"的读法会让线上与本地跑出两套
+ *   不同的门禁，而两者的日志同形）。关掉观察用 `unobserve(id)`。
+ *
+ * ★ 空串/全空白 ⇒ 等价于没设：一个空的环境变量不是"有人在观察"，也不许被读成
+ *   任何裁决上的放宽。这是"缺省不放宽"的一部分，所以它有一条专门的臂。
+ */
+export declare const OBSERVE_GATES_ENV = "AGENT_TEAMS_OBSERVE_GATES";
+/** 解析环境变量里的观察名单（导出以便夹具钉住解析规则本身）。 */
+export declare function observeIdsFromEnv(value: string | undefined): string[];
+export declare function createGateRegistry(options?: {
+    readonly observeFromEnv?: string | undefined;
+}): {
     /**
      * 注册一条判据。
      * ★ 重复 id ⇒ 抛错，**不静默覆盖** —— 静默覆盖会让"我换了一条判据"
@@ -138,11 +235,46 @@ export declare function createGateRegistry(): {
      */
     register(registration: GateRegistration): GateRegistration;
     unregister(id: string): boolean;
+    /**
+     * ── ★ 让一条判据进入观察模式（显式选择加入）─────────────────────────────────
+     *
+     * 关掉它用 `unobserve(id)`：**开关是运行时调用，不需要 code change**。
+     *
+     * ★ 为什么对未注册的 id 也接受（且不抛错）：观察集是**配置**，而配置可能比
+     *   注册表先就位。把顺序耦合起来会造出"配置写得对、只是加载早了一步"这种
+     *   只在特定装配顺序下出现的缺陷。控制台读 `observingIds()` 就能看出
+     *   "名单里有一个当前没注册的 id"。
+     *
+     * ★ 但它**不是静默的**：返回一个可读的结果，让调用方能区分
+     *   "已注册、现在开始观察"与"名单里记下了、而这条判据还没注册"。
+     */
+    observe(id: string, options?: ObserveOptions): {
+        id: string;
+        registered: boolean;
+        reason: string;
+    };
+    /** 结束观察：这条判据的裁决立刻恢复阻止流程。返回它此前是否在观察中。 */
+    unobserve(id: string): boolean;
+    /** 这条判据当前是否处在观察模式（缺省 false —— 即今天的行为）。 */
+    isObserving(id: string): boolean;
+    /**
+     * 当前观察名单（含尚未注册的 id）。控制台读它。
+     *
+     * ★ 读它与读 `isObserving` 都【不改裁决】—— 它是一份**配置视图**，
+     *   而"谁这一轮真的开火了"是 `GateEvaluation.observed`。两者不同形是刻意的。
+     */
+    observingIds(): Array<{
+        id: string;
+        reason: string;
+        registered: boolean;
+    }>;
     /** 控制台读它。按 point 分组，组内保持注册顺序。 */
     list(): Record<InsertionPoint, Array<{
         id: string;
         description: string;
         hasAppliesTo: boolean;
+        observing: boolean;
+        observeReason?: string;
     }>>;
     /** 该位置已注册的判据条数（控制台/测试用）。 */
     count(point: InsertionPoint): number;
