@@ -50,21 +50,45 @@ pnpm typecheck     # 期望 exit=0
 | `9183235` | ★ **注入面 + lifecycle 真证据**（`pnpm verify` 转绿）|
 | `0e63010` | 构建产物重建 |
 
-**判据层现状**（十条，五个位置里四个已接满；全部在生产路径上真的会跑）：
+**判据层现状**（十一条，★ **六个位置全部接满**）：
 
 ```
 contract:   contract.build-artifact-scope | contract.verify-command
 dispatch:   dispatch.changed-paths | dispatch.worktree
 completion: completion.verify-rerun | completion.r5 | completion.mutation | completion.backtest
 delivery:   delivery.coverage | delivery.convergence
-runtime:    0 条判据 —— 但【五个调用点都在】且已证明可达（挂上去就会被跑到）
+runtime:    runtime.liveness
 （mutation-guard 是 guard，不进注册表）
 ```
 
-**★ `runtime` 与"空位置"不同形**：t6 之前它是"挂上去也永远不会跑"（没有调用点），
-现在是"调用点已证明可达，等第一条判据"。
-它的第一条判据应当是 `with-timeout`（有界等待）——那是唯一需要**计时器**的判据，
-而现有判据全是纯数据变换，所以值得单独一轮设计。
+**`runtime.liveness` 是特殊的**：它不是「硬超时」，是**周期性探活**（用户裁定）。
+
+```
+① 卡死了   两次探活之间 lastActivityAt 没变 ⇒ blocked（作为【告警】，不拒绝任务）
+③ 定期告知 还在动 ⇒ ok +「还在跑，已 N 分钟」
+✗ 没进展   明确【不做】——「思考很久」与「卡住」在观察上同形，判它必然误报
+```
+
+· **间隔 10 分钟**；**活动定义以产出为准**（有 `assistant/message` 才算在动）
+· 它是本插件**第一条带状态的判据**（比较这次与上次），
+  但状态放在**调用方**，判据本身仍是纯函数 `(wait) => verdict`
+· 契约 §5 硬要求「runtime 不能拒绝任务」——由**类型**保证
+  （`onDispatched` 返回 `void`，回调在 `if (accepted)` 之内）
+
+**★ 三条只有踩了才知道的（都在 `src/gates/runtime/liveness.ts` 附近有实测注释）**：
+```
+a) 「看得到输出」≠「又有了输出」——
+   assistant/message 是【历史日志】，每次探活都会重新发现同一条旧输出。
+   记录"看到就刷新" ⇒ 卡死的成员永远健康 ⇒ 判据永不报警。
+   修法：存【已观察到的输出指纹】，只有指纹变了才推进时刻。
+
+b) 标记必须换代：
+   等待记录的键用 (teamId, taskId, attemptId)。用 taskId 会读到上一代的等待时长。
+
+c) 参数坏了 ≠ 判据失效：
+   间隔为 0/NaN/负数/Infinity/非数 ⇒ 【不抛错】，落回缺省 10 分钟并记下原文
+   （理由：一个因为参数没写对就炸的守卫，会在第一次出问题时被关掉）
+```
 
 ### 注册表的两条新能力（本轮加的）
 
