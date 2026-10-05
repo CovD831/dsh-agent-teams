@@ -42,20 +42,35 @@ echo "③ 重装依赖"
 (cd "$PROFILE" && pnpm install)
 
 echo "④ 验证指向"
-TARGET=$(readlink "$PROFILE/node_modules/@nanmicoder/dsh-agent-teams" 2>/dev/null || echo "(不是链接)")
-echo "  指向: $TARGET"
+LINK=$(readlink "$PROFILE/node_modules/@nanmicoder/dsh-agent-teams" 2>/dev/null || echo "")
+echo "  链接: ${LINK:-(不是链接)}"
+if [ -z "$LINK" ]; then
+  echo "  ★ 不是符号链接 —— 仍是拷贝。回退：cp $PROFILE/package.json.bak.* $PROFILE/package.json && (cd $PROFILE && pnpm install)"
+  exit 1
+fi
+# ★ 实测修正：readlink 返回的可能是【相对路径】(pnpm 就是这么写的)。
+#   拿它直接与绝对路径做字符串比较会【假报失败】—— 第一次跑脚本就踩到了。
+#   必须解析成绝对路径后再比。
+TARGET=$(cd "$PROFILE/node_modules/@nanmicoder/dsh-agent-teams" 2>/dev/null && pwd -P || echo "")
+echo "  解析后: ${TARGET:-(解析失败)}"
 if [ "$TARGET" != "$REPO" ]; then
   echo "  ★ 未指向源码。回退：cp $PROFILE/package.json.bak.* $PROFILE/package.json && (cd $PROFILE && pnpm install)"
   exit 1
 fi
 echo "  ✓ 正确"
 
-echo "⑤ 验证新判据已可见"
-if ls "$PROFILE/node_modules/@nanmicoder/dsh-agent-teams/lib/gates/" >/dev/null 2>&1; then
-  ls "$PROFILE/node_modules/@nanmicoder/dsh-agent-teams/lib/gates/"
-  echo "  ✓ 判据层可见（切换前这里是空的）"
+echo "⑤ 验证新判据已可见，且与源码一致"
+INSTALLED="$PROFILE/node_modules/@nanmicoder/dsh-agent-teams"
+if ! ls "$INSTALLED/lib/gates/" >/dev/null 2>&1; then
+  echo "  ★ 没看到 lib/gates/ —— 在仓库里跑 pnpm build 后重试"
+  exit 1
+fi
+ls "$INSTALLED/lib/gates/"
+# ★ 目录存在还不够：断链也可能留个空壳。逐字节比一个关键文件。
+if cmp -s "$INSTALLED/lib/gates/index.js" "$REPO/lib/gates/index.js"; then
+  echo "  ✓ 判据层可见，且 index.js 与源码逐字节相同"
 else
-  echo "  ★ 没看到 lib/gates/ —— 可能需要在仓库里先跑 pnpm build"
+  echo "  ★ lib/gates/index.js 与源码不一致 —— 跑 pnpm build 后重试"
   exit 1
 fi
 
