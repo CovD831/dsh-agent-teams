@@ -18,6 +18,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
 import { deliverToMember } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
+import { createTaskWorktree, worktreePromptLine } from './worktree.ts'
 import {
   markMailboxDelivered,
   discardMailboxMessages,
@@ -90,6 +91,13 @@ export interface DispatchTicket {
   readonly acceptance?: readonly string[]
   readonly verify?: readonly string[]
   readonly reviewedTaskId?: string
+  /**
+   * ★ 该任务的隔离工作目录（worktree 的绝对路径）。
+   *   缺席 ⇒ 没有隔离 ⇒ 提示里【不】产出伪造的工作目录指令。
+   */
+  readonly worktreePath?: string
+  /** 该 worktree 里缺失的 gitignore 条目（如 node_modules）—— 必须告诉成员。 */
+  readonly worktreeMissingIgnored?: readonly string[]
 }
 
 function taskProfileSeedId(task: TeamTask): string | undefined {
@@ -211,6 +219,25 @@ export function assignmentPrompt(ticket: DispatchTicket, stateDir: string, teamI
   const protocol = ticket.profileProtocol?.trim() || '(none)'
   const executionPrompt = ticket.executionPrompt?.trim()
   const kind = ticket.kind?.trim() || 'work'
+  /**
+   * ── ★ 隔离工作目录：告诉成员"在哪干活" ────────────────────────────────────────
+   *
+   * 子会话的 cwd 硬编码继承父会话（START-HERE §5②），**改不了** ⇒ 隔离只能靠
+   * "给一个独立目录 + 在提示里告诉成员"。没有路径时本块为空 ——
+   * **绝不产出一个伪造的工作目录指令**（那会让成员以为有隔离，实际没有）。
+   *
+   * ★ 缺依赖必须明说：worktree 是干净的检出，gitignore 的 `node_modules`
+   *   不在里面（实测边界③）。不说 ⇒ 成员跑 `pnpm test` 失败，然后把一次
+   *   "环境没准备好"误报成"工作没做出来"——这两件事不同形（契约 §3.4）。
+   */
+  const worktreeLine = worktreePromptLine(ticket.worktreePath)
+  const missingIgnored = ticket.worktreeMissingIgnored ?? []
+  const worktreeBlock = worktreeLine === ''
+    ? ''
+    : `
+${worktreeLine}${missingIgnored.length === 0 ? '' : `
+Note: ${missingIgnored.join(', ')} exist in the captain's workspace but not in this worktree (they are gitignored, so a clean checkout does not carry them). Install/set them up inside the worktree before running verification commands, or a missing dependency will look like a failing test.`}
+`
   const contract = [
     `Kind: ${kind}${ticket.round === undefined ? '' : ` (round ${ticket.round})`}`,
     ticket.objective === undefined || ticket.objective === '' ? '' : `Objective: ${ticket.objective}`,
@@ -231,7 +258,7 @@ ${kind === 'implementation' || kind === 'repair' ? 'changedPaths: list the actua
 
 You are executing as configured member "${ticket.memberName}".
 Do not start a teammate's assigned task.
-
+${worktreeBlock}
 Team goal:
 ${goal}
 
@@ -418,7 +445,39 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         })
         if (ticket === undefined) return
 
-        const prompt = assignmentPrompt(ticket, config.stateDir, team.id)
+        /**
+         * ── ★ 建隔离工作目录（在锁外做：git 是 I/O，不该拖长持锁时间）─────────────
+         *
+         * 只给【会写文件的】任务建 —— review / requirements 这类只读任务不需要
+         * 自己的检出，给它们建只会浪费磁盘并让清理面变大。
+         *
+         * ★ 建失败【不】阻断派发：隔离是"能不能拿到父版本"的能力，不是"这一步
+         *   过不过"的裁决。失败时提示里没有工作目录 ⇒ 成员照常在共享目录干活，
+         *   而 R5 那类需要父版本的判据会因为没有 worktree 而 unmeasured
+         *   （判据自己会表达"我没测成"，见契约 §3.4）。
+         *   —— 把一次基础设施故障伪装成任务失败是更坏的结果。
+         */
+        const needsWorktree = ticket.kind === 'implementation' || ticket.kind === 'repair'
+        let worktreePath: string | undefined
+        let worktreeMissingIgnored: readonly string[] | undefined
+        if (needsWorktree) {
+          const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId })
+          if (created.ok) {
+            worktreePath = created.path
+            worktreeMissingIgnored = created.missingIgnored
+          } else {
+            ctx.logger.warn(`agent-teams: no isolated worktree for task "${ticket.taskId}" (${created.reason}); the member will work in the shared workspace`)
+          }
+        }
+        const dispatched: DispatchTicket = {
+          ...ticket,
+          ...worktreePath === undefined ? {} : { worktreePath },
+          ...worktreeMissingIgnored === undefined || worktreeMissingIgnored.length === 0
+            ? {}
+            : { worktreeMissingIgnored },
+        }
+
+        const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)
         const signal = new AbortController().signal
         const accepted = config.dispatch === undefined
           ? await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)

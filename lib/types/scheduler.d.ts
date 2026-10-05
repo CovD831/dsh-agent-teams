@@ -65,6 +65,13 @@ export interface DispatchTicket {
     readonly acceptance?: readonly string[];
     readonly verify?: readonly string[];
     readonly reviewedTaskId?: string;
+    /**
+     * ★ 该任务的隔离工作目录（worktree 的绝对路径）。
+     *   缺席 ⇒ 没有隔离 ⇒ 提示里【不】产出伪造的工作目录指令。
+     */
+    readonly worktreePath?: string;
+    /** 该 worktree 里缺失的 gitignore 条目（如 node_modules）—— 必须告诉成员。 */
+    readonly worktreeMissingIgnored?: readonly string[];
 }
 /**
  * Recursively collect `status=completed` ancestors of `taskId` in topological
