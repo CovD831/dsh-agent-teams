@@ -27,6 +27,30 @@ declare module '@deepseek-ai/dsh-llm' {
 export declare function onAgentReady(ctx: Context, listener: (agent: Agent, vetoable: boolean) => void): () => void;
 /** Read child-owned history, excluding any descriptor inherited from a parent. */
 export declare function sessionOwnEvents(session: Session): readonly SessionEvent[];
+/**
+ * ── ★ 归属证据：这个成员【真的写过】哪些文件 ────────────────────────────────────
+ *
+ * `dsh-tool-fs` 给每次写入/编辑的 `tool/result` 挂 `meta.diffs`
+ * （源码见 app.asar 内 `@deepseek-ai/dsh-tool-fs/lib/index.js`）：
+ *
+ *     meta.diffs: Array<{ path: string, oldText: string|null, newText: string }>
+ *
+ * `isFileDiff` 要求 `path: string`、`oldText` 为 null 或字符串、`newText` 为字符串；
+ * `diffsFromMeta` 还要求数组非空且每一项都合法 —— 形状是实测的，不是猜的。
+ *
+ * ★ 为什么走【会话事件】而不是 cwd 或 git status：
+ *   · START-HERE §5②：子会话 cwd 硬编码继承父会话 ⇒ 隔离不能靠 cwd；
+ *   · START-HERE §5③：全队在同一目录 ⇒ git 只知道"工作区脏了"，不知道是谁改的。
+ *   会话事件是**逐成员**的，所以它同时绕开这两条。
+ *
+ * ★ 返回 `undefined` 与 `[]` 必须不同形：
+ *   · `undefined` ⇒ 没能读到事件（判据 ⇒ unmeasured）
+ *   · `[]`        ⇒ 读到了，确实没有写入（判据 ⇒ 可以据此判定虚报）
+ *
+ * 形状不认识时返回 `undefined`（"没能测量"），**不是** `[]`（"测了是零"）——
+ * 把这两件事混起来，会让一次读取失败伪装成一个关于工作的结论（契约 §3.4）。
+ */
+export declare function observedChangedPaths(session: Session): string[] | undefined;
 /** Install before the first request, including cold resume, with HMR cleanup. */
 export declare function installContinuableMemberSetup(ctx: Context, setup: Setup): void;
 /** Queue a distinct host-authored turn; never substitute model-message steer. */

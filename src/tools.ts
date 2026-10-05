@@ -57,6 +57,7 @@ import {
 } from './state.ts'
 import { appendTaskEvidence } from './quality-gates.ts'
 import { registry } from './gates/index.ts'
+import { observedChangedPaths } from './harness-compat.ts'
 import type { ContractAmendmentInput } from './state.ts'
 import type { AcceptanceResult, CommandResult, ReviewFinding, ReviewVerdict, TaskKind } from './types.ts'
 import {
@@ -1806,6 +1807,34 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          * 完成裁决。判据自己 `appliesTo` 也会跳过那种情形 —— 两处都表达同一条边界，
          * 是因为执行器缺席这条路径也必须能被审计。
          */
+        /**
+         * ── ★ 归属证据：这个成员【真的写过】哪些文件 ─────────────────────────────
+         *
+         * `dispatch.changed-paths` 需要"自报的 changedPaths 与真实写入是否对得上"。
+         * 真相来自该成员自己的会话事件（dsh-tool-fs 挂在 tool/result 上的 meta.diffs），
+         * 经 `observedChangedPaths(caller.session)` 折叠成一组路径。
+         *
+         * ★ 这正是 START-HERE §5③ 那个"共同障碍"的解法：git 只知道工作区脏了，
+         *   而会话事件是逐成员的 ⇒ 不需要 worktree，也不需要改 cwd（§5②）。
+         *
+         * ★ 队长代报（caller 是队长）时拿不到成员会话 ⇒ 观察缺席 ⇒ 判据 unmeasured，
+         *   而不是被当成通过。这是刻意的：没能观察就不能声称它诚实。
+         */
+        const dispatchGates = await registry.evaluate('dispatch', {
+          task,
+          update: { changedPaths: input.changedPaths },
+          observedChangedPaths: observedChangedPaths(caller.session),
+        })
+        if (dispatchGates.ok === false) {
+          if (dispatchGates.unmeasured !== undefined) {
+            /**
+             * ★ 未测量与"发现问题"不同形（§3.4）。措辞必须分开 —— 读日志的人要能
+             *   看出"判据没能测量"，而不是"判据发现了问题"。
+             */
+            throw new Error(`update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`)
+          }
+          throw new Error(`update_task rejected: ${dispatchGates.blockers.join('; ')}`)
+        }
         const completionGates = await registry.evaluate('completion', {
           task,
           update: {

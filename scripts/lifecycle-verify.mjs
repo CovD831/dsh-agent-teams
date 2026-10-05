@@ -193,6 +193,15 @@ const ctx = {
       liveAgents.set(id, child)
       children.push({ id, label: spec.label, mode: 'continuable' })
       if (typeof spec.label === 'string' && spec.label.startsWith('agent-teams:')) {
+        /**
+         * ★ 真实成员的会话一定带 tool/result；`dispatch.changed-paths` 正是从
+         *   `meta.diffs` 里读"这个成员真的写过哪些文件"（形状同 dsh-tool-fs 的
+         *   isFileDiff）。此前这个夹具的成员会话里【只有 descriptor】——
+         *   于是判据只能诚实地说"我没能观察"（unmeasured）并拒绝。
+         *
+         *   这里补上真实存在的写入记录：为 'src/parser.ts' 造一条 diff，
+         *   与后面 update_task 自报的 changedPaths 对得上（对照臂语义）。
+         */
         child.session[modernHarness ? '_ownEvents' : 'events'] = [{
           type: 'subagent/descriptor',
           data: {
@@ -203,6 +212,11 @@ const ctx = {
             agentProvider: spec.request?.agentOptions?.provider ?? 'fake',
             agentModel: spec.request?.agentOptions?.model ?? 'fake-model',
           },
+        }, {
+          type: 'tool/result',
+          turn: 1,
+          step: 1,
+          meta: { diffs: [{ path: 'src/parser.ts', oldText: null, newText: 'export const parser = () => []\n' }] },
         }]
       }
       child.ctx = childContext(child)
