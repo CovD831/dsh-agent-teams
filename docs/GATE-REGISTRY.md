@@ -25,7 +25,7 @@ src/quality-gates.ts   1233 行 · 34 个导出平铺
 | # | 插入点 | 什么时候 | 上游对应函数 | 能拿到什么 |
 |---|---|---|---|---|
 | ① | `contract` | 建任务、改契约 | `validateCreateTask` / `amendTaskContract` | 团队状态 + 待建/待改的任务 |
-| ② | `dispatch` | 派发前（成员开工）| *（上游没有）* | 团队状态 + 任务 |
+| ② | `dispatch` | 派发前（成员开工）| *（上游没有）* | 团队状态 + 任务 + ★ **该成员的会话事件**（归属证据的来源）|
 | ③ | `completion` | 成员汇报完成 | `evaluateQualityCompletion` | 任务 + 本次提交 |
 | ④ | `delivery` | 团队宣布交付 | `canDeclareDelivery` | 团队状态 |
 | ⑤ | `runtime` | 全程（跨步骤）| *（上游没有）* | 见 §5 |
@@ -121,19 +121,39 @@ list()                        // 控制台读它
 gates/
   registry.mjs          注册表本身（不加判据）
   contract/
-    verify-command.mjs  · verify 命令写得对吗（今天踩两次的那条）
-    objective.mjs       · 目标可判定吗
-    scorer-reach.mjs    · 写域碰到判据文件了吗
+    verify-command.mjs   · verify 命令写得对吗（今天踩两次的那条）
+    objective.mjs        · 目标可判定吗
+    scorer-reach.mjs     · 写域碰到判据文件了吗
+  dispatch/
+    changed-paths.mjs    · ★ 已生效（自报改动必须对得上真实写入）
   completion/
-    verify-rerun.mjs    · ★ 已生效（verify 由判据层重跑）
-    r5.mjs              · 红前绿后
-    mutation.mjs        · 变异测试
+    verify-rerun.mjs     · ★ 已生效（verify 由判据层重跑）
+    r5.mjs               · 红前绿后
+    mutation.mjs         · 变异测试
   delivery/
-    coverage.mjs        · 每个目标都有任务认领
-    convergence.mjs     · idle ≠ converged
+    coverage.mjs         · 每个目标都有任务认领
+    convergence.mjs      · idle ≠ converged
   runtime/
-    with-timeout.mjs    · 有界等待
+    with-timeout.mjs     · 有界等待
 ```
+
+### ★ 归属证据：`dispatch` 位置能拿到什么（2026-10-05 落地）
+
+`dispatch` 位置可以拿到**该成员的会话事件**，于是判据能问一个此前问不出的问题：
+「自报的改动，真的是这个成员做的吗」。
+
+```
+dsh-tool-fs 给每次写入/编辑的 tool/result 挂 meta.diffs：
+    meta.diffs: Array<{ path, oldText, newText }>
+读它的入口：src/harness-compat.ts 的 observedChangedPaths(session)
+
+★ 形状关键：undefined（没能观察）与 []（观察了，确实没写）必须不同形。
+  前者 ⇒ unmeasured；后者 ⇒ 可以据此判定"虚报"。
+  把这两件事混起来，一次读取失败就会伪装成一个关于工作的结论。
+```
+
+**★ 为什么这条重要**：它把"哪些文件是这个成员改的"从 git/cwd 里解放出来
+（成员共用目录、cwd 又硬编码继承父会话）。R5 / 变异 / scorer-reach 都依赖这个问题。
 
 **★ 一条判据一个文件**，理由：**两个判据改在同一个文件里，就是我们要消灭的那种冲突**。
 
@@ -215,7 +235,11 @@ gates/
 
 ## 9. 已知的边界（不假装它能做更多）
 
-1. **插入点是固定的五个** —— 要加第六个位置，得改上游（那是流程形状的变化，不是判据的变化）
-2. **判据拿到的输入面由上游决定** —— 它不传的东西，判据拿不到
+1. **插入点是固定的五个** —— 要加第六个位置，得改上游（那是流程形状的变化，不是判据的变化）。
+   现已用上 `dispatch` 与 `completion` 两个位置（`contract` / `delivery` / `runtime` 仍空）。
+2. **判据拿到的输入面由上游决定** —— 它不传的东西，判据拿不到。
+   ★ 但**会话事件**是一个例外且很有用：插件能通过 `sessionOwnEvents()` 自己读到
+   逐成员的历史（`tool/result` 的 `meta.diffs`），不必等上游传。
 3. **`runtime` 的告警不能直接拒任务** —— 见 §5，这是刻意的
-4. **注册表本身在上游之外** —— 但**接线点在它里面**，所以不是零耦合
+4. **注册表本身在上游之外** —— 但**接线点在它里面**，所以不是零耦合。
+   ★ 接线点现有 6 处（`tools.ts` 的 update_task 里 `dispatch` + `completion` 各一次）。

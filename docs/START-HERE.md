@@ -28,15 +28,17 @@ pnpm verify        # 期望 exit=0
 pnpm typecheck     # 期望 exit=0
 ```
 
-**已提交的六件事**（都可回退、都有验收）：
+**已提交的八件事**（都可回退、都有验收）：
 
 | commit | 做了什么 |
 |---|---|
 | `54eddb4` | fork 基线：版本 0.1.23、README 同步、lib 重建 |
 | `04c8250` | ★ **判据：verify 由判据层重跑**（堵住伪造 completed） |
 | `bee6a57` | 配置：钉死 `memberModel`（否则成员模型随队长漂移）|
-| `d38de30` | ★ **注册表**（三态裁决、不短路、非法形状抛错）|
+| `d38de30` | ★ **注册表**（三态裁决、不短路、非法形状抛错） |
 | `70c8c96` | ★ **把 verify 重跑搬进注册表**（证明注册表接得上真判据）|
+| `626c59d` | ★ **判据：changedPaths 必须对得上真实写入**（dispatch 位置第一条）|
+| `7cdf263` | ★ **把归属观察接进 update_task**（判据真的会开火，不再永远 unmeasured）|
 
 ---
 
@@ -59,6 +61,9 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 ③ 它的 verify 只跑 scripts/*.test.mjs
    ⇒ 判据测试放 scripts/，import lib/ 的编译产物（与它现有 24 个测试同构）
    ⇒ 我们已加 verify:gates，否则判据测试会是"有 0 个读者"
+   ⇒ ★ 判据夹具命名为 scripts/gate-<id>.test.mjs（被 gate-* glob 收进 test:gates）
+     名字不匹配那个 glob 的夹具（如 observed-changed-paths.test.mjs）
+     必须在 test:gates 里【显式列出】，否则它同样"有 0 个读者"
 ```
 
 ---
@@ -68,8 +73,8 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 ```
 五个插入点（按流程位置，不按模块）：
   contract    建任务/改契约
-  dispatch    派发前
-  completion  成员汇报完成      ← 现有 1 条：verify-rerun
+  dispatch    派发前                ← 现有 1 条：changed-paths
+  completion  成员汇报完成          ← 现有 1 条：verify-rerun
   delivery    团队宣布交付
   runtime     全程
 
@@ -135,7 +140,7 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 
 ③ 队长的 workspace = 会话的 cwd；成员在【同一个目录】里干活
    ⇒ git 只知道"工作区脏了"，不知道"哪个文件是这个成员改的"
-   ⇒ ★ 这是 R5 / 变异测试 / scorer-reach 的共同障碍
+   ⇒ ★ **这一条已经解决了**（2026-10-05，见 §5.1）—— 不走 git，走会话事件。
 
 ④ 一个队长同一时间只能带一个活动团队
 ⑤ 终态（completed/failed/cancelled）不可改；但可追加署名证据
@@ -144,20 +149,51 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 
 ---
 
+## 5.1 ★ 归属问题已解决：走会话事件，不走 cwd / 不走 git
+
+**2026-10-05 发现并落地。** §5②③ 曾被认为是"隔离"的拦路虎，而它其实有一个
+不需要 worktree 的解法。
+
+```
+dsh-tool-fs 给每次写入/编辑的 tool/result 挂 meta.diffs：
+    meta.diffs: Array<{ path: string, oldText: string|null, newText: string }>
+（已从 app.asar 抽出该包源码核实：isFileDiff 要求 path:string；
+  diffsFromMeta 要求数组非空且每项合法 —— 形状是实测的，不是猜的）
+
+而这些事件可以由插件【已有】的入口读到：sessionOwnEvents(memberAgent.session)
+```
+
+⇒ **归属走【会话事件】，它是逐成员的** ⇒ 同时绕开 §5②（不能改 cwd）与
+§5③（git 不知道是谁改的），**而且不需要 worktree 及其两个坑**。
+
+```
+src/harness-compat.ts  observedChangedPaths(session): string[] | undefined
+                       ★ undefined（没能观察）与 []（观察了，确实没写）必须不同形
+src/gates/dispatch/changed-paths.ts
+                       自报的 changedPaths 与观察到的写入比对；虚报或隐瞒都拒
+```
+
+**★ 一个值得记住的接线教训**：把这条判据接进 `update_task` 后，`lifecycle-verify`
+挂了。原因**不是判据错了**，而是它的合成成员会话里【只有 descriptor、没有
+tool/result】—— 判据于是诚实地说"我没能观察"并拒绝。
+**处理方式是修夹具（补上真实的 tool/result），不是把判据放松到能让测试过。**
+
+---
+
 ## 6. 下一步（按已定的顺序）
 
 ```
-① ★ 隔离：给成员一个 worktree
-   前提：三条判据（R5 / 变异 / scorer-reach）都需要"哪些文件是这个成员改的"
-   障碍：见 §5②③ —— 不能改 cwd，只能靠任务里指定路径
-   而 worktree 可用性有两个坑（gitignore 的夹具、未提交的工作）
+① ~~隔离：给成员一个 worktree~~ —— ★ 归属问题已用会话事件解决（见 §5.1），
+   worktree 不再是 R5 / 变异 / scorer-reach 的前提。
 
-② R5（红前绿后）接到 completion 位置
-   需要：父版本 + 修复版本 + newTestFiles（隔离之后才能确定）
+② R5（红前绿后）接到 completion 位置        ← 现在可以做了
+   需要：父版本 + 修复版本 + newTestFiles（用 §5.1 的会话事件即可确定）
    样板：src/gates/completion/verify-rerun.ts
 
 ③ 之后的候选（按性价比）：
    contract/verify-command    verify 命令写得对吗（实测：grep -qx N 会被 wc 的前导空格卡死）
+   contract/scorer-reach      写域碰到判据文件了吗（现在也有归属证据了）
+   completion/mutation        变异测试
    delivery/coverage          每个目标都有任务认领
    delivery/convergence       idle ≠ converged（空回复不是收敛）
    runtime/with-timeout       有界等待
