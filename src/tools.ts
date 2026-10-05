@@ -98,6 +98,22 @@ export interface ToolsConfig {
   maxMembers: number
   /** Named team profiles from the active DSH profile. */
   profiles: Record<string, import('./profiles.ts').TeamProfileConfig>
+  /**
+   * ── ★ 时钟（t5）：探活判据唯一的读数来源 ─────────────────────────────────────
+   *
+   * 契约 §2 性质 1 说判据是纯数据变换、**I/O 与时钟由调用方注入**。所以
+   * `src/gates/runtime/liveness.ts` 里没有 `Date.now()`，它读的是 ctx 里的
+   * `wait.now` —— 而那个值来自这里。
+   *
+   * ★ 缺省 `Date.now` 是**生产**的缺省，不是夹具的。夹具注入假时钟才能在不真等
+   *   10 分钟的情况下构造"两次探活之间成员一点产出都没有"。
+   *   **一个测不了超时的探活判据等于没有探活** —— 而不注入时钟就只剩真等这一条路。
+   *
+   * ★ 不注入 ⇒ 判据按自己的契约报 unmeasured（缺 `now`），**不是**退回系统时钟。
+   *   偷偷退回 `Date.now` 会让"夹具以为自己在控制时间"与"判据读了真实时间"
+   *   在日志里同形 —— 那种缺陷只在跨零点或长会话里出现。
+   */
+  now?: () => number
 }
 
 /** Browser/UI mutations allowed while a plan is waiting for approval. */
@@ -854,6 +870,413 @@ export function runtimeGateLogSnapshot(): ReadonlyArray<{ at: number; event: str
 }
 
 /**
+ * 等待记录的快照（控制台/夹具读它；返回**深**副本）。
+ *
+ * ★ 与 {@link runtimeGateLogSnapshot} 同形态，理由也同：进程级状态必须有只读出口，
+ *   否则夹具只能通过"跑一次探活、看它说了什么"来间接推断内部状态 —— 而那正是
+ *   最容易被夹具自己写错的一层（"我以为它在记录里"与"记录里真的有"同形）。
+ */
+export function waitRecordSnapshot(): ReadonlyArray<{
+  teamId: string
+  taskId: string
+  memberName: string
+  attemptId: string
+  startedAt: number
+  lastActivityAt?: number
+  lastPollAt?: number
+  lastOutputKey?: string
+  activityCount: number
+}> {
+  return [...waitRecords.values()].map((record) => ({ ...record }))
+}
+
+/** 清空等待记录（★ 只给夹具用：进程级状态会跨用例残留，而残留会让"第一次探活"变形）。 */
+export function resetWaitRecords(): void {
+  waitRecords.clear()
+}
+
+/**
+ * ── ★★ runtime 位置的第一条判据（探活）需要的【输入面】─────────────────────────
+ *
+ * 契约 §5 给 `runtime` 举的例子是「在成员被派发时启动计时器；超时 ⇒ 记录」。而
+ * 判据层要问的第一个问题是："这个成员【等了多久】，以及它【还在动吗】"。
+ *
+ * MEASURED（2026-10-06，开工前实测）：这两个观察**在插件里都不存在**。
+ *
+ *   · `ctx` 有 `{task, update, updateGate, …}`，**没有**"等了多久"；
+ *   · 源码里 grep 不到 `startedAt` / `dispatchedAt`；
+ *   · `onDispatched` 的 payload 有 taskId/attempt/attemptId/worktreePath，**没有时间戳**。
+ *
+ * ⇒ 判据接进来 ≠ 它的输入接进来。这就是本队反复踩过的那个形态（本轮之前已在
+ *   `inScope` / `verify` / 执行器上踩了三次），所以输入面与判据是两次改动。
+ *
+ * ── ★ 为什么需要【一份记录】，而不是一个局部变量 ──────────────────────────────
+ *
+ * 最省事的写法是在 `onDispatched` 里记一个数、然后……给谁呢？`onDispatched` 是
+ * **调度器**的回调，它只覆盖六个调用点里的**一个**（`member-dispatched`）。
+ * 其余五个（task-created / task-update / task-update-settled / task-status /
+ * delivery-declared）各建各的求值面 —— 一个记在闭包里的局部变量，它们**一个都看不见**。
+ *
+ * ⇒ 那五处要带 `wait` 的话，只能现编一个"起点 = 现在"。那就是**伪造一个时刻**。
+ *   这正是契约 §5 说 `runtime` "**可以带状态**"的落点：跨步骤的过程约束，它的
+ *   观察必须活得比一个步骤长。
+ *
+ * ── ★ 键是 attemptId，不是 taskId ─────────────────────────────────────────────
+ *
+ * 一次重派发会换 `attemptId`（`beginTaskAttempt`）⇒ 那是**新的一次等待**。
+ * 用 `taskId` 做键，reassign 之后旧的 `startedAt` 会留在原地，判据读到的等待时长
+ * 是**上一代尝试**的 —— 与"把失败归给一个从未发生的事件"同源（t6 已经为派发
+ * 事件吃过一次：投递失败不算派发）。用 attemptId 做键，这件事在**形状上**不可能发生。
+ *
+ * ── ★ 有限、且不落盘 ─────────────────────────────────────────────────────────
+ *
+ * 与 {@link runtimeGateLog} 同形态：进程内、有上限、不写进 team.json。
+ * "这一次运行里等过哪些成员"是**运行**的属性，不是团队契约的一部分；落盘会让一个
+ * 派生事实变成需要维护和迁移的状态（与 `taskWorktreeBase` 同一判断）。
+ */
+const WAIT_RECORD_LIMIT = 200
+
+/**
+ * 一条等待记录：**"这个尝试等了多久"的观察**。
+ *
+ * ★ 三个字段的语义必须分开，因为它们各自能独立地缺席：
+ *   · `startedAt`      —— 派发被接受的那一刻。**没有它就没有等待起点。**
+ *   · `lastActivityAt` —— **观察到产出**的那一刻（不是事件自带的时间戳，见下）。
+ *   · `lastPollAt`     —— 上一次把这份记录交给判据（探活）的时刻。
+ */
+interface WaitRecord {
+  readonly teamId: string
+  readonly taskId: string
+  readonly memberName: string
+  readonly attemptId: string
+  /** 派发被接受的那一刻（ms epoch）。★ 唯一来源是调度器的 `onDispatched.dispatchedAt`。 */
+  readonly startedAt: number
+  /**
+   * ── ★ 最近一次【观察到产出】的时刻 ─────────────────────────────────────────
+   *
+   * `undefined` 表示**还没有观察到任何产出**，它必须在形状上与"观察到了一次产出"
+   * 不同 —— 判据据此分辨"这个成员一直在动"与"这个成员压根没动过"。
+   *
+   * ★★ 为什么不能从会话事件里读：**会话事件没有时间戳**。
+   *
+   * MEASURED（2026-10-06，与本队开工前实测一致）：`dsh-session` 的
+   * `assistant/message` 事件只有 `message.content`，**没有 `at` / `ts`**。
+   * 所以"最后活动时刻"**不是读出来的，是记下来的** —— 在【观察到产出的那一刻】
+   * 由我方取一次时钟。这正是契约 §5 那句"runtime 可以带状态"。
+   *
+   * ⇒ 它的含义精确地是："**我们最后一次看见它说话**是在什么时候"。
+   *   这与"它最后一次说话是什么时候"不同形，而后者在本 Harness 版本上**不可得**。
+   *   判据与日志都必须按前者理解（措辞上的区别在这里是**语义**，不是文风）。
+   */
+  lastActivityAt?: number
+  /** 上一次探活（求值）的时刻。缺席 ⇒ 这是第一次探活。 */
+  lastPollAt?: number
+  /**
+   * ── ★ 已经**观察到**的那次产出的指纹（见 `sessionOutputKey`）───────────────
+   *
+   * ★ 它不是诊断字段，而是判据能不能工作的**前提**：成员会话里的
+   *   `assistant/message` 是**历史日志**，会一直留在那里。没有这一位，
+   *   每次探活都会"看见输出"⇒ 刷新 `lastActivityAt` ⇒ 一个卡死的成员
+   *   看起来永远刚动过 ⇒ **这条判据永远不报警**。
+   */
+  lastOutputKey?: string
+  /** 已经观察到的产出次数（诊断用；判据不用它判"第一次"，见下）。 */
+  activityCount: number
+}
+
+/**
+ * 进程内的等待记录表：`attemptId` → 记录。
+ *
+ * ★ 用 `Map` 的顺序当 LRU 用（`Map` 保证插入顺序，重插一个键不会换位置，所以
+ *   更新时要先删再插）—— 有上限的进程级状态必须能淘汰，否则它就是一个"只在最长
+ *   的那些会话里出现"的缺陷。
+ */
+const waitRecords = new Map<string, WaitRecord>()
+
+/** 记一条等待记录，并维持上限（最旧的先走）。 */
+function putWaitRecord(record: WaitRecord): void {
+  waitRecords.delete(record.attemptId)
+  waitRecords.set(record.attemptId, record)
+  while (waitRecords.size > WAIT_RECORD_LIMIT) {
+    const oldest = waitRecords.keys().next()
+    if (oldest.done === true) break
+    waitRecords.delete(oldest.value)
+  }
+}
+
+/**
+ * ── ★ 调用点①：派发时刻（等待起点）────────────────────────────────────────────
+ *
+ * 与 t6 的 `onDispatched` **同形状**：不返回值、不改派发结果。它只往记录表里放
+ * 一行"这个尝试从此刻开始等"。调度器不读它的返回值（`evaluateRuntimeGates` 的
+ * 返回值在 tools.ts:1140 那里被 `void` 掉），所以 **runtime 位置仍然拒绝不了任务**。
+ *
+ * ★ 起点【不是】从 `attempt.attempt` 或 `task.updatedAt` 推出来的：那些是**别的
+ *   用途的**时间戳（任务记录的最后修改），拿它们冒充"成员开始干活了"，会让探活
+ *   把"队长刚改过任务描述"读成"成员刚开工"。
+ */
+function recordDispatchStart(event: {
+  readonly teamId: string
+  readonly taskId: string
+  readonly memberName: string
+  readonly attemptId: string
+  readonly dispatchedAt: number
+}): void {
+  putWaitRecord({
+    teamId: event.teamId,
+    taskId: event.taskId,
+    memberName: event.memberName,
+    attemptId: event.attemptId,
+    startedAt: event.dispatchedAt,
+    activityCount: 0,
+  })
+}
+
+/**
+ * ── ★ 调用点②：最后活动时刻（"它还在动吗"）─────────────────────────────────────
+ *
+ * 读法与 `observeMemberConvergence`（本文件 1030 行附近）**同源**：从该成员自己的
+ * 会话日志里读 `assistant/message`。区别只有一处，而它是整件事的关键：
+ *
+ *     ★ 事件【不带时间戳】⇒ "什么时候说的"读不出来，
+ *       必须【在观察到产出的那一刻，由我方取一次时钟】。
+ *
+ * ⇒ 所以本函数做两件事，且**顺序不能反**：
+ *     1. 先读会话日志，看有没有 `assistant/message`；
+ *     2. **只有真的看到了**，才向注入的时钟取一次时刻。
+ *
+ * ★ 反过来（先取时钟再看日志）会在"这次没看到产出"时白记一个时刻 —— 那会让
+ *   "它没动"与"它刚动过"在记录里同形，而探活判据要分辨的正是这件事。
+ *
+ * ★ 三态与"记录 ≠ 观察"这条纪律（t12 的教训）：
+ *   · 读到会话、且**看到了一条新的** `assistant/message` ⇒ 记下**当前时刻**
+ *   · 读到会话、但一条都没有                      ⇒ **什么都不记**（"没观察到产出"，
+ *                                                   不是"观察到零产出"）
+ *   · 读不到会话（没有 live Agent / 日志炸了）    ⇒ **什么都不记**，且**不伪造**
+ *
+ * ── ★★ "看到输出"与"看到【新的】输出"不是一回事（这是本函数最容易写错的一处）──
+ *
+ * 成员会话里的 `assistant/message` **会一直留在那里**：它是一条历史日志。所以
+ * 每次探活都"看得到输出" —— 若把"看得到"当成"它在动"，`lastActivityAt` 会随着
+ * 每一次探活前进，于是"两次探活读数没变"**永远不成立**：
+ *
+ *     探活一次 ⇒ 读到历史输出 ⇒ 刷新时刻 ⇒ 看起来刚动过
+ *     探活两次 ⇒ 同上         ⇒ 再刷新     ⇒ 看起来还是刚动过
+ *     ⇒ **一个卡死的成员永远健康**，而这条判据**永远不报警**。
+ *
+ * ⇒ 所以记录里要留一个**已观察到的输出指纹**（`lastOutputKey`），只有指纹变了
+ *   （＝真的又多了一条输出）才推进 `lastActivityAt`。这一位是判据能不能分辨
+ *   "卡死"与"还在跑"的**全部**依据，而它必须落在记录里（跨步骤的状态）。
+ *
+ * ★ 指纹取"最后一条 assistant 消息的文本长度 + 条数"而不是全文：会话可以很长，
+ *   而这里只需要分辨"有没有多一条"。★ 但它是**内容无关**的 —— 一个成员反复输出
+ *   同样的话仍会推进（那是 `assistant/message` 条数变了），符合用户裁定的
+ *   "以产出为准（有 assistant/message 才算在动）"。
+ *
+ * ★ 这三支的差别在于"有没有往记录里写一个时刻"，而不是在于返回值 —— 调用方
+ * （`onDispatched` 与 `agent_teams_status`）都不需要读它。
+ *
+ * @returns 本次是否观察到了**新的**产出（供夹具与诊断使用；**不参与任何裁决**）。
+ */
+function observeMemberActivity(ctx: Context, memberId: string, attemptId: string | undefined, now: number): boolean {
+  if (attemptId === undefined || memberId === '') return false
+  const record = waitRecords.get(attemptId)
+  if (record === undefined) return false
+  const live = ctx.agents.get(memberId as SessionId)
+  if (live === undefined) return false
+  const key = sessionOutputKey(live.session)
+  if (key === undefined) return false
+  /**
+   * ★ 指纹没变 ⇒ 这是**已经看过的那条输出**，不是新的活动。
+   *
+   *   这一支是"卡死能被发现"的唯一保证：不写时刻、也不改指纹。
+   *   把它写成"看到了就刷新"，会让这条判据在最需要它的时候（成员彻底不动了）
+   *   表现成"一切正常"。
+   */
+  if (record.lastOutputKey !== undefined && record.lastOutputKey === key) return false
+  /**
+   * ★ 时刻单调：一次观察不得把 `lastActivityAt` **往回拨**。
+   *
+   * 注入的时钟是可被夹具驱动的一个函数，而**观察的顺序与实际发生的顺序可以不一致**
+   * （例如成员先产出、随后一个更早开始的探活才跑到）。允许回拨，等于允许"最后活动
+   * 时刻"变成"随机某一个活动时刻"，而探活判据的全部推理都建在它的**单调性**上。
+   */
+  if (record.lastActivityAt !== undefined && record.lastActivityAt > now) return true
+  putWaitRecord({ ...record, lastActivityAt: now, lastOutputKey: key, activityCount: record.activityCount + 1 })
+  return true
+}
+
+/**
+ * 一个成员会话里【产出】的指纹：`undefined` 表示"没有可观察的产出"。
+ *
+ * ★ 与 `sessionSpokeWithContent` 同源、同一个读法，但回答的是不同问题：
+ *   · `sessionSpokeWithContent` —— "它有没有说过非空的话"（布尔）
+ *   · 本函数                   —— "**说的是哪一次**"（可比较的指纹）
+ * 后者才是"最后活动时刻"能成立的前提：没有它，每次探活都会重新发现那条旧输出。
+ */
+function sessionOutputKey(session: unknown): string | undefined {
+  if (session === null || typeof session !== 'object') return undefined
+  let events: readonly unknown[]
+  try {
+    events = sessionOwnEvents(session as never) as readonly unknown[]
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(events)) return undefined
+  let messages = 0
+  let text = 0
+  for (const event of events) {
+    if (event === null || typeof event !== 'object') continue
+    if ((event as { type?: unknown }).type !== 'assistant/message') continue
+    const content = (event as { message?: { content?: unknown } }).message?.content
+    if (!Array.isArray(content)) continue
+    const hasText = content.some((block) => (
+      block !== null && typeof block === 'object'
+      && (block as { type?: unknown }).type === 'text'
+      && typeof (block as { text?: unknown }).text === 'string'
+      && (block as { text: string }).text.trim() !== ''
+    ))
+    if (!hasText) continue
+    messages += 1
+    for (const block of content) {
+      if (block === null || typeof block !== 'object') continue
+      const value = (block as { text?: unknown }).text
+      if (typeof value === 'string') text += value.length
+    }
+  }
+  /**
+   * ★ 一条非空输出都没有 ⇒ `undefined`（＝**没能观察**），而**不是** `'0:0'`。
+   *   后者看起来是"观察到零条"，而"它还没说过话"与"它说了个空"是两件事
+   *   （本文件在 `observedSpoke` 那里已经为这条分界写过一段说明）。
+   */
+  if (messages === 0) return undefined
+  return `${messages}:${text}`
+}
+
+/**
+ * 读一个成员会话里【有没有非空的 assistant 输出】。
+ *
+ * ★ 与 `observedSpoke` 的关系：同源、不同问题。
+ *   · `observedSpoke` 答"**最近一次**输出是不是空的"（收敛判据要的）；
+ *   · 本函数答"**有没有过**输出"（探活要的）。
+ *
+ * 为什么探活不能直接复用 `observedSpoke`：它读的是**最后一条** assistant 消息，
+ * 而"最后一条是空的"在一个还在干活的成员身上也会发生（例如它先说了句话、然后
+ * 输出了一段空文本）。探活要问的是"它有没有真的动过"，那个问题对"最后一条"不敏感。
+ */
+function sessionSpokeWithContent(session: unknown): boolean {
+  if (session === null || typeof session !== 'object') return false
+  let events: readonly unknown[]
+  try {
+    events = sessionOwnEvents(session as never) as readonly unknown[]
+  } catch {
+    return false
+  }
+  if (!Array.isArray(events)) return false
+  return events.some((event) => {
+    if (event === null || typeof event !== 'object') return false
+    if ((event as { type?: unknown }).type !== 'assistant/message') return false
+    const content = (event as { message?: { content?: unknown } }).message?.content
+    if (!Array.isArray(content)) return false
+    return content.some((block) => (
+      block !== null && typeof block === 'object'
+      && (block as { type?: unknown }).type === 'text'
+      && typeof (block as { text?: unknown }).text === 'string'
+      && (block as { text: string }).text.trim() !== ''
+    ))
+  })
+}
+
+/**
+ * ── ★ 调用点④：团队级观察（`task-status` / `delivery-declared` 共用）──────────────
+ *
+ * 这两个调用点【没有单个 task】—— 它们问的是"这个团队现在什么情况"。所以探活判据
+ * 从它们那里拿到的是 `waits`（**每个未结束尝试一条**），而不是 `wait`。
+ *
+ * ★ `wait` 与 `waits` 不同形不是重复，是两种问题（与 t12 那条"记录 ≠ 观察"同源）：
+ *     · `wait`  —— "**这个任务**等了多久"（发生在某一步的上下文里）
+ *     · `waits` —— "**这个团队里**有谁在等、等了多久"（发生在快照/交付的时刻）
+ *   把它们合成一个"wait 或 waits"的字段，会让"我知道这一个任务"与"我把队里所有
+ *   等待都看了一遍"在判据里同形 —— 而后者才知道"谁卡住了"。
+ *
+ * ★★ 空数组与缺席必须不同形（本文件已经为 `members` 立过同一条界线）：
+ *   · `waits: []`  —— 观察了：这个团队**此刻没有任何等待中的尝试**
+ *   · `waits` 缺席 —— 没能观察（例如状态读取失败）⇒ 判据按自己的契约 unmeasured
+ *
+ * ★ 只有**未结束**的尝试才进来：一个已经 completed / failed / cancelled 的任务不在
+ *   等任何人。把终结的任务也列进去，探活会为一个**早就结束**的尝试报"它卡住了"。
+ */
+function teamWaitObservations(
+  team: TeamState,
+  now: number,
+): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = []
+  for (const task of team.tasks) {
+    if (TERMINAL_TASK_STATUSES.includes(task.status)) continue
+    if (task.assignee === undefined || task.assignee === CAPTAIN_KEY) continue
+    const observation = waitObservationFor(team.id, task.id, task.attemptId, now)
+    if (observation !== undefined) out.push(observation)
+  }
+  return out
+}
+
+/**
+ * ── ★ 调用点③：把等待观察交给 runtime 判据（六个调用点共用）───────────────────
+ *
+ * 这是本模块**唯一**构造 `wait` 的地方。六处调用（member-dispatched /
+ * task-created / task-update / task-update-settled / task-status /
+ * delivery-declared）都经它取观察，于是"同一个尝试在不同步骤里读到不同的等待"
+ * 这件事在**形状上**不可能发生。
+ *
+ * ★★ 读不到 ⇒ **不注入**，而不是注入一个默认值。
+ *
+ * 这是 t5 验收里那句"读不到时不得伪造 —— 不注入，让判据自己报 unmeasured"。
+ * 具体地：没有匹配的等待记录 ⇒ 返回 `undefined` ⇒ `wait` 字段**不出现在 ctx 里**
+ * ⇒ 判据按自己的契约说"我没能测量"。**调用方绝不在这里替判据决定"那就算通过"**
+ * （本文件在 `inject` 那一段已经为这条纪律写过一段说明）。
+ *
+ * ★ 哪些情形"读不到"（每一种都必须不同形于"读到了"）：
+ *   · 这个尝试没有派发记录（例如队长自己接管的任务）⇒ 没有起点 ⇒ 不注入；
+ *   · `attemptId` 缺席（任务还没被派发过）⇒ 不注入；
+ *   · 记录在，但起点不可用 ⇒ 不注入。
+ *
+ * ★ 每次交接都推进 `lastPollAt`：**"上一次探活"是这次探活产生的**，所以它属于
+ *   交接这一步，而不是属于记录本身。判据不用它算"第几次"，只用它分辨
+ *   「这是第一次探活」（字段缺席）与「上次探活在 T」（字段在）。
+ */
+function waitObservationFor(
+  teamId: string,
+  taskId: string,
+  attemptId: string | undefined,
+  now: number,
+): Record<string, unknown> | undefined {
+  if (attemptId === undefined) return undefined
+  const record = waitRecords.get(attemptId)
+  /**
+   * ★ teamId / taskId 必须对得上：`attemptId` 是 capability，理论上唯一，但一条
+   *   记录被 LRU 淘汰之后**同一个键可以指向另一次派发**。这里核对其余两个身份，
+   *   于是"读了别人的等待"在形状上不可能发生。
+   */
+  if (record === undefined || record.teamId !== teamId || record.taskId !== taskId) return undefined
+  const observation: Record<string, unknown> = {
+    taskId,
+    memberName: record.memberName,
+    attemptId,
+    startedAt: record.startedAt,
+    /** ★ 本次求值的时钟读数 —— 判据**绝不**自己读 `Date.now()`（契约 §2 性质 1）。 */
+    now,
+    ...record.lastActivityAt === undefined ? {} : { lastActivityAt: record.lastActivityAt },
+    ...record.lastPollAt === undefined ? {} : { previousPollAt: record.lastPollAt },
+  }
+  /**
+   * ★ 交接之后才推进 `lastPollAt`（而不是读之前）：两次读之间若发生异常，
+   *   "上一次探活"必须仍然是**真的发生过**的那一次。
+   */
+  putWaitRecord({ ...record, lastPollAt: now })
+  return observation
+}
+
+/**
  * 跑 `runtime` 位置，并且**无论它返回什么都继续**（契约 §5 硬要求）。
  *
  * ★ 三态 + 一个不同的第四种情形，四种在返回值里【互不同形】：
@@ -870,12 +1293,75 @@ export function runtimeGateLogSnapshot(): ReadonlyArray<{ at: number; event: str
  *
  * ★ 与调用点纪律的关系：只有调用方知道"这个事件是不是某条运行判据适用的事件"。
  *   本模块不读 context（不替判据猜），也不把"没跑"记成 `ok`。
+ *
+ * ★ `clock`（t5）：本入口是**唯一**给 runtime 判据注入时钟读数的地方。它由
+ *   `registerAgentTeamsTools` 的 `config.now` 决定（缺省 `Date.now`），于是：
+ *   · 生产路径上六处调用点读到的是同一个时钟；
+ *   · 夹具注入一个假时钟，就能**不真的等待**地构造"两次探活之间没有任何产出"。
+ *
+ *   ★ 判据层绝不自己读时间（契约 §2 性质 1）—— 它拿到的是 ctx 里的 `wait.now`。
  */
-async function evaluateRuntimeGates(ctx: Context, event: string, context: unknown): Promise<JsonValue | undefined> {
+async function evaluateRuntimeGates(
+  ctx: Context,
+  event: string,
+  context: unknown,
+  clock: () => number = Date.now,
+): Promise<JsonValue | undefined> {
   if (registry.count('runtime') === 0) return undefined
+  const source = context as Record<string, unknown>
+  /**
+   * ── ★ 输入面注入：六个调用点**共用**这一个构造点 ────────────────────────────
+   *
+   * 探活判据要问"这个成员等了多久 / 还在动吗"。这两个观察由本模块的等待记录表
+   * （见 {@link waitObservationFor}）持有，而不是由每个调用点各自拼 ——
+   * 四处拼同一个东西，就是四处会慢慢分叉的地方，而它们在日志里同形。
+   *
+   * ★★ 读不到 ⇒ `wait` **整个字段缺席**，绝不是 `{}` 或半份观察。
+   *   这是 t5 验收里那句"读不到时不得伪造 —— 不注入，让判据自己报 unmeasured"。
+   *   判据已经声明：`startedAt` / `now` 缺席 ⇒ unmeasured（不是 ok）。
+   *
+   * ★ 哪些事件带 `wait`：凡上下文里有 `team` + `task`（＝"这一步是关于某个具体
+   *   任务的"）的，都能对上一条等待记录。`member-dispatched` 用的是回调 payload
+   *   （没有嵌套的 `team`），所以它走下面那一支。
+   */
+  const teamId = (source.team as { id?: unknown } | undefined)?.id
+    /**
+     * ★ `member-dispatched` 这一支：调度器的回调 payload **不是**嵌套的
+     *   `{team, task}` 形状，它就是 `{teamId, taskId, attemptId, …}` 本身。
+     *   两个形状都要认 —— 否则派发那一刻（**探活的起点**）反而是唯一读不到
+     *   等待观察的调用点，而它正是最需要的那个。
+     */
+    ?? (typeof source.teamId === 'string' ? source.teamId : undefined)
+  const taskId = typeof (source.task as { id?: unknown } | undefined)?.id === 'string'
+    ? (source.task as { id: string }).id
+    : typeof source.taskId === 'string' ? source.taskId : undefined
+  const attemptId = typeof (source.task as { attemptId?: unknown } | undefined)?.attemptId === 'string'
+    ? (source.task as { attemptId: string }).attemptId
+    : typeof source.attemptId === 'string' ? source.attemptId : undefined
+  const wait = typeof teamId === 'string' && typeof taskId === 'string'
+    ? waitObservationFor(teamId, taskId, attemptId, clock())
+    : undefined
+  /**
+   * ★ 团队级调用点（`task-status` / `delivery-declared`）拿不到单个 task ⇒ 给
+   *   `waits`（每个未结束尝试一条）。判据据此能问"这个队里**有谁**卡住了" ——
+   *   那是快照与交付时刻真正要问的问题。
+   *
+   * ★ 只在**上下文里真的有 team 对象**时注入。没有 team（例如一次纯派发事件）
+   *   就整个字段缺席 ⇒ 判据 unmeasured，而不是拿到一个空的观察面被误读成
+   *   "这个队一个人都没在等"。
+   */
+  const team = source.team as TeamState | undefined
+  const waits = team !== undefined && typeof team === 'object' && Array.isArray(team.tasks) && typeof team.id === 'string'
+    ? teamWaitObservations(team, clock())
+    : undefined
   let evaluation
   try {
-    evaluation = await registry.evaluate('runtime' as never, { ...(context as object), event })
+    evaluation = await registry.evaluate('runtime' as never, {
+      ...source,
+      ...wait === undefined ? {} : { wait },
+      ...waits === undefined ? {} : { waits },
+      event,
+    })
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error)
     ctx.logger.warn(`agent-teams: the runtime gate threw on "${event}" (recorded, not thrown at the caller): ${reason}`)
@@ -1120,10 +1606,28 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   installRetiredMemberGuard(ctx, config.stateDir)
   installMemberDelegationGuard(ctx, config.stateDir, config.memberMaxDepth ?? 0)
   installMailboxAdmission(ctx, config.stateDir)
+  /**
+   * ★ 时钟（t5）：整个插件只从这一个地方读时间给判据用。
+   *
+   * 与 `judgeRuntimeGates` 里那个 `Date.now`（运行记录的**写入时刻**）是两个用途：
+   * 那个是"这条记录是什么时候写的"，这个是"这次求值的观察时刻"。合流会让夹具
+   * 推进假时钟时，运行记录上的时刻跟着跳 —— 而运行记录是给人看的审计，它必须
+   * 反映真实墙上时间。
+   */
+  const clock = (): number => config.now?.() ?? Date.now()
   const scheduler = installTeamScheduler(ctx, {
     stateDir: config.stateDir,
     executionPrompt: config.executionPrompt,
     dispatch: dispatchMember,
+    /**
+     * ★ 时钟（t5）：调度器与判据层读**同一个**可注入时钟。
+     *
+     * 两处各读各的（调度器读 `Date.now`、判据读另一个）不会当场出错，但会让
+     * "派发在 T 发生"与"探活在 T' 读到起点"之间没有一个共享的参照 —— 夹具
+     * 推进假时钟时就会只推进一半，于是超时永远测不出来，而测试**看起来是绿的**
+     * （因为没人真的等过）。
+     */
+    now: clock,
     // ★ 把派发时拿到的隔离基准记下来，供 completion 位置的 r5 / 回测判据使用。
     onWorktree: (taskId, base) => rememberWorktreeBase(taskId, base),
     /**
@@ -1136,8 +1640,25 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
      * ★ 记录发生在【投递被接受之后】(`accepted === true`)。投递失败 ⇒ 任务回滚、
      *   成员没开工 ⇒ 那不是"派发过"。把失败的投递也记成一次派发，会让运行判据
      *   读到一个从未发生的事件。
+     *
+     * ★ t5 在这里做了两件事，**顺序有意义**：
+     *   ① `recordDispatchStart` —— 把"这个尝试从此刻开始等"记进等待记录表。
+     *      这是探活判据要的**等待起点**，而它只在这一刻可得（派发一结束，
+     *      那个时刻就没有第二个来源了：任务记录上的 `updatedAt` 是别的用途，
+     *      拿它冒充"成员开工了"会让"队长刚改过任务"读成"成员刚开工"）。
+     *   ② `observeMemberActivity` —— 派发刚被接受时，成员**可能已经**产出过
+     *      （冷恢复/接续的情形：会话里本来就有非空输出）。所以这里先观察一次，
+     *      否则"它其实一直在动"会被读成"它一直没动"。
+     *
+     * ★ 返回值仍然被 `void` 掉：runtime **不得拒绝任务**（契约 §5 硬要求）。回调
+     *   的签名是 `void`，没有可读的返回值，所以这条约束是**类型上**保证的，
+     *   而不是靠纪律。
      */
-    onDispatched: (event) => { void evaluateRuntimeGates(ctx, 'member-dispatched', event) },
+    onDispatched: (event) => {
+      recordDispatchStart(event)
+      observeMemberActivity(ctx, event.memberId, event.attemptId, event.dispatchedAt)
+      void evaluateRuntimeGates(ctx, 'member-dispatched', event, clock)
+    },
   })
   const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
     scheduler.kickMember(workspace, teamId, memberName)
@@ -2078,7 +2599,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           team: fresh,
           task,
           created: true,
-        })
+        }, clock)
         appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, captain.session), 'agent-teams/task-created', {
           teamId: fresh.id,
           taskId: task.id,
@@ -2511,11 +3032,12 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          *   调用点之后照常执行，本调用点对控制流零影响。理由见 `evaluateRuntimeGates`。
          */
         let runtimeGateRecord = await evaluateRuntimeGates(ctx, 'task-update', {
+          team: fresh,
           task,
           update: { status: args.status, output: args.output, verdict: args.verdict as ReviewVerdict | undefined },
           updateGate: dispatchGates,
           wantsCompleted: args.status === 'completed',
-        })
+        }, clock)
         if (dispatchGates.ok === false) {
           if (dispatchGates.unmeasured !== undefined) {
             /**
@@ -2817,6 +3339,46 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         }
         await writeTeam(stateRoot, fresh)
         /**
+         * ── ★★ 成员提交一次更新 ⇒ 顺手**读一遍它的会话日志**（这是第二个观察时刻）──
+         *
+         * ── 两个"看起来都行"、而只有一个是错的写法 ─────────────────────────────
+         *
+         * ✗ 错的：把**这次工具调用**当成一次产出（`args.output` 非空 ⇒ 记一次活动）。
+         *   它错得很像对的（"产出当场就在手上，何必去翻日志"），而后果是**关掉判据**：
+         *   一个卡死的成员，只要它的工具还在被调用（重试、心跳、空转），
+         *   `lastActivityAt` 就会被反复刷新 ⇒ 两次探活读数一直在变 ⇒ **永远不报警**。
+         *   而那正是探活存在的全部理由。用户已裁定活动的定义是
+         *   「**以产出为准（有 `assistant/message` 才算在动；`status` 可能因别的原因
+         *   抖动）**」—— 工具参数**不是** `assistant/message`。
+         *
+         * ✓ 对的：在这里**读一次该成员的会话日志**（`observeMemberActivity`），
+         *   与 `observeMemberConvergence` 同源、与探活同一个判据面。**产物仍然是
+         *   `assistant/message`**，所以它不会把"工具被调用"读成"在动"：一个只被
+         *   反复调用工具、却一句话都没说的成员，指纹不变 ⇒ 什么都不记。
+         *
+         * ── 为什么需要这第二个时刻（只留派发 + 探活是不够的）─────────────────────
+         *
+         * 观察时刻越多，活动时刻越**接近真实**。只留两个的话，最坏情形是：
+         *
+         *     成员在 T1..T2 之间一直在产出，而队长直到 T3 才查一次状态
+         *     ⇒ 判据在 T3 才第一次看见那些产出 ⇒ `lastActivityAt = T3`
+         *
+         * 这不是假报警（那一轮反而看不到"没动"），但它是**迟到的观察**：在 T1 与 T3
+         * 之间的任何一次探活，都会把"它其实一直在动"读成"它没动"。而
+         * `agent_teams_update_task` 是**成员每次交进展都会经过的那一步** ——
+         * 用它当观察时刻，代价是一次已有的会话读，换来的是探测精度。
+         *
+         * ★ 它**不能替代**探活时刻：一个成员可能长时间只在写文件、跑命令，
+         *   一条更新都不发 —— 那时只有 `agent_teams_status` 能观察到它。
+         *   两个时刻都要，因为探活问的是"它还在动吗"，而"动"发生在任何时刻。
+         */
+        {
+          const activeMember = fresh.members.find(candidate => candidate.name === task.assignee)
+          if (identity.kind === 'member' && activeMember !== undefined && activeMember.id !== '') {
+            observeMemberActivity(ctx, activeMember.id, task.attemptId, clock())
+          }
+        }
+        /**
          * ── ★ runtime 位置：这一步【做完了】（契约 §5）───────────────────────────
          *
          * 上面的调用点看的是"意图"（`args.status`），这里看的是"结果"（落盘后的 task）。
@@ -2825,11 +3387,12 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          * 状态已经写下去了，本调用点做的事只有记录。
          */
         runtimeGateRecord = await evaluateRuntimeGates(ctx, 'task-update-settled', {
+          team: fresh,
           task,
           update: { status: task.status, output: task.output, verdict: task.verdict },
           updateGate: completionGates,
           wantsCompleted,
-        })
+        }, clock)
         if (followUpMessage !== undefined) await appendMailbox(stateRoot, fresh.id, CAPTAIN_KEY, followUpMessage)
         appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, caller.session), 'agent-teams/task-updated', {
           teamId: fresh.id,
@@ -3221,6 +3784,33 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
        *   —— **delivery 判据仍然真的会拦，只是拦在它该拦的那一步**。
        */
       const memberConvergence = observeMemberConvergence(ctx, team)
+      /**
+       * ── ★ 调用点②（第三条入口）：读一次会话日志，看每个成员还在不在动 ─────────
+       *
+       * 这里是**最自然**的观察点，理由有两条，缺一条都不够：
+       *
+       *   ① 它本来就在读会话（`observeMemberConvergence` 已走同一个入口），所以多读
+       *      一遍 `assistant/message` **不引入新的 I/O**；
+       *   ② 它是探活的**驱动时刻**（用户已裁定：10 分钟探活一次）。判据只在被调用的
+       *      那一刻才说话，而"被调用"发生在这里 —— 所以**观测与探活必须是同一刻**，
+       *      否则判据读到的是一个上次探活留下的陈旧读数，而它看起来与新鲜读数同形。
+       *
+       * ★ 观察**先于**求值：本段在下面的 `evaluateRuntimeGates` 之前跑，于是这一次
+       *   求值读到的 `lastActivityAt` 是刚刚观察到的。反过来会让一次探活永远是
+       *   "上一次"的视图 —— 而那正是"两次探活读数没变 ⇒ 报警"的假阳性来源。
+       *
+       * ★ 对**每个**未结束任务的成员都观察，不只是当前忙的那些：一个成员可能刚刚
+       *   产出、然后回到 idle，而"它动过"这件事必须留在记录里（否则下一次探活会
+       *   把它读成"从派发到现在一直没动"）。
+       */
+      const now = clock()
+      for (const task of team.tasks) {
+        if (TERMINAL_TASK_STATUSES.includes(task.status)) continue
+        if (task.assignee === undefined || task.assignee === CAPTAIN_KEY) continue
+        const activeMember = team.members.find(candidate => candidate.name === task.assignee)
+        if (activeMember === undefined || activeMember.id === '') continue
+        observeMemberActivity(ctx, activeMember.id, task.attemptId, now)
+      }
       const deliveryContext = {
         team,
         gate: deliveryCheck,
@@ -3233,7 +3823,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
        *   分不出"是契约层面不允许"还是"是某条判据发现了问题"。
        */
       const deliveryEvaluation = await registry.evaluate('delivery' as never, deliveryContext)
-      const runtimeRecord = await evaluateRuntimeGates(ctx, 'task-status', deliveryContext)
+      const runtimeRecord = await evaluateRuntimeGates(ctx, 'task-status', deliveryContext, clock)
       const delivery = {
         ok: deliveryEvaluation.ok === false ? false : deliveryCheck.ok,
         blockers: [
@@ -3368,7 +3958,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       if (evaluation.evaluated === 0 && evaluation.registered > 0) {
         ctx.logger.warn(`agent-teams: declare_delivery reached the delivery gate with no gate evaluated (${evaluation.registered} registered, all skipped); delivery was not checked`)
       }
-      await evaluateRuntimeGates(ctx, 'delivery-declared', deliveryContext)
+      await evaluateRuntimeGates(ctx, 'delivery-declared', deliveryContext, clock)
       void stateRoot
       return {
         team_id: team.id,

@@ -41,17 +41,44 @@ export interface SchedulerConfig {
      * ★ 时机：投递【被接受之后】才回调。投递失败会走下面那条回滚路径（任务回
      *   pending、成员回 idle），那一次不是"派发过"；把失败也记成一次派发，会让
      *   运行判据读到一个从未发生的事件。
+     *
+     * ★ `dispatchedAt`（t5）：这次派发【被接受的那一刻】。
+     *   探活判据要问的头一个问题是「这个成员等了多久」，而答案是"现在 − 起点"——
+     *   起点只能在这里取得，因为渡过了这一步，派发就结束了。
+     *   呼叫方拿它去记一条等待记录（见 `tools.ts` 的 `recordDispatchStart`）。
      */
     readonly onDispatched?: (event: {
+        /**
+         * ★ 这一次派发属于哪个团队（t5）。
+         *
+         * 等待记录要一个键，而 `taskId`（`t1`、`t2`…）**只在团队内唯一** —— 两个团队的
+         * `t1` 会撞在同一个键上，于是"读了另一个团队的等待"。`teamId` 是让它唯一的
+         * 那一半，而它只在这里可得（调度器手上有，回调的其余字段里没有）。
+         */
+        readonly teamId: string;
         readonly taskId: string;
         readonly memberName: string;
         readonly memberId: string;
         readonly attempt: number;
         readonly attemptId: string;
         readonly kind: string;
+        /** ★ 派发被接受的那一刻（ms epoch），取自 {@link SchedulerConfig.now}。 */
+        readonly dispatchedAt: number;
         readonly worktreePath?: string;
         readonly worktreeUnavailable?: string;
     }) => void;
+    /**
+     * ── ★ 时钟（t5）：调度器<b>不</b>自己读 `Date.now()` ───────────────────────────
+     *
+     * 它是可注入的，理由与判据层那条纪律同源（契约 §2 性质 1）：**I/O 与时钟
+     * 由调用方给**。这里的时间戳会经 `onDispatched.dispatchedAt` 流进等待记录，
+     * 而判据拿它算"等了多久"。
+     *
+     * ★ 缺省 `Date.now` 是给生产用的，**不是给夹具用的**：夹具注入假时钟才能
+     *   在不真等 10 分钟的情况下构造"两次探活之间没有任何产出"。
+     *   —— 一个不能注入时钟的探活判据，只能靠真等来测，而真等的夹具没人跑。
+     */
+    readonly now?: () => number;
 }
 export interface TeamScheduler {
     /** Try to give every genuinely idle/ready member one unit of ready work. */

@@ -64,17 +64,44 @@ export interface SchedulerConfig {
    * ★ 时机：投递【被接受之后】才回调。投递失败会走下面那条回滚路径（任务回
    *   pending、成员回 idle），那一次不是"派发过"；把失败也记成一次派发，会让
    *   运行判据读到一个从未发生的事件。
+   *
+   * ★ `dispatchedAt`（t5）：这次派发【被接受的那一刻】。
+   *   探活判据要问的头一个问题是「这个成员等了多久」，而答案是"现在 − 起点"——
+   *   起点只能在这里取得，因为渡过了这一步，派发就结束了。
+   *   呼叫方拿它去记一条等待记录（见 `tools.ts` 的 `recordDispatchStart`）。
    */
   readonly onDispatched?: (event: {
+    /**
+     * ★ 这一次派发属于哪个团队（t5）。
+     *
+     * 等待记录要一个键，而 `taskId`（`t1`、`t2`…）**只在团队内唯一** —— 两个团队的
+     * `t1` 会撞在同一个键上，于是"读了另一个团队的等待"。`teamId` 是让它唯一的
+     * 那一半，而它只在这里可得（调度器手上有，回调的其余字段里没有）。
+     */
+    readonly teamId: string
     readonly taskId: string
     readonly memberName: string
     readonly memberId: string
     readonly attempt: number
     readonly attemptId: string
     readonly kind: string
+    /** ★ 派发被接受的那一刻（ms epoch），取自 {@link SchedulerConfig.now}。 */
+    readonly dispatchedAt: number
     readonly worktreePath?: string
     readonly worktreeUnavailable?: string
   }) => void
+  /**
+   * ── ★ 时钟（t5）：调度器<b>不</b>自己读 `Date.now()` ───────────────────────────
+   *
+   * 它是可注入的，理由与判据层那条纪律同源（契约 §2 性质 1）：**I/O 与时钟
+   * 由调用方给**。这里的时间戳会经 `onDispatched.dispatchedAt` 流进等待记录，
+   * 而判据拿它算"等了多久"。
+   *
+   * ★ 缺省 `Date.now` 是给生产用的，**不是给夹具用的**：夹具注入假时钟才能
+   *   在不真等 10 分钟的情况下构造"两次探活之间没有任何产出"。
+   *   —— 一个不能注入时钟的探活判据，只能靠真等来测，而真等的夹具没人跑。
+   */
+  readonly now?: () => number
 }
 
 export interface TeamScheduler {
@@ -353,6 +380,15 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
     `${stateRoot}\u0000${teamId}\u0000${memberName}`
   )
 
+  /**
+   * ★ 时钟（t5）：调度器只从这一个地方读时间。
+   *
+   * 默认实现是 `Date.now`（生产路径），注入的假时钟让夹具能在**不真的等待**的
+   * 情况下构造"派发之后过了 11 分钟"。判据层绝不自己读时间（契约 §2 性质 1），
+   * 而这个时间戳就是它唯一的来源。
+   */
+  const clock = (): number => config.now?.() ?? Date.now()
+
   const serializeMember = async <T>(key: string, operation: () => Promise<T>): Promise<T> => {
     const previous = memberQueues.get(key) ?? Promise.resolve()
     let release!: () => void
@@ -622,14 +658,21 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
            * ★ runtime 位置的接线（t6）：投递【被接受之后】才记录这次派发。
            *   只记录、不拒流程（契约 §5）—— 回调的返回值被有意忽略，因为一个
            *   过程约束不该、也不能改变派发结果。失败路径不记录（见下面的回滚）。
+           *
+           * ★ `dispatchedAt`（t5）取在**投递已被接受之后**，所以它是"成员真的要
+           *   开始干活"的时刻，而不是"我们打算派发"的时刻 —— 投递本身可能很慢
+           *   （起一个子代理、等 provider），把等待起点记在投递之前，会让探活
+           *   把一个**还没开工**的成员读成"已经等了很久没产出"。
            */
           config.onDispatched?.({
+            teamId: team.id,
             taskId: dispatched.taskId,
             memberName: dispatched.memberName,
             memberId: dispatched.memberId,
             attempt: dispatched.attempt,
             attemptId: dispatched.attemptId,
             kind: dispatched.kind as string,
+            dispatchedAt: clock(),
             ...worktreePath === undefined ? {} : { worktreePath },
             ...worktreeUnavailable === undefined ? {} : { worktreeUnavailable },
           })
