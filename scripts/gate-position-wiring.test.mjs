@@ -571,18 +571,40 @@ test('★ runtime 位置：判据【自己抛错】也要被记录，且不把�
   }
 })
 
-test('★ 对照臂：runtime 位置空着 ⇒ 调用照常，且返回值里【不出现】runtime_gates（缺席 ≠ ok）', async () => {
+test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用照常，且本臂不引入拒绝', async () => {
   const workspace = track(mkdtempSync(join(tmpdir(), 'wire-runtime-ok-')))
   await seedRunningTeam(workspace)
   const { call } = pluginFixture(workspace)
-  assert.equal(registry.count('runtime'), 0)
-  const created = await call('agent_teams_create_task', { subject: 'work with no runtime gate', inScope: ['docs/x.md'] })
+  /**
+   * ★ t6 修正（与上面 delivery 那条同源）：这一臂此前写着
+   *   `assert.equal(registry.count('runtime'), 0)` —— 它把「runtime 位置为空」当成了
+   *   对照臂的**前提**。而本任务（t6）正是要往 runtime 接第一条判据
+   *   （`runtime.liveness`）⇒ 那条断言在交付的那一刻必然作废（棘轮）。
+   *
+   *   ⇒ 对照臂真正要问的问题是：「**没有额外的东西发言时，流程照常吗**」——
+   *     而不是「这个位置是空的吗」。所以现在它只断言：本臂自己不挂任何东西，
+   *     于是这次调用不得因为【本臂引入的原因】而失败。
+   *
+   * ★ 而"空位置 ⇒ 返回值里不出现 runtime_gates"那条纪律并没有被丢掉，只是换了一处
+   *   钉：`runtime.liveness` **按事件收窄**（只认 `runtime-liveness`），其余五个事件上
+   *   它被 `appliesTo` 跳过 —— 位置不再为空，但这一轮**没有任何判据适用**，
+   *   于是 `evaluated === 0`。★ 那是"没检查"的读数，**不是**"检查通过了"。
+   */
+  const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] })
   assert.equal(created.status, 'pending')
   /**
-   * ★ 缺席与 `{ok:true}` 必须不同形。把"这里没有过程约束"读成"过程约束通过了"，
-   *   正是三态裁决要防的那种合流。
+   * ★ "没有判据适用"与"判据都通过了"必须不同形（registry 的 `evaluated` / `skippedAll`）。
+   *   把前者读成后者，正是三态裁决要防的那种合流。
    */
-  assert.equal('runtime_gates' in created, false, 'an empty runtime position must be absent, not reported as ok')
+  assert.equal(created.runtime_gates?.ok, true)
+  assert.equal(created.runtime_gates?.evaluated, 0, '★ 这一轮没有任何一条运行判据适用 ⇒ evaluated=0，不是"跑了一条什么都对的判据"')
+  assert.equal(created.runtime_gates?.registered, 1, '★ runtime 位置必须真的挂着 t6 的探活判据')
+  assert.match(String(created.runtime_gates?.outcome), /nothing evaluated/, '★ "没有判据适用"必须留在运行记录里')
+  assert.equal(
+    (created.runtime_gates?.ran ?? []).filter((entry) => entry.verdict !== 'skipped').length,
+    0,
+    '★ 非探活事件上，探活判据必须一条都不跑（否则每次工具调用都背上未测量的噪音）',
+  )
 })
 
 // ── 臂 7：runtime 真的接在【派发】那一刻（契约 §5 的例子）─────────────────────

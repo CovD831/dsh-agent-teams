@@ -127,6 +127,12 @@ const NEW_POSITION_GATES = [
   { binding: 'contractVerifyCommand', id: 'contract.verify-command', point: 'contract' },
   { binding: 'deliveryCoverage', id: 'delivery.coverage', point: 'delivery' },
   { binding: 'deliveryConvergence', id: 'delivery.convergence', point: 'delivery' },
+  /**
+   * ★ t6：runtime 位置的第一条判据。它的 point 是 `runtime` —— 而 runtime 是
+   *   【过程约束】，它的 blocked 不进裁决（契约 §5）。这一点不影响登记表的形状：
+   *   登记问的是"它装在哪个位置、会不会被求值"，而"裁决算不算数"是调用方的事。
+   */
+  { binding: 'runtimeLiveness', id: 'runtime.liveness', point: 'runtime' },
 ]
 
 /** 登记表里某条判据挂在哪。 */

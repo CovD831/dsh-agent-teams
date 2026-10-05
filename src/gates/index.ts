@@ -99,6 +99,25 @@ import * as buildArtifactScope from './contract/build-artifact-scope.ts'
 import * as deliveryCoverage from './delivery/coverage.ts'
 import * as deliveryConvergence from './delivery/convergence.ts'
 /**
+ * ── T6 ——— 已接：runtime 位置的第一条判据（探活，契约 §5 的落点）────────────────
+ *
+ *      id = 'runtime.liveness' · point = 'runtime'
+ *
+ *      「卡死了」：两次探活之间最后活动时刻没变 ⇒ blocked（**作为告警，不是拒绝**）。
+ *      「定期告知」：还在活动 ⇒ ok + 「还在跑，已 N 分钟」。
+ *      ✗ 「没进展」不做 —— 「思考很久」与「卡住」在观察上同形，判它必然误报。
+ *
+ * ★ 它【不是】硬超时：等多久都不构成报警，唯一的判据是"这 10 分钟里动过没有"。
+ *   用户原话：「有的任务确实超过 30min」。
+ *
+ * ★ 它是【有状态】的（本插件第一条）：比较"这次探活"与"上次探活"。状态由**调用方**
+ *   持有（每条等待一本记录），判据本身仍是纯函数 —— 时钟与两份读数全部注入。
+ *
+ * ★ 本行由 t6 落。规则：`src/gates/index.ts` 归【第一个接判据的任务】持有；t6 恰好
+ *   也是为三个空位置建调用点的那个任务（见下面 contract/delivery 两行）。
+ */
+import * as runtimeLiveness from './runtime/liveness.ts'
+/**
  * ── T7 ——— 已接：判据「verify 命令可判性」（contract 位置第二条）──────────────
  *
  *      id = 'contract.verify-command' · point = 'contract'
@@ -201,6 +220,12 @@ const ALL_GATES = [
    */
   deliveryCoverage,
   deliveryConvergence,
+  /**
+   * T6 ——— 已接：runtimeLiveness（runtime 位置的第一条判据）
+   * ★ runtime 位置上只有它一条，所以没有"位置内顺序"要排；但它有位置纪律：
+   *   它的任何裁决都【只被记录】，不参与控制流（契约 §5 硬要求）。
+   */
+  runtimeLiveness,
 ] as const
 
 /**

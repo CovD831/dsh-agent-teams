@@ -136,6 +136,24 @@ function fullyInjectedCompletionCtx() {
   }
 }
 
+/** 一个"什么都注入"的 runtime ctx（探活能测：起点 / 时钟 / 两次活动读数都在）。 */
+function fullyInjectedRuntimeCtx() {
+  const T0 = 1_700_000_000_000
+  const INTERVAL = 10 * 60_000
+  return {
+    event: 'runtime-liveness',
+    task: { id: 't-x', assignee: 'worker' },
+    wait: {
+      startedAt: T0,
+      lastActivityAt: T0 + INTERVAL / 2,
+      now: T0 + 2 * INTERVAL,
+      previousPollAt: T0 + INTERVAL,
+      previousLastActivityAt: T0,
+      intervalMs: INTERVAL,
+    },
+  }
+}
+
 test('① 接线：dispatch 位置的两条判据都会被 evaluate 跑到（不是 skipped、不是缺席）', async () => {
   const evaluation = await registry.evaluate('dispatch', fullyInjectedDispatchCtx())
   for (const id of ['dispatch.changed-paths', 'dispatch.worktree']) {
@@ -165,11 +183,21 @@ test('① 接线：注册清单里每条判据都能在它自己的位置上被�
   const list = registry.list()
   const dispatchCtx = fullyInjectedDispatchCtx()
   const completionCtx = fullyInjectedCompletionCtx()
-  const contexts = { dispatch: dispatchCtx, completion: completionCtx }
+  /**
+   * ★ t6：`runtime` 位置现在也有判据了（`runtime.liveness`），于是它也需要一份
+   *   "什么都注入"的 ctx —— 否则这一节会因为 `contexts[point] === undefined`
+   *   而**静默跳过** runtime，读起来仍像"全都可达"。
+   *
+   * ★ 注意与其它位置的一个本质差异：runtime 的裁决**不进流程**（契约 §5）。
+   *   本节的断言是"它被求值到了"，不是"它拦住了什么" —— 后者由
+   *   `gate-position-wiring.test.mjs` 从调用点那一侧证明（记录但不阻止）。
+   */
+  const runtimeCtx = fullyInjectedRuntimeCtx()
+  const contexts = { dispatch: dispatchCtx, completion: completionCtx, runtime: runtimeCtx }
   for (const point of INSERTION_POINTS) {
     const registered = list[point] ?? []
     if (registered.length === 0) continue
-    // ★ 只在有 ctx 的两个位置上做可达性断言；其余位置本就没有判据，也没有编排入口。
+    // ★ 只有拿到 ctx 的位置能做可达性断言；其余位置本就没有判据，也没有编排入口。
     if (contexts[point] === undefined) continue
     const evaluation = await registry.evaluate(point, contexts[point])
     for (const { id } of registered) {
