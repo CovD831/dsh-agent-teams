@@ -50,14 +50,47 @@ pnpm typecheck     # 期望 exit=0
 | `9183235` | ★ **注入面 + lifecycle 真证据**（`pnpm verify` 转绿）|
 | `0e63010` | 构建产物重建 |
 
-**判据层现状**（六条，全部在生产路径上真的会跑）：
+**判据层现状**（十条，五个位置里四个已接满；全部在生产路径上真的会跑）：
 
 ```
+contract:   contract.build-artifact-scope | contract.verify-command
 dispatch:   dispatch.changed-paths | dispatch.worktree
 completion: completion.verify-rerun | completion.r5 | completion.mutation | completion.backtest
+delivery:   delivery.coverage | delivery.convergence
+runtime:    0 条判据 —— 但【五个调用点都在】且已证明可达（挂上去就会被跑到）
 （mutation-guard 是 guard，不进注册表）
-contract / delivery / runtime 三个位置仍为空
 ```
+
+**★ `runtime` 与"空位置"不同形**：t6 之前它是"挂上去也永远不会跑"（没有调用点），
+现在是"调用点已证明可达，等第一条判据"。
+它的第一条判据应当是 `with-timeout`（有界等待）——那是唯一需要**计时器**的判据，
+而现有判据全是纯数据变换，所以值得单独一轮设计。
+
+### 注册表的两条新能力（本轮加的）
+
+```
+① 观察模式：observe(id,{reason}) / AGENT_TEAMS_OBSERVE_GATES
+   新判据可先【只记录不拒绝】，显式开启，缺省不放宽
+   放过但记录：裁决进 observed.{blockers,unmeasured}，绝不并进 blockers
+   ★ 观察 ≠ appliesTo（后者会让判据根本不跑，观察期什么都看不见）
+
+② 全跳过可读：evaluated / skipped / registered / skippedAll
+   「有判据但全被跳过」不再与「判据都通过」同形
+```
+
+### ★ 本轮 5 次卡点给出的 checklist（接线一轮之后逐项检查）
+
+见 `docs/GATE-REGISTRY.md` §8.5。摘要：
+
+```
+□ 夹具有没有把「当前数量/为空/形状」写成不变量？（本轮 5 次）
+□ 既有 fixture 的输入形状，有没有因新接线而不再合法？（本轮 4 次）
+□ 每个 finding 的修复，能不能用一次定向突变打红它？（规则二：打不红=没修）
+□ 新判据的【输入面】接上了吗？（判据接进来 ≠ 输入接进来，本轮 3 次）
+```
+
+**★ 那 4 次「既有 fixture 不再合法」全都是接线成功的信号** ——
+它们证明新判据在**真实路径**上真的会开火，而不只是在夹具里。
 
 ### ★ 但已装插件还是上游原始版本
 
@@ -267,25 +300,45 @@ src/worktree.ts   createTaskWorktree({ repo, taskId })  → { ok, path, base, mi
 ## 6. 下一步（按已定的顺序）
 
 ```
-① ~~隔离：给成员一个 worktree~~ —— ★ 已完成（2026-10-05，见 §5.2）
-   每任务一个 detached worktree；路径写进派发提示；四条边界都有夹具。
+① ~~隔离：给成员一个 worktree~~        ★ 已完成（§5.2）
+② ~~R5 接到 completion 位置~~          ★ 已完成（ebbacce）
+③ ~~contract/verify-command~~          ★ 已完成（含「执行器缺席」那一格）
+④ ~~completion/mutation~~              ★ 已完成（c396e71）
+⑤ ~~delivery/coverage + convergence~~  ★ 已完成（t11/t12/t15/t16）
+⑥ runtime/with-timeout                 ← 唯一还没判据的位置
+   ★ 它需要【计时器】—— 现有判据全是纯数据变换，所以这是第一次
+     引入带状态的判据（契约 §5 允许 runtime 带状态、且不能拒绝任务）
+   ★ 位置已就绪：五个调用点都在，且证明可达
 
-② R5（红前绿后）接到 completion 位置           ← 现在两样原料都齐了
-   需要【两样，缺一不可】：
-     · 父版本 + 修复版本          ← §5.2 的 worktree 提供（base = 那个 hash）
-     · newTestFiles 是哪个成员写的 ← §5.1 的会话事件提供
-   样板：src/gates/completion/verify-rerun.ts
-   ★ 判据要能表达"没有 worktree ⇒ 我测不了"（unmeasured），
-     而不是把"没隔离"当成"检查通过"。
-
-③ 之后的候选（按性价比）：
-   contract/verify-command    verify 命令写得对吗（实测：grep -qx N 会被 wc 的前导空格卡死）
+⑦ 之后的候选：
    contract/scorer-reach      写域碰到判据文件了吗（归属证据已有，见 §5.1）
-   completion/mutation        变异测试
-   delivery/coverage          每个目标都有任务认领
-   delivery/convergence       idle ≠ converged（空回复不是收敛）
-   runtime/with-timeout       有界等待
+   completion/ 的 L3 语义变异体（现在只有 L1/L2 机械那一半）
+   delivery/ 的合并后全量回测（backtest 现在做的是分支级）
+
+⑧ ★ 本轮暴露的两个结构问题（都值得单独一轮，不要顺手做）
+   a) 接线一轮之后，必须专门留一轮处理「接线暴露出来的口径问题」——
+      本轮 19 个任务里 7 次 failed 全是这个形态：写域漏项 → 验收口径 →
+      语义空白 → 调用方偷懒分支 → 执行器缺席。
+      **指望"边接边发现"会让一轮变成十几轮。**
+   b) 判据的【输入面】与判据本身是两件事。本轮三次在同一张验收表上
+      逐个踩到：inScope 缺席 / verify 缺席 / 执行器缺席。
+      接线时必须同时问：「它的输入接上了吗？」
 ```
+
+---
+
+## 6.1 ★ 一条关于「本轮为什么收敛」的观察（来自执行者）
+
+本轮 wire-dev 标了 7 次 failed，**没有一次把失败改写成通过**。它的原话值得留在文档里：
+
+> 每次都不是「做错了」，而是「做完之后暴露了下一个更根本的东西」——
+> 写域漏项 → 验收口径 → 语义空白 → 调用方偷懒分支 → 执行器缺席。
+> **一个没被突变抓住的修复等于没修。**
+> **一个会在成员拿出证据后改自己条款的上级，是这条链能收敛的另一半原因。**
+
+**配套**：captain 在这一轮 amend 了 6 次契约（其中 1 次是修自己造成的自相矛盾）。
+**契约错了就改契约，不是让成员绕过去** —— 但也**不要让成员自己改契约**（那会把
+"契约错了"变成"实现悄悄放宽了"）。这两条同时成立。
 
 ---
 
