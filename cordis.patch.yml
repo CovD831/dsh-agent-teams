@@ -19,3 +19,18 @@
         stateDir: .agent-teams
         # Provider used to spawn member subagents ('spawn' or 'fork').
         memberProvider: spawn
+        # ── ★ 成员模型：显式钉死，不继承队长会话 ──────────────────────────────
+        #
+        # MEASURED（2026-10-05，accept-a 探针）：不设这一项时，成员模型走
+        #   model = explicitModel ?? defaultModel ?? currentModel
+        # 的最后一级 —— 【继承队长会话当时的模型】。而队长模型会随会话切换
+        # （实测：主会话从 glm-5.3 换到 deepseek-v4.1-flash 之后，新加的成员
+        # 仍然是 wb/glm-5.3，因为它读的是建队那一刻的 header）。
+        #
+        # 那让"成员用什么模型"变成一个【随时间漂移】的值：同一个团队配置，
+        # 今天建的成员和明天建的不是同一个模型，而记录里看不出来为什么。
+        #
+        # ⇒ 钉死在这里。优先级仍是 explicitModel > 本项 > 队长，所以需要时
+        #   单个成员仍可在 add_member 里覆盖（不同角色不同模型的用法不受影响）。
+        memberModel: deepseek-v4.1-flash
+
