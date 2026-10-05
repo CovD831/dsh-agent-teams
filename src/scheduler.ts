@@ -87,6 +87,18 @@ export interface SchedulerConfig {
     readonly kind: string
     /** ★ 派发被接受的那一刻（ms epoch），取自 {@link SchedulerConfig.now}。 */
     readonly dispatchedAt: number
+    /**
+     * ── ★ 这一次派发是【连续】还是【重来】（V3-2/t9 的判别面）─────────────────────
+     *
+     * 真 = 调度器只是给一个**已经在等待的**持久尝试补一次投递（status ⇒ kickTeam
+     * 那条路）⇒ 这一次等待是**连续**的，探活窗口必须继承；假 = **新的**尝试
+     * （重派发 / 首次派发）⇒ 开一个新窗口。
+     *
+     * ★ 为什么不用 `attempt` 计数判别：`beginTaskAttempt` 在**两条路上都会**让
+     *   `attempt += 1`（实测：kickTeam 给闲成员补投递也跳号），所以计数分不出
+     *   这两种。而"是不是在补一次已有的等待"只有调度器知道 —— 它在这里交出来。
+     */
+    readonly continued: boolean
     readonly worktreePath?: string
     readonly worktreeUnavailable?: string
   }) => void
@@ -673,6 +685,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             attemptId: dispatched.attemptId,
             kind: dispatched.kind as string,
             dispatchedAt: clock(),
+            continued: dispatched.recoveredOwned,
             ...worktreePath === undefined ? {} : { worktreePath },
             ...worktreeUnavailable === undefined ? {} : { worktreeUnavailable },
           })

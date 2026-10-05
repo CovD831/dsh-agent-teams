@@ -884,15 +884,36 @@ export function waitRecordSnapshot(): ReadonlyArray<{
   startedAt: number
   lastActivityAt?: number
   lastPollAt?: number
+  lastPolledActivityAt?: number
   lastOutputKey?: string
   activityCount: number
 }> {
   return [...waitRecords.values()].map((record) => ({ ...record }))
 }
 
+/**
+ * 等待**窗口**的快照（与 `waitRecordSnapshot` 同形态：进程级状态必须有只读出口）。
+ *
+ * ★ 它回答的是"这个任务这一次等待从哪里开始、上次何时被探活" —— 与记录表
+ *   （"这一代读到过什么"）是**两个作用域**。夹具要分辨"换代没重置窗口"，
+ *   唯一的办法就是把这两张表都读出来。
+ */
+export function waitWindowSnapshot(): ReadonlyArray<{
+  teamId: string
+  taskId: string
+  memberName: string
+  startedAt: number
+  lastPollAt?: number
+  lastPolledActivityAt?: number
+  touchedAt: number
+}> {
+  return [...waitWindows.values()].map((window) => ({ ...window }))
+}
+
 /** 清空等待记录（★ 只给夹具用：进程级状态会跨用例残留，而残留会让"第一次探活"变形）。 */
 export function resetWaitRecords(): void {
   waitRecords.clear()
+  waitWindows.clear()
 }
 
 /**
@@ -949,7 +970,30 @@ interface WaitRecord {
   readonly taskId: string
   readonly memberName: string
   readonly attemptId: string
-  /** 派发被接受的那一刻（ms epoch）。★ 唯一来源是调度器的 `onDispatched.dispatchedAt`。 */
+  /**
+   * ── ★ V3-2：等待窗口的起点，**跨代继承** ────────────────────────────────────
+   *
+   * MEASURED（2026-10-06，verifier3 / t3）：`agent_teams_status` 每次都会 `kickTeam`，
+   * 而 kick 会给一个非 `working` 的成员 `beginTaskAttempt` **换新一代 capability**。
+   * 于是每次探活看到的都是一个**刚出生**的等待：`startedAt = 现在`、
+   * `previousPollAt` 缺席 ⇒ 「两次探活之间它动过没有」这个前提**在真实路径上不成立**，
+   * 探活退化成"每次都报第一次"。实测三次探活，记录从 1 条变 2 条、`startedAt`
+   * 从 1600000 跳到 2200000。
+   *
+   * ⇒ 修法：`startedAt`（**窗口起点**）由"这个任务的等待从哪里开始"决定，
+   *   而不是由"这一代 attempt 什么时候被创建"决定。换代时**继承上一代的起点**，
+   *   于是窗口跨代连续，"两次探活之间"重新有意义。
+   *
+   * ★ 与"键用 attemptId"的关系（两者不矛盾，分工不同）：
+   *   · **键**仍然是 `attemptId`（capability 是身份，换代就是另一次尝试）；
+   *   · **窗口起点**是任务的属性，跨代继承。
+   *   把键换成 taskId 才是错的（reassign 之后旧起点会留在原地），
+   *   而把【起点】随换代重置同样错 —— 两个方向都会让读数不属于它声称的那段等待。
+   *
+   * ★ 继承是**有界**的：只在同一 (teamId, taskId) 上继承，且只在上一代记录仍在
+   *   表里时继承（LRU 淘汰之后退回本代派发时刻 —— 那时"窗口从哪开始"确实无据可依，
+   *   而这比编一个起点诚实）。
+   */
   readonly startedAt: number
   /**
    * ── ★ 最近一次【观察到产出】的时刻 ─────────────────────────────────────────
@@ -972,6 +1016,18 @@ interface WaitRecord {
   /** 上一次探活（求值）的时刻。缺席 ⇒ 这是第一次探活。 */
   lastPollAt?: number
   /**
+   * ── ★ 上一次探活【读到的】活动时刻（V3-3 的输入面）─────────────────────────────
+   *
+   * 与 `lastActivityAt` 不同形，且**两个都要**：
+   *   · `lastActivityAt`         —— 我们至今观察到的最新一次产出（**至今**）
+   *   · `lastPolledActivityAt`   —— **上一次探活那一刻**看到的那个值（**快照**）
+   *
+   * 判据问的是"这两次探活之间它动过没有"，所以它要的是**两个快照**，
+   * 而不是"最新值"与"某个别的值"。把两者合成一个字段，会让"上一次探活之后
+   * 它才动过"这件事**无法表达** —— 而那恰好是"还在跑"与"卡死"的唯一分界。
+   */
+  lastPolledActivityAt?: number
+  /**
    * ── ★ 已经**观察到**的那次产出的指纹（见 `sessionOutputKey`）───────────────
    *
    * ★ 它不是诊断字段，而是判据能不能工作的**前提**：成员会话里的
@@ -992,6 +1048,132 @@ interface WaitRecord {
  *   的那些会话里出现"的缺陷。
  */
 const waitRecords = new Map<string, WaitRecord>()
+
+/**
+ * ── ★ V3-2（收口）：任务作用域的**等待窗口簿** ────────────────────────────────
+ *
+ * 键 `teamId + '\u0000' + taskId` → 这个任务**这一次开工**的窗口。
+ *
+ * ── 为什么需要它（而不是从记录表里"找上一代")────────────────────────────────
+ *
+ * MEASURED（2026-10-06）：`agent_teams_status` 在**同一次调用**里先 `kickTeam`
+ * （换代）再求值（探活）。所以换代那一刻，上一代记录**也正要在同一次调用里**
+ * 被戳上 `lastPollAt = now` —— 从记录表里读"上一代的戳"，读到的究竟是
+ * 换代前还是换代后的值，取决于两者的先后顺序，而那是一个**说不清的口径**。
+ * 我为此试过三种写法（继承戳 / 首次交接不写戳 / 出生即不写戳），每一种都是
+ * 修好一条臂、弄红另一条 —— 因为它们都在同一个含糊的读法上打转。
+ *
+ * ⇒ 正确的做法是**把窗口本身变成一等对象**：它不属于任何一代 attempt，
+ *   于是"换代"与"探活戳"不再需要互相推断。记录（per-attempt）只用来回答
+ *   "这一代读到过什么"，窗口簿（per-task）回答"这一次等待从何时开始、上次何时探的"。
+ *
+ * ── ★ 继承必须有界（队长本轮明确要求的边界，且这里逐条钉住）────────────────
+ *
+ *   · **键含 teamId**：不同团队里同名的 taskId 不能互借窗口；
+ *   · **换成员即换窗口**：`memberName` 不同 ⇒ 另一次等待（另一个人的命，不该
+ *     继承前一个人的等待时长 —— 那会把"刚接手"读成"等了 40 分钟"）；
+ *   · **任务进入终态即撤销**：`teamWaitObservations` 只喂未结束的任务，
+ *     而 `forgetWaitWindow` 在任务离开未结束集合时被调用 ⇒ 窗口不再被继承；
+ *   · **只继承"还活着"的窗口**：见 `claimWaitWindow` 的 `staleAfterMs` ——
+ *     一个超过宽限期没有被任何探活碰过的窗口，不再会被下一代继承
+ *     （否则"上一代已经结束的等待"会被当成还在跑，正是队长点出的那个风险）；
+ *   · **LRU 上限**：与记录表同形态，进程级状态必须有界。
+ */
+/**
+ * ── ★ 哪些事件是【一次探活】（V3-2 收口的最后一位）────────────────────────────
+ *
+ * 与判据层 `LIVENESS_EVENTS` 是**同一份成员**，但这里必须**独立地**写一遍：
+ * 那一份是"判据该不该开口"，这一份是"调用方该不该推进探活戳" —— 两件事。
+ * （判据层不 import 调用方，调用方也不 import 判据：契约 §2 性质 2 说的是
+ * 判据之间不互调，而同一条分层纪律在这里同样适用。）
+ *
+ * ★ 只有 `task-status` 会在真实的 10 分钟节拍上反复发生 —— 用户裁定的
+ *   "10 分钟探活一次"就发生在查状态时。`runtime-liveness` 是显式探活入口
+ *   （夹具与将来的定时器用它），保留在名单里。
+ */
+const PROBE_EVENTS = Object.freeze(['task-status', 'runtime-liveness'])
+
+const waitWindows = new Map<string, WaitWindow>()
+const WAIT_WINDOW_LIMIT = 200
+/**
+ * 一个窗口在多久没有被任何探活碰过之后，**不再被下一代继承**。
+ *
+ * ★ 取 3 个探活间隔（30 分钟）：正常的换代总是紧跟着探活（下一次 status 就会碰到它），
+ *   所以真实路径上永远不会逼近这个界；而一个被遗忘的窗口（成员消失、任务悬停、
+ *   记录被 LRU 淘汰）最迟 30 分钟后就再也继承不到 —— 于是"上一代已经结束的等待"
+ *   不可能被无限期地当成还在跑。
+ */
+/**
+ * 探活间隔的兜底值（与判据层的 `DEFAULT_LIVENESS_INTERVAL_MS` 同值）。
+ *
+ * ★ 这里**不 import 判据**（契约 §2 性质 2：判据之间不互相调用；反过来调用方
+ *   直接 import 判据常量同样会把两层焊在一起）。这个数只用来给"窗口多久算陈旧"
+ *   定一个界，它不参与任何裁决 —— 判据那边仍然自己持有它那份。
+ */
+const DEFAULT_PROBE_INTERVAL_MS_FALLBACK = 10 * 60_000
+const WAIT_WINDOW_STALE_MS = 3 * DEFAULT_PROBE_INTERVAL_MS_FALLBACK
+
+interface WaitWindow {
+  readonly teamId: string
+  readonly taskId: string
+  readonly memberName: string
+  /** 这一次等待从何时开始（ms epoch）。★ 换代的语义是"这一轮重来"，但探活问的是"它还活着吗"—— 后者跨代成立。 */
+  startedAt: number
+  /** 上一次探活的时刻（窗口作用域，不属于任何一代 attempt）。 */
+  lastPollAt?: number
+  /** 上一次探活读到的活动时刻（窗口作用域）。 */
+  lastPolledActivityAt?: number
+  /** 最近一次被**任何**探活碰过的时刻（`lastPollAt` 的同义词，但即使还没探过也有值：建窗口那一刻）。 */
+  touchedAt: number
+  /**
+   * ── ★ 这个窗口认的是第几代尝试（"连续 vs 重来"的判别面）─────────────────────
+   *
+   * MEASURED（2026-10-06，两种合法需求打起来的那一格）：
+   *   · t5 的臂 5：**重派发**（任务回 pending、换 attempt）必须开一个**新窗口** ——
+   *     否则一个刚开工的成员会被读成"等了 30 分钟"；
+   *   · t3 的 V3-2：**换代**（status ⇒ kickTeam 给闲成员换 capability）必须
+   *     **继承**窗口 —— 否则探活永远在"第一次"，静默成员永不报警。
+   * 两者都对，区别只在"任务是不是真的重来了"。
+   *
+   * ⇒ 判别面用 `attempt` 计数：`beginTaskAttempt` 每次都会 `attempt += 1`，
+   *   **重来一定跳号**；而 kickTeam 给已在等待的成员补一次派发时，那一代数与
+   *   窗口记的相同 ⇒ 判为**连续**，继承窗口。
+   *   两个方向都在夹具里各有一条臂（clock-dev 的臂 5 / 本文件的 V3-2 臂）。
+   */
+  attempt: number
+}
+
+/** 窗口的键：队 + 任务 + 成员（★ 换成员即换窗口）。 */
+function waitWindowKey(teamId: string, taskId: string, memberName: string): string {
+  return `${teamId}\u0000${taskId}\u0000${memberName}`
+}
+
+/** 记一个等待窗口，并维持上限（与记录表同形态：有界的进程级状态）。 */
+function putWaitWindow(key: string, window: WaitWindow): void {
+  waitWindows.delete(key)
+  waitWindows.set(key, window)
+  while (waitWindows.size > WAIT_WINDOW_LIMIT) {
+    const oldest = waitWindows.keys().next().value
+    if (oldest === undefined) break
+    waitWindows.delete(oldest)
+  }
+}
+
+/**
+ * 任务离开"未结束"集合时撤销它的窗口 —— **有界继承的最后一道**。
+ *
+ * ★ 队长点出的风险：*"否则上一代已经结束的等待会被当成还在跑"*。
+ *   时间上的界（`WAIT_WINDOW_STALE_MS`）只能挡住"被遗忘的窗口"，
+ *   挡不住"这个任务已经 completed/failed/cancelled，而它的窗口还新鲜"。
+ *   ⇒ 终态是**语义上的界**，必须在任务真的结束那一刻把窗口撤掉。
+ */
+function forgetWaitWindow(teamId: string, taskId: string): void {
+  for (const key of [...waitWindows.keys()]) {
+    const window = waitWindows.get(key)
+    if (window === undefined) continue
+    if (window.teamId === teamId && window.taskId === taskId) waitWindows.delete(key)
+  }
+}
 
 /** 记一条等待记录，并维持上限（最旧的先走）。 */
 function putWaitRecord(record: WaitRecord): void {
@@ -1020,15 +1202,111 @@ function recordDispatchStart(event: {
   readonly taskId: string
   readonly memberName: string
   readonly attemptId: string
+  /** ★ 这一次派发是第几代尝试（诊断用）。 */
+  readonly attempt: number
+  /** ★ 连续还是重来（见 {@link WaitWindow.continued}）。 */
+  readonly continued: boolean
   readonly dispatchedAt: number
 }): void {
+  /**
+   * ── ★ V3-2：换代时【继承】上一代的等待窗口起点 ────────────────────────────────
+   *
+   * 见 {@link WaitRecord.startedAt}。这里取的是"同一个 (team, task) 上最近一条
+   * 记录"的起点：那一代与本代是**同一次等待**，只是 capability 被换掉了。
+   *
+   * ★ 只在起点**更早**时继承（`Math.min`）：一个更晚的起点会让窗口反而变短，
+   *   而窗口是单调向前的（时间只会往前走）。用 `min` 让"继承"在任何到达顺序下
+   *   都只可能延长窗口，不可能伪造出一个更早的过去。
+   *
+   * ★ 上一代**已经留了活动读数**时，一并继承 `lastActivityAt` / `lastOutputKey`：
+   *   否则换代会让"它其实一直在动"这个已经观察到的事实凭空消失 ——
+   *   那与"没观察到"同形，而探活正是靠这一点分辨卡死。
+   */
+  /**
+   * ── ★ V3-2 收口：窗口用【任务作用域的簿】认领，不再从记录表里"找上一代" ────────
+   *
+   * 见 {@link waitWindows}。判定"这是不是同一次等待"的三个条件，逐条对应
+   * 那条有界继承的边界：
+   *   · 键里含 teamId / taskId / memberName ⇒ 换队、换任务、换成员都不会误借；
+   *   · 窗口必须**还活着**（`touchedAt` 在 `WAIT_WINDOW_STALE_MS` 之内）
+   *     ⇒ 一个已经结束/被遗忘的等待不会被下一代继承；
+   *   · 窗口**只被认领一次**（认领即续命），于是"两个成员同时抢同一个窗口"不可能。
+   */
+  const key = waitWindowKey(event.teamId, event.taskId, event.memberName)
+  const existing = waitWindows.get(key)
+  /**
+   * ★ 有界继承的**第三条界**：`attempt` 必须**没有跳号**（没跳 = 同一次等待的连续）。
+   *   跳号 ⇒ 任务真的重来了 ⇒ 新窗口（这条与 t5 的臂 5 是同一件事）。
+   */
+  /**
+   * ★ 连续 = 调度器说这是"给一个已经在等待的尝试补一次投递"（`continued`）。
+   *   重来（`continued` 为假）⇒ 新窗口 —— 那条与 t5 的臂 5 是同一件事。
+   */
+  /**
+   * ★ 上一代的产出指纹/计数：从中取（键与窗口同口径：队+任务+成员）。
+   *   换代是**同一次等待**，所以"我看过它的哪一条输出"这件事跨代成立。
+   */
+  const previousRecord = [...waitRecords.values()]
+    .filter((record) => record.teamId === event.teamId && record.taskId === event.taskId && record.memberName === event.memberName)
+    .sort((a, b) => (b.lastPollAt ?? b.startedAt) - (a.lastPollAt ?? a.startedAt))[0]
+  const previousOutputKey = previousRecord?.lastOutputKey
+  const previousActivityCount = previousRecord?.activityCount ?? 0
+  const continued = existing !== undefined && event.continued
+  const alive = continued && event.dispatchedAt - existing.touchedAt <= WAIT_WINDOW_STALE_MS
+  /**
+   * ★ 起点取 `min`：窗口**只可能变长，不可能被伪造出一个更早的过去之外的形状**。
+   *   一个更晚的起点会让"已等多久"缩水，而时间只会往前走。
+   */
+  const window: WaitWindow = {
+    teamId: event.teamId,
+    taskId: event.taskId,
+    memberName: event.memberName,
+    attempt: event.attempt,
+    startedAt: alive ? Math.min(existing!.startedAt, event.dispatchedAt) : event.dispatchedAt,
+    ...alive && existing!.lastPollAt !== undefined ? { lastPollAt: existing!.lastPollAt } : {},
+    ...alive && existing!.lastPolledActivityAt !== undefined ? { lastPolledActivityAt: existing!.lastPolledActivityAt } : {},
+    touchedAt: event.dispatchedAt,
+  }
+  putWaitWindow(key, window)
+  /**
+   * ── ★ 新记录**不**自带一个"刚观察过"的活动读数 ────────────────────────────────
+   *
+   * MEASURED：换代之后紧接着 `observeMemberActivity` 会跑一次（派发即观察），
+   * 而它写的是"**现在**"——于是即使成员一句话都没说，新记录也会带上一个
+   * 等于 `now` 的活动读数。判据下一次比较时看到"上一次读到的也是刚动过"
+   * ⇒ **永远相等** ⇒ 静默成员不报警（或迟一次）。
+   *
+   * ⇒ 换代继承的是**上一代真的观察到的那个时刻**（窗口上的 `lastPolledActivityAt`
+   *   或上一代记录的 `lastActivityAt`），而不是"现在"。这让"观察到产出"这件事
+   *   只在**真的产出**时前进 —— 与"工具被调用不是产出"是同一条纪律。
+   */
+  const inheritedActivity = window.lastPolledActivityAt
   putWaitRecord({
     teamId: event.teamId,
     taskId: event.taskId,
     memberName: event.memberName,
     attemptId: event.attemptId,
-    startedAt: event.dispatchedAt,
-    activityCount: 0,
+    startedAt: window.startedAt,
+    ...inheritedActivity === undefined ? {} : { lastActivityAt: inheritedActivity },
+    /**
+     * ── ★★ 产出指纹必须**跨代继承** —— 这是 V3-2 最后一位，也是整条链上最隐蔽的一处 ──
+     *
+     * MEASURED（2026-10-06，把窗口做成一等对象之后仍然差一格）：
+     * `observeMemberActivity` 靠 `lastOutputKey` 判断"这条输出我是不是已经看过"
+     * （`if (record.lastOutputKey === key) return false` —— 它不刷新活动时刻）。
+     * 而换代产生的是**新记录**，那一代没有指纹 ⇒ 这条判断失效 ⇒ 派发时那次观察
+     * **无条件**把 `lastActivityAt` 写成 `now`。
+     *
+     * ⇒ 后果：换代之后，探活读到的"最后活动时刻"永远是"刚刚"，
+     *   于是「两次探活之间它动过没有」**永远相等** ⇒ 静默成员不报警
+     *   （或只在换代停止之后才报一次）。这正是"迟一次探活"的根因，
+     *   而它看起来完全不像缺陷 —— 观察是**合法**发生的，只是指纹丢了。
+     *
+     * ★ 与 `lastActivityAt` 一起继承是必须的：只继承时刻而不继承指纹，
+     *   下一次观察仍会因为"没有指纹可比"而重新盖一次时间。
+     */
+    ...previousOutputKey === undefined ? {} : { lastOutputKey: previousOutputKey },
+    activityCount: previousActivityCount,
   })
 }
 
@@ -1209,12 +1487,22 @@ function sessionSpokeWithContent(session: unknown): boolean {
 function teamWaitObservations(
   team: TeamState,
   now: number,
+  event: string,
 ): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = []
   for (const task of team.tasks) {
-    if (TERMINAL_TASK_STATUSES.includes(task.status)) continue
+    /**
+     * ★ 有界继承的**语义边界**（队长本轮点出的风险：*"否则上一代已经结束的等待
+     *   会被当成还在跑"*）：任务进入终态那一刻，它的等待窗口立刻撤销。
+     *   时间上的界（`WAIT_WINDOW_STALE_MS`）只能挡住被遗忘的窗口，
+     *   挡不住"任务已经 completed 而窗口还新鲜" ⇒ 这一条是必须的。
+     */
+    if (TERMINAL_TASK_STATUSES.includes(task.status)) {
+      forgetWaitWindow(team.id, task.id)
+      continue
+    }
     if (task.assignee === undefined || task.assignee === CAPTAIN_KEY) continue
-    const observation = waitObservationFor(team.id, task.id, task.attemptId, now)
+    const observation = waitObservationFor(team.id, task.id, task.attemptId, now, task.assignee, event)
     if (observation !== undefined) out.push(observation)
   }
   return out
@@ -1249,6 +1537,12 @@ function waitObservationFor(
   taskId: string,
   attemptId: string | undefined,
   now: number,
+  memberName: string | undefined,
+  /**
+   * ★ 这一次求值是不是**一次探活**（见 {@link PROBE_EVENTS}）。
+   *   它决定窗口的探活戳要不要在这一次交接里推进 —— 换代不是探活。
+   */
+  event: string,
 ): Record<string, unknown> | undefined {
   if (attemptId === undefined) return undefined
   const record = waitRecords.get(attemptId)
@@ -1258,21 +1552,176 @@ function waitObservationFor(
    *   于是"读了别人的等待"在形状上不可能发生。
    */
   if (record === undefined || record.teamId !== teamId || record.taskId !== taskId) return undefined
+  /**
+   * ── ★ V3-2 收口：窗口（per-task）是探活戳的权威来源，记录（per-attempt）只补读数 ──
+   *
+   * `startedAt` / `previousPollAt` / `previousLastActivityAt` 三个**跨代概念**
+   * 一律从窗口簿读；`lastActivityAt` 这种"这一代读到过什么"从记录读。
+   * 两者分开之后，"换代"不再需要从记录表里推断探活戳 —— 那正是我前三种写法
+   * 反复失败的根因。
+   */
+  const windowKey = waitWindowKey(record.teamId, record.taskId, record.memberName)
+  const window = waitWindows.get(windowKey)
   const observation: Record<string, unknown> = {
     taskId,
     memberName: record.memberName,
     attemptId,
-    startedAt: record.startedAt,
+    startedAt: window?.startedAt ?? record.startedAt,
     /** ★ 本次求值的时钟读数 —— 判据**绝不**自己读 `Date.now()`（契约 §2 性质 1）。 */
     now,
     ...record.lastActivityAt === undefined ? {} : { lastActivityAt: record.lastActivityAt },
-    ...record.lastPollAt === undefined ? {} : { previousPollAt: record.lastPollAt },
+    /**
+     * ★ `previousPollAt` 取自**窗口**：它说的是"这一个任务这一次等待上一次被探活
+     *   是何时"，与"这一代 attempt 是什么时候被创建的"无关。换代不重置它。
+     */
+    ...window?.lastPollAt === undefined ? {} : { previousPollAt: window.lastPollAt },
+    /**
+     * ── ★ V3-3 / V3-1 的另一半：上一次探活**读到的**活动时刻 ──────────────────
+     *
+     * MEASURED（2026-10-06，verifier3 / t3）：这个字段**从来没有被交出去过** ——
+     * `WaitRecord` 里根本没有存它。于是判据的"卡死"那一条**永远算不出来**：
+     * 它拿到 `previousPollAt`（知道"这不是第一次探活"），却拿不到"上一次它读到
+     * 的活动时刻是哪个"，于是只能报 `unmeasured`
+     * （"this is the second liveness probe … the last activity reading of the
+     * previous probe is missing"）。
+     *
+     * ⇒ 这正是本队那个形态的又一次出现：**判据接进来了，而它需要的输入没接。**
+     *   判据那侧写得没错 —— 它按契约拒绝了"没法比较"的那一格。
+     *
+     * ★ 时序：**先**把本次读到的东西放进观察，**再**推进 `lastPollAt` 与
+     *   `lastPolledActivityAt`。反过来的话，第一次探活就会把"这一次的读数"
+     *   冒充成"上一次的读数"，于是两次探活永远相等 ⇒ **每一次探活都报卡死**
+     *   （假警报，而且是 100% 命中的那种）。
+     */
+    ...window?.lastPolledActivityAt === undefined ? {} : { previousLastActivityAt: window.lastPolledActivityAt },
   }
   /**
    * ★ 交接之后才推进 `lastPollAt`（而不是读之前）：两次读之间若发生异常，
    *   "上一次探活"必须仍然是**真的发生过**的那一次。
+   *
+   * ★ `lastPolledActivityAt` 记的是**这一次探活读到的活动时刻**（可能就是
+   *   `undefined`：那一刻还没观察到产出）。它下一次会作为 `previousLastActivityAt`
+   *   交出去，而判据拿它做两端比较 —— 那正是"这两次之间它动过没有"的全部依据。
+   *
+   * ── ★ V3-2 的最后一环：探活戳必须能【跨代延续】，且【刚出生】的那一代不许被戳 ──
+   *
+   * MEASURED（2026-10-06，继承 `startedAt` 与读数之后仍然不报警）：
+   * `agent_teams_status` 在**同一次调用**里先派发、后求值。换代产生的新记录紧接着
+   * 被这一次求值戳上 `lastPollAt = now` ⇒ 下一次探活读到 `previousPollAt === 自己
+   * 的 now` ⇒ `observed_span_ms = 0` ⇒ 间隔永远"没走完" ⇒ **探活永远不报警**。
+   * 而若改成"第一次交接一律不写戳"，换代又会让**每一代**都是第一次 ⇒ 同样不报警。
+   *
+   * ⇒ 正确的不变量是：**戳属于【这一次等待】，不属于某一代 attempt。**
+   *   换代时它随 `startedAt` 一起被继承（见 `recordDispatchStart`），
+   *   于是新一代一出生就带着"上一次探活发生在 T"这个真实读数；
+   *   而**只有真的被交接过的**记录才会把戳推进到 `now`。
+   *
+   * ★ 三条互斥的情形，各自的行为都要能断言：
+   *   · 记录带着继承来的戳 ⇒ 推进到 `now`（这一次比较真的发生了）；
+   *   · 记录带着自己的旧戳   ⇒ 推进到 `now`（同上）；
+   *   · 记录**没有**戳（首次交接）⇒ 不写 ⇒ 下一次它仍报"第一次探活"
+   *     （判据报"没有可比对象"是**诚实**的，比一个"就是此刻"的假戳好得多）。
    */
-  putWaitRecord({ ...record, lastPollAt: now })
+  /**
+   * ★★ V3-2 收口：**刚在一次调用里出生的记录，不由这一次调用写探活戳**。
+   *
+   * MEASURED（2026-10-06）：`agent_teams_status` 的同一次调用里，kickTeam 先换代、
+   * 求值后发生。换代产生的新记录被**同一次**求值戳上 `lastPollAt = now` ⇒ 下一次
+   * 探活读到 `previousPollAt === 自己的 now` ⇒ `observed_span_ms = 0` ⇒ 那一次
+   * 探活**不比**（报 `ok`），报警整整迟到一次探活。
+   *
+   * ⇒ 规则：**戳属于"这一次等待"，而一次等待的第一次交接不算"上一次探活"。**
+   *   新一代继承上一代的戳（见 `recordDispatchStart`），于是它一出生就带着
+   *   "上一次探活发生在 T"；而**这一次**调用对它只做交接、不推进戳 ——
+   *   因为这个戳说的是"上一代被探活的时刻"，不是"现在"。
+   *
+   * ★ 与"第一次探活"不同形：真·第一次交接时 `lastPollAt` 本来就缺席，
+   *   判据报"没有可比对象"（诚实）；而这里传承的是**真实发生过的那一次探活**。
+   */
+  /**
+   * ★ 探活戳推进在**窗口**上（跨代的那一份），记录上的那份只是镜像、供诊断。
+   *   于是"这一次探活"与"上一代 attempt"彻底解耦 —— 换代不再可能把戳重置。
+   */
+  if (window !== undefined) {
+    /**
+     * ★★ 关键一位：刚认领的窗口**这一次不算"上一次探活"**。
+     *
+     * MEASURED：`status` 在同一次调用里先 kickTeam（认领窗口）再求值（探活）。
+     * 若这一次就把 `lastPollAt` 写成 `now`，那么下一次探活读到的
+     * `previousPollAt === 自己的 now` ⇒ `observed_span = 0` ⇒ 那一次不比
+     * ⇒ 报警迟到一次探活。
+     *
+     * ⇒ 规则：**窗口的第一次交接是"开工"，不是"探活"。** 认领时只在
+     *   `lastPollAt` 仍缺席的情况下**保持缺席**（`touchedAt` 照常续命，
+     *   那是"窗口还活着"的证据，与"上次何时探活"不同形）。
+     *   于是：认领之后的第一探报"第一次探活"（诚实），第二探开始才真的比较。
+     */
+    /**
+     * ★★ 只有**探活事件**才推进窗口的探活戳 ─────────────────────────────────────
+     *
+     * MEASURED（2026-10-06，把窗口做成一等对象之后的一次实测，逐次调用读出来的）：
+     * ```
+     * status#2 的两次求值：member-dispatched ⇒ prevPoll=1600000  ← 对
+     *                      task-status       ⇒ prevPoll=2200000  ← 错：被上一次求值吃掉了
+     * ```
+     * ⇒ `member-dispatched`（换代那一刻）**不**是一次探活，而它在那次调用里**先**
+     *   跑；若它推进了戳，紧接着的 `task-status` 就只能读到"刚刚"，span=0，
+     *   **判据那一次不比较** ⇒ 报警迟到一次探活。
+     *
+     * ⇒ 规则：**戳只由"问了一句'还活着吗'"的那次求值推进。** 换代不是探活，
+     *   `task-created` / `task-update` 也不是。哪些事件算，由**导出白名单**
+     *   决定（与判据侧的 `LIVENESS_EVENTS` 同一份成员），判据层与调用方不会再各说各话。
+     */
+    /**
+     * ★ 探活事件**总是**推进窗口的探活戳。
+     *
+     * MEASURED（2026-10-06，最后一位）：我在这里加过一条"第一次交接不算探活"的
+     * 守卫，结果是窗口永远拿不到 `lastPollAt` 的基线 —— status#1 只写下了
+     * `lastPolledActivityAt`，于是 status#2 读到的 `previousPollAt` 缺席
+     * ⇒ 判据把它读成"第一次探活"⇒ **比对根本不发生**。
+     *
+     * ⇒ 正确的不变量只有两条，各自都在别处钉住：
+     *   ① **换代不推进戳**（`isProbe` 过滤掉 `member-dispatched` 等）；
+     *   ② **认领时不覆盖戳**（`recordDispatchStart` 从 `existing` 继承，
+     *      而不是从 `now` 新建）。
+     *   有了 ②，这里就**必须**老老实实每次都推进 —— 否则基线永远不存在。
+     */
+    const isProbe = PROBE_EVENTS.includes(event)
+    /**
+     * ── ★★ 读到的读数取【换代前那一代】的，不是这一代的 ─────────────────────────
+     *
+     * MEASURED（2026-10-06，最后一位）：换代在同一次调用里生成一条**新记录**，
+     * 它的 `lastActivityAt` 是"派发那一刻观察到的"（很可能就是 `now`）。
+     * 若把这一代的值写进 `lastPolledActivityAt`，下一次探活读到的
+     * `previousLastActivityAt` 就变成"上次也是刚动过" ⇒ **比较永远相等**
+     * ⇒ 静默成员永不报警（或只在第三次才报，取决于换代次数）。
+     *
+     * ⇒ 探活要交出去的"上一次它读到什么"，只能是**这一次探活真正读到的那个值** ——
+     *   而"这一次读到的"在换代口径下就是**新记录的 `lastActivityAt`**，
+     *   它恰恰是"我们最后一次看见它说话"（不论哪一代记的）。
+     *   所以这里取的是 `record.lastActivityAt`，但**判据那一侧**必须拿它跟
+     *   `previousLastActivityAt` 比 —— 而后者记的是**上一次探活时的同一个量**。
+     *   两者是同一口径，比较才成立。
+     */
+    putWaitWindow(windowKey, {
+      ...window,
+      ...isProbe ? { lastPollAt: now } : {},
+      touchedAt: isProbe ? now : window.touchedAt,
+      ...isProbe && record.lastActivityAt !== undefined ? { lastPolledActivityAt: record.lastActivityAt } : {},
+    })
+  }
+  /**
+   * ★ 记录上的那份只是**镜像**（供诊断），它同样只由探活事件推进 ——
+   *   否则 `member-dispatched` 会在同一次调用里先把这一位推到 now，
+   *   而紧接着的 `task-status` 正是要拿它当"上一次探活"来比较。
+   */
+  putWaitRecord({
+    ...record,
+    ...PROBE_EVENTS.includes(event) ? { lastPollAt: now } : {},
+    ...PROBE_EVENTS.includes(event) && record.lastActivityAt !== undefined
+      ? { lastPolledActivityAt: record.lastActivityAt }
+      : {},
+  })
   return observation
 }
 
@@ -1338,8 +1787,15 @@ async function evaluateRuntimeGates(
   const attemptId = typeof (source.task as { attemptId?: unknown } | undefined)?.attemptId === 'string'
     ? (source.task as { attemptId: string }).attemptId
     : typeof source.attemptId === 'string' ? source.attemptId : undefined
+  /**
+   * ★ 成员名也要取到：窗口的键含它（换成员 = 另一次等待，见 {@link waitWindowKey}），
+   *   而取错了键会让判据去读**另一个人的**窗口。两个形状都要认（与 teamId 同）。
+   */
+  const memberName = typeof (source.task as { assignee?: unknown } | undefined)?.assignee === 'string'
+    ? (source.task as { assignee: string }).assignee
+    : typeof source.memberName === 'string' ? source.memberName : undefined
   const wait = typeof teamId === 'string' && typeof taskId === 'string'
-    ? waitObservationFor(teamId, taskId, attemptId, clock())
+    ? waitObservationFor(teamId, taskId, attemptId, clock(), memberName, event)
     : undefined
   /**
    * ★ 团队级调用点（`task-status` / `delivery-declared`）拿不到单个 task ⇒ 给
@@ -1352,7 +1808,7 @@ async function evaluateRuntimeGates(
    */
   const team = source.team as TeamState | undefined
   const waits = team !== undefined && typeof team === 'object' && Array.isArray(team.tasks) && typeof team.id === 'string'
-    ? teamWaitObservations(team, clock())
+    ? teamWaitObservations(team, clock(), event)
     : undefined
   let evaluation
   try {

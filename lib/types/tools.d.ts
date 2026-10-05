@@ -134,8 +134,25 @@ export declare function waitRecordSnapshot(): ReadonlyArray<{
     startedAt: number;
     lastActivityAt?: number;
     lastPollAt?: number;
+    lastPolledActivityAt?: number;
     lastOutputKey?: string;
     activityCount: number;
+}>;
+/**
+ * 等待**窗口**的快照（与 `waitRecordSnapshot` 同形态：进程级状态必须有只读出口）。
+ *
+ * ★ 它回答的是"这个任务这一次等待从哪里开始、上次何时被探活" —— 与记录表
+ *   （"这一代读到过什么"）是**两个作用域**。夹具要分辨"换代没重置窗口"，
+ *   唯一的办法就是把这两张表都读出来。
+ */
+export declare function waitWindowSnapshot(): ReadonlyArray<{
+    teamId: string;
+    taskId: string;
+    memberName: string;
+    startedAt: number;
+    lastPollAt?: number;
+    lastPolledActivityAt?: number;
+    touchedAt: number;
 }>;
 /** 清空等待记录（★ 只给夹具用：进程级状态会跨用例残留，而残留会让"第一次探活"变形）。 */
 export declare function resetWaitRecords(): void;
