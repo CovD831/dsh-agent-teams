@@ -544,3 +544,220 @@ test('臂 3d ★ 对照臂：登记表是装配点里【唯一】的清单（没
     )
   }
 })
+
+/**
+ * ── 臂 3e/3f/3g：集成收口（t4）—— 新判据第一次上线时，那件【不要写在这里】的事 ──
+ *
+ * 契约对刚上线的判据有一条要求：**先在观察模式下跑一轮**（只记录、不拒绝）。
+ * 落到装配点上，最自然的写法是在 `src/gates/index.ts` 里加一句
+ *
+ *     registry.observe('runtime.liveness', { reason: 'first deployment' })
+ *
+ * ★ 那是错的，而且不是风格问题：**写下去之后，观察期在生产里等于没有**。
+ *   两个时刻的时序（臂 3e 把它测成一条可执行的断言）：
+ *     · `export const registry = buildRegistry()` 在**模块加载时**就建好了；
+ *     · 插件 `apply()` 在**之后**才跑，守卫与调度器的安装也都在那之后。
+ *   ⇒ 观察期只活在"加载完成"与"`apply()` 跑完"之间那个没有调用者的窗口里 ——
+ *     而那个窗口在生产里不存在（谁也不会在第一行 import 与 apply 之间插一手）。
+ *   注册表 §3.5 决定 ② 早就把这条读法否掉了，原话是「观察集是**运行时数据**，
+ *   不是注册字段」，理由正是本队实测过的那条：改代码 → 漏了 build →
+ *   装的位置跑的是旧代码。
+ *
+ * ⇒ 观察开关有两个**已经存在**的入口，装配点一个都不该加：
+ *     · `AGENT_TEAMS_OBSERVE_GATES=runtime.liveness`（部署改动，不改代码）；
+ *     · `registry.observe(id, { reason })`（运行时调用，改这一次运行）。
+ *   3e 钉"装配点里没有第三句话"，3g 钉"那两个入口真的能开"。
+ */
+
+/** 装配点源码里真的出现的 `registry.observe(...)` / `.unobserve(...)`（注释里提到它不算）。 */
+function observeCallsInAssembly() {
+  const withoutComments = wiringState().source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  return [...withoutComments.matchAll(/\bregistry\s*\.\s*(?:un)?observe\s*\(/g)].map((match) => match[0])
+}
+
+test('臂 3e ★ 集成臂：装配点【不】写死观察开关 —— 观察期是运行时数据，写进清单就等于没有观察期', () => {
+  /**
+   * ★ MEASURED（可复现）：把 `registry.observe('runtime.liveness')` 写进装配点之后，
+   *   两件事同时发生，而它们在日志里完全同形：
+   *     · 单例的观察集被**产品**改过了 —— 夹具想清场只能 `unobserve()`，
+   *       于是清场清掉的是产品写下的那一句，"观察期生效"与"被夹具关掉"分不开；
+   *     · 观察期的时间窗 = import 与 apply 之间 —— 生产里没有夹在中间的人。
+   */
+  assert.deepEqual(
+    observeCallsInAssembly(),
+    [],
+    '★ 装配点里出现了 registry.observe(...) / unobserve(...)：观察开关走 AGENT_TEAMS_OBSERVE_GATES 或运行时调用，'
+    + '不要写进这一份清单 —— 单例在模块加载时就建好了，写在这里的观察期到 apply() 之前就结束（等于没有），'
+    + '而夹具随后 unobserve() 清掉的正是这一句，于是"观察生效"与"被夹具关掉"同形',
+  )
+
+  /**
+   * ★ 反向的一半（缺了它这条断言是恒真的）：**在有人要求它观察的时候，装配点仍然
+   *   不许自己多写这一句**。"没人观察时才干净"测不出上面那个缺陷 —— 缺陷恰恰是在
+   *   "配置要它观察"的时候被写下去的。
+   */
+  const observing = createGateRegistry({ observeFromEnv: 'runtime.liveness' })
+  assert.deepEqual(
+    observeCallsInAssembly(),
+    [],
+    '★ 观察名单生效时装配点更不该自己写 observe —— 那会让"配置要它观察"与"清单写死它观察"同形',
+  )
+  assert.equal(
+    observing.isObserving('runtime.liveness'),
+    true,
+    '★ 对照：一份真的带观察名单的注册表，它的观察状态来自**配置**（装配点一个字没改）',
+  )
+})
+
+/** 真实判据模块的产物路径（与臂 1/1d 一样，走 `lib/`，不碰源码）。 */
+const LIVENESS_MODULE = '../lib/gates/runtime/liveness.js'
+
+/** 「开火了」的那份上下文：两个探活的最后活动时刻相同 ⇒ 判据会告警。 */
+function stuckContext() {
+  return {
+    event: 'runtime-liveness',
+    task: { id: 't1', assignee: 'worker' },
+    wait: {
+      now: 1_000_000 + 600_000,
+      startedAt: 1_000_000,
+      lastActivityAt: 5,
+      previousPollAt: 1_000_000,
+      previousLastActivityAt: 5,
+    },
+  }
+}
+
+test('臂 3f ★ 集成臂：runtime 上"观察模式"与"不拒绝流程"是双保险 —— 放行的是同一组裁决，而告警没有被吃掉', async () => {
+  /**
+   * ★ 本臂回答一个**只能实测**的问题：这条判据第一次上线，契约要求它在观察模式
+   *   下跑一轮；而 runtime 位置本来就有硬要求"不得拒绝任务"。两者同时生效时谁说话？
+   *
+   *   ★ 先把一格看清：`registry.evaluate('runtime', …)` 的返回值在任何情况下都只是
+   *     数据 —— 要不要据此拒绝由调用方决定（`src/tools.ts` 的 `evaluateRuntimeGates`
+   *     对 runtime 只记一行日志）。所以这里"观察模式放行的不是流程"，而是**这一格
+   *     自己的裁决字段**：
+   *       · 平时：   开火 ⇒ `ok:false` + `blockers:[原文]`
+   *       · 观察中： 开火 ⇒ `ok:true`  + `blockers:[]` + `observed.blockers:[原文]`
+   *     两者对流程的影响都是零（这就是"双保险"），但**读日志的人**读到的东西不同 ——
+   *     而本队已经栽过一次「把没测到并进通过」，所以这里钉的是：观察期里那条告警
+   *     仍然在返回值里，没有被观察开关吃掉。
+   *
+   *   ⇒ 四组读数两两不同形，缺任何一组，别的组都会退化成恒真。
+   */
+  const context = stuckContext()
+
+  /**
+   * ① 不适用 ⇒ 判据没跑。它与"跑了、没发现问题"必须不同形。
+   *
+   * ★ 这里【不】硬编码一个"肯定不适用"的事件名：V3-1 的修复正是**在改那份事件
+   *   白名单**（`appliesTo` 从只认 `runtime-liveness` 改成按 `LIVENESS_EVENTS`
+   *   收窄），硬编码就会把别人的一次正当修改读成"我这里红了"。⇒ 从判据自己
+   *   导出的白名单里**推**一个不适用的事件，测的是机制（不适用的事件不许被求值），
+   *   不是某一份名单当前的成员。
+   */
+  const liveness = await import(LIVENESS_MODULE)
+  const knownEvents = ['runtime-liveness', 'task-status', 'task-created', 'task-update', 'task-update-settled', 'delivery-declared']
+  const notAProbeEvent = knownEvents.find((name) => liveness.appliesTo({ event: name }) !== true)
+  assert.ok(
+    notAProbeEvent !== undefined,
+    '★ 六个调用点事件里必须至少有一个【不是】探活：一条对所有事件都开口的判据会让每次工具调用都背上探活读数',
+  )
+  assert.equal(liveness.appliesTo({ event: 'runtime-liveness' }), true, '★ 显式的探活事件必须永远在名单里（夹具与将来的显式探活入口用它）')
+
+  const notApplicable = await registry.evaluate('runtime', { event: notAProbeEvent })
+  assert.equal(notApplicable.evaluated, 0, `★ 不适用的事件（${notAProbeEvent}）⇒ 这一轮没有判据被求值`)
+  assert.equal(notApplicable.registered, 1, '★ 而不适用 ≠ 位置为空：判据仍然注册着')
+  assert.deepEqual(notApplicable.blockers, [], '★ "没跑"不许在任何字段上读成"发现问题"')
+
+  /** ② 不在观察 ⇒ 告警进 `blockers`。 */
+  const strict = await registry.evaluate('runtime', context)
+  assert.equal(strict.ok, false, '★ 缺省 = 有否决权（注册表 §3.5 决定 ①）')
+  assert.equal(strict.blockers.length, 1, '★ 开火了就必须交出一条原文')
+  assert.match(strict.blockers[0], /liveness alarm, not a rejection/, '★ 原文要说清它不打断任何东西')
+
+  /**
+   * ③ 在观察 ⇒ **同一段原文**进 `observed.blockers`，`blockers` 空。
+   *
+   * ★ 用 `try/finally` 包住：单例上的观察集是**进程级**状态，泄漏出去会让同一次
+   *   运行里别的用例读到另一套门禁（注册表 §3.5 决定 ② 的原文）。
+   */
+  const before = registry.observingIds()
+  registry.observe('runtime.liveness', { reason: 't4: first deployment — observe one round before it gets a say' })
+  try {
+    const observing = await registry.evaluate('runtime', context)
+    assert.equal(observing.ok, true, '★ 观察中 ⇒ 这条裁决不拦（对 runtime 而言它本来也拦不了任何东西 —— 双保险）')
+    assert.deepEqual(observing.blockers, [], '★ 放过的那条不许同时留在 blockers 里 —— 否则"放过"与"没放过"同形')
+    assert.equal(observing.observedBlockers, 1, '★ 但它必须被【计数】—— 观察期不是静默期')
+    assert.equal(observing.observed.blockers.length, 1)
+    /**
+     * ★★ 本臂的核心断言：观察期**没有**把告警吃掉。同一份上下文、同一条判据，
+     *   ② 与 ③ 交出的原文必须**逐字相同**，差别只在它落在哪个字段。
+     *   打红它的定向突变是"观察分支直接把裁决丢掉"（不 push 进 `observedBlockers`）——
+     *   那时 ③ 变成一份完全空的读数，而 `ok:true` 会让它读起来像"探过了，没事"。
+     */
+    assert.equal(
+      observing.observed.blockers[0],
+      strict.blockers[0],
+      '★ 观察期与被拦下必须是【同一段原文】—— 否则读 observed 的人看到的是另一句话',
+    )
+    assert.equal(observing.ran[0].observed, true, '★ "开火了但被放过"必须在 ran[] 里带标记')
+    assert.equal(strict.ran[0].observed, undefined, '★ 而没被放过的那一条不带这个标记（两者不同形）')
+  } finally {
+    registry.unobserve('runtime.liveness')
+  }
+  assert.deepEqual(registry.observingIds(), before, '★ 进程级观察集必须回到本臂进场时的样子（不许泄漏给别的用例）')
+
+  /** ④ 收尾后立刻复查：观察确实结束了 —— 否则上面那三条全是恒真。 */
+  const after = await registry.evaluate('runtime', context)
+  assert.equal(after.ok, false, '★ unobserve 之后这条判据必须恢复它本来的裁决形状')
+  assert.equal(after.observedBlockers, undefined, '★ "观察期什么都没发生"与"放过了一条真实发现"必须不同形')
+})
+
+test('臂 3g ★ 集成臂：观察名单的两个入口都真的能开 —— 而装配点一行不改', async () => {
+  /**
+   * ★ 臂 3e 说"不要写进装配点"，本臂说"那不写进去要靠什么"。两个入口都要**实测**
+   *   能开 —— 否则 3e 就成了一条"要求一件做不到的事"的规则。
+   *
+   * ★ 这里用**新建实例**，不碰单例：环境变量是在 `createGateRegistry()` 构造时
+   *   读一次的，拿单例测它就得去动 `process.env` 这个全局状态（会让用例互相污染，
+   *   注册表自己的注释把那列为"最难归因的一类缺陷"）。
+   */
+  const module = await import(LIVENESS_MODULE)
+  const { asRegistration } = await import('../lib/gates/index.js')
+  const build = (observeFromEnv) => {
+    const r = createGateRegistry(observeFromEnv === undefined ? {} : { observeFromEnv })
+    r.register(asRegistration(module))
+    return r
+  }
+  const context = stuckContext()
+
+  /** ① 环境变量入口：没设 / 设了 / 空串 —— 三者必须可分辨。 */
+  const unlisted = await build(undefined).evaluate('runtime', context)
+  assert.equal(unlisted.ok, false, '★ 没设环境变量 ⇒ 判据有否决权（缺省不放宽）')
+  assert.equal(unlisted.observedBlockers, undefined)
+
+  const listed = await build('runtime.liveness').evaluate('runtime', context)
+  assert.equal(listed.ok, true, '★ 名单里有它 ⇒ 观察期生效 —— 不改代码、不改装配点、不需要 build')
+  assert.equal(listed.observedBlockers, 1, '★ 而且放过的那条被记下来了')
+
+  const blank = await build('   ,  ').evaluate('runtime', context)
+  assert.equal(blank.ok, false, '★ 空串/全空白 ⇒ 等价于没设（一个空的环境变量不是"有人在观察"）')
+
+  /** ② 运行时调用入口：不碰 env、也不碰装配点。 */
+  const runtime = build(undefined)
+  runtime.observe('runtime.liveness', { reason: 'observe one round before it gets a say' })
+  const observed = await runtime.evaluate('runtime', context)
+  assert.equal(observed.ok, true, '★ 运行时 observe ⇒ 同一份清单、同一条判据，裁决被放过')
+  assert.equal(
+    observed.observed.blockers[0],
+    unlisted.blockers[0],
+    '★ 两个入口放过的必须是同一条发现（原文逐字相同）',
+  )
+  runtime.unobserve('runtime.liveness')
+  assert.equal((await runtime.evaluate('runtime', context)).ok, false, '★ unobserve ⇒ 立刻恢复（同样不需要 build）')
+
+  /** ★ 三个入口都走完，装配点里仍然没有第三句话 —— 本臂全程没有碰那个文件。 */
+  assert.deepEqual(observeCallsInAssembly(), [], '★ 两个入口都跑完，装配点里仍然没有第三句话')
+})

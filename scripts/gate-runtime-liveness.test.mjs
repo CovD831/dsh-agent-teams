@@ -30,7 +30,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { gate, appliesTo, id, point, DEFAULT_LIVENESS_INTERVAL_MS } from '../lib/gates/runtime/liveness.js'
+import { gate, appliesTo, id, point, DEFAULT_LIVENESS_INTERVAL_MS, LIVENESS_EVENTS } from '../lib/gates/runtime/liveness.js'
 
 const T0 = 1_700_000_000_000
 const INTERVAL = DEFAULT_LIVENESS_INTERVAL_MS           // 10 分钟
@@ -126,21 +126,41 @@ test('★ 不做「没进展」：两次探活之间没产出，但没跨过一�
    *   本臂钉的是最难的那一格：上一次读数在 `now - 2 分钟`（**没有**跨过一个间隔），
    *   而它的活动时刻与这一次完全相同。
    *
-   * ★ 本判据的答案：`blocked`。理由不是"它没动"，而是"上一次读到它的时刻已经
-   *   整整一个间隔没变" —— 这正是「卡死了」那条可判定的定义，与"在想"无关：
-   *   一个在读文件、跑长命令的成员同样会跨过一个间隔没有任何 assistant 产出，
-   *   而那时唯一诚实的话是"我看不到它在动，去看一眼"，而不是"它卡死了，掐掉它"
-   *   （本判据没有掐的能力，见契约 §5）。
+   * ★★ V3-4 修正后的答案：`ok`，**而且它自己也叫做"还不是下结论的时候"**。
    *
-   * 打红它：把 `stuck` 判定改成要求两条（活动没变 **且** 时间跨度极大）。
+   *   此前这一格是 `blocked`，措辞写着 "has not moved for a **full** 10-minute
+   *   probe interval" —— 但两次探活只隔了 2 分钟。**措辞与实际判据不符**，
+   *   读日志的人会据此算错账（V3-4 就是这么被独立验证抓到的）。
+   *
+   *   ⇒ 现在：活动读数没变、但**间隔还没走完** ⇒ 不构成"卡死"（卡死的定义是一个
+   *     完整间隔里没动），也**不是**"它动过" ⇒ `ok` + `interval_complete: false`，
+   *     让读日志的人知道**这一次还没到下结论的时候**。
+   *
+   * 打红它：把 `intervalElapsed` 从报警条件里去掉（那会退回 V3-4 的旧行为）。
    */
-  const verdict = gate(ctx({
+  const verdict = expectOk(gate(ctx({
     startedAt: T0, lastActivityAt: T0, now: P2,
     previousPollAt: P2 - 2 * 60_000, previousLastActivityAt: T0,
-  }))
-  const blockers = expectBlocked(verdict)
+  })))
+  assert.equal(verdict.stuck, false, '★ 半个间隔不构成"卡死"')
+  assert.equal(verdict.interval_complete, false, '★ 必须说清"间隔还没走完"')
+  assert.match(String(verdict.message), /not yet a liveness judgement/)
+})
+
+test('★ V3-4：一个完整间隔、读数没变 ⇒ 才叫"卡死"（半个间隔不算）', () => {
+  /**
+   * ★ 与上一条成对：同一次比较，只有**跨过一个完整间隔**才是告警。
+   *   两条臂一起把 V3-4 的边界钉死 —— 单看任何一条都还能被"恒不报警"或
+   *   "恒报警"蒙混过去。
+   *
+   * 打红它：把 `observedSpan >= intervalMs` 的 `>=` 改成 `>`（差一就漏报）。
+   */
+  const blockers = expectBlocked(gate(ctx({
+    startedAt: T0, lastActivityAt: T0, now: P1 + INTERVAL,
+    previousPollAt: P1, previousLastActivityAt: T0,
+  })))
   assert.match(blockers[0], /has not moved for a full 10-minute probe interval/)
-  assert.equal(/exceeded|too long|timed out/i.test(blockers[0]), false, '★ 措辞不得读起来像"超时了"')
+  assert.match(blockers[0], /10 minute\(s\) apart/, '★ 告警必须交出"这两个读数隔了多久"')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -436,7 +456,7 @@ test('★ 输入面的第二条纪律：活动观察在【成员上报那一刻�
    *   observeMemberActivity"（那种断言会在无害重构下红，而在真正的旁路下绿）。
    *   判据是"观察有没有产生正确的读数变化"——**行为对，接线就在**。
    */
-  const { registerAgentTeamsTools, waitRecordSnapshot, resetWaitRecords } = await import('../lib/tools.js')
+  const { registerAgentTeamsTools, waitRecordSnapshot, waitWindowSnapshot, resetWaitRecords } = await import('../lib/tools.js')
   const { createTeamDir } = await import('../lib/state.js')
   const { mkdtempSync, rmSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
@@ -523,18 +543,60 @@ test('★ 输入面的第二条纪律：活动观察在【成员上报那一刻�
      */
     const first = await dispatchOnce()
     assert.equal(deliveries.length, 1, '前置：成员必须真的被派发出去（走真实路径）')
+    /**
+     * ★★ 口径（第二版，如实记下为什么改）：
+     *
+     * 我最初写的是"任何一代的 `lastActivityAt` 都不许晚于它的 `startedAt`"。
+     * 那条断言在**写路径不作任何观察**时成立；而当写路径恢复成"读一次会话日志"
+     * （clock-dev 的修法）之后，它会因为**合法**的观察而红 ——
+     * 记下的时刻是"我们观察到那条输出时"的时钟值，它当然可以晚于 `startedAt`。
+     * ⇒ 断言写错了对象：它测的是"时刻在哪"，而这里要测的是**"心跳有没有让等待看起来像在动"**。
+     *
+     * ★ 正确的口径：**心跳前后，窗口上的"最近活动"读数不许前进。**
+     *   "工具被调用"不是产出 ⇒ 它不许改变任何一处的活动读数。
+     *   这与"成员真的说了话 ⇒ 必须前进"（下一条臂）成对，两条一起才钉得住那一格。
+     */
+    const beforeHeartbeat = waitWindowSnapshot().at(-1)?.lastPolledActivityAt ?? null
+    const heartbeatRecordsBefore = waitRecordSnapshot()
     t += 60_000
     await call('agent_teams_update_task', {
       task_id: 't1', attempt_id: first.attemptId, output: 'a heartbeat with no new message',
     }, worker)
     const heartbeatRecords = waitRecordSnapshot()
     assert.ok(heartbeatRecords.length >= 1, '前置：心跳之后应当仍有等待记录')
-    for (const record of heartbeatRecords) {
-      assert.equal(
-        record.lastActivityAt,
-        record.startedAt,
-        `★ 工具被调用【不是】产出：会话里没有新的 assistant/message 时，记录里任何一代的活动时刻都不许晚于它自己的起点 `
+    /**
+     * ── ★ 口径（第三版，把两次写错的都记下来）──────────────────────────────────
+     *
+     * ① 第一版：「任何一代的 `lastActivityAt` 都不许晚于它的 `startedAt`」
+     *    —— 错在把"时刻落在哪"当成了"有没有动"。写路径恢复观察之后，它因**合法**的
+     *    观察而红（观察到的时刻本来就可以晚于起点）。
+     * ② 第二版：「心跳不许把读数推成 `t`」—— 同样错：换代时的观察会**重新读一次
+     *    会话日志**，而日志里那条旧输出一直在，于是它合法地记下"现在"。
+     *
+     * ★ 正确的口径是问**产出本身有没有变**：`lastOutputKey` 与 `activityCount`
+     *   才是"它说过几次话"的读数。工具被调用不改变会话日志 ⇒ 这两位数不许动。
+     *   这与下一条臂（成员真的说了话 ⇒ 必须前进）成对，两条一起钉住那一格。
+     */
+    const outputsBefore = heartbeatRecordsBefore.map((record) => `${record.lastOutputKey ?? 'none'}#${record.activityCount}`).sort()
+    for (const record of waitRecordSnapshot()) {
+      assert.ok(
+        outputsBefore.includes(`${record.lastOutputKey ?? 'none'}#${record.activityCount}`),
+        '★ 工具被调用【不是】产出：心跳之后不许出现任何**新的产出指纹**'
         + `（否则一个卡死的成员只要工具还在被调用就永远健康）。实际记录：${JSON.stringify(record)}`,
+      )
+    }
+    /**
+     * ★ 只在**同一个窗口**内比较：心跳会把任务打回派发池 ⇒ 可能换代 ⇒
+     *   窗口按"连续 vs 重来"的规则**合法地**重建（新窗口的读数是新的、不是被推进的）。
+     *   拿重建后的窗口去比心跳前的读数是错的 —— 那会把一次合法的重来读成"被推进"。
+     */
+    const windowAfter = waitWindowSnapshot().at(-1)
+    const sameWindow = windowAfter !== undefined && windowAfter.startedAt === (waitWindowSnapshot()[0]?.startedAt ?? windowAfter.startedAt)
+    if (sameWindow) {
+      assert.equal(
+        windowAfter?.lastPolledActivityAt ?? null,
+        beforeHeartbeat,
+        '★ 同一个窗口内：心跳不得推进活动读数',
       )
     }
 
@@ -558,11 +620,35 @@ test('★ 输入面的第二条纪律：活动观察在【成员上报那一刻�
   }
 })
 
-test('★ appliesTo：只认自己那一个事件（其余五个调用点不该被这条判据发言）', () => {
-  assert.equal(appliesTo({ event: 'runtime-liveness' }), true)
-  for (const other of ['member-dispatched', 'task-created', 'task-update', 'task-update-settled', 'task-status', 'delivery-declared']) {
-    assert.equal(appliesTo({ event: other }), false, `"${other}" 不是一次探活`)
+test('★ appliesTo：按事件【白名单】发言，白名单外的调用点不许被这条判据说话', () => {
+  /**
+   * ── ★ V3-1：这条臂此前钉的是"只认 runtime-liveness 一个事件"───────────────
+   *
+   * 那个断言**把缺陷写成了规格**：六处调用点没有一处传 `runtime-liveness`，
+   * 于是它对每一个真实事件都说 false ⇒ 判据恒 `skipped` ⇒ **永不求值**。
+   * 而这条臂当时是**绿的** —— 一条把 bug 固化成期望的断言，比没有断言更坏：
+   * 它会挡住修复（把 `task-status` 纳入白名单时，它第一个红）。
+   *
+   * ★ 现在改成从判据【自己导出的白名单】推导（与 integrator3 的臂 3f 同一口径）：
+   *   测的是**机制**（白名单内的必须开口、白名单外的一律不许），而不是某一份名单
+   *   当前的成员。加减名单不会再让这条臂红，而"白名单被清空""非白名单事件混进来"
+   *   这类**真实的退化**照样会被抓住。
+   */
+  assert.ok(LIVENESS_EVENTS.length > 0, '★ 白名单不许为空 —— 空白名单 = 判据永不求值（那正是 V3-1）')
+  for (const event of LIVENESS_EVENTS) {
+    assert.equal(appliesTo({ event }), true, `★ 白名单里的 "${event}" 必须让判据开口`)
   }
+  /**
+   * ★ 而且 `task-status` 必须在里面：它是**时刻驱动**的那一个，用户裁定的
+   *   "10 分钟探活一次"就发生在查状态时。这一条是 V3-1 的**真正回归护栏** ——
+   *   去掉它，判据就重新变回"装了但永远不跑"。
+   */
+  assert.ok(LIVENESS_EVENTS.includes('task-status'), '★ 探活必须在查状态那一刻求值（否则六条真实路径上仍然恒 skipped）')
+  for (const other of ['member-dispatched', 'task-created', 'task-update', 'task-update-settled', 'delivery-declared']) {
+    if (LIVENESS_EVENTS.includes(other)) continue
+    assert.equal(appliesTo({ event: other }), false, `"${other}" 不是一次探活，不该被这条判据发言`)
+  }
+  assert.equal(appliesTo({ event: 'some-unknown-event' }), false, '★ 白名单外的任何事件都不许开口')
   assert.equal(appliesTo(undefined), false)
   /**
    * ★ 但"能开口却缺输入"绝不靠 appliesTo 藏：那会把「没测到」并进「通过」。
@@ -576,4 +662,213 @@ test('★ 判据身份与装配约定一致（id/point 是装配点的键）', (
   assert.equal(id, 'runtime.liveness')
   assert.equal(point, 'runtime')
   assert.equal(DEFAULT_LIVENESS_INTERVAL_MS, 10 * 60_000, '用户裁定：探活间隔 10 分钟')
+})
+
+test('★ V3-2 回归护栏：换代【不重置】等待窗口 —— 静默成员必须真的报警（不是迟到/不报）', async () => {
+  /**
+   * ── ★ V3-2（medium，t3 独立验证抓到）：每次 `agent_teams_status` 都会 kickTeam
+   *    ⇒ 换新一代 `attemptId`。若等待窗口由"这一代 attempt"决定，那么
+   *    「两次探活之间它动过没有」这个前提**在真实路径上不成立**，探活退化成
+   *    "每次都报第一次" —— 于是静默成员**永不报警**。那正是源项目那个
+   *    「63 分钟零进展而没有任何一句话说它在等什么」的缺口。
+   *
+   * ★ 这条臂从**真实调用点**进（`agent_teams_status` ⇒ kickTeam ⇒ 派发 ⇒ 探活），
+   *   用注入时钟推进，**不真等**任何时间。
+   *
+   * ── 定向突变（本条臂的可证伪性）──────────────────────────────────────────────
+   *   · 把 `PROBE_EVENTS` 清空 ⇒ 探活戳永不推进 ⇒ 序列变成 `ok|ok|ok|ok`，本臂红；
+   *   · 让**任何事件**都推进戳（卸掉 `isProbe` 过滤）⇒ 换代那次调用把戳推到现在
+   *     ⇒ 首探变成 `unmeasured`（"第二次探活却拿不到上一次的活动读数"），本臂红。
+   *   两条都实测过（见 t8 的报告）。
+   */
+  const { registerAgentTeamsTools, resetWaitRecords } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'liveness-window-'))
+  try {
+    resetWaitRecords()
+    await createTeamDir(join(workspace, '.agent-teams'), {
+      id: 'team', name: 'Window', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 1,
+      members: [{ id: 'worker-session', name: 'worker', status: 'idle', joinedAt: 1 }],
+      tasks: [{
+        id: 't1', subject: 'work', assignee: 'worker', status: 'pending',
+        dependencies: [], attempt: 0, kind: 'work', createdAt: 1, updatedAt: 1,
+      }],
+    })
+    let t = 1_000_000
+    const events = [{ type: 'assistant/message', message: { content: [{ type: 'text', text: 'starting' }] } }]
+    const worker = { id: 'worker-session', status: 'idle', session: { header: { cwd: workspace }, events }, steer() {} }
+    const captain = { id: 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} }
+    const tools = new Map()
+    registerAgentTeamsTools({
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      tools: { register(tool) { tools.set(tool.name, tool) } },
+      subagents: {
+        getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0',
+        [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+      },
+      agents: { get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
+      on() { return () => {} }, effect(setup) { return setup() },
+    }, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, now: () => t })
+    const probe = async () => {
+      const result = await tools.get('agent_teams_status').execute({}, { agent: captain, signal: new AbortController().signal })
+      await new Promise((resolve) => setImmediate(resolve))
+      return String(result.runtime_gates?.outcome ?? '')
+    }
+
+    /**
+     * ── ★ V3-2 验收：静默成员的序列必须是 `ok → blocked → blocked` ──────────────
+     *
+     * ★ 为什么首探是 `ok` 而不是报警：第一次探活**没有可比对象**（`previousPollAt`
+     *   缺席）—— 判据据实报"还不知道"，这是诚实的，不是漏报。
+     *   第二探开始，窗口已经把两次读数都拿到了 ⇒ 那一刻它已经**整整一个间隔没动**
+     *   ⇒ 必须报警。
+     *
+     * ★ 「迟一次探活」正是本臂要防的退化：在 10 分钟节拍下，迟一次就是**迟 10 分钟**，
+     *   而"卡住没人说"正是这条判据存在的全部理由。
+     */
+    const silent = []
+    for (let i = 0; i < 4; i += 1) { t += 10 * 60_000; silent.push((await probe()).slice(0, 7)) }
+    assert.deepEqual(
+      silent.map((outcome) => (outcome.startsWith('blocked') ? 'blocked' : outcome.startsWith('ok') ? 'ok' : 'other')),
+      ['ok', 'blocked', 'blocked', 'blocked'],
+      `★★ V3-2 的验收：静默成员必须是 ok → blocked → blocked（首探没有可比对象 ⇒ ok）。`
+      + ` 若第二探仍是 ok，说明换代把等待窗口重置了 —— 「迟一次探活」在 10 分钟节拍下就是迟 10 分钟。`
+      + ` 实际序列：${silent.join(' | ')}`,
+    )
+
+    /** 对照臂：同样的团队与时钟，唯一的差别是"每轮都产出" ⇒ 永不报警。 */
+    resetWaitRecords()
+    const talking = []
+    for (let i = 0; i < 4; i += 1) {
+      t += 10 * 60_000
+      events.push({ type: 'assistant/message', message: { content: [{ type: 'text', text: `progress ${t}` }] } })
+      talking.push((await probe()).slice(0, 7))
+    }
+    assert.deepEqual(
+      talking.filter((outcome) => outcome.startsWith('blocked')),
+      [],
+      `★ 对照臂：一直在产出的成员【绝不】报警 —— 唯一的差别是"这个间隔里有没有产出"。实际：${talking.join(' | ')}`,
+    )
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
+})
+
+test('★ V3-2 有界继承：窗口的【陈旧界限】必须钉住 —— 已结束的等待不许被无限期当成还在跑', async () => {
+  /**
+   * ── ★ 队长本轮明确要求的边界 ──────────────────────────────────────────────────
+   *
+   * 窗口升级到任务作用域之后，"继承"这件事就有了一个必须回答的问题：
+   * **一个已经结束、却还留在表里的窗口，会不会被下一代当成"还在跑"？**
+   * 两个界分别挡住它，各自都要有一条臂看着：
+   *
+   *   ① `WAIT_WINDOW_STALE_MS`（时间界 = 3 个探活间隔 = 30 分钟）
+   *      —— 一个超过宽限期没有被任何探活碰过的窗口，不再被继承；
+   *   ② `forgetWaitWindow`（语义界）
+   *      —— 任务进入终态那一刻撤销窗口。
+   *
+   * ★ 本臂钉 ①：**它防的正是"上一代已结束的等待被无限期继承"**。
+   *   没有这条界，一个被遗忘的窗口会让后来者读到一个远古的 `startedAt`
+   *   ⇒ 判据第一次探活就报"它等了 3 小时"（假警报）。
+   *
+   * ── 定向突变 ──────────────────────────────────────────────────────────────────
+   *   把 `alive` 里的时间比较去掉（`const alive = continued`）⇒ 本臂红。
+   */
+  const { registerAgentTeamsTools, resetWaitRecords, waitWindowSnapshot, waitRecordSnapshot } = await import('../lib/tools.js')
+  const { createTeamDir, readTeam, writeTeam, withTeamLock } = await import('../lib/state.js')
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'liveness-window-stale-'))
+  try {
+    resetWaitRecords()
+    await createTeamDir(join(workspace, '.agent-teams'), {
+      id: 'team', name: 'Stale', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 1,
+      members: [{ id: 'worker-session', name: 'worker', status: 'idle', joinedAt: 1 }],
+      tasks: [{
+        id: 't1', subject: 'work', assignee: 'worker', status: 'pending',
+        dependencies: [], attempt: 0, kind: 'work', createdAt: 1, updatedAt: 1,
+      }],
+    })
+    const T0 = 1_000_000
+    let t = T0
+    const events = [{ type: 'assistant/message', message: { content: [{ type: 'text', text: 'starting' }] } }]
+    const worker = { id: 'worker-session', status: 'idle', session: { header: { cwd: workspace }, events }, steer() {} }
+    const captain = { id: 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} }
+    const tools = new Map()
+    registerAgentTeamsTools({
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      tools: { register(tool) { tools.set(tool.name, tool) } },
+      subagents: {
+        getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0',
+        [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+      },
+      agents: { get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
+      on() { return () => {} }, effect(setup) { return setup() },
+    }, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, now: () => t })
+    const call = (name) => tools.get(name).execute({}, { agent: captain, signal: new AbortController().signal })
+
+    /** 第一次派发 ⇒ 窗口起点 = T0。 */
+    await call('agent_teams_status')
+    await new Promise((resolve) => setImmediate(resolve))
+    const firstWindow = waitWindowSnapshot()[0]
+    assert.equal(firstWindow?.startedAt, T0, '前置：窗口起点应当是第一次派发那一刻')
+    assert.equal(firstWindow?.touchedAt, T0)
+
+    /**
+     * ── ① 陈旧界限：静置 **超过** 30 分钟（3 个间隔 + 1 分钟）之后再换代 ──────────
+     *
+     * ★ 构造要点（第一版写错过两次，都记下来）：
+     *   ① 若让任务回 `pending` 再派发，`forgetWaitWindow`（**语义界**）会先把窗口
+     *      撤掉，于是时间界根本没被测到（实测：去掉时间界后那条臂仍然全绿）；
+     *   ② `status` 本身会探活并续命 `touchedAt`，所以必须在**同一个时刻**上让
+     *      成员回到可派发状态再探一次，才能观察到"陈旧的窗口不被继承"。
+     *
+     * ⇒ 正确的构造：任务**保持未结束**，把时钟推过宽限期，让成员回 `idle`
+     *   再查一次状态（连续换代）。此时语义界不适用，唯一能挡住继承的是时间界。
+     *
+     * ★ 判据（差分量，可证伪）：**窗口起点必须是"现在"，不是 31 分钟前**。
+     *   去掉时间界之后：`startedAt` 会变成 1000000（继承了 31 分钟前的窗口）
+     *   —— 那条臂就此变红（实测）。
+     */
+    t = T0 + 31 * 60_000
+    worker.status = 'idle'
+    await call('agent_teams_status')
+    await new Promise((resolve) => setImmediate(resolve))
+    const afterStale = waitWindowSnapshot().at(-1)
+    assert.equal(
+      afterStale?.startedAt,
+      t,
+      `★★ 陈旧界限：一个超过 30 分钟没有被探活碰过的窗口**不许被继承** —— `
+      + `否则一个被遗忘的等待会让判据一上来就报"它等了半小时以上"（假警报），`
+      + `而那正是"上一代已结束的等待被当成还在跑"。实际窗口：${JSON.stringify(afterStale)}`,
+    )
+
+    /**
+     * ── ② 对照：**连续**（kickTeam 补投递）时窗口必须**继承**（不能因为界过严而失效）──
+     *
+     * 这一半同样重要：一个把所有换代都当"重来"的实现会让判据永远报"第一次探活"，
+     * 于是静默成员永不报警。两条臂一起才钉得住"有界"这个词的两个方向。
+     */
+    const before = waitWindowSnapshot().at(-1)
+    t += 60_000
+    await call('agent_teams_status')
+    await new Promise((resolve) => setImmediate(resolve))
+    const after = waitWindowSnapshot().at(-1)
+    if ((after?.attempt ?? 0) > (before?.attempt ?? 0)) {
+      assert.equal(
+        after?.startedAt,
+        before?.startedAt,
+        '★ 连续（不是重来）的换代必须继承窗口起点 —— 否则探活永远报"第一次"，静默成员永不报警',
+      )
+    }
+    assert.ok(waitRecordSnapshot().length >= 1, '前置：等待记录仍在')
+  } finally {
+    rmSync(workspace, { recursive: true, force: true })
+  }
 })
