@@ -161,8 +161,10 @@ dsh-tool-fs 给每次写入/编辑的 tool/result 挂 meta.diffs：
 会话事件回答      ：哪些文件是哪个成员改的          （completion 的变更审计）
 会话事件【不能】回答：一个可 checkout 的父版本在哪    （R5 / 变异测试需要）
     meta.diffs 给的是 { path, oldText, newText } —— 一次编辑的前后文本，
-    拼不出可信的父版本；父版本仍然得靠 worktree / git 历史。
-⇒ R5 = 归属（已解决）+ 版本（未解决，见 START-HERE §6①）
+    拼不出可信的父版本；父版本只能来自 git 历史。
+⇒ 父版本由 src/worktree.ts 提供（每任务一个 detached worktree，
+  `createTaskWorktree` 返回的 `base` 就是那个父版本 hash）。
+⇒ R5 = 归属（§5.1 已解决）+ 版本（worktree 已落地，见 START-HERE §5.2）
 ```
 
 **★ 一条判据一个文件**，理由：**两个判据改在同一个文件里，就是我们要消灭的那种冲突**。

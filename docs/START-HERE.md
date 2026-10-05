@@ -28,7 +28,7 @@ pnpm verify        # 期望 exit=0
 pnpm typecheck     # 期望 exit=0
 ```
 
-**已提交的八件事**（都可回退、都有验收）：
+**已提交的九件事**（都可回退、都有验收）：
 
 | commit | 做了什么 |
 |---|---|
@@ -39,6 +39,8 @@ pnpm typecheck     # 期望 exit=0
 | `70c8c96` | ★ **把 verify 重跑搬进注册表**（证明注册表接得上真判据）|
 | `626c59d` | ★ **判据：changedPaths 必须对得上真实写入**（dispatch 位置第一条）|
 | `7cdf263` | ★ **把归属观察接进 update_task**（判据真的会开火，不再永远 unmeasured）|
+| `8851e6e` | 文档更正：切开「归属」与「版本」，worktree 仍然需要 |
+| `68ee2c8` | ★ **worktree 隔离**（每任务一个 detached 检出，解决"版本"）|
 
 ---
 
@@ -185,11 +187,12 @@ R5 需要的是：  一个干干净净的【父版本】工作树，让新测试
                靠 oldText/newText 拼父版本既脆弱又不完整 ⇒ 它替代不了 git 历史
 ```
 
-⇒ **worktree 仍然需要**，理由从"归属"换成了"版本"。见 §6。
+⇒ **worktree 仍然需要**，理由从"归属"换成了"版本"。**它已落地**（见 §5.2）。
 
-**★ 一条既有约束别忘**：`docs/quality-gates.md` §2 第 83 行与 §13 第 807 行
-把独立 worktree 列为「**后续 PR，不在本需求范围**」——
-它是被**有意推迟**的，不是被这里关闭的。本节的结论不改变那条推迟。
+**★ 一条既有约束**：`docs/quality-gates.md` §2 第 83 行与 §13 第 807 行
+把独立 worktree 列为「后续 PR，不在本需求范围」——那条推迟属于**当时那个 PR
+的范围约束**。本项目的管理者已明确要求现在做，所以它被推翻了，
+但**推翻要记在这里**，不要让下一个会话以为它还在生效。
 
 **★ 一个值得记住的接线教训**：把这条判据接进 `update_task` 后，`lifecycle-verify`
 挂了。原因**不是判据错了**，而是它的合成成员会话里【只有 descriptor、没有
@@ -198,22 +201,60 @@ tool/result】—— 判据于是诚实地说"我没能观察"并拒绝。
 
 ---
 
+## 5.2 ★ worktree 隔离已落地：每任务一个 detached 检出
+
+**2026-10-05 落地。** 它解决的是**版本**（§5.1 解决的是归属）。
+
+```
+src/worktree.ts   createTaskWorktree({ repo, taskId })  → { ok, path, base, missingIgnored }
+                  worktreePromptLine(path)              → 派发提示里"在哪干活"那一行
+                  detectWorktreeSupport(repo)           → 能不能隔离，不能则带原因
+
+接线：src/scheduler.ts 的 kickMember —— 【锁外】建，只给 implementation/repair，
+      建失败【不】阻断派发（隔离是能力，不是裁决）
+```
+
+### ★ 四条实测边界（不是猜的，每条都有夹具）
+
+```
+① 同一分支不能检出到两个 worktree ⇒ 必须 --detach
+   （并行成员必然在同一分支上，否则第二个直接失败）
+② 新 worktree 是干净的 HEAD ⇒ 主工作区未提交的改动不会带过去
+   ★ 这正是 R5 要的"父版本"；但也意味着成员看不到队长未提交的工作
+③ worktree 里【没有】gitignore 的文件（如 node_modules）
+   ⇒ 直接跑 pnpm test 会因缺依赖失败 ⇒ 我们把它报出来（missingIgnored），
+     否则一次"环境没准备好"会被误报成"工作没做出来"
+④ worktree 里的写入对主工作区完全隔离
+```
+
+### ★ cwd 仍然没动
+
+子会话 cwd 硬编码继承父会话（§5②），**改不了** ⇒ 隔离靠两件事：
+**给一个独立目录** + **在派发提示里告诉成员**。
+提示里没有路径时**不产出任何指令** —— 绝不假装有隔离。
+
+### 一个设计决定：建失败为什么不阻断
+
+隔离是"能不能拿到父版本"的**能力**，不是"这一步过不过"的**裁决**。
+建不出来时提示里没有工作目录，成员照常在共享目录干活，而需要父版本的判据
+（R5/变异）会因为拿不到 worktree 而 `unmeasured` —— 判据自己会表达"我没测成"。
+**把一次基础设施故障伪装成任务失败是更坏的结果。**
+
+---
+
 ## 6. 下一步（按已定的顺序）
 
 ```
-① 隔离：给成员一个 worktree                    ← 仍然要做，理由已换
-   ★ 不是为了"归属"（那个已由 §5.1 的会话事件解决），而是为了【版本】：
-     R5 / 变异测试需要"一个可 checkout 的父版本工作树"，
-     而 meta.diffs 的 {path, oldText, newText} 拼不出可信的父版本。
-   ★ 它此前被 docs/quality-gates.md 有意推迟（"后续 PR"）—— 要动它，
-     先确认那条推迟是否还成立。
-   两个已知的坑：gitignore 的夹具、未提交的工作
+① ~~隔离：给成员一个 worktree~~ —— ★ 已完成（2026-10-05，见 §5.2）
+   每任务一个 detached worktree；路径写进派发提示；四条边界都有夹具。
 
-② R5（红前绿后）接到 completion 位置
+② R5（红前绿后）接到 completion 位置           ← 现在两样原料都齐了
    需要【两样，缺一不可】：
-     · 父版本 + 修复版本        ← 来自 ①（worktree / git 历史）
-     · newTestFiles 是哪个成员写的 ← 来自 §5.1（会话事件，已有）
+     · 父版本 + 修复版本          ← §5.2 的 worktree 提供（base = 那个 hash）
+     · newTestFiles 是哪个成员写的 ← §5.1 的会话事件提供
    样板：src/gates/completion/verify-rerun.ts
+   ★ 判据要能表达"没有 worktree ⇒ 我测不了"（unmeasured），
+     而不是把"没隔离"当成"检查通过"。
 
 ③ 之后的候选（按性价比）：
    contract/verify-command    verify 命令写得对吗（实测：grep -qx N 会被 wc 的前导空格卡死）
