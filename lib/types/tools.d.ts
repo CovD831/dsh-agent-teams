@@ -97,11 +97,12 @@ export declare function stagedPlanApprovedContext(teamName: string): string;
 export declare function stagedPlanDiscardContext(teamName: string): string;
 /** Model-facing continuation that turns the review UI back into a conversation. */
 export declare function stagedPlanFeedbackContext(teamName: string): string;
-/**
- * Register every `agent_teams_*` tool into the shared tools registry.
- * @param ctx - the plugin context (injects `tools`).
- * @param config - resolved tool config.
- */
+/** 运行记录的快照（控制台/夹具读它；返回副本，调用方改不动内部状态）。 */
+export declare function runtimeGateLogSnapshot(): ReadonlyArray<{
+    at: number;
+    event: string;
+    outcome: string;
+}>;
 export declare function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): AgentTeamsRuntime;
 export declare function applyQualityFollowUp(team: TeamState, closed: TeamTask): {
     created: TeamTask[];

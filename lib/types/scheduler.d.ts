@@ -30,6 +30,28 @@ export interface SchedulerConfig {
      *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
      */
     readonly onWorktree?: (taskId: string, base: string) => void;
+    /**
+     * ── ★ runtime 位置的接线点：一个成员【真的被派发出去】了 ─────────────────────
+     *
+     * 契约 `docs/GATE-REGISTRY.md` §5 给 `runtime` 写的例子正是这一条：
+     * 「在成员被派发时启动 / 超时 ⇒ 产生一条记录 / 它不直接拒任务」。所以本回调
+     * **只能记录**：调度器不读它的返回值，也没有可读的返回值 ⇒ 过程约束无法
+     * 拒绝派发（§5 硬要求）。
+     *
+     * ★ 时机：投递【被接受之后】才回调。投递失败会走下面那条回滚路径（任务回
+     *   pending、成员回 idle），那一次不是"派发过"；把失败也记成一次派发，会让
+     *   运行判据读到一个从未发生的事件。
+     */
+    readonly onDispatched?: (event: {
+        readonly taskId: string;
+        readonly memberName: string;
+        readonly memberId: string;
+        readonly attempt: number;
+        readonly attemptId: string;
+        readonly kind: string;
+        readonly worktreePath?: string;
+        readonly worktreeUnavailable?: string;
+    }) => void;
 }
 export interface TeamScheduler {
     /** Try to give every genuinely idle/ready member one unit of ready work. */
