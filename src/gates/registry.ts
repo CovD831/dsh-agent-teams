@@ -54,6 +54,49 @@ export interface GateEvaluation {
   unmeasured?: string
   ran: GateRunEntry[]
   outputs: Record<string, Record<string, unknown>>
+  /**
+   * ── ★ 这一步【真的跑了】几条判据 ──────────────────────────────────────────────
+   *
+   * 该位置挂了【至少一条】判据、但全部被 `appliesTo` 跳过时，本字段是 `0`。
+   *
+   * ★ 为什么必须有它（MEASURED，2026-10-05）：
+   *
+   *     ① kind=work、这一轮不试图完成 ⇒ `{ok:true, blockers:[]}`  ran=[全部 skipped]
+   *     ② 判据跑了且都通过             ⇒ `{ok:true, blockers:[]}`  ran=[都有裁决]
+   *
+   *   **返回对象在 `ok` 这一字段上完全一样。** 只读 `r.ok` 的调用方读不出
+   *   "一条都没跑"。信息其实还在 `ran` 里，但 `ok` 是那个会被人读、会被 `if`
+   *   判的字段 —— 一处未来忘了传 `wantsCompleted` 的重构，就会让四条判据静默
+   *   全跳过，而门禁返回 `ok: true`。**跳过的代价与失败的代价不同，输出却相同。**
+   *
+   * ★ 与 `unmeasured` 的区别（刻意不让它们合流）：
+   *
+   *     `unmeasured` —— 判据【跑了】，但它说"我测不了"。这是关于**测量**的结论。
+   *     `evaluated:0` —— 判据【根本没跑】。这是关于**这一步有没有被检查**的结论。
+   *
+   *   把后者的整体裁决翻成 `ok:false` 是【错的】：`contract`/`delivery`/`runtime`
+   *   位置现在一条判据都没有，而"这个位置这一轮没有适用的判据"是**正常情形**，
+   *   拒掉它会让没装判据的位置卡死流程。⇒ 所以 `ok` 保持 true，多给一个**可读的
+   *   计数**，让调用方能区分；要靠它把关的调用方自己判 `evaluated === 0 && count > 0`。
+   */
+  evaluated: number
+  /** 该位置这一轮被 `appliesTo` 跳过的条数（`evaluated + skipped` 即本次涉及的判据总数）。 */
+  skipped: number
+  /**
+   * 该位置【挂了】几条判据（与上下文无关）。
+   *
+   * ★ `registered === 0`（空位置）与 `registered > 0 && evaluated === 0`（全跳过）
+   *   必须【不同形】—— 前者是"这里还没有判据"，后者是"有判据却一条没跑"。
+   *   把这两件事混起来，一次静默全跳过就会伪装成"这个位置本来就没判据"。
+   */
+  registered: number
+  /**
+   * 该位置【有判据、却一条都没跑】时的一句人话；其余情形缺席。
+   *
+   * ★ 与 `unmeasured` 同属"没测到"，但不同形（见上）：这里说的是"判据没跑"，
+   *   不是"判据跑了说测不了"。空位置【不产出】它 —— 那是正常情形，不是异常。
+   */
+  skippedAll?: string
 }
 
 /** 五个【位置】，不是五个判据。一个位置可挂零到多条。 */
@@ -210,9 +253,17 @@ export function createGateRegistry() {
        *   全局变量），而那就又回到"结果散落在各处、无法被控制台读取"的老问题。
        */
       const outputs = new Map<string, Record<string, unknown>>()
+      /**
+       * ★ 该位置【挂了】几条判据 —— 与上下文无关，只数注册表。
+       *   它与"跑了 / 跳过"分开数，是为了让空位置与全跳过【不同形】。
+       */
+      let registered = 0
+      let skipped = 0
       for (const reg of byId.values()) {
         if (reg.point !== point) continue
+        registered += 1
         if (typeof reg.appliesTo === 'function' && reg.appliesTo(context) !== true) {
+          skipped += 1
           ran.push({ id: reg.id, verdict: 'skipped' })
           continue
         }
@@ -238,11 +289,43 @@ export function createGateRegistry() {
         ran.push({ id: reg.id, verdict: 'unmeasured' })
       }
       const collected: Record<string, Record<string, unknown>> = Object.fromEntries(outputs)
+      const evaluated = registered - skipped
+      /**
+       * ★ 「有判据、却一条都没跑」的说明。
+       *
+       * 只有在【该位置确实挂了判据】时才产出：空位置（`registered === 0`）是正常
+       * 情形，不是异常 —— 在那里产出这段话，会让每个还没接判据的位置都读起来像
+       * 出了问题，而那正是"把正常读成异常"，与"把异常读成正常"一样有害。
+       */
+      const allSkipped = registered > 0 && evaluated === 0
+        ? `none of the ${registered} gate(s) registered at "${point}" applied to this context; nothing was evaluated, so this step was not checked`
+        : undefined
+      const counts = { evaluated, skipped, registered }
       if (unmeasuredReasons.length > 0) {
-        return { ok: false, unmeasured: unmeasuredReasons.join('; '), blockers, ran, outputs: collected }
+        return {
+          ok: false, unmeasured: unmeasuredReasons.join('; '), blockers, ran, outputs: collected,
+          ...counts, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+        }
       }
-      if (blockers.length > 0) return { ok: false, blockers, ran, outputs: collected }
-      return { ok: true, blockers, ran, outputs: collected }
+      if (blockers.length > 0) {
+        return {
+          ok: false, blockers, ran, outputs: collected,
+          ...counts, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+        }
+      }
+      /**
+       * ★ 全跳过时 `ok` **仍然为 true** —— 这是刻意的，理由见 `GateEvaluation.evaluated`：
+       *   "这个位置这一轮没有适用判据"是正常情形（空位置同理），把它翻成 `ok:false`
+       *   会让没装判据的位置卡死流程。区分靠 `evaluated` / `skippedAll` 这两个
+       *   可读的字段，而不是靠把一个正常情形判成拒绝。
+       *
+       * ★ 注意：走到这里意味着 `blockers` 为空（上面的分支已拦），所以这里不可能
+       *   出现"全跳过却带着 blocker"的自相矛盾 —— 真有 blocker 时它会在上一行返回。
+       */
+      return {
+        ok: true, blockers, ran, outputs: collected,
+        ...counts, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+      }
     },
   }
 }

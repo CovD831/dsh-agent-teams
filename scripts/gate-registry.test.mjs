@@ -215,3 +215,147 @@ test('⑮ 没有产出的判据 ⇒ outputs 为空对象（不是 undefined）',
   const v = await r.evaluate('delivery', {})
   assert.deepEqual(v.outputs, {}, '★ 调用方不必写 `?? {}` —— 空即空')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑯ 三臂：「全跳过」不得与「都通过」同形（t13）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★ 判据形态（收窄助手）：把一个裁决对象压成【可比较的形状】。
+ *   它把"哪几个字段在场"这件事变成可断言的东西 —— 因为在日志里，两者的
+ *   区别恰恰就是"在场/缺席"，而不是值的不同。
+ */
+function shapeOf(evaluation) {
+  return {
+    ok: evaluation.ok,
+    blockers: evaluation.blockers.length,
+    unmeasured: evaluation.unmeasured !== undefined,
+    skippedAll: evaluation.skippedAll !== undefined,
+    evaluated: evaluation.evaluated,
+    skipped: evaluation.skipped,
+    registered: evaluation.registered,
+  }
+}
+
+/** 一个位置，挂 N 条判据，全部被 appliesTo 跳过。 */
+function allSkippedRegistry(point, count = 3) {
+  const r = createGateRegistry()
+  for (let index = 0; index < count; index += 1) {
+    r.register({
+      id: `skip-${index}`, point, description: 'skipped probe',
+      // ★ 判据本身会【拒绝】—— 这样"全跳过却没拦住"就不是因为判据温和，而是因为没跑。
+      appliesTo: () => false,
+      gate: () => blocked('this gate would have blocked if it had run'),
+    })
+  }
+  return r
+}
+
+test('⑯ 臂 1 ★ 全跳过：有判据、却一条没跑 ⇒ 可读出「跑了 0 条」，且与「都通过」不同形', async () => {
+  const skippedRegistry = allSkippedRegistry('completion', 3)
+  const passedRegistry = createGateRegistry()
+  for (let index = 0; index < 3; index += 1) {
+    passedRegistry.register({ id: `pass-${index}`, point: 'completion', description: 'passing probe', gate: () => ok() })
+  }
+
+  const skipped = await skippedRegistry.evaluate('completion', {})
+  const passed = await passedRegistry.evaluate('completion', {})
+
+  /**
+   * ★ 这是本任务的核心断言：`ok` 一样，但**形状必须不同**。
+   *   改动前这两行 `shapeOf` 完全相等 —— 一次忘了传上下文的重构会让四条判据
+   *   静默全跳过，而门禁返回 `ok: true`，读起来与"都过了"一模一样。
+   */
+  assert.equal(skipped.ok, true, '★ 全跳过【不翻成 ok:false】—— 那是正常情形（空位置同理），拒掉它会卡死流程')
+  assert.notDeepEqual(shapeOf(skipped), shapeOf(passed), '★ 全跳过与都通过必须不同形，否则人只能看见"通过"')
+  assert.equal(skipped.evaluated, 0, '★ 必须能读出"一条都没跑"')
+  assert.equal(skipped.skipped, 3)
+  assert.equal(skipped.registered, 3)
+  assert.match(skipped.skippedAll, /none of the 3 gate\(s\) registered at "completion" applied/)
+  assert.match(skipped.skippedAll, /this step was not checked/, '★ 话要说全：不只是"没跑"，还有"所以这一步没被检查"')
+
+  // 对照：都通过的形状
+  assert.equal(passed.evaluated, 3)
+  assert.equal(passed.skipped, 0)
+  assert.equal(passed.skippedAll, undefined, '★ 「都通过」不许带"没检查"的说明 —— 两者不同形')
+  assert.equal(skipped.skippedAll !== undefined, true)
+})
+
+test('⑯ 臂 2 ★ 空位置：本来就没有判据 ⇒ 仍返回 ok，且【不得】产出「没检查」的说明', async () => {
+  const empty = createGateRegistry()
+  const verdict = await empty.evaluate('delivery', {})
+
+  assert.equal(verdict.ok, true, '★ 空位置必须放行 —— 把"这里还没接判据"判成拒绝，是误伤')
+  assert.deepEqual(verdict.ran, [])
+  /**
+   * ★ 关键：空位置与全跳过必须【不同形】。
+   *   两者都是"一条都没跑"，但一个是"这里还没有判据"（正常），
+   *   一个是"有判据却全被跳过"（要曝光）。混起来，静默全跳过会伪装成
+   *   "这个位置本来就没判据"。
+   */
+  assert.equal(verdict.registered, 0, '★ 空位置：registered=0')
+  assert.equal(verdict.evaluated, 0)
+  assert.equal(verdict.skipped, 0)
+  assert.equal(verdict.skippedAll, undefined, '★ 空位置不得产出"没检查"的说明 —— 那是正常情形，不是异常')
+
+  const skipped = await allSkippedRegistry('delivery', 1).evaluate('delivery', {})
+  assert.notDeepEqual(
+    shapeOf(verdict),
+    shapeOf(skipped),
+    '★ 「空位置」与「全跳过」必须不同形 —— 否则一次静默全跳过会伪装成"这个位置本来就没判据"',
+  )
+})
+
+test('⑯ 臂 3 ★ 至少一条跑了 ⇒ 三种合并规则一字不改（ok / blocked / unmeasured）', async () => {
+  /**
+   * ★ 混着放：两条被跳过、一条真跑。跳过的那两条如果被当成"跑了"，结果会变。
+   */
+  const r = createGateRegistry()
+  r.register({ id: 'skip-a', point: 'completion', description: 'd', appliesTo: () => false, gate: () => blocked('must not surface') })
+  r.register({ id: 'run-ok', point: 'completion', description: 'd', gate: () => ok() })
+  r.register({ id: 'skip-b', point: 'completion', description: 'd', appliesTo: () => false, gate: () => blocked('must not surface') })
+
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, true)
+  assert.deepEqual(v.blockers, [], '★ 被跳过的判据【不得】贡献 blocker')
+  assert.equal(v.evaluated, 1, '★ 只数真的跑了的')
+  assert.equal(v.skipped, 2)
+  assert.equal(v.registered, 3)
+  assert.equal(v.skippedAll, undefined, '★ 有判据跑了 ⇒ 不是"全跳过"，不许带那句说明')
+
+  // 原样保留的三种合并规则
+  const blockedR = createGateRegistry()
+  blockedR.register({ id: 'b', point: 'completion', description: 'd', gate: () => blocked('found a problem') })
+  assert.equal((await blockedR.evaluate('completion', {})).ok, false)
+
+  const unmeasuredR = createGateRegistry()
+  unmeasuredR.register({ id: 'u', point: 'completion', description: 'd', gate: () => unmeasured('could not measure') })
+  const um = await unmeasuredR.evaluate('completion', {})
+  assert.equal(um.ok, false)
+  assert.equal(um.evaluated, 1, '★ unmeasured 是"跑了但说测不了" ⇒ evaluated 必须 ≥ 1（与全跳过的 0 不同形）')
+
+  // 空注册表照常放行（既有 ⑨ 的语义）
+  for (const point of INSERTION_POINTS) {
+    const empty = await createGateRegistry().evaluate(point, {})
+    assert.equal(empty.ok, true)
+    assert.equal(empty.skippedAll, undefined)
+  }
+})
+
+test('⑯ 臂 3b ★ 「全跳过」与「unmeasured」必须不同形（都是"没测到"，但不是同一件事）', async () => {
+  const skipped = await allSkippedRegistry('completion', 2).evaluate('completion', {})
+  const unmeasuredR = createGateRegistry()
+  unmeasuredR.register({ id: 'u', point: 'completion', description: 'd', gate: () => unmeasured('no executor was injected') })
+  const unmeasuredVerdict = await unmeasuredR.evaluate('completion', {})
+
+  /**
+   * ★ 前者是"判据【根本没跑】"（关于这一步有没有被检查），
+   *   后者是"判据跑了、说它【测不了】"（关于测量的结论）。
+   *   两者都意味着"没测到"，但成因不同、责任不同 ⇒ 不许同形。
+   */
+  assert.notDeepEqual(shapeOf(skipped), shapeOf(unmeasuredVerdict))
+  assert.equal(skipped.unmeasured, undefined, '★ 全跳过不是 unmeasured —— 那是关于"测量"的结论，而这里压根没测')
+  assert.equal(unmeasuredVerdict.skippedAll, undefined)
+  assert.equal(skipped.evaluated, 0)
+  assert.equal(unmeasuredVerdict.evaluated, 1)
+})
