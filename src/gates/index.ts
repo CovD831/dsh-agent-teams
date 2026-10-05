@@ -11,6 +11,7 @@
 
 import { createGateRegistry } from './registry.ts'
 import * as verifyRerun from './completion/verify-rerun.ts'
+import * as changedPaths from './dispatch/changed-paths.ts'
 
 /**
  * 全部判据。**一条判据一个 import** —— 这样"换掉一条"就是换一个 import，
@@ -18,6 +19,7 @@ import * as verifyRerun from './completion/verify-rerun.ts'
  */
 const ALL_GATES = [
   verifyRerun,
+  changedPaths,
 ]
 
 /** 建一个装好全部判据的注册表。 */
