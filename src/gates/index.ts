@@ -68,6 +68,51 @@ import * as worktree from './dispatch/worktree.ts'
 import * as r5 from './completion/r5.ts'
 import * as mutation from './completion/mutation.ts'
 /**
+ * ── T10 ——— 已接：判据「inScope 含 src/ 却漏 lib/ 构建产物」（contract 位置第一条）
+ *
+ *      id = 'contract.build-artifact-scope' · point = 'contract'
+ *      证据来源：契约里的 inScope 列表本身 —— 它只做路径字符串之间的映射，
+ *                不读磁盘、不碰 classifyChangedPath（预防，不是放宽）。
+ *                inScope 整个缺席（如 kind=work）⇒ ok（不适用，没有同步要求）；
+ *                inScope 在场但读不出 ⇒ unmeasured（见 t11 修正后的两条臂）。
+ *
+ * ★ 本行由 t10 落。规则：`src/gates/index.ts` 归【第一个接判据的任务】持有并接线，
+ *   后续任务按「一人一行」只加自己那一行 —— 见上面的槽位约定。
+ */
+import * as buildArtifactScope from './contract/build-artifact-scope.ts'
+/**
+ * ── T8 ——— 已接：delivery 位置的两条判据（交付那一刻的全局检查）─────────────────
+ *
+ *      id = 'delivery.coverage'    · point = 'delivery'
+ *          每个目标都有人认领。一个没有任何任务 `coverageOf` 它的目标在任务列表里
+ *          【不留痕迹】：全绿、review 全 pass、canDeclareDelivery 返回 ok，
+ *          而它从来没人碰过 —— "没测到"并进"通过"的同一形态，只是被并进去的是整个目标。
+ *
+ *      id = 'delivery.convergence' · point = 'delivery'
+ *          成员确实收敛 —— idle ≠ converged，空回复不是收敛。
+ *
+ * ★ 这两行由 t11 落。规则：`src/gates/index.ts` 归【第一个接判据的任务】持有。
+ *   t8 的判据本体是 t8 已交付的产物，本任务**只接线、不改它们**（见 t11 契约）。
+ * ★ 顺序 = 同位置内的求值顺序：先问"有没有人做"（coverage），再问"做的人收敛了没有"
+ *   （convergence）—— 一个没人认领的目标谈不上"那个人的收敛"。
+ */
+import * as deliveryCoverage from './delivery/coverage.ts'
+import * as deliveryConvergence from './delivery/convergence.ts'
+/**
+ * ── T7 ——— 已接：判据「verify 命令可判性」（contract 位置第二条）──────────────
+ *
+ *      id = 'contract.verify-command' · point = 'contract'
+ *      证据来源：契约里声明的 verify 命令本身。
+ *      实测教训（本队）：`grep -qx N` 会被 `wc` 的前导空格卡死 —— 命令永远失败
+ *      而它看起来是对的，于是一个【永远红】的 verify 会把整条任务链锁死。
+ *      本判据在契约落库那一刻就问"这条命令判得出来吗"。
+ *
+ * ★ 本行由 t14 落。★ 它此前【已在盘上但没进清单】—— 那正是本轮一直在消灭的
+ *   「装了但调不到」：判据文件写好了、夹具也有了，而 `registry.list().contract`
+ *   里没有它。接线与判据本体分开看，是这类缺陷唯一的藏身处。
+ */
+import * as contractVerifyCommand from './contract/verify-command.ts'
+/**
  * ── 四条并行判据的 import 槽位（一人一行，互不越界）───────────────────────────
  *
  * T1 ——— 已接：判据「worktree 到达（成员真的在隔离目录里干活吗）」
@@ -137,6 +182,25 @@ const ALL_GATES = [
   // T3 ——— 已接：mutation
   // T4 ——— 已接：backtest
   backtest,
+  /**
+   * T10 ——— 已接：buildArtifactScope
+   * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   */
+  buildArtifactScope,
+  /**
+   * T7 ——— 已接：contractVerifyCommand（contract 位置第二条；由 t14 接线）
+   * ★ 顺序 = build-artifact-scope（scope 里有没有漏产物）
+   *        → verify-command（这条命令判不判得出来）。
+   *   两条都在契约落库那一刻说话，且互不依赖 —— 顺序只影响 blocker 的排列。
+   */
+  contractVerifyCommand,
+  /**
+   * T8 ——— 已接：delivery 位置的两条判据（由 t11 接线；判据本体属 t8）
+   * ★ 顺序 = coverage（有没有人做）→ convergence（做的人收敛了没有）：
+   *   一个没人认领的目标谈不上"那个人的收敛"。
+   */
+  deliveryCoverage,
+  deliveryConvergence,
 ] as const
 
 /**

@@ -35,6 +35,11 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildRegistry, registry } from '../lib/gates/index.js'
+/**
+ * ★ 空注册表的语义要用一个**真的新建的空实例**表达，而不是借某个"当前恰好为空"
+ *   的位置（见臂 3d 的注释：那会把临时状态写成不变量）。
+ */
+import { createGateRegistry, INSERTION_POINTS } from '../lib/gates/registry.js'
 
 /** 本仓库根（夹具要读源文件，import 的是编译产物 —— 与现有 24 个测试同构）。 */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -75,16 +80,54 @@ function wiredPlaces() {
     if (!state.isListed(place.binding)) continue
     wired.add(place.task)
   }
-  // 反向校验：ALL_GATES 里出现了约定之外的绑定名 ⇒ 有人绕过约定加了判据。
+  // 反向校验：那四条【并行约定槽位】要么完整接上、要么完整缺席 —— 不许半接。
+  /**
+   * ★ 这里此前是「ALL_GATES 里出现约定表之外的绑定名 ⇒ 抛错」。它把一个**临时状态**
+   *   当成了契约：那张表钉的是"四条并行判据谁改哪一行"，而 contract / delivery /
+   *   runtime 三个位置的判据**本来就超出那张表**（本轮 t7/t8/t10 正是在往里加）。
+   *   于是"有人绕过约定加了判据"与"有人往一个还没有约定的位置加了判据"在日志里同形
+   *   —— 而后者恰恰是本轮的目标。
+   *
+   * ★ 改成：新位置的判据在下面的 NEW_POSITION_GATES 里【登记】即可，不禁止。
+   *   这与 t11 的规则同源 —— **夹具不得把「某个位置当前为空」写成不变量，它测的
+   *   应当是机制的形状（接了就该被跑到），不是当前的接线数量。**
+   *
+   * ★ 而"绕过约定"这一半并没有被丢掉：未登记的绑定名仍然抛错，只是合法的登记
+   *   出口从"四条槽位表"扩到了"四条槽位表 + 新位置清单"。清单是显式的 ——
+   *   往新位置接判据的人要在这里写一行，而不是悄悄塞进 ALL_GATES 就完事。
+   */
   const known = new Set([...ASSEMBLY_PLACES.map((place) => place.binding), 'verifyRerun', 'changedPaths'])
   const listedButUnknown = [...state.source.matchAll(/^\s{2}([A-Za-z_][\w]*),$/gm)]
     .map((match) => match[1])
-    .filter((binding) => !known.has(binding))
+    .filter((binding) => !known.has(binding) && !NEW_POSITION_GATES.some((gate) => gate.binding === binding))
   if (listedButUnknown.length > 0) {
-    throw new Error(`★ ALL_GATES 里出现了约定表之外的绑定名：${listedButUnknown.join(', ')} —— 加判据要走四条并行约定的那一行，否则冲突面会重新扩散`)
+    throw new Error(
+      `★ ALL_GATES 里出现了本文件不认识的绑定名：${listedButUnknown.join(', ')} —— 新位置的判据要在本文件的 NEW_POSITION_GATES 里登记（连同 id 与 point），`
+      + '否则"接了判据"与"有人绕过装配点塞了一条"在日志里同形',
+    )
   }
   return wired
 }
+
+/**
+ * ── 新位置（contract / delivery / runtime）已接的判据 ──────────────────────────
+ *
+ * ★ 与 ASSEMBLY_PLACES 的分工：那张表是**四条并行判据的写域约定**（任务号 → 路径 →
+ *   绑定名 → id → point），它管的是"谁改哪一行"。这张表是**新位置的接线登记**：
+ *   t6 为三个位置建了调用点，t7/t8/t10 往里挂判据，而它们没有"一行一人"的原始约定。
+ *
+ * ★ 登记的意义不是形式主义：不登记 ⇒ 夹具无法区分"新位置接了一条判据"与
+ *   "有人绕过装配点注册"。而本文件的臂 2/3/3d 正是靠这两张表断言
+ *   "登记表里的每一条都能在装配点找到来源"。
+ *
+ * ★ 往这里加一行的人同时要保证：该判据真的会进对应 point 的求值（臂 3d 会核）。
+ */
+const NEW_POSITION_GATES = [
+  { binding: 'buildArtifactScope', id: 'contract.build-artifact-scope', point: 'contract' },
+  { binding: 'contractVerifyCommand', id: 'contract.verify-command', point: 'contract' },
+  { binding: 'deliveryCoverage', id: 'delivery.coverage', point: 'delivery' },
+  { binding: 'deliveryConvergence', id: 'delivery.convergence', point: 'delivery' },
+]
 
 /** 登记表里某条判据挂在哪。 */
 function registeredPointOf(id, list) {
@@ -118,6 +161,14 @@ const ASSEMBLY_PLACES = [
   { task: 'T2', path: './completion/r5.ts', binding: 'r5', id: 'completion.r5', point: 'completion' },
   { task: 'T3', path: './completion/mutation.ts', binding: 'mutation', id: 'completion.mutation', point: 'completion' },
   { task: 'T4', path: './completion/backtest.ts', binding: 'backtest', id: 'completion.backtest', point: 'completion' },
+  /**
+   * ── 本轮（contract / delivery / runtime 三个空位置）的槽位 ─────────────────
+   *
+   * T10 已接：`contract.build-artifact-scope`（inScope 含 src/ 却漏 lib/ 产物）。
+   * 其余两条（t7 = contract.verify-command、t8 = delivery.coverage）在各自任务里落，
+   * 落之前它们**不在**这份表里 —— 于是"少了"与"表里没有"仍然不同形。
+   */
+  { task: 'T10', path: './contract/build-artifact-scope.ts', binding: 'buildArtifactScope', id: 'contract.build-artifact-scope', point: 'contract' },
 ]
 
 /** 一个最小的、合法的判据模块（对照臂用）。 */
@@ -266,10 +317,47 @@ test('臂 2 ★ 未测量臂：已接的槽位形状对、未接的槽位确实�
     [],
     '★ 探针/占位判据不得出现在真实注册表里',
   )
-  // 空位置与"接上了"不同形：contract/delivery/runtime 至今没有任何判据。
+  // 空位置与"接上了"不同形：**空位置才**必须是一条都没有。
+  //
+  // ★ MEASURED（2026-10-05，t10 接上 contract 位置的第一条判据时）：这一条此前写死
+  //   「contract/delivery/runtime 三个位置至今没有任何判据」，于是**任何**往这三个
+  //   位置接判据的任务都会把它撞红 —— 一条把"还没接"当不变量的断言，会在工作真正
+  //   完成的那一刻变成障碍（棘轮）。⇒ 改成按【装配点源码】算期望：一个位置该有几条，
+  //   由"约定表里已接的槽位数"决定，不由夹具手抄。空位置仍然必须如实为空。
+  /**
+   * ★ 新位置（contract / delivery / runtime）：条数由【装配点源码 + 新位置登记表】
+   *   决定，不由夹具手抄。
+   *
+   *   MEASURED（2026-10-05，t10 接上 contract 位置第一条判据时）：这一段此前是
+   *   「三个位置至今没有任何判据」，于是**任何**往这三个位置接判据的任务都会把它撞红。
+   *   一条把"还没接"写成不变量的断言，恰好在工作真正完成的那一刻变成障碍 —— 那是棘轮。
+   *
+   *   ⇒ 现在它与 completion / dispatch 用同一条口径：期望条数 = 装配点里已接的条数。
+   *     于是「空位置如实为空」与「接上了就得被看见」两件事同时成立，而**夹具不再
+   *     需要有人去改它**：接一条，期望就 +1。
+   */
   for (const point of ['contract', 'delivery', 'runtime']) {
     const entries = Object.entries(list).find(([name]) => name === point)?.[1] ?? []
-    assert.deepEqual(entries, [], `★ ${point} 位置如实为空 —— 空位置与"接上了"必须不同形`)
+    const expected = newPositionGateIds(point)
+    assert.equal(
+      entries.length,
+      expected.length,
+      `★ ${point} 位置该有 ${expected.length} 条（由装配点的 import + 清单 + NEW_POSITION_GATES 决定）；`
+      + `空位置与"接上了"必须不同形，多一条少一条都要说得出为什么。实际：${JSON.stringify(entries.map((entry) => entry.id))}`,
+    )
+    for (const entry of entries) {
+      assert.ok(
+        expected.includes(entry.id),
+        `★ ${point} 位置上出现了装配点清单之外的判据 ${entry.id} —— 它绕过了 src/gates/index.ts 那一份清单`,
+      )
+    }
+    // 反向：登记了却没接上 ⇒ 也是一条说不清的差异。
+    for (const id of expected) {
+      assert.ok(
+        entries.some((entry) => entry.id === id),
+        `★ ${point} 位置登记了 ${id}，登记表里却没有它 —— 它被"接上了"却没进装配点`,
+      )
+    }
   }
   assert.equal(
     registry.count('completion'),
@@ -280,12 +368,32 @@ test('臂 2 ★ 未测量臂：已接的槽位形状对、未接的槽位确实�
 })
 
 /**
+ * 某个新位置【应该】有几条、分别是哪几条 —— 从装配点源码与 NEW_POSITION_GATES 推。
+ *
+ * ★ 口径与 `wiredPlaces()` 一致：**登记的绑定名必须同时被 import 且进了 ALL_GATES**，
+ *   否则"登记了但没接上"会被算成已接（而那正是"装了但调不到"的静态版本）。
+ */
+function newPositionGateIds(point) {
+  const state = wiringState()
+  return NEW_POSITION_GATES
+    .filter((gate) => gate.point === point)
+    .filter((gate) => state.isImported(gate.binding) && state.isListed(gate.binding))
+    .map((gate) => gate.id)
+    .sort()
+}
+
+/**
  * ── 对照臂（臂 3）：真实的装配点 ─────────────────────────────────────────────
  */
 test('臂 3 ★ 对照臂：登记表里每一条判据都用【同一条装配路径】装配，且形状齐备', () => {
   const list = registry.list()
   const entries = Object.values(list).flat()
-  const known = ['completion.verify-rerun', 'dispatch.changed-paths', ...ASSEMBLY_PLACES.map((place) => place.id)]
+  const known = [
+    'completion.verify-rerun',
+    'dispatch.changed-paths',
+    ...ASSEMBLY_PLACES.map((place) => place.id),
+    ...NEW_POSITION_GATES.map((gate) => gate.id),
+  ]
 
   /**
    * ★ 不钉死 count，钉【归属】：登记表里出现的每一条，必须是"既有两条 + 约定表四条"
@@ -342,12 +450,21 @@ test('臂 3b ★ 对照臂：三条 completion 判据会同一次求值一起跑
     )
   }
   // 注释槽位必须与真实清单一一对应：不然"注释说已接、代码没接"会无人发现。
-  const placeholders = [...state.source.matchAll(/^\s*\/\/ (T\d) ——— (待接|已接)：(\w+)$/gm)]
-  assert.deepEqual(
-    placeholders.map((match) => [match[1], match[3]]),
-    ASSEMBLY_PLACES.map((place) => [place.task, place.binding]),
-    '★ 登记表里的四行槽位（一人一行）就是求值顺序与归属的唯一约定',
-  )
+  //
+  // ★ MEASURED（2026-10-05，t10 落 contract 位置时）：这里原先把槽位注释的**行数**
+  //   与约定表**数组**做了 deepEqual，于是往表里加一条槽位（而不在 ALL_GATES 里
+  //   手写那一行注释）会让它红 —— 而"表里多了一条槽位"本来正是接入面在扩大的
+  //   表现。⇒ 改成【逐条断言】：约定表里的每个槽位都必须在源码里有一条对应的
+  //   `// T? ——— 已接：<binding>`，多出来的槽位不许沉默（要么注释、要么别进表）。
+  const placeholders = [...state.source.matchAll(/^\s*(?:\*|\/\/) (T\d+) ——— (待接|已接)：([A-Za-z_][\w]*)/gm)]
+    .map((match) => [match[1], match[3]])
+  for (const place of ASSEMBLY_PLACES) {
+    assert.ok(
+      placeholders.some(([task, binding]) => task === place.task && binding === place.binding),
+      `★ 约定表里的槽位 ${place.task}（${place.binding}）在装配点源码里没有对应的注释槽位 `
+      + `（写成 \`// ${place.task} ——— 已接：${place.binding}\`）—— 一条只活在夹具里的槽位，读源码的人看不见`,
+    )
+  }
   // ★ 注释与代码不许打架：注释说「已接」而清单里没有（或反过来）是最坏的一种，
   //   因为它让"接上了"与"没接上"在给人看的那一面同形。
   for (const [task, , binding] of placeholders.map((match) => [match[1], match[2], match[3]])) {
@@ -377,23 +494,47 @@ test('臂 3c ★ 对照臂：约定表（路径 / 导出名 / id / point）确�
 })
 
 test('臂 3d ★ 对照臂：登记表是装配点里【唯一】的清单（没有人偷偷在别处注册）', async () => {
-  const empty = buildRegistry()
-  const verdict = await empty.evaluate('delivery', {})
-  assert.equal(verdict.ok, true)
-  assert.deepEqual(verdict.ran, [], '★ 空位置放行，且 ran 为空 —— 不是"跑了一条什么都对的判据"')
+  const built = buildRegistry()
+  /**
+   * ★ 这里此前用 `evaluate('delivery', {})` —— delivery 位置当时是空的，于是
+   *   "ran 为空"成立。t8/t11 把两条 delivery 判据接上之后，同一次求值里它们会
+   *   （按各自 appliesTo 被）跳过一次，ran 就不再为空。
+   *
+   *   实测的教训（2026-10-05，t11）：**不要用一个"当前恰好为空"的位置去表达
+   *   "空注册表放行"**。那会把临时状态写成不变量 —— 接一条判据就红，而红的原因
+   *   与"有人偷偷注册"毫无关系。空注册表的语义用一个**真的新建的空实例**表达，
+   *   与任何位置当前接了什么都无关。
+   */
+  const fresh = createGateRegistry()
+  for (const point of INSERTION_POINTS) {
+    const verdict = await fresh.evaluate(point, {})
+    assert.equal(verdict.ok, true, `★ 空注册表在 ${point} 必须放行`)
+    assert.deepEqual(verdict.ran, [], '★ 空注册表放行，且 ran 为空 —— 不是"跑了一条什么都对的判据"')
+    assert.equal(verdict.registered, 0, '★ 空注册表：registered=0（空位置与"全跳过"不同形）')
+  }
   // 进程级单例与新建的注册表必须是同一份清单的两个实例（否则编排层读到的不是这份清单）
   assert.deepEqual(
-    empty.list(),
+    built.list(),
     registry.list(),
     '★ registry 单例与 buildRegistry() 必须同源 —— 否则"接上了"与"编排层读到了"会不同形',
   )
-  // 已接的每一条都要能被 evaluate 真的跑到（注册 ≠ 会被求值：point 挂错位置就是这种失败）。
-  for (const place of ASSEMBLY_PLACES) {
-    if (!wiredPlaces().has(place.task)) continue
-    const ran = await empty.evaluate(place.point, undefined)
+  /**
+   * ★ 已接的每一条都要能被 evaluate 真的跑到（注册 ≠ 会被求值：point 挂错位置
+   *   就是这种失败）。**四条并行槽位与新位置的判据都走这一条** —— 它测的是
+   *   机制的形状（接了就该被跑到），不是当前的接线数量。
+   */
+  const wiredEntries = [
+    ...ASSEMBLY_PLACES.filter((place) => wiredPlaces().has(place.task)),
+    ...NEW_POSITION_GATES.filter((gate) => {
+      const state = wiringState()
+      return state.isImported(gate.binding) && state.isListed(gate.binding)
+    }),
+  ]
+  for (const place of wiredEntries) {
+    const ran = await built.evaluate(place.point, undefined)
     assert.ok(
       ran.ran.some((entry) => entry.id === place.id),
-      `★ ${place.task} 接了却没在 ${place.point} 的求值里出现 —— 它被注册到了一个永不被跑的位置`,
+      `★ ${place.id} 接了却没在 ${place.point} 的求值里出现 —— 它被注册到了一个永不被跑的位置`,
     )
   }
 })
