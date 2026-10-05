@@ -104,7 +104,7 @@
     "test:git-install": "node --test scripts/git-artifacts.test.mjs",
     "verify:source-runner": "node --test scripts/harness-source-verify.test.mjs",
     "verify:git-artifact": "node scripts/git-artifacts.mjs",
-    "test:gates": "node --test src/gates/*.test.mjs",
+    "test:gates": "node --test scripts/gate-*.test.mjs",
     "verify:gates": "pnpm test:gates"
   },
   "peerDependencies": {

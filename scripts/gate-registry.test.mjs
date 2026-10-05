@@ -11,14 +11,18 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { createGateRegistry, ok, blocked, unmeasured, INSERTION_POINTS } = await import(
-  new URL('./registry.mjs', import.meta.url)
-)
+import {
+  createGateRegistry, ok, blocked, unmeasured, INSERTION_POINTS,
+} from '../lib/gates/registry.js'
 
 /** 一个最小的注册表，带一条指定裁决的判据。 */
 function withGate(point, verdict, extra = {}) {
   const r = createGateRegistry()
-  r.register({ id: 'probe', point, description: 'probe', gate: () => verdict, ...extra })
+  r.register({
+    id: 'probe', point, description: 'probe',
+    gate: () => verdict,
+    ...extra,
+  })
   return r
 }
 
@@ -172,4 +176,42 @@ test('⑫ unregister 生效，且注销后该位置回到空', async () => {
   assert.equal(r.unregister('probe'), true)
   assert.equal((await r.evaluate('delivery', {})).ok, true)
   assert.equal(r.unregister('probe'), false, '★ 二次注销返回 false，不抛错（幂等）')
+})
+
+test('⑬ ★ 判据在【被采纳】时产出的数据要被交出来（否则只能写副作用）', async () => {
+  const r = createGateRegistry()
+  r.register({
+    id: 'producer', point: 'completion', description: 'd',
+    // 通过时交出一份"判据层亲眼看到的结果"
+    gate: () => ({ ok: true, reruns: [{ command: 'x', exitCode: 0 }] }),
+  })
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, true)
+  assert.deepEqual(
+    v.outputs['producer'],
+    { reruns: [{ command: 'x', exitCode: 0 }] },
+    '★ 一个只能表达"过/不过"的接线层，会逼判据把结果写进副作用里',
+  )
+  assert.equal(v.ran[0].produced, true, '★ ran 里也要看得出"这条判据交了东西"')
+})
+
+test('⑭ ★ 被【拒绝】的判据，它的产出不得被当成结果使用', async () => {
+  const r = createGateRegistry()
+  r.register({
+    id: 'bad', point: 'completion', description: 'd',
+    gate: () => ({ ok: false, blockers: ['nope'], reruns: [{ command: 'x', exitCode: 999 }] }),
+  })
+  const v = await r.evaluate('completion', {})
+  assert.equal(v.ok, false)
+  assert.deepEqual(
+    v.outputs,
+    {},
+    '★ 一条被拒的判据的产出如果被采纳，就等于用它的结果去覆盖记录 —— 而它刚刚说了不可信',
+  )
+})
+
+test('⑮ 没有产出的判据 ⇒ outputs 为空对象（不是 undefined）', async () => {
+  const r = withGate('delivery', ok())
+  const v = await r.evaluate('delivery', {})
+  assert.deepEqual(v.outputs, {}, '★ 调用方不必写 `?? {}` —— 空即空')
 })

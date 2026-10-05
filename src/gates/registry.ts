@@ -27,6 +27,35 @@
  *    串行发现花了三轮。 ⇒ 一次给全。
  */
 
+/**
+ * 一条判据的裁决。**三态，不是两态。**
+ *
+ *  - `{ ok: true, ...产出 }`              —— 测了，没问题（可附带给出的结果）
+ *  - `{ ok: false, blockers: [...] }`     —— 测了，发现问题
+ *  - `{ ok: false, unmeasured: string }`  —— ★ 没能测量
+ */
+export type GateVerdict =
+  | { ok: true; [produced: string]: unknown }
+  | { ok: false; blockers: string[] }
+  | { ok: false; unmeasured: string }
+
+export type InsertionPoint = typeof INSERTION_POINTS[number]
+
+export interface GateRunEntry {
+  id: string
+  verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped'
+  count?: number
+  produced?: boolean
+}
+
+export interface GateEvaluation {
+  ok: boolean
+  blockers: string[]
+  unmeasured?: string
+  ran: GateRunEntry[]
+  outputs: Record<string, Record<string, unknown>>
+}
+
 /** 五个【位置】，不是五个判据。一个位置可挂零到多条。 */
 export const INSERTION_POINTS = Object.freeze([
   'contract',    // ① 建任务 / 改契约
@@ -43,11 +72,11 @@ export const INSERTION_POINTS = Object.freeze([
  *  - `{ ok: false, blockers: [...] }`      —— 测了，发现问题（必须说清为什么）
  *  - `{ ok: false, unmeasured: string }`   —— ★ 没能测量
  */
-export function ok() {
+export function ok(): { ok: true } {
   return { ok: true }
 }
 
-export function blocked(...blockers) {
+export function blocked(...blockers: Array<string | string[]>): { ok: false; blockers: string[] } {
   const list = blockers.flat().filter((item) => typeof item === 'string' && item.trim() !== '')
   if (list.length === 0) {
     throw new Error('a gate that blocks must say why: blocked() needs at least one non-empty blocker')
@@ -55,7 +84,7 @@ export function blocked(...blockers) {
   return { ok: false, blockers: list }
 }
 
-export function unmeasured(reason) {
+export function unmeasured(reason: string): { ok: false; unmeasured: string } {
   if (typeof reason !== 'string' || reason.trim() === '') {
     throw new Error('unmeasured() must say what could not be measured')
   }
@@ -63,13 +92,17 @@ export function unmeasured(reason) {
 }
 
 /** 校验一条裁决的形状。非法形状【抛错】而不是被当成通过 —— 一个形状错误的裁决是最危险的。 */
-function assertVerdict(verdict, id) {
-  if (verdict === null || typeof verdict !== 'object' || typeof verdict.ok !== 'boolean') {
+function assertVerdict(verdict: unknown, id: string): GateVerdict {
+  if (verdict === null || typeof verdict !== 'object') {
     throw new Error(`gate "${id}" returned a malformed verdict (expected {ok:boolean}): ${JSON.stringify(verdict)}`)
   }
-  if (verdict.ok === false) {
-    const hasBlockers = Array.isArray(verdict.blockers) && verdict.blockers.length > 0
-    const hasUnmeasured = typeof verdict.unmeasured === 'string' && verdict.unmeasured.trim() !== ''
+  const v = verdict as Record<string, unknown>
+  if (typeof v['ok'] !== 'boolean') {
+    throw new Error(`gate "${id}" returned a malformed verdict (expected {ok:boolean}): ${JSON.stringify(verdict)}`)
+  }
+  if (v['ok'] === false) {
+    const hasBlockers = Array.isArray(v['blockers']) && (v['blockers'] as unknown[]).length > 0
+    const hasUnmeasured = typeof v['unmeasured'] === 'string' && (v['unmeasured'] as string).trim() !== ''
     if (!hasBlockers && !hasUnmeasured) {
       throw new Error(`gate "${id}" returned ok:false but said neither why (blockers) nor that it could not measure (unmeasured)`)
     }
@@ -77,12 +110,20 @@ function assertVerdict(verdict, id) {
       throw new Error(`gate "${id}" returned both blockers and unmeasured; pick one — "found problems" and "could not measure" are different claims`)
     }
   }
-  return verdict
+  return verdict as GateVerdict
 }
 
 /**
  * 一个注册表实例。判据按 point 分组，组内按注册顺序求值（顺序稳定，便于复现）。
  */
+export interface GateRegistration {
+  id: string
+  point: InsertionPoint
+  description: string
+  appliesTo?: (context: any) => boolean
+  gate: (context: any) => GateVerdict | Promise<GateVerdict>
+}
+
 export function createGateRegistry() {
   /** @type {Map<string, object>} */
   const byId = new Map()
@@ -93,7 +134,7 @@ export function createGateRegistry() {
      * ★ 重复 id ⇒ 抛错，**不静默覆盖** —— 静默覆盖会让"我换了一条判据"
      *   与"两条判据都在、后一条赢了"在日志里同形。
      */
-    register(registration) {
+    register(registration: GateRegistration): GateRegistration {
       const { id, point, description, gate, appliesTo } = registration ?? {}
       if (typeof id !== 'string' || id.trim() === '') {
         throw new Error('a gate registration requires a non-empty id')
@@ -114,22 +155,22 @@ export function createGateRegistry() {
       return registration
     },
 
-    unregister(id) {
+    unregister(id: string): boolean {
       return byId.delete(id)
     },
 
     /** 控制台读它。按 point 分组，组内保持注册顺序。 */
-    list() {
-      const out = {}
+    list(): Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean }>> {
+      const out = {} as Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean }>>
       for (const point of INSERTION_POINTS) out[point] = []
       for (const reg of byId.values()) {
-        out[reg.point].push({ id: reg.id, description: reg.description, hasAppliesTo: typeof reg.appliesTo === 'function' })
+        out[reg.point]!.push({ id: reg.id, description: reg.description, hasAppliesTo: typeof reg.appliesTo === 'function' })
       }
       return out
     },
 
     /** 该位置已注册的判据条数（控制台/测试用）。 */
-    count(point) {
+    count(point: InsertionPoint): number {
       let n = 0
       for (const reg of byId.values()) if (reg.point === point) n += 1
       return n
@@ -150,37 +191,58 @@ export function createGateRegistry() {
      *   `{ok:false}` 却不说原因）如果被当成通过，那这条判据就是【装上了但没生效】
      *   —— 那比没装更坏，因为它会让人以为检查过了。
      */
-    async evaluate(point, context) {
+    async evaluate(point: InsertionPoint, context: unknown): Promise<GateEvaluation> {
       if (!INSERTION_POINTS.includes(point)) {
         throw new Error(`evaluate() called with unknown insertion point "${point}"`)
       }
-      const ran = []
-      const blockers = []
-      const unmeasuredReasons = []
+      const ran: GateRunEntry[] = []
+      const blockers: string[] = []
+      const unmeasuredReasons: string[] = []
+      /**
+       * ★ 判据在被采纳时产出的【结果】(outputs)，按 id 收集。
+       *
+       * MEASURED（2026-10-05，接第一条真判据时）：`completion.verify-rerun` 通过时
+       * 要把【判据层亲眼看到的 exitCode】交回调用方，让它替换掉成员自报的值。
+       * 而本注册表此前只回 `{ok, blockers, ran}` —— **那条产出会被静默丢掉**，
+       * 于是"通过"这条路径上，成员伪造的 exitCode 仍然留在记录里。
+       *
+       * ⇒ 一个只能表达"过/不过"的接线层，会强迫判据把结果写进副作用里（日志、
+       *   全局变量），而那就又回到"结果散落在各处、无法被控制台读取"的老问题。
+       */
+      const outputs = new Map<string, Record<string, unknown>>()
       for (const reg of byId.values()) {
         if (reg.point !== point) continue
         if (typeof reg.appliesTo === 'function' && reg.appliesTo(context) !== true) {
           ran.push({ id: reg.id, verdict: 'skipped' })
           continue
         }
-        const verdict = assertVerdict(await reg.gate(context), reg.id)
-        if (verdict.ok === true) {
-          ran.push({ id: reg.id, verdict: 'ok' })
+        const produced = assertVerdict(await reg.gate(context), reg.id)
+        const verdict = produced as Record<string, unknown>
+        if (verdict['ok'] === true) {
+          /**
+           * 除 `ok` 之外的字段都是产出。★ 只在【真的被采纳】时收集 ——
+           * 一条被拒的判据的产出不该被当成结果使用。
+           */
+          const given = Object.fromEntries(Object.entries(verdict).filter(([key]) => key !== 'ok'))
+          if (Object.keys(given).length > 0) outputs.set(reg.id, given)
+          ran.push({ id: reg.id, verdict: 'ok', produced: Object.keys(given).length > 0 })
           continue
         }
-        if (Array.isArray(verdict.blockers)) {
-          for (const item of verdict.blockers) blockers.push(`[${reg.id}] ${item}`)
-          ran.push({ id: reg.id, verdict: 'blocked', count: verdict.blockers.length })
+        if (Array.isArray(verdict['blockers'])) {
+          const list = verdict['blockers'] as string[]
+          for (const item of list) blockers.push(`[${reg.id}] ${item}`)
+          ran.push({ id: reg.id, verdict: 'blocked', count: list.length })
           continue
         }
-        unmeasuredReasons.push(`[${reg.id}] ${verdict.unmeasured}`)
+        unmeasuredReasons.push(`[${reg.id}] ${String(verdict['unmeasured'])}`)
         ran.push({ id: reg.id, verdict: 'unmeasured' })
       }
+      const collected: Record<string, Record<string, unknown>> = Object.fromEntries(outputs)
       if (unmeasuredReasons.length > 0) {
-        return { ok: false, unmeasured: unmeasuredReasons.join('; '), blockers, ran }
+        return { ok: false, unmeasured: unmeasuredReasons.join('; '), blockers, ran, outputs: collected }
       }
-      if (blockers.length > 0) return { ok: false, blockers, ran }
-      return { ok: true, blockers, ran }
+      if (blockers.length > 0) return { ok: false, blockers, ran, outputs: collected }
+      return { ok: true, blockers, ran, outputs: collected }
     },
   }
 }

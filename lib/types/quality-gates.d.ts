@@ -121,35 +121,16 @@ export declare function collectChangedPaths(gitStatusText: string): string[];
 export declare function inScopeOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): string[];
 export declare function validateCreateTask(team: TeamState, input: CreateTaskInput): ValidateCreateTaskResult;
 /**
- * ── ★ 判据层自己执行 verify，不采信成员自报的 exitCode ────────────────────────────
+ * ── ★ 这一条判据【已搬到注册表】────────────────────────────────────────────────
  *
- * MEASURED（2026-10-05，gate-probe 探针，上游 v0.1.22）：一个成员【零真实工作】，
- * 提交两条 acceptanceResults 全 passed（evidence 里直接写 "FABRICATED"）+ 两条
- * commandsRun 全 passed（exitCode 填伪造的 0，命令根本没跑，产物文件不存在），
- * 任务被判 completed —— 与真实完成（t3 干净基线）在判据层【不可区分】。
+ * 重跑 verify 的逻辑现在在 `src/gates/completion/verify-rerun.mjs`，由
+ * `src/gates/index.mjs` 装配、`tools.ts` 通过
+ * `registry.evaluate('completion', ...)` 调用。
  *
- * 根因：`evaluateQualityCompletion` 只比对【条数与 status】，而 status/exitCode
- * 都是【成员自报的】。这正是"把判据的输入交给被判的一方"。
- *
- * ⇒ 修复：判据层【自己重跑】verify 命令。执行器由调用方注入（保持本文件零 I/O
- * 的纯函数纪律——这是它架构里最好的部分，不该破坏）。执行器为 undefined 时
- * 退回当前行为（纯函数仍然可单测，旧测试全部不受影响）。
+ * ★ 为什么搬走：留在这里会是**同一个规则的第二份实现**（§3.6）——
+ *   两处都实现"重跑 verify"，改一处不改另一处时，其中一份变成死代码而没人知道。
+ *   本文件（`quality-gates.ts`）保持【零 I/O 的纯规则】这一纪律，判据层在它外面。
  */
-/** 执行一条 verify 命令，返回真实退出码。由调用方注入；本文件不 import 任何 I/O。 */
-export type VerifyCommandExecutor = (command: string) => Promise<number>;
-export interface VerifyRerunResult {
-    /** 每条 verify 命令的重跑结果，与 task.verify 顺序一致。 */
-    reruns: readonly CommandResult[];
-    /** 自报 passed 但重跑非零的命令（伪造的直接证据）。 */
-    mismatches: readonly CommandResult[];
-    /** 重跑发生时为 true；执行器缺席时为 false（此时结果为空数组）。 */
-    executed: boolean;
-}
-/**
- * 重跑任务的全部 verify 命令并比对自报结果。
- * 纯数据变换：执行动作全部通过注入的 executor 发生。
- */
-export declare function rerunVerifyCommands(task: TeamTask, update: QualityCompletionUpdate, executor: VerifyCommandExecutor | undefined): Promise<VerifyRerunResult>;
 export declare function evaluateQualityCompletion(task: TeamTask, update: QualityCompletionUpdate): QualityCompletionResult;
 /**
  * Derive the repair round's inScope from the findings that caused it.
