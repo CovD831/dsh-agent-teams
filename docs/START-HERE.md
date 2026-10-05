@@ -140,7 +140,8 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 
 ③ 队长的 workspace = 会话的 cwd；成员在【同一个目录】里干活
    ⇒ git 只知道"工作区脏了"，不知道"哪个文件是这个成员改的"
-   ⇒ ★ **这一条已经解决了**（2026-10-05，见 §5.1）—— 不走 git，走会话事件。
+   ⇒ ★ **"归属"这一半已解决**（2026-10-05，见 §5.1）—— 不走 git，走会话事件。
+     但"版本"那一半【没解决】：要父版本仍然得靠 worktree / git 历史（见 §6①）。
 
 ④ 一个队长同一时间只能带一个活动团队
 ⑤ 终态（completed/failed/cancelled）不可改；但可追加署名证据
@@ -151,8 +152,8 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 
 ## 5.1 ★ 归属问题已解决：走会话事件，不走 cwd / 不走 git
 
-**2026-10-05 发现并落地。** §5②③ 曾被认为是"隔离"的拦路虎，而它其实有一个
-不需要 worktree 的解法。
+**2026-10-05 发现并落地。** §5②③ 曾被认为是"隔离"的拦路虎。它确实有一个
+不靠 cwd、不靠 git 的解法 —— 但要**说清它解决了什么、没解决什么**。
 
 ```
 dsh-tool-fs 给每次写入/编辑的 tool/result 挂 meta.diffs：
@@ -164,7 +165,7 @@ dsh-tool-fs 给每次写入/编辑的 tool/result 挂 meta.diffs：
 ```
 
 ⇒ **归属走【会话事件】，它是逐成员的** ⇒ 同时绕开 §5②（不能改 cwd）与
-§5③（git 不知道是谁改的），**而且不需要 worktree 及其两个坑**。
+§5③（git 不知道是谁改的）。
 
 ```
 src/harness-compat.ts  observedChangedPaths(session): string[] | undefined
@@ -172,6 +173,23 @@ src/harness-compat.ts  observedChangedPaths(session): string[] | undefined
 src/gates/dispatch/changed-paths.ts
                        自报的 changedPaths 与观察到的写入比对；虚报或隐瞒都拒
 ```
+
+### ★★ 它解决的是【归属】，不是【版本】—— 别把这两件事混起来
+
+这是最容易搞错的一点。会话事件回答的是「**哪些文件是哪个成员改的**」，
+它**不能**提供「一个可 checkout 的历史版本」：
+
+```
+会话事件给的是：{ path, oldText, newText } —— 一次编辑的前后文本
+R5 需要的是：  一个干干净净的【父版本】工作树，让新测试在上面必须变红
+               靠 oldText/newText 拼父版本既脆弱又不完整 ⇒ 它替代不了 git 历史
+```
+
+⇒ **worktree 仍然需要**，理由从"归属"换成了"版本"。见 §6。
+
+**★ 一条既有约束别忘**：`docs/quality-gates.md` §2 第 83 行与 §13 第 807 行
+把独立 worktree 列为「**后续 PR，不在本需求范围**」——
+它是被**有意推迟**的，不是被这里关闭的。本节的结论不改变那条推迟。
 
 **★ 一个值得记住的接线教训**：把这条判据接进 `update_task` 后，`lifecycle-verify`
 挂了。原因**不是判据错了**，而是它的合成成员会话里【只有 descriptor、没有
@@ -183,16 +201,23 @@ tool/result】—— 判据于是诚实地说"我没能观察"并拒绝。
 ## 6. 下一步（按已定的顺序）
 
 ```
-① ~~隔离：给成员一个 worktree~~ —— ★ 归属问题已用会话事件解决（见 §5.1），
-   worktree 不再是 R5 / 变异 / scorer-reach 的前提。
+① 隔离：给成员一个 worktree                    ← 仍然要做，理由已换
+   ★ 不是为了"归属"（那个已由 §5.1 的会话事件解决），而是为了【版本】：
+     R5 / 变异测试需要"一个可 checkout 的父版本工作树"，
+     而 meta.diffs 的 {path, oldText, newText} 拼不出可信的父版本。
+   ★ 它此前被 docs/quality-gates.md 有意推迟（"后续 PR"）—— 要动它，
+     先确认那条推迟是否还成立。
+   两个已知的坑：gitignore 的夹具、未提交的工作
 
-② R5（红前绿后）接到 completion 位置        ← 现在可以做了
-   需要：父版本 + 修复版本 + newTestFiles（用 §5.1 的会话事件即可确定）
+② R5（红前绿后）接到 completion 位置
+   需要【两样，缺一不可】：
+     · 父版本 + 修复版本        ← 来自 ①（worktree / git 历史）
+     · newTestFiles 是哪个成员写的 ← 来自 §5.1（会话事件，已有）
    样板：src/gates/completion/verify-rerun.ts
 
 ③ 之后的候选（按性价比）：
    contract/verify-command    verify 命令写得对吗（实测：grep -qx N 会被 wc 的前导空格卡死）
-   contract/scorer-reach      写域碰到判据文件了吗（现在也有归属证据了）
+   contract/scorer-reach      写域碰到判据文件了吗（归属证据已有，见 §5.1）
    completion/mutation        变异测试
    delivery/coverage          每个目标都有任务认领
    delivery/convergence       idle ≠ converged（空回复不是收敛）
