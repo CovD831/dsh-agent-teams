@@ -22,6 +22,14 @@ export interface SchedulerConfig {
     readonly stateDir: string;
     readonly executionPrompt?: string;
     readonly dispatch?: (captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string) => Promise<boolean>;
+    /**
+     * 建出隔离检出时报告它的基准版本（`worktree.base`）。
+     *
+     * ★ 这是 R5 / 回测唯一的父版本来源。判据层在成员【汇报完成】时需要它，
+     *   而那时派发已经结束 ⇒ 由调用方在这里记下来。
+     *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
+     */
+    readonly onWorktree?: (taskId: string, base: string) => void;
 }
 export interface TeamScheduler {
     /** Try to give every genuinely idle/ready member one unit of ready work. */
@@ -72,6 +80,20 @@ export interface DispatchTicket {
     readonly worktreePath?: string;
     /** 该 worktree 里缺失的 gitignore 条目（如 node_modules）—— 必须告诉成员。 */
     readonly worktreeMissingIgnored?: readonly string[];
+    /**
+     * ── ★【未隔离】这件事本身要留下痕迹 ──────────────────────────────────────────
+     *
+     * 降级派发（非 git 仓库）时带着它。理由：一次 `logger.warn` 不是一条记录 ——
+     * 它随进程消失，而"这个任务是在没有隔离的地方做的"是一个【关于这份工作的
+     * 事实】，读日志的人（以及依赖父版本的判据）必须能看见它。
+     *
+     * ★ 它与 `worktreePath === undefined` 必须【不同形】：
+     *   `worktreeUnavailable` 有值 ⇒ 问过 git 了，这个仓库【不支持】隔离 ⇒ 成员
+     *     应当知道，且 R5/变异那类判据会因此 unmeasured；
+     *   两者都缺席 ⇒ 这个任务【本来就不需要】隔离（review/requirements 这类只读任务）。
+     *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
+     */
+    readonly worktreeUnavailable?: string;
 }
 /**
  * Recursively collect `status=completed` ancestors of `taskId` in topological

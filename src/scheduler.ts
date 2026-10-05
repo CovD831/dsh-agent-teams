@@ -45,6 +45,14 @@ export interface SchedulerConfig {
   readonly stateDir: string
   readonly executionPrompt?: string
   readonly dispatch?: (captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string) => Promise<boolean>
+  /**
+   * 建出隔离检出时报告它的基准版本（`worktree.base`）。
+   *
+   * ★ 这是 R5 / 回测唯一的父版本来源。判据层在成员【汇报完成】时需要它，
+   *   而那时派发已经结束 ⇒ 由调用方在这里记下来。
+   *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
+   */
+  readonly onWorktree?: (taskId: string, base: string) => void
 }
 
 export interface TeamScheduler {
@@ -98,6 +106,20 @@ export interface DispatchTicket {
   readonly worktreePath?: string
   /** 该 worktree 里缺失的 gitignore 条目（如 node_modules）—— 必须告诉成员。 */
   readonly worktreeMissingIgnored?: readonly string[]
+  /**
+   * ── ★【未隔离】这件事本身要留下痕迹 ──────────────────────────────────────────
+   *
+   * 降级派发（非 git 仓库）时带着它。理由：一次 `logger.warn` 不是一条记录 ——
+   * 它随进程消失，而"这个任务是在没有隔离的地方做的"是一个【关于这份工作的
+   * 事实】，读日志的人（以及依赖父版本的判据）必须能看见它。
+   *
+   * ★ 它与 `worktreePath === undefined` 必须【不同形】：
+   *   `worktreeUnavailable` 有值 ⇒ 问过 git 了，这个仓库【不支持】隔离 ⇒ 成员
+   *     应当知道，且 R5/变异那类判据会因此 unmeasured；
+   *   两者都缺席 ⇒ 这个任务【本来就不需要】隔离（review/requirements 这类只读任务）。
+   *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
+   */
+  readonly worktreeUnavailable?: string
 }
 
 function taskProfileSeedId(task: TeamTask): string | undefined {
@@ -238,6 +260,18 @@ export function assignmentPrompt(ticket: DispatchTicket, stateDir: string, teamI
 ${worktreeLine}${missingIgnored.length === 0 ? '' : `
 Note: ${missingIgnored.join(', ')} exist in the captain's workspace but not in this worktree (they are gitignored, so a clean checkout does not carry them). Install/set them up inside the worktree before running verification commands, or a missing dependency will look like a failing test.`}
 `
+  /**
+   * ── ★ 降级派发时必须【明说】没有隔离 ─────────────────────────────────────────
+   *
+   * 这里不产出工作目录指令（绝不伪造一个），但也不能沉默：成员会以为自己在一个
+   * 隔离的检出里，而实际上它正和全队共用目录。措辞必须让"没隔离"与"不需要隔离"
+   * 不同形 —— 前者是环境限制，后者是这一步本来就不涉及写文件。
+   */
+  const unavailableLine = typeof ticket.worktreeUnavailable === 'string' && ticket.worktreeUnavailable.trim() !== ''
+    ? `
+No isolated worktree: ${ticket.worktreeUnavailable.trim()}
+Work directly in the shared workspace. Work that needs a parent revision (R5 red-then-green, mutation testing) cannot be measured here and will be reported as such rather than as passing.`
+    : ''
   const contract = [
     `Kind: ${kind}${ticket.round === undefined ? '' : ` (round ${ticket.round})`}`,
     ticket.objective === undefined || ticket.objective === '' ? '' : `Objective: ${ticket.objective}`,
@@ -258,7 +292,7 @@ ${kind === 'implementation' || kind === 'repair' ? 'changedPaths: list the actua
 
 You are executing as configured member "${ticket.memberName}".
 Do not start a teammate's assigned task.
-${worktreeBlock}
+${worktreeBlock}${unavailableLine}
 Team goal:
 ${goal}
 
@@ -451,22 +485,100 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
          * 只给【会写文件的】任务建 —— review / requirements 这类只读任务不需要
          * 自己的检出，给它们建只会浪费磁盘并让清理面变大。
          *
-         * ★ 建失败【不】阻断派发：隔离是"能不能拿到父版本"的能力，不是"这一步
-         *   过不过"的裁决。失败时提示里没有工作目录 ⇒ 成员照常在共享目录干活，
-         *   而 R5 那类需要父版本的判据会因为没有 worktree 而 unmeasured
-         *   （判据自己会表达"我没测成"，见契约 §3.4）。
-         *   —— 把一次基础设施故障伪装成任务失败是更坏的结果。
+         * ★ 建失败【拒绝派发】（见下面的分支）：隔离是"这个成员能不能在正确的
+         *   地方干活"的前置条件，不是可选装饰。此前"warn 后继续"的写法把隔离
+         *   变成了提示 —— 成员在共享工作区干活，而没有任何一步会拒绝它。
          */
         const needsWorktree = ticket.kind === 'implementation' || ticket.kind === 'repair'
         let worktreePath: string | undefined
         let worktreeMissingIgnored: readonly string[] | undefined
+        let worktreeUnavailable: string | undefined
         if (needsWorktree) {
           const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId })
-          if (created.ok) {
+          if (created.ok !== true && created.unsupported === true) {
+            /**
+             * ── ★ 这个仓库【没有】隔离能力 ⇒ 降级派发，但留下痕迹 ──────────────
+             *
+             * MEASURED（2026-10-05）：此前这里对**所有**建不出来的情形都拒绝派发。
+             * 而非 git 仓库不是"这次没成"，是"这里根本没有"：拒绝 ⇒ 任务回
+             * pending、成员回 idle ⇒ `agent/status` 的 idle 边再踢一次 ⇒ 再拒绝
+             * ⇒ **无限循环，任务永久卡死**（实测：非 git 项目里每一个
+             * implementation/repair 任务都卡死，而只有一条 warn 说原因）。
+             *
+             * ★ 为什么降级是对的（而不是"再放宽一点"）：隔离是**能力**，
+             *   不是**裁决**。没有能力时，该做的是【如实说没有】并让成员干活，
+             *   而"没有隔离"这件事必须留下痕迹 —— 于是依赖父版本的判据
+             *   （R5 / 变异 / 回测的基准）拿到的是"我测不了"，不是"通过了"。
+             *   这正是"没测到不得并进通过"在调度层的同一条纪律。
+             *
+             * ★ 与下面 `failed` 分支的区别是本质的：那里是 git 仓库却建不出来，
+             *   属于环境坏了，**重试是合理的**；这里重试一万次也还是同一个环境。
+             *   一个"重试也不会有不同结果"的守卫，只会把任务卡死。
+             */
+            worktreeUnavailable = created.reason
+            ctx.logger.warn(`agent-teams: task "${ticket.taskId}" has no isolated worktree (${created.reason}); dispatching into the shared workspace and recording the task as un-isolated`)
+          } else if (created.ok !== true) {
+            /**
+             * ── ★ 机制化：本该能隔离却建不出来 ⇒ 拒绝派发 ────────────────────────
+             *
+             * 此前这里是 `logger.warn(...)` 之后【继续派发】。而"继续"的实际含义是
+             * 成员在【共享工作区】里干活 —— 于是隔离从机制退化成提示：
+             *
+             *   ① 隔离目录从未被真正使用，`dispatch.worktree` 到达判据也拿不到
+             *      任何可核对的东西（一次 warn 不是一条记录）；
+             *   ② 依赖父版本的判据（R5 / 变异）在这条路径上永远只能 unmeasured；
+             *   ③ 而"工作落到了主树"这件事【没有任何入口会拒绝】。
+             *
+             * ⇒ 现在:是 git 仓库却建不出来 ⇒ 该成员这一步【不派发】，工作回到
+             *   共享任务池。没有 fallback。理由与"判据不得把未测量并进通过"同源：
+             *   一个能被绕过的守卫等于没有守卫，而它还会让人以为有。
+             *
+             * ★ 回滚用与派发失败【同一条】路径 —— 那条路径已经处理了所有困难情形
+             *   （恢复中的 attempt、被队长接管的 capability、并发交接）。这里再写
+             *   一份"只把任务置回 pending"的轻量回滚，就会造出第二个语义不同的
+             *   回滚，而两者在日志里看不出区别。
+             */
+            ctx.logger.warn(`agent-teams: refusing to dispatch task "${ticket.taskId}" to "${ticket.memberName}": no isolated worktree (${created.reason})`)
+            await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
+              const fresh = await readTeam(stateRoot, team!.id)
+              if (fresh === undefined) return
+              const task = fresh.tasks.find(candidate => candidate.id === ticket.taskId)
+              if (task?.attemptId !== ticket.attemptId) return
+              if (ticket.recoveredOwned && ticket.previousStatus !== undefined && ticket.previousAttemptId !== undefined) {
+                task.status = ticket.previousStatus
+                task.assignee = ticket.previousAssignee
+                task.attempt = ticket.previousAttempt
+                task.attemptId = ticket.previousAttemptId
+                Object.assign(task, ticket.previousResult)
+                parkedAttempts.set(ticket.memberId, ticket.previousAttemptId)
+              } else {
+                task.status = 'pending'
+                task.assignee = ticket.previousAssignee
+                task.attemptId = undefined
+                parkedAttempts.delete(ticket.memberId)
+              }
+              task.handoffId = undefined
+              task.reassigning = false
+              task.updatedAt = Date.now()
+              const currentMember = fresh.members.find(candidate => candidate.name === ticket.memberName)
+              if (currentMember !== undefined && currentMember.status !== 'removed') currentMember.status = 'idle'
+              await writeTeam(stateRoot, fresh)
+            })
+            return
+          } else {
             worktreePath = created.path
             worktreeMissingIgnored = created.missingIgnored
-          } else {
-            ctx.logger.warn(`agent-teams: no isolated worktree for task "${ticket.taskId}" (${created.reason}); the member will work in the shared workspace`)
+            /**
+             * ★ 把这个任务的【隔离基准】交回调用方。
+             *
+             * `base` 是 R5（红前绿后）与回测（baseline）唯一的父版本来源，而它只
+             * 在这里可得（`createTaskWorktree` 的产物）。判据层在成员汇报完成时
+             * 需要它，那时派发早已结束 ⇒ 必须在这里交出去。
+             *
+             * ★ 只有真的建出 worktree 才回调：没有隔离就没有父版本，判据应当
+             *   说"我没能测量"，而不是拿一个猜出来的版本去比较。
+             */
+            config.onWorktree?.(ticket.taskId, created.base)
           }
         }
         const dispatched: DispatchTicket = {
@@ -475,6 +587,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           ...worktreeMissingIgnored === undefined || worktreeMissingIgnored.length === 0
             ? {}
             : { worktreeMissingIgnored },
+          ...worktreeUnavailable === undefined ? {} : { worktreeUnavailable },
         }
 
         const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)

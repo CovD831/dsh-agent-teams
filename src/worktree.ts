@@ -37,8 +37,8 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 export interface WorktreeResult {
   ok: true
@@ -58,6 +58,27 @@ export interface WorktreeRefusal {
   ok: false
   /** ★ Must say "could not isolate" — never "isolation was unnecessary". */
   reason: string
+  /**
+   * ── ★ 这次拒绝是【哪一种】────────────────────────────────────────────────────
+   *
+   * 调用方必须能区分下面两件事，而它们的区别**不是措辞、是后果**：
+   *
+   *   `'unsupported'` —— 这个仓库【根本没有】隔离能力（不是 git 仓库）。
+   *       这不是异常，是环境。⇒ 调用方应当降级派发，并把"未隔离"如实记进
+   *       任务记录。★ 若把它也当成拒绝派发，成员会在共享目录里干活、任务却
+   *       永远回 pending、调度器再踢再失败 ⇒ **无限循环，任务永久卡死**
+   *       （实测：非 git 项目里所有 implementation/repair 任务全卡死）。
+   *
+   *   `'failed'`      —— 是 git 仓库，但这次建不出来（没有提交、权限、磁盘…）。
+   *       这是真异常。⇒ 调用方应当拒绝派发，因为"本该能隔离却没有"意味着
+   *       环境坏了，而它下一次可能就好了 —— 重试是合理的。
+   *
+   * ★ 为什么是【结构化字段】而不是让调用方去匹配 `reason` 的字符串：
+   *   字符串匹配是脆的 —— 改一个标点、加一层 git 版本差异的措辞，判别就会
+   *   静默翻转，而翻转的后果正是上面那个无限循环。这里把判别放在【产生它的
+   *   地方】（我们刚刚亲自问了 git），调用方只读一个枚举。
+   */
+  unsupported?: boolean
 }
 
 function git(cwd: string, args: readonly string[]): string {
@@ -84,15 +105,26 @@ function tryGit(cwd: string, args: readonly string[]): { ok: true; value: string
  * 能不能在这个仓库里做隔离。**只读检查**，不建任何东西。
  *
  * ★ 返回拒绝时带 reason —— 调用方要能区分"这个仓库不支持"与"我们没试"。
+ * ★ 并且带 `unsupported` —— 调用方还要能区分"这个仓库不支持"（⇒ 降级）
+ *   与"本该能、这次没成"（⇒ 拒绝派发）。见 `WorktreeRefusal.unsupported`。
  */
 export function detectWorktreeSupport(repo: string): { ok: true; base: string } | WorktreeRefusal {
   const top = tryGit(repo, ['rev-parse', '--is-inside-work-tree'])
   if (!top.ok || top.value.trim() !== 'true') {
-    return { ok: false, reason: `not a git repository (${top.ok ? 'unexpected rev-parse output' : top.message})` }
+    return {
+      ok: false,
+      unsupported: true,
+      reason: `not a git repository (${top.ok ? 'unexpected rev-parse output' : top.message})`,
+    }
   }
   const head = tryGit(repo, ['rev-parse', '--verify', 'HEAD'])
   if (!head.ok) {
-    return { ok: false, reason: `the repository has no commit to use as a parent revision (${head.message})` }
+    // ★ 是 git 仓库、但没有提交 ⇒ 这是"本该能隔离却建不出来"，不是环境不支持。
+    return {
+      ok: false,
+      unsupported: false,
+      reason: `the repository has no commit to use as a parent revision (${head.message})`,
+    }
   }
   return { ok: true, base: head.value.trim() }
 }
@@ -166,6 +198,95 @@ export function createTaskWorktree(options: CreateWorktreeOptions): WorktreeResu
  */
 function missingIgnored(repo: string, worktreePath: string): string[] {
   return ignoredTopLevel(repo).filter((name) => existsSync(join(repo, name)) && !existsSync(join(worktreePath, name)))
+}
+
+export interface ProvisionOptions {
+  /** The repository (captain workspace) the dependencies are copied from. */
+  repo: string
+  /** The task worktree the dependencies are copied into. */
+  worktree: string
+  /**
+   * Top-level entries to copy (typically `<repo>/node_modules` — the ones
+   * `missingIgnored` reported). Relative, but `..` and absolute paths are
+   * refused: provisioning must never reach outside either root.
+   */
+  entries: readonly string[]
+}
+
+export interface ProvisionResult {
+  /** Entries that are now present in the worktree. */
+  copied: string[]
+  /**
+   * ★ 没能准备的那一件 + 原因。**必须报出来**：一件"没准备好"如果静默通过，
+   *   成员会在里面跑命令、因缺依赖失败，然后把一次"环境没准备好"误报成
+   *   "工作没做出来"（两者不同形）。
+   */
+  failed: Array<{ entry: string; reason: string }>
+}
+
+/**
+ * ── 依赖按需注入：把测试需要的包【复制】进 worktree ────────────────────────────
+ *
+ * worktree 是干净的检出，gitignore 的 `node_modules` 不在里面（实测边界③）。
+ * 成员要在隔离目录里跑验证命令，就必须有依赖。三条路的实测结论：
+ *
+ *   · 软链（symlink）⇒ ★ **会被写穿**：worktree 里的写入顺着链改到主检出的
+ *     依赖树。一条被共享、可被任意改写的依赖树，会让"两个成员各自验证"
+ *     在日志里同形，而出问题时无从归因。
+ *   · 只读锁（chmod / lockfile）⇒ 不阻止写穿，只把成员换成另一种失败方式。
+ *   · 复制品（copy）  ⇒ 代价是磁盘，换来的是【两个检出真的互不影响】。
+ *
+ * ★ 为什么是选项而【不是】自动执行：复制一棵 node_modules 很贵，静默地做会把
+ *   "派发很快"变成"派发很慢"。调用方（调度器）显式要求才做，本函数不猜。
+ *
+ * ★ 为什么 entries 必须显式给出：我们不读 `.gitignore` 的语义（那是 git 的事），
+ *   调用方拿 `missingIgnored` 的结论来喂它 —— 于是"要复制什么"有唯一来源。
+ */
+export function provisionWorktreeDependencies(options: ProvisionOptions): ProvisionResult {
+  const { repo, worktree } = options
+  const copied: string[] = []
+  const failed: Array<{ entry: string; reason: string }> = []
+
+  for (const entry of options.entries) {
+    const safe = safeRelativeEntry(entry)
+    if (safe === undefined) {
+      failed.push({ entry, reason: 'refused: only plain relative entries directly inside the repo may be provisioned' })
+      continue
+    }
+    const source = join(repo, safe)
+    const target = join(worktree, safe)
+    if (!existsSync(source)) {
+      failed.push({ entry: safe, reason: `not present in ${repo}` })
+      continue
+    }
+    if (existsSync(target)) {
+      // 已经在了 ⇒ 不重复复制（重试一个 attempt 不该把依赖树再搬一遍）。
+      copied.push(safe)
+      continue
+    }
+    try {
+      mkdirSync(dirname(target), { recursive: true })
+      /**
+       * ★ 普通复制，不是软链、不是 reflink —— 实测：软链会被写穿。
+       *   `dereference: false` 保留包内部自带的相对软链（pnpm 大量使用它们），
+       *   把它们变成真实拷贝会让 .pnpm 的相对结构失真。
+       */
+      cpSync(source, target, { recursive: true, dereference: false, force: false, errorOnExist: false })
+    } catch (error) {
+      failed.push({ entry: safe, reason: String((error as Error | undefined)?.message ?? error) })
+      continue
+    }
+    copied.push(safe)
+  }
+
+  return { copied, failed }
+}
+
+/** 只接受"直接位于根下的普通相对条目"——注入路径不能穿到根外。 */
+function safeRelativeEntry(entry: string): string | undefined {
+  const trimmed = entry.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  if (trimmed === '' || trimmed.startsWith('/') || trimmed.includes('/') || trimmed === '.' || trimmed.includes('..')) return undefined
+  return trimmed
 }
 
 /**
