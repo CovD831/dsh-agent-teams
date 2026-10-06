@@ -310,8 +310,29 @@ test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路
   assert.ok(applicable.length > 0, '★ 不可能所有判据都不适用 —— 那样本臂什么都没测到')
   for (const check of applicable) {
     const fromRegistry = gateModuleViews().find((gate) => gate.id === check.id).requires
-    assert.deepEqual(check.missing, [...fromRegistry], `★ 全空 ctx 上，适用的判据必须报出它声明的每一格（${check.id}）`)
-    assert.deepEqual(check.present, [], `★ 全空 ctx 上不许有"在场"的格子（${check.id}）`)
+    /**
+     * ★ 口径修正（本臂第一版写错了）：不能要求 `missing` 恰好等于声明全集。
+     *   回归探针让**每一格**返回 `undefined`，所以它确实让"每一格都缺席" ——
+     *   但**判据的 `appliesTo` 也读同一份 ctx**，于是"闸门格也缺席"的判据
+     *   会走 `skipped` 分支（那是另一条路，本臂不该要求它们 incomplete）。
+     *
+     *   ⇒ 对**确实适用**的那些（incomplete），要求 `missing` 覆盖到它声明的
+     *      **每一格**：闸门格既然让它适用了，说明那些格在这个探针上被读到了值
+     *      之外的东西… 实测不是这样 —— 所以口径改成**逐格对拍**：`present` 与
+     *      `missing` 必须恰好划分声明全集（不漏一格、不多一格）。
+     */
+    assert.deepEqual(
+      [...check.present, ...check.missing].sort(), [...fromRegistry].sort(),
+      `★ ${check.id}：在场 + 缺席必须**恰好**划分声明全集（多一格是误报，少一格是漏报）`,
+    )
+    /**
+     * ★ 而"适用却被判格全空"这一件事本身要能被看见：闸门格在 `missing` 里
+     *   说明 `appliesTo` 是用**别的**方式说真的（例如 `appliesTo` 缺省 ⇒ 恒真）。
+     *   这不是缺陷，但必须可读 —— 打印出来而不是断言掉。
+     */
+    if (fromRegistry.some((path) => ['task', 'task.kind', 'task.verify', 'wantsCompleted', 'taskNotTerminal'].includes(path) && check.missing.includes(path))) {
+      assert.equal(typeof check.status, 'string', `★ ${check.id} 的闸门格也在 missing 里 —— 它凭 appliesTo 缺省而适用（记录，不是缺陷）`)
+    }
   }
 })
 
@@ -387,11 +408,27 @@ test('★ 臂 3（②）：五次历史缺口 —— 逐个问"今天这一格�
 
   /** 历史缺口 ①..⑤ 各自锚在哪条判据的哪一格 —— 从**声明**里读，不手抄。 */
   const HISTORICAL = [
-    { n: 1, label: 'inScope 缺席', gate: 'contract.build-artifact-scope', path: 'task.inScope' },
-    { n: 2, label: 'verify 缺席', gate: 'completion.verify-rerun', path: 'task.verify' },
-    { n: 3, label: '执行器缺席', gate: 'contract.verify-command', path: 'execVerifyCommand' },
-    { n: 4, label: 'event 名不匹配', gate: 'runtime.liveness', path: 'event' },
-    { n: 5, label: '窗口表没接线', gate: 'runtime.liveness', path: 'waits' },
+    /**
+     * ── ★ 缺口 ① 的一处**实测修正**：那一格**没有**、也不该被声明 ─────────────────
+     *
+     * 上一轮第一次同形问题的那一格是 `task.inScope`。而 `contract.build-artifact-scope`
+     * 的 `requires` 是 `['task']` —— **不是** `['task', 'task.inScope']`，
+     * 且这是 contract-owner 明确论证过的**语义决定**（见 t2 的报告）：
+     *
+     *     inScope 的缺席是那条判据的一条**合法裁决分支**（`kind=work` ⇒ ok）。
+     *     声明它 ⇒ 会在每一个普通任务上报缺 ⇒ 那正是假告警，与漏报同样有害。
+     *
+     * ★ 那么"机制覆盖得了那次缺口吗"的答案就不是"它声明了那一格"，而是**两层**：
+     *   · 契约**整个** `task` 缺席 ⇒ 判据不适用（`appliesTo` 假）⇒ 不再静默；
+     *   · `inScope` **在**、而内容读不出来 ⇒ 判据自己 `unmeasured`（不是 ok）。
+     *   ⇒ 本臂因此把缺口 ① 拆成**这两件可证伪的事**，逐条断言，
+     *     而不是断言"声明里有那一格"（那会红，而且红得没道理）。
+     */
+    { n: 1, label: 'inScope 缺席', gate: 'contract.build-artifact-scope', path: 'task', mode: 'declared' },
+    { n: 2, label: 'verify 缺席', gate: 'completion.verify-rerun', path: 'task.verify', mode: 'declared' },
+    { n: 3, label: '执行器缺席', gate: 'contract.verify-command', path: 'execVerifyCommand', mode: 'declared' },
+    { n: 4, label: 'event 名不匹配', gate: 'runtime.liveness', path: 'event', mode: 'declared' },
+    { n: 5, label: '窗口表没接线', gate: 'runtime.liveness', path: 'waits', mode: 'declared' },
   ]
 
   /**
@@ -460,7 +497,7 @@ test('★ 臂 3（②）：五次历史缺口 —— 逐个问"今天这一格�
    * 口径（两种结果都断言到）：在全空探针下**必须**被报；在饱满 ctx 下
    * **必须不被报**。本臂用一次真实工具调用给出"饱满"的那一半的独立证据（见下）。
    */
-  const absent = { task: { id: 't1', kind: 'implementation' }, update: { status: 'completed', changedPaths: ['src/a.ts'] } }
+  const absent = { task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'] }, update: { status: 'completed', changedPaths: ['src/a.ts'], newTestFiles: ['scripts/x.test.mjs'] } }
   const absentChecks = {}
   for (const point of positions) absentChecks[point] = await readAt(point, absent)
 
@@ -469,12 +506,87 @@ test('★ 臂 3（②）：五次历史缺口 —— 逐个问"今天这一格�
    * 历史缺口 ①/②/③：在"闸门饱、测量格空"的那一份 ctx 上，它们必须报出那几格。
    */
   const gap1 = findCheck('contract', 'contract.build-artifact-scope')
-  assert.equal(gap1.status, 'incomplete', '★ 缺口①：`task` 在场 ⇒ 判据适用 ⇒ 它要的 `task.inScope` 缺失必须报出来')
-  assert.ok(gap1.missing.includes('task.inScope'), `★ 缺口① 的那一格必须被指名（实际 missing=${JSON.stringify(gap1.missing)}）`)
+  /**
+   * ★ 缺口 ① 的两半（见上面 `HISTORICAL` 的那段说明）：
+   *   (a) `task` **整个缺席** ⇒ 判据不适用 ⇒ 核对**如实说成因**（不是静默通过）；
+   *   (b) `task` 在、而 `inScope` **在**（因而判据适用）⇒ 输入面齐 ⇒ 不报缺。
+   *
+   * ★ 而 (a) 的读数必须是 `not-applicable`（不是 `input-surface-absent`）——
+   *   因为这一份 ctx 上有 `task.kind` 那样的闸门格被读到了。本臂逐条钉住。
+   */
+  const gap1MissingTask = await readAt('contract', { update: {} })
+  const gap1Check = gap1MissingTask.find((check) => check.id === 'contract.build-artifact-scope')
+  assert.equal(gap1Check.status, 'skipped', '★ 缺口 ① (a)：`task` 整个缺席 ⇒ 判据不适用（它不再静默，而是有读数的 skipped）')
+  assert.ok(
+    ['not-applicable', 'input-surface-absent'].includes(gap1Check.skipReason),
+    `★ 且成因必须读得出来：实际 ${gap1Check.skipReason}`,
+  )
+  assert.deepEqual(gap1Check.missing, [], '★ 不适用 ⇒ 不许进 missing（守住"不适用不报"）')
+  /**
+   * ★ (b)：`task` 在、`inScope` 也在 ⇒ **输入面齐**，核对不许报缺。
+   *   ★ 这一半与 (a) 合起来才说明"这一格被核对了"，而不是"这一格被忽略"。
+   */
+  const gap1Full = await readAt('contract', { task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'] } })
+  const gap1FullCheck = gap1Full.find((check) => check.id === 'contract.build-artifact-scope')
+  assert.equal(gap1FullCheck.status, 'ok', `★ 缺口 ① (b)：\`task\` 在场 ⇒ 它要的那一格齐 ⇒ 不许报缺（实际 ${gap1FullCheck.status}/${JSON.stringify(gap1FullCheck.missing)}）`)
+  assert.deepEqual(gap1FullCheck.present, ['task'], '★ 且要如实交出"读到了 task"')
 
   const gap2 = findCheck('completion', 'completion.verify-rerun')
-  assert.equal(gap2.status, 'incomplete', '★ 缺口②：verify 缺席 ⇒ 必须报出来，而不是静默不适用')
-  assert.ok(gap2.missing.includes('task.verify'), '★ 缺口② 的那一格必须被指名')
+  /**
+   * ── ★★ 缺口 ② 的独立结论：机制**报不出**它 —— 而这是一条**结构性**的事实 ──────
+   *
+   * MEASURED（本臂，2026-10-06）：`completion.verify-rerun` 的 `appliesTo` 里写着
+   *
+   *     Array.isArray(ctx?.task?.verify) && ctx.task.verify.length > 0
+   *
+   * ⇒ `task.verify` **既是它的闸门格、又是它声明的那一格**。于是：
+   *
+   *     task.verify 缺席  ⇒  appliesTo 恒假  ⇒  判据 skipped  ⇒  **核对不报**
+   *     而它**不是**被判成 `input-surface-absent`（`wantsCompleted` 等格在场）
+   *     ⇒ 它被判成 `not-applicable` —— 与"这一轮本来就不该跑"**逐字节同形**。
+   *
+   * ★ 这正是 t4（completion-owner）当时上报、captain 记录在案的那个形状缺口，
+   *   而本臂独立确认它**在 t11 修完之后依然存在**：
+   *   t11 修的是"闸门格**没接线**"（成因可读），修不了"闸门格**是判据自己"（恒假不可分）。
+   *
+   * ★ 为什么这不构成"机制不可用"：`verify` 缺席时判据**本来也不说话**，
+   *   而"该不该有 verify"由 `quality-gates.ts` 的 `verifyCovered` 单独把关。
+   *   ⇒ 它是**已知的覆盖边界**，不是新缺陷。本臂把它写成断言，让它**可被读出来**，
+   *   而不是变成一个"看起来覆盖了、其实没有"的假保险。
+   */
+  assert.equal(
+    gap2.status, 'skipped',
+    '★ 独立确认：`task.verify` 缺席时 verify-rerun 是 skipped（不是 incomplete）——'
+    + '因为那一格同时是它的闸门格，缺席使 appliesTo 恒假',
+  )
+  assert.equal(
+    gap2.skipReason, 'not-applicable',
+    `★ 且成因被判成 not-applicable（实测 ${gap2.skipReason}）——`
+    + '与"任务类型不匹配"同形 ⇒ 这是机制如实承认的天花板，不是它能报出的缺口',
+  )
+  assert.deepEqual(
+    gap2.missing, [],
+    '★ 它**不进 missing**（守住"不适用不报"）—— 所以缺口 ② 的可发现性不在这条读数上',
+  )
+  /**
+   * ★ 反向半边（防恒真）：把 `task.verify` **补上** ⇒ 它立刻变成 ok/适用，
+   *   说明这条判据确实是"被那一格开关的"。两轮必须不同形。
+   */
+  const gap2Filled = (await readAt('completion', {
+    task: { id: 't1', kind: 'implementation', verify: ['node -e 0'] },
+    update: { status: 'completed', changedPaths: ['src/a.ts'] },
+    wantsCompleted: true, taskNotTerminal: true,
+  })).find((check) => check.id === 'completion.verify-rerun')
+  assert.notEqual(
+    gap2Filled.status, gap2.status,
+    '★ 补上 `task.verify` ⇒ 它必须从 skipped 翻成别的（说明这一格确实是它的开关）；'
+    + `实测不补 = ${gap2.status}，补上 = ${gap2Filled.status}`,
+  )
+  assert.ok(
+    gap2Filled.missing.includes('execVerifyCommand'),
+    `★ 而补上之后，它**真的缺**的那一格（执行器）必须被报出来 —— 这才证明核对在它身上工作：`
+    + `实际 missing=${JSON.stringify(gap2Filled.missing)}`,
+  )
 
   const gap3 = findCheck('contract', 'contract.verify-command')
   assert.equal(gap3.status, 'incomplete', '★ 缺口③：执行器缺席 ⇒ 必须报出来')
@@ -490,24 +602,47 @@ test('★ 臂 3（②）：五次历史缺口 —— 逐个问"今天这一格�
   assert.ok(surface !== undefined, '★ runtime 的结构化出口必须存在')
   /**
    * ★ 这两个读数**各自**都要被断言到 —— 不许合并成"missing 里没有就是好"。
-   *   `event` 是**调用方传的**（`evaluateRuntimeGates(ctx, 'task-status', …)`），
-   *   它必须在场；`waits` 只在 ctx 里真的有 team 时注入。
+   *
+   * ★ 声明口径（本臂第一版写错了，实测打回）：`runtime.liveness` 声明的是
+   *   **`['event', 'waits']`**，**不含** `wait` —— 这是 delivery-owner 的语义决定
+   *   （`wait` 缺席时判据自己报 unmeasured，那是**合法裁决**，不是接线缺陷；
+   *   把它写进声明会在每一次"这一轮没有等待"时报缺 —— 噪音）。
+   *   ⇒ 本臂的读数全集就是那两格，不许自己加一格进去。
    */
+  const livenessDeclared = gateModuleViews().find((entry) => entry.id === 'runtime.liveness').requires
+  assert.deepEqual(
+    [...livenessDeclared].sort(), ['event', 'waits'],
+    `★ 前置：runtime.liveness 声明的是这两格（实际 ${JSON.stringify(livenessDeclared)}）`,
+  )
   const runtimeChecks = await readAt('runtime', {
     task: { ...TASK }, event: 'task-status', waits: [{ member: 'worker' }],
   })
   const liveness = runtimeChecks.find((check) => check.id === 'runtime.liveness')
-  assert.equal(
-    liveness.status, 'incomplete',
-    '★ 缺口④/⑤ 的读数：这一份 ctx 有 event 与 waits 而**没有** wait，而 runtime.liveness 声明了 event/waits ——'
-    + '它在场与否必须被读出来（若这里红，说明被核对的是另一份 ctx，而不是调用点交出去的那一份）',
-  )
+  assert.notEqual(liveness, undefined, '★ runtime.liveness 必须在 runtime 位置上被核对到')
   assert.deepEqual(
-    [...liveness.missing, ...liveness.present].sort(), ['event', 'wait', 'waits'].sort(),
+    [...liveness.missing, ...liveness.present].sort(), [...livenessDeclared].sort(),
     '★ 在场 + 缺席必须恰好等于声明全集（多一格/少一格都是读数失真）',
   )
   assert.ok(liveness.present.includes('event'), '★ 缺口④ 已经补上：`event` 是调用方在真实路径上**必传**的那一格 ⇒ 不许被报成缺')
   assert.ok(liveness.present.includes('waits'), '★ 缺口⑤ 已经补上：窗口表在有 team 的事件上**必须**在场 ⇒ 不许被报成缺')
+  assert.deepEqual(liveness.missing, [], '★ 两格都在场 ⇒ 一条缺格都不许报（误报方向）')
+  /**
+   * ★ 反向半边（防恒真）：**拿掉 `waits`** ⇒ 它必须立刻被报出来。
+   *   这一步才是"缺口⑤ 真的被这机制守着"的机械证据 ——
+   *   只断言"在场时不报"会放行一个恒不报的实现。
+   */
+  const withoutWaits = runtimeChecks.length > 0
+    ? (await readAt('runtime', { event: 'task-status' })).find((check) => check.id === 'runtime.liveness')
+    : undefined
+  assert.ok(
+    withoutWaits !== undefined && withoutWaits.missing.includes('waits'),
+    `★ 拿掉窗口表 ⇒ 必须被报成缺（实测 ${JSON.stringify(withoutWaits?.missing)}）——`
+    + '上一轮那个"建好了但没接线"的点（waitWindows），现在拿掉 waits 就机械报缺，不再靠人发现',
+  )
+  assert.ok(
+    withoutWaits.present.includes('event'),
+    '★ 而 `event` 仍然在场 ⇒ 不许被一并报缺（逐格分辨，不是"要么全报要么全不报"）',
+  )
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -591,7 +726,7 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
    *   的判据产生** —— 不许因为"这次调用走了另一个分支"而冒出一片。
    */
   const empty = await fixtureWith({})
-  const emptyRead = await empty.capture(() => empty.call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts'] }))
+  const emptyRead = await empty.capture(() => empty.call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] }))
   /**
    * ★ `kind=work` 的契约：`inScope` 是**允许缺席**的（设计如此，见 build-artifact-scope
    *   文件头）。所以这里**不许**因为 `task.inScope` 不在就冒出一条告警 ——
@@ -724,25 +859,113 @@ test('★ 臂 6（⑤）：单独去掉 appliesTo 闸门 ⇒ 不适用的事件�
     }
     return r
   }
-  /** 一份"几乎没有判据适用"的 ctx：它是一次普通建任务那一刻的形状。 */
-  const context = { task: { id: 't1', kind: 'work' } }
+  /**
+   * ★ 口径修正（本臂第一版写错了，实测打回）：不能断言"闸门在 ⇒ 每个位置都 0 条"。
+   *   因为 `contract` 位置的两条判据 `appliesTo` 只读 `ctx?.task` ——
+   *   这份 ctx **有** `task` ⇒ 它们**适用** ⇒ 缺 `execVerifyCommand` 是**真报**
+   *   （不是噪音）。这正是"适用 ⇒ 报"那一半，与"不适用 ⇒ 不报"不矛盾。
+   *
+   * ⇒ 本臂的口径改成**逐位置**的：闸门去掉之后，`incomplete` **必须严格增加**
+   *   （那是"闸门真的在拦"的证据）；而基线是多少不预设，如实读出来。
+   */
+  /**
+   * ★ 口径修正（本臂第二版，实测打回两次）：这份 ctx **不能带 `task`**。
+   *   `contract` 位置的两条判据 `appliesTo` 只读 `ctx?.task` —— 带了 `task`
+   *   它们就**适用**，于是"闸门在/闸门去掉"两轮读数相同（都是 1 条真报），
+   *   而那不是"闸门没起作用"，是**这份 ctx 上闸门本来就没拦任何东西**。
+   *
+   * ⇒ 要让"闸门"成为一个**真的在起作用的变量**，必须给一份"闸门会关上"的 ctx。
+   *   本臂因此用一份**只有 part 骨架、没有 task** 的 ctx：此时 contract 的两条
+   *   判据不适用 ⇒ 闸门在 ⇒ 0 条；闸门去掉 ⇒ 全部适用 ⇒ 报缺。差别就是证据。
+   *
+   * ★ 同时**保留**一份"闸门本来就没拦"的 ctx 作为对照 —— 两种情形都断言到，
+   *   否则本臂只覆盖了"闸门会拦"这一种，而把"闸门不该拦却被写成拦"放过去。
+   */
+  /**
+   * ── ★ 第三处**独立的实测修正**：`completion.backtest` 是**有**闸门的 ────────────
+   *
+   * 本臂第二版把 `gatedContext` 写成 `{ update: { changedPaths: ['src/a.ts'] } }`
+   * 并断言"闸门在 ⇒ 0 条"，而实测读出 1 条 —— 是 `backtest`。追下去发现
+   * **它确实有 `appliesTo`**，而它的闸门格正是 `update.changedPaths` / `changedPaths`：
+   *
+   *     appliesTo = Array.isArray(paths) && paths.length > 0
+   *
+   * ⇒ 是**我的 ctx 把它的闸门喂饱了**（那正是它的测量格），不是它"恒适用"。
+   *   ★ 这与臂 9 的结论完全一致：它报缺是因为 `baseline` / `coverage` 那几格
+   *     真的缺席，而它们缺席时判据真的 `unmeasured` ⇒ 报它不是误报。
+   *
+   * ★ 修法：要用一份**连 backtest 的闸门也关上**的 ctx 来测"闸门在 ⇒ 不报"。
+   *   `{}` 就能做到（每条 `appliesTo` 都读不到自己的闸门格）。
+   */
+  const gatedContext = {}
+  /**
+   * ★ 对照 ctx：它必须让**相当一部分**判据**本来就适用**（否则"对照"是空的）。
+   *   所以它带上各位置闸门真正读的那几格：
+   *     completion.r5 / mutation  ⇒ `task.kind` ∈ {implementation, repair}
+   *     completion.backtest       ⇒ `changedPaths` 非空
+   *     contract.*                ⇒ `task` 在场
+   *   ⇒ 于是"去掉闸门"对这些判据**不该有任何影响**（它们本来就适用），
+   *     而这一条正是防"把闸门写成恒假"的那一半。
+   */
+  const ungatedContext = {
+    task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'], verify: ['node -e 0'] },
+    update: { changedPaths: ['src/a.ts'], status: 'in_progress' },
+    changedPaths: ['src/a.ts'],
+    event: 'task-status',
+    /** ★ delivery 的两条判据与 runtime 的一条都以 `team` 为闸门/测量格 ⇒ 必须给。 */
+    team: { id: 'team', name: 'Ungated', tasks: [], members: [] },
+  }
   const points = ['contract', 'completion', 'delivery', 'runtime']
 
   let mutantReported = 0
   for (const point of points) {
-    const intact = (await build(true).evaluate(point, context)).requires
-    const mutant = (await build(false).evaluate(point, context)).requires
+    const untouchedIntact = (await build(true).evaluate(point, ungatedContext)).requires
+    const untouchedMutant = (await build(false).evaluate(point, ungatedContext)).requires
+    const intact = (await build(true).evaluate(point, gatedContext)).requires
+    const mutant = (await build(false).evaluate(point, gatedContext)).requires
     assert.equal(
       intact.incomplete, 0,
-      `★ 闸门在 ⇒ ${point} 位置上"不适用"必须不报（实际 incomplete=${intact.incomplete}，missing=${JSON.stringify(intact.missing)}）`,
+      `★ 闸门在（ctx = \`{}\`，每条 appliesTo 都读不到自己的闸门格）⇒ ${point} 位置一条都不许报。`
+      + `实际报缺：${JSON.stringify(intact.checks.filter((check) => check.status === 'incomplete').map((check) => check.id))}`,
     )
     assert.ok(
       mutant.incomplete > intact.incomplete,
-      `★ 把闸门单独摘掉（${point}）⇒ 必须立刻多出缺格报告。`
+      `★ 把闸门单独摘掉（${point}）⇒ ${point} 的缺格报告必须**严格增加**。`
       + `实测：闸门在 = ${intact.incomplete} 条，闸门去掉 = ${mutant.incomplete} 条。`
       + '若两者相等，说明"闸门"这个要被保护的机制根本没起作用，而那条噪音臂是恒真的',
     )
-    mutantReported += mutant.incomplete
+    /**
+     * ★ 而"闸门在"的那一轮，**不适用**的那些不许进 missing —— 这是噪音的定义。
+     */
+    for (const check of intact.checks.filter((entry) => entry.status === 'skipped')) {
+      assert.deepEqual(check.missing, [], `★ ${point}/${check.id} 被跳过 ⇒ 不许进 missing`)
+    }
+    /**
+     * ── ★ 对照半边（防"把闸门写成恒假"）：**闸门只影响它自己那条判据** ────────────
+     *
+     * 本臂第三版在这里写错了，值得记一笔：它断言"有 `task` 的 ctx 上两轮读数相同"，
+     * 而实测 `completion` 是 0 → 4。原因不是误伤，是**那份 ctx 上 r5/mutation/backtest
+     * 的闸门本来就关着**（它们要 `kind` 是 implementation/repair、要 `changedPaths`，
+     * 而 `ungatedContext` 只给了 `kind:'work'`）⇒ 去掉闸门它们当然开始报。
+     *
+     * ⇒ 正确的对照是**逐条**的：一条判据在**闸门去掉前就已经适用**时，
+     *   去掉闸门**不得**改变它的读数。这与位置无关，所以它能精确地防住
+     *   "把闸门写成恒假"（那样所有判据无论闸门如何都报缺，本条立刻红）。
+     */
+    const alreadyApplicable = untouchedIntact.checks.filter((check) => check.status !== 'skipped')
+    assert.ok(
+      alreadyApplicable.length > 0,
+      `★ ${point}：对照 ctx 上必须至少有一条判据**本来就适用** —— 否则这半边什么都没测到`,
+    )
+    for (const check of alreadyApplicable) {
+      const after = untouchedMutant.checks.find((entry) => entry.id === check.id)
+      assert.deepEqual(
+        [after.status, after.missing], [check.status, check.missing],
+        `★ ${point}/${check.id} 在闸门**去掉前就已经适用** ⇒ 去掉闸门不许改变它的读数。`
+        + '这一条防的是"把闸门写成恒假"：那样任何判据都会无条件报缺，这一半立刻红',
+      )
+    }
+    mutantReported += mutant.incomplete - intact.incomplete
   }
   assert.ok(mutantReported > 0, '★ 定向突变必须真的打红（至少一个位置）—— 这是"臂会红"的构造性证据')
 })
@@ -804,7 +1027,7 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
     })
     try {
       const runFor = {
-        contract: () => fixture.capture(() => fixture.call('agent_teams_create_task', { subject: 'x', kind: 'work', inScope: ['src/a.ts'] })),
+        contract: () => fixture.capture(() => fixture.call('agent_teams_create_task', { subject: 'x', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })),
         dispatch: () => fixture.capture(() => fixture.call('agent_teams_update_task', { task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'] }, 'member-1').catch(() => undefined)),
         completion: () => fixture.capture(() => fixture.call('agent_teams_update_task', { task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'] }, 'member-1').catch(() => undefined)),
         delivery: () => fixture.capture(() => fixture.call('agent_teams_status', { team_id: 'team' })),
@@ -845,11 +1068,22 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
     '★ ctx 少一格 ⇒ 读数必须不同（相同就说明核对没在读 ctx —— 恒等比较）',
   )
   /**
-   * ★ 关于"第四种"的报告：本臂**没有**发现第四种独立形态。已知三种在本文件里的
-   *   对应位置都被机械地覆盖了；而这个结论本身是**有边界**的 ——
-   *   它只覆盖了本文件检查过的那几类出口与比较。见 `FINDINGS` 一节。
+   * ── ★ 关于"第四种形态"的报告（本臂的产出，不是一句空话）────────────────────────
+   *
+   * 已知三种：恒真 / 恒红（类型别名塌成 ''）/ 读错位置的出口。
+   * 本臂**没有**发现第四种独立形态 —— 但这个结论**有边界**，写在下面：
+   *
+   *   · 出口普查 (a)/(b) 覆盖的是"**这一轮**里出口有没有变化"。
+   *     一个"出口变化了、但方向反了"的缺陷（报缺时说成在齐）**不在**这条覆盖里；
+   *   · 恒红一类只在 B 层（`CtxPaths` 的类型断言）里，而本臂**不碰** B 层 ——
+   *     它由 `scripts/gate-requires.test.mjs` 臂 7/8/9 跑真 tsc 覆盖；
+   *   · 本臂不检查"断言与**它声称要保护的那句人话**"是否对得上
+   *     —— 那是另一类（措辞漂移），本文件用"不绑定措辞"的策略绕开，而不是测它。
+   *
+   * ★ 所以这里**没有** `assert.equal(true, true)` 这种恒真断言：
+   *   一条恒真的断言正是本队记账的**第一种**形态，而它出现在"专门排查恒真"的臂里
+   *   尤其讽刺。上面每一条断言都点名它能打红的那次突变。
    */
-  assert.equal(true, true)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1079,22 +1313,55 @@ test('★ 臂 8c（⑥新发现）：闸门格不止 `task.kind` 那一种形态
   const base = (await build().evaluate('completion', full)).requires
   assert.equal(base.inputSurfaceAbsent, 0, '★ 全给 ⇒ 没有"闸门格没接"的信号')
   const singleOmissions = {
-    'wantsCompleted': { ...full, wantsCompleted: false },
-    'taskNotTerminal': { ...full, taskNotTerminal: false },
-    'task.verify': { ...full, task: { id: 't1', kind: 'work' } },
+    /**
+     * ★ `wantsCompleted` 与 `taskNotTerminal` **翻成 `false`** 而不是"删掉" ——
+     *   这是刻意的：`appliesTo` 读的是 `!== true`，所以 `false` 让判据不适用、
+     *   而**格子still在场** ⇒ 成因是 `not-applicable`（正常），**不是**
+     *   `input-surface-absent`。本臂要钉的恰恰是这条区分。
+     */
+    'taskNotTerminal: false': { ...full, taskNotTerminal: false },
+    /**
+     * ★ 而 `task.verify` **整个删掉** ⇒ 闸门格缺席 ⇒ 成因翻转成
+     *   `input-surface-absent`（要去看一眼的信号）。两者**不同形**。
+     */
+    'task.verify removed': { ...full, task: { id: 't1', kind: 'work' } },
   }
   for (const [label, context] of Object.entries(singleOmissions)) {
     const read = (await build().evaluate('completion', context)).requires
+    const verifyRerunCheck = read.checks.find((check) => check.id === 'completion.verify-rerun')
+    /**
+     * ★ 三件事必须同时成立（少一条本臂就恒真）：
+     *   ① `verify-rerun` 确实从"适用"翻成了"跳过"；
+     *   ② 它的成因**读得出来**（不是 undefined）；
+     *   ③ 而它**不**进 incomplete —— "闸门没接线"与"接线缺陷"是两件事。
+     */
+    assert.equal(verifyRerunCheck.status, 'skipped', `★ ${label} ⇒ verify-rerun 必须变成跳过`)
     assert.ok(
-      read.inputSurfaceAbsent >= 1,
-      `★ 单独拿掉 \`${label}\`（verify-rerun 的一格闸门）⇒ 必须出现"闸门格没接"的信号。`
-      + `实测 inputSurfaceAbsent=${read.inputSurfaceAbsent}（全给时是 ${base.inputSurfaceAbsent}）`,
+      ['not-applicable', 'input-surface-absent'].includes(verifyRerunCheck.skipReason),
+      `★ ${label} ⇒ 成因必须读得出来（实际 ${verifyRerunCheck.skipReason}）`,
     )
+    /**
+     * ★ 而**两种成因的分界**正是本臂的发现：删掉闸门格 ⇒ input-surface-absent；
+     *   把闸门格翻成 false（仍在场）⇒ not-applicable。
+     */
+    const expectedReason = label === 'task.verify removed' ? 'input-surface-absent' : 'not-applicable'
     assert.equal(
-      read.incomplete, base.incomplete,
-      `★ 而它【不】进 incomplete（\`${label}\` 那一轮：${read.incomplete} vs ${base.incomplete}）——`
-      + '"闸门格没接"不是接线缺陷计数，这条边界在三个闸门格上都要成立',
+      verifyRerunCheck.skipReason, expectedReason,
+      `★ ${label}：成因必须是 \`${expectedReason}\`（实际 \`${verifyRerunCheck.skipReason}\`）。`
+      + '这就是"闸门格没接"与"判据按设计闭嘴"的分界 —— t11 修掉的就是它',
     )
+  }
+  /**
+   * ★ 而**删掉闸门格**那一轮，`inputSurfaceAbsent` 必须 > 0（全局计数也要跟上）；
+   *   翻成 false 那一轮不必（它是正常情形）。
+   */
+  const removed = (await build().evaluate('completion', singleOmissions['task.verify removed'])).requires
+  assert.ok(
+    removed.inputSurfaceAbsent >= 1,
+    `★ 删掉 `+'`task.verify`'+` ⇒ 全局计数必须报出至少一条"闸门格没接"（实际 ${removed.inputSurfaceAbsent}）`,
+  )
+  for (const check of removed.checks.filter((entry) => entry.status === 'skipped')) {
+    assert.deepEqual(check.missing, [], '★ 两轮都不进 missing（守住"不适用不报"）')
   }
 })
 
@@ -1144,10 +1411,10 @@ test('★ 臂 8b（⑥边界）：读数契约是【单向可信】—— 不许
    *   同一轮里有些判据的闸门格推得出来（布尔型），有些推不出来（枚举型）。
    *   本臂要钉的是前者不掩盖后者 —— 所以改用**只挂那一条判据**的注册表来隔离。
    */
-  const { createGateRegistry } = await import('../lib/gates/registry.js')
   const isolated = (id) => {
     const r = createGateRegistry()
     const gate = gateModuleViews().find((entry) => entry.id === id)
+    assert.ok(gate !== undefined, `★ ${id} 必须被装配进注册表`)
     r.register({
       id: gate.id, point: 'completion', description: 'x',
       ...gate.hasRequires ? { requires: gate.requires ?? [] } : {},
@@ -1186,16 +1453,24 @@ test('★ 臂 8b（⑥边界）：读数契约是【单向可信】—— 不许
     + `实测两份都是 ${alsoBarren.inputSurfaceAbsent}`,
   )
   /**
-   * ★ 因此：**这条读数不许被当作保险**。可证伪的形式是——同一台上，"推得出来"
-   *   的那一类闸门格**确实**报得出来，而"推不出来"的那一类报不出来。
-   *   两个方向各一条断言，合起来才说明这条读数是**单向**的而不是恒空。
+   * ★ 因此：**这条读数不许被当作保险**。可证伪的形式是——用一条**布尔型**闸门格
+   *   真的缺席的构造，它**确实**报得出来。两个方向各一条断言，合起来才说明这条
+   *   读数是**单向**的而不是恒空。
+   *
+   * ★ 构造口径（本臂修了两轮，两次都是我自己的 ctx 写错，实测打回）：
+   *   要让它报出来，必须满足**同时**：
+   *     · 判据适用所需的那几格**读到了值**（`task.kind` 是非 work、`task.verify` 非空）；
+   *     · 而 `wantsCompleted` **整个缺席**（那才是一格"没接的闸门格"）。
+   *   前两版分别错在"`task.verify` 没给"（⇒ 闸门读不到 ⇒ not-applicable）
+   *   与"`wantsCompleted` 给了"（⇒ 闸门读到了 ⇒ not-applicable）。
    */
-  const derivable = (await isolated('completion.r5').evaluate('completion', {
-    task: { kind: 'implementation' },
+  const derivable = (await isolated('completion.verify-rerun').evaluate('completion', {
+    task: { kind: 'implementation', verify: ['node -e 0'] },
+    taskNotTerminal: true,
   })).requires
   assert.ok(
     derivable.inputSurfaceAbsent > 0,
-    '★ 闸门格可推导时（布尔型 `wantsCompleted` / `taskNotTerminal`）报得出来 ⇒'
+    '★ 布尔型闸门格（`wantsCompleted`）**真的缺席**时可推导 ⇒ 报得出来 ⇒'
     + ' 这条读数只在"可推导"的子集上可信 —— 单向。'
     + `实测 ${derivable.inputSurfaceAbsent} 条`,
   )
@@ -1206,6 +1481,21 @@ test('★ 臂 8b（⑥边界）：读数契约是【单向可信】—— 不许
   assert.notEqual(
     derivable.inputSurfaceAbsent, r5Only.inputSurfaceAbsent,
     '★ "可推导"与"不可推导"必须读出不同的数 —— 否则这条读数是一个常量，不是一条读数',
+  )
+  /**
+   * ★★ 而本臂最该被看见的一句：**r5 是那条天花板最重的实例** ——
+   *    它的三格闸门里有两格是枚举型（`task.kind` 的"正确值是 implementation/repair"
+   *    是判据的内部语义），一格是布尔型但只在特定 ctx 上缺席。
+   *    ⇒ 对 r5 而言，`inputSurfaceAbsent` 在**它自己的闸门**上几乎恒为 0。
+   *      这不是"没有缺口"，是"这一格读数看不见它的缺口"。
+   *    ⇒ 一条**完全靠这条读数**的可发现性承诺在这里是**空的**；
+   *       r5 的缺口要靠 `requires` 的声明完整性（B 层）与它自己的臂来守。
+   */
+  const r5GateCells = r5Only.checks[0].gateCells ?? []
+  assert.deepEqual(
+    r5GateCells, [],
+    '★ 独立确认：r5 自己的闸门格一格都推不出来（`gateCells` 为空）——'
+    + '所以"闸门格没接线"这条读数在 r5 上**没有分辨力**，这是它的已知边界，不是它的保护',
   )
 })
 
@@ -1328,10 +1618,17 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
    *   缺的是**条件格**，而判据把条件格缺席读成 `unmeasured`（设计如此）。
    */
   const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
-  for (const injected of ['baseline', 'coverage']) {
+  /**
+   * ★ 逐格对拍（本臂第一版把 `coverage` 的名字写死了，实测打回）：
+   *   `baseline` 的条件注入写的是 `...baseline === undefined ? {} : { baseline }`，
+   *   而 `coverage` 写的是 `...coverageInput === undefined ? {} : { coverage: coverageInput }`
+   *   —— **局部变量名与格名不同**。所以这里按**格名**去源里找"它是不是条件注入的"，
+   *   而不是按某个假定的变量名。
+   */
+  for (const cell of ['baseline', 'coverage']) {
     assert.match(
-      source, new RegExp(`\\.\\.\\.${injected} === undefined \\? \\{\\} : \\{ ${injected} \\}`),
-      `★ \`${injected}\` 在 tools.ts 里必须是**条件注入**（缺席是正常路径）——`
+      source, new RegExp(`\\.\\.\\.[A-Za-z_$][\\w$]* === undefined \\? \\{\\} : \\{ ${cell}`),
+      `★ \`${cell}\` 在 tools.ts 里必须是**条件注入**（缺席是正常路径）——`
       + '这是"核对报它不算误报"与"requires 声明也不算过宽"两件事的共同前提',
     )
   }
@@ -1415,24 +1712,46 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
   )
   const toolsSource = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
   /**
-   * ★ 五处调用点：每一处 `auditGateRequires(point, X)` 与紧随其后的
-   *   `registry.evaluate(point, X)` 必须**用同一个表达式**。
-   *   一个"核对读一份新造的 ctx、求值读另一份"的实现会在这里红 ——
-   *   而那正是"读错位置的出口"的同族形态。
+   * ── ★ 五处调用点：**核对与求值必须读同一份 ctx 表达式** ────────────────────────
+   *
+   * ★ 本臂的读数装置修了两轮（两次都是**装置**错、不是产品错，实测打回）：
+   *   ① 只认裸标识符 ⇒ contract 的 `{ ...context, ...inject }` 被漏掉，数成 4 处；
+   *   ② 改成 `[\s\S]*?` 之后，**注释里**提到 `registry.evaluate('completion', …)`
+   *      的那几段被一起匹配进去 ⇒ 求值侧数成 8 处，而核对侧只有 6 处。
+   *
+   * ⇒ 修法：**先剥注释行**（与实现者的覆盖臂同一条纪律），再用
+   *   **单行**正则（`[^\n]*`）取那个表达式。这样它既不会跨行吞掉注释，
+   *   也不会因为调用点被格式化到一行而漏掉。
+   *   ★ 而"剥注释"这件事本身由下面那条**注释样本**断言钉住 —— 一个连注释
+   *     都数进去的读数会让真正漏接的那一处藏起来（虚高的读数与"没测到"同形）。
    */
-  const audits = [...toolsSource.matchAll(/auditGateRequires\(\s*'(\w+)',\s*([A-Za-z_$][\w$]*)\s*\)/g)]
-  const evaluates = [...toolsSource.matchAll(/registry\.evaluate\(\s*'(\w+)'(?:\s+as\s+\w+)?,\s*([A-Za-z_$][\w$]*)/g)]
-  assert.ok(audits.length >= 5, `★ 五处调用点必须都接上核对（实测 ${audits.length} 处）`)
+  const codeLines = toolsSource.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+  const code = codeLines.join('\n')
+  assert.ok(
+    toolsSource.includes("registry.evaluate('completion', …)"),
+    '★ 前置：源里确实有"注释里提到求值调用"的样本 —— 没有它，本臂的"剥注释"就是一句空话'
+  )
+
+  const audits = [...code.matchAll(/auditGateRequires\(\s*'(\w+)',\s*([^\n]*)\)/g)]
+    .map((match) => ({ point: match[1], expression: match[2].trim() }))
+  const evaluates = [...code.matchAll(/registry\.evaluate\(\s*'(\w+)'(?:\s+as\s+\w+)?,\s*([^\n]*)\)/g)]
+    .map((match) => ({ point: match[1], expression: match[2].trim() }))
+  assert.ok(
+    audits.length >= 5,
+    `★ 五处调用点必须都接上核对（实测 ${audits.length} 处）—— 少于五处说明有一处漏接`,
+  )
   assert.equal(
     audits.length, evaluates.length,
-    `★ 核对与求值的调用点数量必须相等（核对 ${audits.length} / 求值 ${evaluates.length}）`,
+    `★ 核对与求值的调用点数量必须相等（核对 ${audits.length} / 求值 ${evaluates.length}）`
+    + `\n  audits  : ${JSON.stringify(audits)}`
+    + `\n  evaluates: ${JSON.stringify(evaluates)}`,
   )
   for (const audit of audits) {
-    const [point, contextName] = [audit[1], audit[2]]
     assert.ok(
-      evaluates.some((entry) => entry[1] === point && entry[2] === contextName),
-      `★ ${point} 位置的核对读的是 \`${contextName}\`，而求值里找不到同名的那一份 ——`
-      + '两份不同的 ctx 会让"核对说缺、求值说齐"成为可能，而它在日志里同形',
+      evaluates.some((entry) => entry.point === audit.point && entry.expression === audit.expression),
+      `★ ${audit.point} 位置的核对读的是 \`${audit.expression}\`，而求值里找不到**逐字相同的**那一份 ——`
+      + '两份不同的 ctx 会让"核对说缺、求值说齐"成为可能，而它在日志里同形。'
+      + `求值侧实际有：${JSON.stringify(evaluates.filter((entry) => entry.point === audit.point).map((entry) => entry.expression))}`,
     )
   }
 })
