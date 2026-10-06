@@ -210,11 +210,94 @@ function valueFor(schema, fields) {
   return value
 }
 
-/** 某个工具的**完整**返回值：顶层字段 + 嵌套出口。 */
-function fullValueFor(schema, name) {
-  let value = valueFor(schema, EMITTERS[name] ?? [])
-  for (const nested of NESTED_EMITTERS[name] ?? []) {
-    value = attachNested(value, nested.path, nested.field)
+/**
+ * ── ★★ 产出面的【唯一真值来源】：`src/tools.ts` 的源码（t15）────────────────────
+ *
+ * MEASURED（2026-10-06，t15 开工时实测的现状）：
+ *
+ *   t14 的臂 1 遍历的是**手写的 `EMITTERS` 表（6 个条目）**，而注册表里有
+ *   **15 个工具** ⇒ **10 个工具从未被直接校验**
+ *   （create / edit_plan / approve / add_member / remove_member / reassign_task /
+ *     claim_task / send_message / resume / delete）。
+ *
+ *   ★ 这正是本任务要防的那个形状**再次出现在夹具自己身上**：
+ *     「声明落在实现后面」。t14 修好了产品代码里的那一份；
+ *     t15 修的是**普查本身**那一份 —— 一份手写的表，就是一个会腐烂的声明面。
+ *
+ * ⇒ 现在**枚举来源是注册表**（全部工具），**期望值来源是源码**（每个工具自己的块）。
+ *   手写的 `EMITTERS` 降级成一条**参考**：它的正确性由臂 4 与源码对账，
+ *   而它**不再决定**普查的范围。
+ */
+const TOOLS_SOURCE = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+/** ★ 剥注释：注释里大量讨论这些字段名（本文件与 `tools.ts` 自己都是证据）。 */
+const TOOLS_CODE = TOOLS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+/** 一个工具 `defineTool({...})` 的代码块（按大括号配平）。 */
+function sourceBlockOf(name) {
+  const m = new RegExp(`name: '${name}'`).exec(TOOLS_CODE)
+  assert.ok(m !== null, `★ 源码里找不到工具 "${name}" —— 它被改名或删掉了，普查必须跟着看清新形状`)
+  const start = TOOLS_CODE.lastIndexOf('defineTool({', m.index)
+  assert.ok(start >= 0, `★ "${name}" 不在一个 defineTool(...) 里 —— 解析锚点失效`)
+  let depth = 0
+  for (let k = TOOLS_CODE.indexOf('{', start); k < TOOLS_CODE.length; k += 1) {
+    if (TOOLS_CODE[k] === '{') depth += 1
+    else if (TOOLS_CODE[k] === '}') {
+      depth -= 1
+      if (depth === 0) return TOOLS_CODE.slice(start, k)
+    }
+  }
+  throw new Error(`★ "${name}" 的 defineTool 块括号不配平`)
+}
+
+/**
+ * 产出语句的形状。★ 只认**字面量键名**。
+ *
+ * MEASURED（t14 臂 4 第一版）：规则里带了 `...InputSurface` 这种宽松形态，
+ * 把 `dispatchInputSurface` 误当成 `input_surface` 的产出 ⇒ 报在错的地方。
+ */
+const EMIT_PATTERNS = {
+  input_surface: /[{,]\s*input_surface\s*:/,
+  runtime_gates: /[{,]\s*runtime_gates\s*:/,
+  dispatch_input_surface: /[{,]\s*dispatch_input_surface\s*:/,
+  completion_input_surface: /[{,]\s*completion_input_surface\s*:/,
+}
+
+/** 变量名 → 字段名（对象本身就是要挂上去的值，不带键名）。 */
+const EMIT_VARIABLES = {
+  input_surface: /\b(?:contractGateSurface|deliveryInputSurface|amended\.input_surface|amendContractSurface\b)/,
+  runtime_gates: /\b(?:runtimeGateRecord|contractRuntimeRecord|runtimeRecord|runtimeInputSurface\b)/,
+}
+
+/** 这个工具**真的会产出**哪几格诊断字段（从它自己的源码块推）。 */
+function emittedFieldsOf(name) {
+  const block = sourceBlockOf(name)
+  return Object.keys(EMIT_PATTERNS).filter(
+    (field) => EMIT_PATTERNS[field].test(block) || (EMIT_VARIABLES[field]?.test(block) ?? false),
+  )
+}
+
+/**
+ * 这个工具产出某一格时，它挂**在哪儿**。
+ *
+ * ★ 只有 `agent_teams_status` 的 `input_surface` 是嵌套的（`delivery.input_surface`）——
+ *   用一张**显式**的路径表记录，而不是靠正则去猜层级（猜层级需要 AST 级分析，
+ *   而它带来的假阴性比它挡住的假阳性更贵）。
+ * ★ 路径表漏登记会被**臂 1** 抓到：那时挂在顶层会被 schema 拒绝 ⇒ 红。
+ */
+const NESTED_PATHS = {
+  agent_teams_status: { input_surface: ['delivery', 'input_surface'] },
+}
+
+/** 某个工具产出某一格时的落点（缺省顶层）。 */
+function pathOf(name, field) {
+  return NESTED_PATHS[name]?.[field] ?? [field]
+}
+
+/** 某个工具的**完整**返回值：它自己的基线值 + 它真的会产出的每一格。 */
+function fullValueForAll(schema, name, fields = emittedFieldsOf(name)) {
+  let value = valueFor(schema, [])
+  for (const field of fields) {
+    value = attachNested(value, pathOf(name, field), field)
   }
   return value
 }
@@ -237,14 +320,26 @@ test('臂 1 ★ 对照臂：每个工具带上它会返回的诊断字段 ⇒ �
   const tools = toolsUnderTest()
   assert.ok(tools.size > 0, '★ 注册表里必须真的有工具 —— 空集合上"每个都通过"是恒真的')
 
+  /**
+   * ── ★★ 枚举来源 = **注册表里的全部工具**（t15 的核心修法）──────────────────────
+   *
+   * t14 的这里写的是 `Object.entries(EMITTERS)` —— **手写表**。手写表就是一份
+   * 会腐烂的声明面：新工具加进来、或者既有工具新增一格产出，**普查根本不会走到它**。
+   * 而本队记账的第 9 次正是"声明落在实现后面"。
+   *
+   * ⇒ 现在遍历 `tools`（真的 `registerAgentTeamsTools` 注册出来的 15 个）。
+   *   每一格的期望值由**它自己的源码块**推（`emittedFieldsOf`）——
+   *   于是"新工具"与"新字段"都会**自动**进入普查，不需要有人来改这张表。
+   */
   const failures = []
-  for (const [name, fields] of Object.entries(EMITTERS)) {
-    const tool = tools.get(name)
-    assert.ok(tool !== undefined, `★ 工具 "${name}" 必须在注册表里（它被 EMITTERS 列为产出面之一）`)
+  for (const [name, tool] of tools) {
     const schema = tool.output?.schema
     assert.ok(schema !== undefined, `★ "${name}" 必须有 output schema —— 没有 schema 就没有"声明面"可言`)
-    const violations = violationsOf(schema, fullValueFor(schema, name))
-    if (violations.length > 0) failures.push(`${name} (${fields.join(', ')}): ${violations.join('; ')}`)
+    const expected = emittedFieldsOf(name)
+    const violations = violationsOf(schema, fullValueForAll(schema, name, expected))
+    if (violations.length > 0) {
+      failures.push(`${name}${expected.length === 0 ? '' : ` (${expected.join(', ')})`}: ${violations.join('; ')}`)
+    }
   }
   assert.deepEqual(
     failures, [],
@@ -254,13 +349,13 @@ test('臂 1 ★ 对照臂：每个工具带上它会返回的诊断字段 ⇒ �
   )
 
   /**
-   * ★ 反向半边（防恒真）：**修复前**这些字段一个都没被声明 —— 所以上面那条
+   * ★ 反向半边（防恒真）：修复前这些字段一个都没被声明 —— 所以上面那条
    *   "没有违规"必须有内容。做法：把诊断字段从值里拿掉之后，**同一份 value**
    *   仍然必须合法（说明违规确实来自诊断字段，而不是"这份 value 本来就不合法"）。
    *   ⇒ 只断言"不违规"会与"这份值本来就是坏的"混淆，两半合起来才不恒真。
    */
-  for (const [name, fields] of Object.entries(EMITTERS)) {
-    const schema = tools.get(name).output.schema
+  for (const [name, tool] of tools) {
+    const schema = tool.output.schema
     const plain = valueFor(schema, [])
     assert.deepEqual(
       violationsOf(schema, plain), [],
@@ -270,20 +365,99 @@ test('臂 1 ★ 对照臂：每个工具带上它会返回的诊断字段 ⇒ �
      * ★ 第二个反向半边：逐个字段**单独**挂上去也必须通过。一次挂多个时，
      *   一个"只声明了第一个"的实现可能蒙混过关（violations 只报第一个缺失的）。
      */
-    for (const field of fields) {
-      const single = { ...plain, [field]: DIAGNOSTIC_FIELDS[field]() }
+    for (const field of emittedFieldsOf(name)) {
+      const single = attachNested(plain, pathOf(name, field), field)
       assert.deepEqual(
         violationsOf(schema, single), [],
-        `★ "${name}" 单独挂顶层 "${field}" 时被自己的 schema 拒绝 —— 多字段同时挂会掩盖它`,
+        `★ "${name}" 单独挂 "${pathOf(name, field).join('.')}" 时被自己的 schema 拒绝 —— 多字段同时挂会掩盖它`,
       )
     }
-    for (const nested of NESTED_EMITTERS[name] ?? []) {
-      const single = attachNested(plain, nested.path, nested.field)
-      assert.deepEqual(
-        violationsOf(schema, single), [],
-        `★ "${name}" 单独挂嵌套 "${nested.path.join('.')}" 时被自己的 schema 拒绝`,
-      )
-    }
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 1b（普查臂，t15）：普查必须【遍历全部工具】而不是列举几个
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('臂 1b ★ 普查臂：枚举来源是注册表，不是一张手写的表 —— 每个工具都被走到', () => {
+  /**
+   * ── ★★ 这一臂就是 t15 的验收本身 ──────────────────────────────────────────────
+   *
+   * MEASURED（2026-10-06，t15 开工时）：t14 的臂 1 遍历 `EMITTERS`（6 条），
+   * 而注册表有 15 个工具 ⇒ **10 个从未被校验**。修好之后，这里要把那条差距
+   * **钉成一条可执行的断言**，否则它会以同样的形状再长回来。
+   *
+   * ★ 三件事必须同时成立，缺一个就有盲区：
+   *   ① 每个工具都**解析得出源码块**（枚举来源是注册表 ⇒ 新工具自动进入普查）；
+   *   ② 每个工具都**走得过校验器**（臂 1 做的那件事，这里复述它的覆盖面）；
+   *   ③ 源码里**真的**认得出产出面的机制（否则 `emittedFieldsOf` 恒返回空数组，
+   *      ①② 都会在"没有期望值"的情况下静默变绿 —— 那就是恒真）。
+   *
+   * ★ ③ 是这一臂最容易被写漏的一半：一个"总是返回 []"的扫描器会让整条普查
+   *   对**所有**工具都通过，而它看起来完全正常。
+   */
+  const tools = toolsUnderTest()
+  const names = [...tools.keys()]
+  assert.ok(names.length > 0, '★ 注册表里必须真的有工具')
+
+  /** ① 每个工具都解析得出源码块 —— 枚举来源是注册表，不是手写表。 */
+  const unparsable = names.filter((name) => {
+    try { sourceBlockOf(name); return false } catch { return true }
+  })
+  assert.deepEqual(
+    unparsable, [],
+    '★ 这些工具在注册表里、而源码里解析不出它的块 —— 普查会漏掉它们：\n' + unparsable.join('\n'),
+  )
+
+  /**
+   * ② 覆盖面的机械读数：**注册表里的每一个**都必须进入普查范围。
+   *    ★ 这里不写"必须等于 15"：工具会增删（t14 的记录就是 12→15）。
+   *      断言的是**集合相等**：普查范围 == 注册表全集。
+   */
+  const censused = names.filter((name) => {
+    const schema = tools.get(name).output?.schema
+    if (schema === undefined) return false
+    violationsOf(schema, fullValueForAll(schema, name))
+    return true
+  })
+  assert.deepEqual(
+    [...censused].sort(), [...names].sort(),
+    `★ 普查范围必须等于注册表全集（注册表 ${names.length} 个，普查 ${censused.length} 个）——`
+    + '差额就是"声明落在实现后面"会藏身的地方',
+  )
+
+  /**
+   * ③ 反向半边（防恒真）：扫描器必须**真的认得出产出面**。
+   *
+   * ★ 做法是**两个方向**都问一遍：
+   *   · 至少有一个工具被认出产出 ≥1 格（否则扫描器恒空 ⇒ 上面两条都没测到东西）；
+   *   · 且被认出的那些格，与 `src/tools.ts` 里**真实的**产出语句对得上。
+   * 一条"恒返回空"的扫描器能过 ① 和 ②（那时每个工具都"没有期望值"⇒ 都通过），
+   * 而它什么都测不到 —— 这正是本队记账的恒真写法。
+   */
+  const withFields = names.filter((name) => emittedFieldsOf(name).length > 0)
+  assert.ok(
+    withFields.length > 0,
+    '★ 没有任何工具被认出产出诊断字段 ⇒ `emittedFieldsOf` 恒返回空数组，'
+    + '上面两条断言都在"没有期望值"上恒真（规则二点名的形态）',
+  )
+  /**
+   * ★ 双向对账：扫描器说这个工具产出某格 ⇔ 源码的产出面里真的有那一格的语句。
+   *   这一条把"扫描器的口径"钉在上面那组 `EMIT_PATTERNS` / `EMIT_VARIABLES` 上，
+   *   而它们本身由臂 4 与源码文本对账。
+   */
+  const scanned = names.flatMap((name) => emittedFieldsOf(name).map((field) => `${name}.${field}`))
+  assert.ok(
+    scanned.length >= 5,
+    `★ 扫描器认出的产出面太少（实测 ${scanned.length} 格）—— 一个退化的扫描器会让普查静默失去分辨力`,
+  )
+  for (const entry of scanned) {
+    const [name, field] = [entry.slice(0, entry.lastIndexOf('.')), entry.slice(entry.lastIndexOf('.') + 1)]
+    const block = sourceBlockOf(name)
+    assert.ok(
+      EMIT_PATTERNS[field].test(block) || (EMIT_VARIABLES[field]?.test(block) ?? false),
+      `★ 扫描器说 "${entry}" 有产出，而它自己的规则在源码块里匹配不到 —— 扫描器与规则分叉了`,
+    )
   }
 })
 
@@ -304,58 +478,59 @@ test('臂 2 ★ 伪造臂：把某个工具的诊断字段单独从 schema 拿�
    *   最小复现，也是那个缺陷当初的真实形状。
    */
   const tools = toolsUnderTest()
-  assert.ok(
-    Object.keys(EMITTERS).length >= 2,
-    '★ 至少要有两个工具参与突变（一个的话，"红了"可能只是那个恰好坏了）',
-  )
 
   const notCaught = []
-  /** 顶层字段 + 嵌套字段一起做突变（两者都是"声明面没跟上"的真实形态）。 */
-  const targets = [
-    ...Object.entries(EMITTERS).flatMap(([name, fields]) => fields.map((field) => ({ name, field, nested: undefined }))),
-    ...Object.entries(NESTED_EMITTERS).flatMap(([name, entries]) => entries.map((entry) => ({ name, field: entry.field, nested: entry.path }))),
-  ]
-  for (const { name, field: dropped, nested } of targets) {
-    {
-      const schema = tools.get(name).output.schema
-      /**
-       * 精确删掉那一格 —— 与缺陷当初的形状逐字相同。
-       * ★ 嵌套的字段要在**它所在的那一层**删（顶层删不到它，而"删了一个不存在的东西"
-       *   会让突变静默跑过、被读成"这条臂是绿的"—— 本队记账的第三种恒定写法）。
-       */
-      let mutated
-      if (nested === undefined) {
-        assert.ok(
-          schema.properties?.[dropped] !== undefined,
-          `★ 突变目标 "${name}.${dropped}" 不在真实 schema 里 —— 一条指向不存在的属性的突变会"跑过"而什么都不改。`
-          + `实际声明：${JSON.stringify(Object.keys(schema.properties ?? {}))}`,
-        )
-        mutated = {
-          ...schema,
-          properties: Object.fromEntries(Object.entries(schema.properties).filter(([key]) => key !== dropped)),
-        }
-      } else {
-        const [parent, leaf] = [nested[nested.length - 2], nested[nested.length - 1]]
-        const parentSchema = schema.properties?.[parent]
-        assert.ok(
-          parentSchema?.properties?.[leaf] !== undefined,
-          `★ 突变目标 "${name}.${nested.join('.')}" 不在真实 schema 里（父层声明：`
-          + `${JSON.stringify(Object.keys(parentSchema?.properties ?? {}))}）`,
-        )
-        mutated = {
-          ...schema,
-          properties: {
-            ...schema.properties,
-            [parent]: {
-              ...parentSchema,
-              properties: Object.fromEntries(Object.entries(parentSchema.properties).filter(([key]) => key !== leaf)),
-            },
-          },
-        }
+  /**
+   * ★ 枚举来源同样是**注册表**（与臂 1 一致，t15）：每个工具、它源码里认出的每一格。
+   *   t14 这里用的是手写的 `EMITTERS`/`NESTED_EMITTERS` ⇒ 突变只覆盖那 6 条。
+   *   ⇒ 现在覆盖**全部工具的全部已识别产出格**。
+   */
+  const targets = [...tools.keys()].flatMap((name) =>
+    emittedFieldsOf(name).map((field) => ({ name, field, path: pathOf(name, field) })))
+  assert.ok(
+    targets.length >= 2,
+    `★ 至少要有两格参与突变（实测 ${targets.length}）—— 一格的话，"红了"可能只是那个恰好坏了`,
+  )
+
+  for (const { name, field: dropped, path } of targets) {
+    const schema = tools.get(name).output.schema
+    let mutated
+    /**
+     * 精确删掉那一格 —— 与缺陷当初的形状逐字相同。
+     * ★ 嵌套的字段要在**它所在的那一层**删（顶层删不到它，而"删了一个不存在的东西"
+     *   会让突变静默跑过、被读成"这条臂是绿的"—— 本队记账的第三种恒定写法）。
+     */
+    if (path.length === 1) {
+      assert.ok(
+        schema.properties?.[dropped] !== undefined,
+        `★ 突变目标 "${name}.${dropped}" 不在真实 schema 里 —— 一条指向不存在的属性的突变会"跑过"而什么都不改。`
+        + `实际声明：${JSON.stringify(Object.keys(schema.properties ?? {}))}`,
+      )
+      mutated = {
+        ...schema,
+        properties: Object.fromEntries(Object.entries(schema.properties).filter(([key]) => key !== dropped)),
       }
-      const violations = violationsOf(mutated, fullValueFor(schema, name))
-      if (violations.length === 0) notCaught.push(`${name}.${nested === undefined ? dropped : nested.join('.')}`)
+    } else {
+      const [parent, leaf] = [path[path.length - 2], path[path.length - 1]]
+      const parentSchema = schema.properties?.[parent]
+      assert.ok(
+        parentSchema?.properties?.[leaf] !== undefined,
+        `★ 突变目标 "${name}.${path.join('.')}" 不在真实 schema 里（父层声明：`
+        + `${JSON.stringify(Object.keys(parentSchema?.properties ?? {}))}）`,
+      )
+      mutated = {
+        ...schema,
+        properties: {
+          ...schema.properties,
+          [parent]: {
+            ...parentSchema,
+            properties: Object.fromEntries(Object.entries(parentSchema.properties).filter(([key]) => key !== leaf)),
+          },
+        },
+      }
     }
+    const violations = violationsOf(mutated, fullValueForAll(schema, name))
+    if (violations.length === 0) notCaught.push(`${name}.${path.join('.')}`)
   }
   assert.deepEqual(
     notCaught, [],
@@ -394,9 +569,12 @@ test('臂 3 ★ 反向臂：工具不许接受自己【没有声明】的诊断�
     /**
      * 再问一次更难的：**未声明**的诊断字段必须被拒。
      * ★ 只对"并非产出面"的那些字段断言 —— 产出面里的字段本来就该被接受（臂 1）。
+     * ★ 枚举来源同臂 1：**注册表**（t15）。原先读手写的 `EMITTERS` ⇒ 那 10 个
+     *   未登记的工具在这里会被判成"一笔都没产出" ⇒ 四个字段全部要求被拒，
+     *   读数看着严格、其实测的是"表里没有它"。
      */
     const declared = new Set(Object.keys(schema.properties ?? {}))
-    const emits = new Set(EMITTERS[name] ?? [])
+    const emits = new Set(emittedFieldsOf(name))
     for (const field of Object.keys(DIAGNOSTIC_FIELDS)) {
       if (declared.has(field) || emits.has(field)) continue
       const violations = violationsOf(schema, valueFor(schema, [field]))
@@ -417,132 +595,67 @@ test('臂 3 ★ 反向臂：工具不许接受自己【没有声明】的诊断�
 // 臂 4（产出面臂）：声明面必须**覆盖**真实的产出面
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 4 ★ 产出面臂：EMITTERS 表与源码里真实的产出面对得上（两个方向都要）', () => {
+test('臂 4 ★ 对账臂：手写的 EMITTERS 参考表必须与【源码产出面】一致（两个方向）', () => {
   /**
-   * ── 为什么这一臂必须从**源码**读，而不是从 schema 读 ────────────────────────────
+   * ── ★ t15 之后这一臂的角色变了，值得说清楚 ────────────────────────────────────
    *
-   * 臂 1 的自变量是 `EMITTERS`（"这个工具真的会产出哪些字段"）。它手写。
-   * ⇒ 它太**宽**（列了一个源码里其实不产出的字段）会让臂 1 断言一个不存在的东西；
-   *   太**窄**（漏了一个真的产出的字段）会让那个字段永远不被覆盖 ——
-   *   而那正是本缺陷的成因本身（"有一个字段没人声明"）。
+   * t14 时 `EMITTERS` 是**普查的自变量**（臂 1 遍历它）—— 于是它既是"期望值"又是
+   * "范围"，两个职责叠在一张手写表上。t15 把**范围**拿走了（改成遍历注册表），
+   * 把**期望值**也拿走了（改成从每个工具自己的源码块推）。
    *
-   * ⇒ 两个方向都要机械核对，且核对的是**源码文本里的产出语句**。
+   * ⇒ 这张手写表现在只剩一个职责：**一份人可读的参考**（它把"哪个工具挂哪一格、
+   *   为什么"写成人话，对读代码的人有用）。而参考也会腐烂 —— 所以本臂把它与
+   *   **唯一真值来源**（源码扫描器）对账，两个方向都要空。
    *
-   * ★ 这是**文本级**的证据，不是语义级的 —— 它足够回答本臂的问题（"返回语句里
-   *   有没有挂这一格"），而不必去执行 15 个工具的完整路径（那需要真实的团队状态、
-   *   锁与调度器，代价远大于它回答的问题）。
+   * ★ 两个方向各自防一件事（合并起来才是"表没错"）：
+   *   · 表太**宽**：列了源码里其实不产出的格 ⇒ 会误导读它的人；
+   *   · 表太**窄**：漏了源码里真产出的格 ⇒ 读它的人以为那一格没人管。
+   * 两个方向都**不再**影响普查覆盖面（臂 1/1b 用注册表 + 源码），
+   * 所以这里的红是"参考该更新了"，不是"产品坏了"。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
-  /**
-   * ★ 剥注释：注释里大量讨论这些字段名（本文件自己就是证据），把它们算进来会让
-   *   读数虚高，而虚高的读数会让真正漏接的那一处藏起来。
-   */
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const tools = toolsUnderTest()
+  const names = [...tools.keys()]
 
-  /** 每个工具 `defineTool({...})` 的代码块（按大括号配平，从 `name:` 往回找 `defineTool`）。 */
-  function blockOf(name) {
-    const m = new RegExp(`name: '${name}'`).exec(code)
-    assert.ok(m !== null, `★ 源码里找不到工具 "${name}" —— 它被改名或删掉了，本臂必须跟着看清新形状`)
-    const start = code.lastIndexOf('defineTool({', m.index)
-    assert.ok(start >= 0, `★ "${name}" 不在一个 defineTool(...) 里 —— 夹具的解析锚点失效`)
-    let depth = 0
-    for (let k = code.indexOf('{', start); k < code.length; k += 1) {
-      if (code[k] === '{') depth += 1
-      else if (code[k] === '}') {
-        depth -= 1
-        if (depth === 0) return { block: code.slice(start, k), start, end: k }
-      }
-    }
-    throw new Error(`★ "${name}" 的 defineTool 块括号不配平 —— 夹具必须看清它`)
-  }
-
-  /**
-   * ★ 产出语句的形状：`{ …:<field> }` 的挂法（`...x === undefined ? {} : { input_surface: … }`）
-   *   与 `x: { input_surface: … }` 的直接挂法都算。
-   *
-   * ★★ MEASURED（本臂第一版就栽在这里）：第一版的 `input_surface` 规则里带了
-   *   一条 `\.\.\.[\w.]*(?:…|InputSurface|…)[\w]*[,\s]` —— 它把 `dispatchInputSurface`
-   *   当成了 `input_surface` 的产出 ⇒ `update_task` 被误报成"产出泛用名"。
-   *   而那个工具在**成功路径**上从不产出泛用名（只有两个位置名）。
-   *   ⇒ 一条太松的正则会让本臂把"表太窄"喊在错的地方，而**真的**漏登记的那一格
-   *     反而被噪音盖住。所以每条规则都**只认字面量键名**。
-   */
-  const EMIT_PATTERNS = {
-    input_surface: /[{,]\s*input_surface\s*:/,
-    runtime_gates: /[{,]\s*runtime_gates\s*:/,
-    dispatch_input_surface: /[{,]\s*dispatch_input_surface\s*:/,
-    completion_input_surface: /[{,]\s*completion_input_surface\s*:/,
-  }
-
-  /**
-   * ★ 变量名 → 字段名的挂法（`...contractGateSurface === undefined ? {} : contractGateSurface`）。
-   *   这一类**不带键名**（对象本身就是要挂上去的值），所以上面那组字面量规则看不见它。
-   *   ⇒ 单独认：一个以这些名字结尾的变量被展开进返回值，等价于挂了对应字段。
-   */
-  const EMIT_VARIABLES = {
-    input_surface: /\b(?:contractGateSurface|deliveryInputSurface|amended\.input_surface|amendContractSurface\b)/,
-    runtime_gates: /\b(?:runtimeGateRecord|contractRuntimeRecord|runtimeRecord|runtimeInputSurface\b)/,
-  }
+  /** 参考表里的条目：顶层 + 嵌套，展平成 `{ name, field }`。 */
+  const listed = [
+    ...Object.entries(EMITTERS).flatMap(([name, fields]) => fields.map((field) => ({ name, field }))),
+    ...Object.entries(NESTED_EMITTERS).flatMap(([name, entries]) => entries.map((entry) => ({ name, field: entry.field }))),
+  ]
+  assert.ok(listed.length > 0, '★ 参考表是空的 —— 那样下面两句"对得上"都是恒真的')
 
   const mismatches = []
-  const allRegistered = {
-    ...Object.fromEntries(Object.entries(EMITTERS).map(([name, fields]) => [name, fields])),
-    ...Object.fromEntries(Object.entries(NESTED_EMITTERS).map(([name, entries]) => [name, entries.map((entry) => entry.field)])),
-  }
-  for (const [name, declaredFields] of Object.entries(allRegistered)) {
-    const { block } = blockOf(name)
-    for (const field of declaredFields) {
-      const emitted = EMIT_PATTERNS[field].test(block) || (EMIT_VARIABLES[field]?.test(block) ?? false)
-      if (!emitted) {
-        mismatches.push(`${name}: 登记了 "${field}"，而源码的产出面里找不到它（表太宽 ⇒ 臂 1 在断言一个不存在的东西）`)
-      }
+  /** 方向 ①（表太宽）：表里列的每一格，源码产出面里必须真的有。 */
+  for (const { name, field } of listed) {
+    if (!names.includes(name)) {
+      mismatches.push(`${name}: 参考表里列了它，而注册表里没有这个工具（工具被改名/删除了）`)
+      continue
+    }
+    if (!emittedFieldsOf(name).includes(field)) {
+      mismatches.push(`${name}: 参考表列了 "${field}"，而源码的产出面里找不到它（表太宽 ⇒ 读它的人被误导）`)
     }
   }
-
-  /**
-   * ★ 反向：源码里**真的挂了**这些字段的工具，必须出现在 EMITTERS 里。
-   *   （缺了这一半，一个新加产出、却忘了登记的工具会静默地不被覆盖 ——
-   *     而那正是本缺陷当初的形状。）
-   */
-  const toolNames = [...new Set([...code.matchAll(/name: '(agent_teams_\w+)'/g)].map((m) => m[1]))]
-  assert.ok(toolNames.length > 0, '★ 一个工具都没解析出来 ⇒ 上面的锚点失效')
-  for (const name of toolNames) {
-    const { block } = blockOf(name)
-    const emits = [
-      ...Object.entries(EMIT_PATTERNS).filter(([, pattern]) => pattern.test(block)).map(([field]) => field),
-      ...Object.entries(EMIT_VARIABLES).filter(([, pattern]) => pattern.test(block)).map(([field]) => field),
-    ]
-    /**
-     * ★ 一个字段只要被**登记在案**即可 —— 无论登记在顶层（`EMITTERS`）还是
-     *   嵌套（`NESTED_EMITTERS`）。本臂问的是"这个工具产出这一格了吗、有人管它吗"，
-     *   而"它挂在哪一层"由 `NESTED_EMITTERS` 单独记录（臂 1 用它取正确的落点）。
-     *
-     * ★ 为什么本臂**不必**分辨层级：`-U0` 的块级扫描看得见"这个工具挂了
-     *   `input_surface`"这个事实，却看不出它在返回对象的哪一层 —— 而要判断层级
-     *   就得做 AST 级的分析，那与本臂回答的问题（"有没有漏登记"）不相称。
-     *   ⇒ 层级由 `NESTED_EMITTERS` + 臂 1 的真实校验负责；
-     *     本臂只保证**没有一格没人登记**。
-     */
-    const listed = [
-      ...(EMITTERS[name] ?? []),
-      ...(NESTED_EMITTERS[name] ?? []).map((entry) => entry.field),
-    ]
-    for (const field of emits) {
-      if (!listed.includes(field)) {
-        mismatches.push(`${name}: 源码产出面里有 "${field}"，而 EMITTERS/NESTED_EMITTERS 都没有登记它（表太窄 ⇒ 这个字段永远不被覆盖）`)
+  /** 方向 ②（表太窄）：源码产出面里认出的每一格，参考表里必须登记。 */
+  for (const name of names) {
+    const listedFields = listed.filter((entry) => entry.name === name).map((entry) => entry.field)
+    for (const field of emittedFieldsOf(name)) {
+      if (!listedFields.includes(field)) {
+        mismatches.push(`${name}: 源码产出面里有 "${field}"，而参考表没登记它（表太窄 ⇒ 读它的人以为这一格没人管）`)
       }
     }
   }
   assert.deepEqual(
     mismatches, [],
-    '★ `EMITTERS` 表与源码里真实的产出面不一致（两个方向都必须空）—— 这张表是臂 1 的自变量，'
-    + '它错了，臂 1 就在测一个不存在的东西：\n' + mismatches.join('\n'),
+    '★ 手写的参考表与源码产出面不一致（两个方向都必须空）：\n' + mismatches.join('\n'),
   )
 
   /**
-   * ★ 反向半边（防恒真）：解析出来的产出面必须**非空** ——
-   *   一个把所有工具都解析成空块的实现会让上面两段全绿，而它什么都没测到。
+   * ★ 反向半边（防恒真）：扫描器认出的产出面必须**非空** ——
+   *   一个把所有工具都解析成空块的扫描器会让上面两段"对得上"在空集合上成立，
+   *   而它什么都没测到。这一半与臂 1b 的第 ③ 条是同一件事实的两个读法。
    */
-  const covered = Object.values(EMITTERS).flat().length
-  assert.ok(covered >= 4, `★ 产出面加起来至少要覆盖 4 格（实测 ${covered}）—— 空集合上"都对得上"是恒真的`)
+  const covered = names.reduce((sum, name) => sum + emittedFieldsOf(name).length, 0)
+  assert.ok(
+    covered >= 4,
+    `★ 全部工具被认出的产出面加起来至少要有 4 格（实测 ${covered}）—— 空集合上"都对得上"是恒真的`,
+  )
 })
