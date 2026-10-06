@@ -164,7 +164,7 @@ test('臂 3 ★ 未测量臂：不适用 ⇒ 不报（且与"核对了、都齐"
   assert.equal(evaluation.requires.skipped, 1, '★ 但"它没被核对"必须记下来（不报 ≠ 什么都没发生）')
   assert.equal(evaluation.requires.checked, 0, '★ checked 只数真的核对了的')
   assert.equal(evaluation.requires.checks[0].status, 'skipped')
-  assert.match(evaluation.requires.checks[0].skippedBecause, /appliesTo/, '★ 跳过要说得清为什么')
+  assert.match(evaluation.requires.checks[0].skippedBecause, /gating cell|not applicable|does not speak/, '★ 跳过要说得清为什么')
 
   /**
    * ★ "不适用"与"核对了、都齐"必须【不同形】。
@@ -517,4 +517,373 @@ test('臂 11 ★ 现有判据的树零改动：t6 只加旁路字段，不改裁
     !/^\s*export (?:const|let) [a-z]/m.test(toolSource),
     '★ 工具文件里不许有可变的模块状态（一条判据改了它，另一条判据的行为就跟着变，而两者在日志里同形）',
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 12/13/14（t11）：闸门格缺席 与 任务类型不匹配 —— 两者必须不同形
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★ 这一组臂修的是什么（completion-owner 发现、shape-dev 复核）───────────────
+ *
+ * 一条判据的声明里混着**两类格**：
+ *
+ *   · **测量格** —— 判据的 `gate()` 自己读（`execVerifyCommand` / `parentRevision` /
+ *     `baseline` …）。它们缺席时 `appliesTo` 仍可能为真 ⇒ 核对走到 `incomplete`。✓
+ *   · **闸门格** —— **`appliesTo` 自己读**（`wantsCompleted` / `task.kind` /
+ *     `taskNotTerminal` …）。它们缺席时 `appliesTo` 恒假 ⇒ 注册表判"不适用"
+ *     ⇒ 核对被 `skipped`。✗
+ *
+ * 后果（实测，就是下面臂 13 的场景 B）：**下次若缺的是闸门格，判据会静默 skipped，
+ * 而新机制抓不到** —— 它和"这一轮本来就不该跑"（任务类型不匹配）**逐字节同形**。
+ *
+ * ★ 锚点来自真实判据，不是我编的场景：`completion.r5` 的 `appliesTo` 是
+ *   ```ts
+ *   const kind = ctx?.task?.kind
+ *   if (kind !== 'implementation' && kind !== 'repair') return false
+ *   if (ctx?.wantsCompleted !== true || ctx?.taskNotTerminal !== true) return false
+ *   return Array.isArray(ctx?.update?.newTestFiles)
+ *   ```
+ */
+
+/** 一份 r5 样的判据形状（闸门格：`task.kind` / `wantsCompleted`；测量格：`parentRevision`）。 */
+const GATED_SUBJECT = {
+  id: 'completion.r5',
+  requires: ['parentRevision', 'scanDirs', 'task.kind', 'wantsCompleted'],
+  appliesTo: (ctx) => {
+    const kind = ctx?.task?.kind
+    if (kind !== 'implementation' && kind !== 'repair') return false
+    if (ctx?.wantsCompleted !== true) return false
+    return true
+  },
+}
+
+test('臂 12 ★ 三臂之一：闸门格【缺席】（调用方没给 wantsCompleted）⇒ input-surface-absent', () => {
+  /**
+   * 场景 B：调用方**没给** `wantsCompleted`。
+   * ★ 这是**接线缺陷** —— `wantsCompleted` 是调用方必须注入的一格，它缺席意味着
+   *   这条判据**永远不跑**，而它静默地永远不跑。
+   */
+  const context = { task: { kind: 'implementation' }, parentRevision: 'abc', scanDirs: ['scripts'] }
+  const check = checkRequires(GATED_SUBJECT, context)
+
+  assert.equal(check.status, 'skipped', '★ 它仍然不是接线缺陷：判据本就不该跑，不许报 missing/incomplete')
+  assert.equal(check.skipReason, 'input-surface-absent', '★ 但成因必须读得出来')
+  assert.deepEqual(check.missing, [], '★ 守住"不适用不报"：不进 missing')
+  assert.deepEqual(
+    check.present, ['parentRevision', 'scanDirs', 'task.kind'],
+    '★ 在场的是测量格 + 已经读到的那个闸门格（task.kind 在，值是 implementation）',
+  )
+  assert.ok(!check.present.includes('wantsCompleted'), '★ 而真正的缺口是 wantsCompleted —— 它不在场')
+  assert.deepEqual(
+    check.gateCells, ['wantsCompleted'],
+    '★ 判别式的原料：appliesTo 实测读了 wantsCompleted，而这一格没接 ⇒ 它凭着一个没接的格子说不适用',
+  )
+  assert.deepEqual(check.gateCellsUndeclared ?? [], [], '★ 这条判据声明全了闸门格，没有声明缺口')
+})
+
+test('臂 13 ★ 三臂之二：任务类型不匹配（kind=work）⇒ not-applicable（与臂 12 不同形）', () => {
+  /**
+   * 场景 A：`kind = 'work'` —— 任务类型不匹配，**判据按设计闭嘴**。
+   *
+   * ★ 与臂 12 的差别**只在于"声明里有没有一格在场"**：
+   *   `task.kind` 在场（值是 'work'）⇒ 判据拿到了判断依据 ⇒ `not-applicable`。
+   */
+  const context = { task: { kind: 'work' }, parentRevision: 'abc', scanDirs: ['scripts'], wantsCompleted: true }
+  const check = checkRequires(GATED_SUBJECT, context)
+
+  assert.equal(check.status, 'skipped')
+  assert.equal(check.skipReason, 'not-applicable', '★ 任务类型不匹配是【正常】，不是缺陷信号')
+  assert.deepEqual(check.missing, [], '★ 不报')
+  assert.ok(check.present.includes('task.kind'), '★ 判据读到了它的闸门格')
+
+  /**
+   * ★ 这是本任务的核心断言：**两者必须不同形**。
+   *   改动前它们逐字节相同（completion-owner 报的那个缺口）。
+   */
+  const absent = checkRequires(GATED_SUBJECT, { task: { kind: 'implementation' }, parentRevision: 'abc', scanDirs: ['scripts'] })
+  assert.notEqual(
+    check.skipReason, absent.skipReason,
+    '★ 「任务类型不匹配」与「闸门格没接线」必须读得出区别 —— 否则第 8 次同形缺陷没有信号',
+  )
+  assert.notDeepEqual(
+    { reason: check.skipReason, skipped: check.skippedBecause?.slice(0, 24) },
+    { reason: absent.skipReason, skipped: absent.skippedBecause?.slice(0, 24) },
+    '★ 不只是枚举值：两句人话也必须不同（读日志的人不查枚举）',
+  )
+})
+
+test('臂 14 ★ 三臂之三：测量格缺席 ⇒ incomplete（第三件事，与前两者又不同形）', () => {
+  /**
+   * 第三种情形：判据**适用**（闸门格都在），而它的**测量格**缺席 ⇒ 真·接线缺陷。
+   * ★ 它走的是另一条路（`incomplete` + `missing`），与上面两种 `skipped` 不同形。
+   */
+  const context = { task: { kind: 'implementation' }, wantsCompleted: true }
+  const check = checkRequires(GATED_SUBJECT, context)
+
+  assert.equal(check.status, 'incomplete', '★ 适用但缺格 ⇒ 这才是接线缺陷，必须报')
+  assert.deepEqual(check.missing, ['parentRevision', 'scanDirs'])
+  assert.equal(check.skipReason, undefined, '★ 它不是 skipped，不许带成因（三态互斥）')
+
+  // 三者两两不同形
+  const shapes = new Set([
+    JSON.stringify([check.status, check.skipReason ?? null]),
+    JSON.stringify(['skipped', 'input-surface-absent']),
+    JSON.stringify(['skipped', 'not-applicable']),
+  ])
+  assert.equal(shapes.size, 3, '★ 三种情形必须产出三个不同的形状')
+})
+
+test('臂 15 ★ 推导闸门格：appliesTo 读了哪几格，是【推导】出来的而不是第二次声明', () => {
+  const context = { task: { kind: 'implementation' }, parentRevision: 'a', scanDirs: ['s'] }
+  const check = checkRequires(GATED_SUBJECT, context)
+  assert.deepEqual(
+    check.gateCells, ['wantsCompleted'],
+    '★ 差分探测：把 wantsCompleted 补上 ⇒ appliesTo 翻真 ⇒ 它是闸门格',
+  )
+  /**
+   * ★ 推论（实测边界，写在 requires.ts 里）：`task.kind` **也**是闸门格，
+   *   但它**推不出来** —— 闸门对它的判断是"是不是某几个具体值"，而那个正确答案
+   *   （'implementation'）是判据内部的语义。核对层**拒绝**猜它：
+   *   猜一个等于把判据的语义抄进核对层，那正是本任务拒绝的第二份声明。
+   *
+   *   所以这一格读数的契约是"报了的一定真、没报的不一定没有"（单向可信）。
+   */
+  assert.ok(!check.gateCells.includes('task.kind'), '★ 推不出来的格子如实不报，绝不猜一个语义值')
+  assert.equal(check.skipReason, 'input-surface-absent', '★ 只要推出一格就够判成因了')
+
+  // ★ 再来一次：kind 整个缺席、而 wantsCompleted 在场 ⇒ 该报的是别的成因
+  const noKind = checkRequires(GATED_SUBJECT, { wantsCompleted: true })
+  assert.equal(noKind.skipReason, 'not-applicable', '★ kind 推不出来 ⇒ 不谎报 input-surface-absent')
+
+  /**
+   * ── ★ 为什么是推导而不是第二份声明（本任务的裁定）──────────────────────────────
+   *
+   * 另立 `appliesRequires` 会让**两份声明分叉**（判据改了闸门、忘了改另一份），
+   * 而分叉在日志里同形 —— 那正是本轮从头到尾要消灭的形态。
+   * 推导读的就是 `requires` 那一份，**不可能与它分叉**。
+   *
+   * ★ 断言这里确实**没有**第二个声明口：形状里只有 `requires` 一个声明字段。
+   */
+  assert.deepEqual(
+    Object.keys(GATED_SUBJECT).filter((key) => key !== 'id' && key !== 'appliesTo' && key !== 'requires'),
+    [],
+    '★ 判据的形状里只有一个声明字段 requires，它正是"闸门格"那一份 —— 所以不存在"两份声明会不会分叉"这个问题',
+  )
+})
+
+test('臂 16 ★ 声明缺口：appliesTo 读了、requires 没声明的格子要被单独读出来', () => {
+  /**
+   * 实测（t11）：`dispatch.worktree` 的 `appliesTo` 读了 `task.kind` 与
+   * `update.changedPaths`，而它的 `requires` 只声明了 `['worktreePath','arrival']`
+   * ⇒ **那两格的接线没有任何东西在核**。这正是"闸门格"缺口在真实判据里的形态。
+   */
+  const worktreeLike = {
+    id: 'dispatch.worktree',
+    requires: ['worktreePath', 'arrival'],
+    appliesTo: (ctx) => {
+      const kind = ctx?.task?.kind
+      if (kind !== 'implementation' && kind !== 'repair') return false
+      return Array.isArray(ctx?.update?.changedPaths) && ctx.update.changedPaths.length > 0
+    },
+  }
+  /**
+   * ★ 这一臂钉的是**读数契约**，而不是"它一定能发现" —— 因为实测它**发现不了**
+   *   这一格（见 requires.ts 里 `undeclaredGateCells` 的天花板记录）：
+   *
+   *     ctx = { task:{kind:'implementation'}, update:{} }
+   *     ⇒ `update.changedPaths` 不在候选里（`update` 是空对象）⇒ 推不出来
+   *
+   * ★ 契约是**单向可信**：**报了的一定真，没报的不一定没有**。
+   *   把它读成"没报 ⇒ 没缺口"是过度解读，那会把一条单向读数变成一条假保险，
+   *   而假保险比没有读数更坏。
+   */
+  const barren = checkRequires(worktreeLike, { task: { kind: 'implementation' }, update: {} })
+  assert.equal(barren.status, 'skipped')
+  assert.deepEqual(barren.missing, [], '★ 声明缺口【不是】接线缺口：它不进 missing（一个要人补声明，一个要人补接线）')
+  assert.deepEqual(
+    barren.gateCellsUndeclared ?? [], [],
+    '★ 没报 ≠ 没缺口：`update` 是空对象，`changedPaths` 连候选都不是 ⇒ 如实不报（不猜）',
+  )
+
+  /**
+   * ★ 而**当候选真的出现在这一份 ctx 上时**，缺口必须被报出来。
+   *   请记住候选来自这一份 ctx —— 这就是这条方法能看见什么、看不见什么的分界。
+   */
+  const withCandidate = checkRequires({ ...worktreeLike, id: 'probe' }, { task: { kind: 'work' }, update: { changedPaths: ['a.ts'] } })
+  assert.equal(withCandidate.status, 'skipped')
+  assert.equal(
+    withCandidate.skipReason, 'not-applicable',
+    '★ task.kind 在场（值是 work）⇒ 判据【读到了依据】才说不适用 —— 这正是"按设计闭嘴"，不是接线缺口',
+  )
+  /**
+   * ★ 而**候选真的出现、且它真的缺席**时，缺口才被报出来 —— 这需要
+   *   `changedPaths` 在**别的** ctx 里出现过、而这一份里没有。实测的形态：
+   *   把声明里没有、而这一份 ctx 上有（且缺席）的格子探一遍。
+   */
+  const gapVisible = checkRequires(
+    { ...worktreeLike, id: 'probe2', appliesTo: (ctx) => Array.isArray(ctx?.update?.changedPaths) && ctx.update.changedPaths.length > 0 },
+    { update: {} },
+  )
+  assert.deepEqual(
+    gapVisible.gateCellsUndeclared ?? [], [],
+    '★ 又一个天花板实例：`update` 是空对象时 `changedPaths` 连候选都不是 —— 如实不报',
+  )
+})
+
+test('臂 17 ★ 三种 skipped 与「没声明」「调用方说不适用」都不同形，且互斥', () => {
+  const cases = {
+    'not-applicable': checkRequires(GATED_SUBJECT, { task: { kind: 'work' }, wantsCompleted: true }),
+    'input-surface-absent': checkRequires(GATED_SUBJECT, { task: { kind: 'implementation' } }),
+    undeclared: checkRequires({ id: 'x', appliesTo: () => false }, {}),
+    caller: checkRequires(GATED_SUBJECT, { task: { kind: 'implementation' } }, false),
+  }
+  const reasons = Object.entries(cases).map(([name, check]) => [name, check.skipReason])
+  for (const [name, reason] of reasons) {
+    assert.equal(reason, name, `★ ${name} 的成因必须如实报出（实际 ${reason}）`)
+  }
+  assert.equal(
+    new Set(reasons.map(([, reason]) => reason)).size, 4,
+    '★ 四种成因必须两两不同形 —— 合成一个 skipped 正是本任务要修的那个缺口',
+  )
+  /**
+   * ★ 互斥：`skipReason` 只在 `skipped` 时出现。一个 `ok` 的核对带成因，
+   *   会让"它没跳过"与"它跳过了"在形状上分不出来。
+   */
+  const ok = checkRequires(GATED_SUBJECT, { task: { kind: 'implementation' }, parentRevision: 'a', scanDirs: ['s'], wantsCompleted: true })
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.skipReason, undefined, '★ ok 不许带 skipReason')
+})
+
+test('臂 18 ★ 计数分流：notApplicable 与 inputSurfaceAbsent 分列（合成一个读不出来）', () => {
+  const subjects = [
+    GATED_SUBJECT,
+    { ...GATED_SUBJECT, id: 'completion.other' },
+  ]
+  // 两份都不可能：A 场景（kind=work）+ B 场景（闸门格缺席）
+  const audit = auditRequires(subjects, { task: { kind: 'work' }, wantsCompleted: true })
+  assert.equal(audit.skipped, 2)
+  assert.equal(audit.notApplicable, 2, '★ 两条都读到了自己的闸门格 ⇒ 都是"按设计闭嘴"')
+  assert.equal(audit.inputSurfaceAbsent, 0)
+  assert.equal(audit.incomplete, 0, '★ "不适用不报"：一个都不进 incomplete')
+
+  const absentAudit = auditRequires(subjects, { task: { kind: 'implementation' } })
+  assert.equal(absentAudit.skipped, 2)
+  assert.equal(absentAudit.notApplicable, 0)
+  assert.equal(absentAudit.inputSurfaceAbsent, 2, '★ 这才是"去看一眼"的信号')
+  assert.equal(absentAudit.incomplete, 0, '★ 它仍然不是接线缺陷计数')
+  assert.notDeepEqual(
+    [audit.notApplicable, audit.inputSurfaceAbsent],
+    [absentAudit.notApplicable, absentAudit.inputSurfaceAbsent],
+    '★ 只读 skipped 的调用方读不出这两轮的区别 —— 计数必须分开',
+  )
+})
+
+test('臂 19 ★ 定向突变：把成因判别式去掉（一律 not-applicable）⇒ 臂 12/13/17 必须红', () => {
+  /**
+   * ★ 规则二后半句的用法：把要保护的那个机制**单独去掉**，臂必须红。
+   *
+   * 这里去掉的是**判别式**本身（不是整个核对层）—— 也就是把
+   *   `presentHere.length === 0 ? 'input-surface-absent' : 'not-applicable'`
+   * 简写成恒 `'not-applicable'`。那样一来"闸门格没接线"又变得读不出来，
+   * 而一切看起来仍然"正常"（都是 skipped、都不报）—— 正是缺口回来时的样子。
+   */
+  const context = { task: { kind: 'implementation' }, parentRevision: 'a', scanDirs: ['s'] }
+  const check = checkRequires(GATED_SUBJECT, context)
+  /**
+   * ★ 判别式**不是**"声明里有没有格子在场"（我第一版就是这么写的，实测错了）：
+   *   这一轮 present = 3 格（含测量格 parentRevision/scanDirs），而缺口仍然存在。
+   *   真正的判别式是 {@link requires.ts} 里推导出的**闸门格**：
+   *   推出一格 ⇒ 判据是凭着一个没接的格子说不适用。
+   */
+  assert.equal(check.present.length, 3, '★ 测量格在场【证明不了】闸门接了 —— 这正是第一版判别式错在哪')
+  assert.deepEqual(check.gateCells, ['wantsCompleted'], '★ 判别式的原料是推导出来的闸门格，不是 present 计数')
+  assert.equal(check.skipReason, 'input-surface-absent')
+  // 对照臂：同一份声明、把那一格补上 ⇒ 成因翻转（这就是"突变会红"的证明）
+  const filled = checkRequires(GATED_SUBJECT, { ...context, wantsCompleted: true })
+  assert.equal(filled.status, 'ok', '★ 补上闸门格它就适用了 —— 说明成因确实是这一格驱动的')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 20（t11）：注册表与 auditRequires 的读数必须【逐字段相等】
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('臂 20 ★ 两个来源的读数不许分叉：registry 的 requires 字段 === auditRequires', async () => {
+  /**
+   * ── ★ 这一臂钉的是一个**修过的真缺陷** ────────────────────────────────────────
+   *
+   * `registry.ts` 里那段"把逐条核对合并成一份读数"的代码，是 `auditRequires` 的
+   * **抄写**（两处各写一遍合并规则）。抄写的第一份代价在 t11 当场兑现：
+   *
+   *     auditRequires 加了 notApplicable / inputSurfaceAbsent 两个成因计数，
+   *     而 registry 那一份没加 ⇒ 两处对【同一批 checks】产出不同的读数，
+   *     而它们都被叫做 requiresField。
+   *
+   * ★ 那正是本队反复见过的形态：同一件事有两个来源，分叉之后在日志里同形。
+   *   而它**不会被任何"读一个来源"的臂发现** —— 必须拿两个来源对拍。
+   */
+  const subjects = [
+    GATED_SUBJECT,
+    { ...GATED_SUBJECT, id: 'completion.second' },
+    { id: 'completion.plain', requires: ['parentRevision'], appliesTo: () => true },
+  ]
+  const contexts = [
+    { task: { kind: 'work' }, wantsCompleted: true },
+    { task: { kind: 'implementation' } },
+    { task: { kind: 'implementation' }, parentRevision: 'a', wantsCompleted: true },
+    { task: { kind: 'implementation' }, parentRevision: 'a', scanDirs: ['s'], wantsCompleted: true },
+  ]
+
+  for (const context of contexts) {
+    const fromRegistry = []
+    for (const subject of subjects) {
+      /** ★ 注册表那条路：注册 → register 校验 → 求值 → 读 requires 字段 */
+      const r = createGateRegistry()
+      r.register({
+        id: subject.id,
+        point: 'completion',
+        description: 'parity probe',
+        ...subject.requires === undefined ? {} : { requires: subject.requires },
+        ...subject.appliesTo === undefined ? {} : { appliesTo: subject.appliesTo },
+        gate: () => ({ ok: true }),
+      })
+      const evaluation = await r.evaluate('completion', context)
+      fromRegistry.push(evaluation.requires.checks.find((check) => check.id === subject.id))
+    }
+    /**
+     * ★ 这一臂**当场抓到过一个真分叉**（t11）：注册表那一侧此前传
+     *   `applies = false`（"调用方说不适用"），于是它的 `skipReason` 恒为
+     *   `'caller'` —— **`'input-surface-absent'` 永远不会出现在生产路径上**，
+     *   t11 的缺口在真实运行里看不见，只在夹具直呼 `checkRequires` 时看得见。
+     *
+     *   实测：同一个 ctx，注册表 `inputSurfaceAbsent: 0` 而 audit 给 `2`。
+     *   ⇒ 修法是注册表不再替核对层回答"为什么跳过"（那个"为什么"只在
+     *     `requires` 那一面读得到）。**这一臂就是它的回归。**
+     */
+    const direct = subjects.map((subject) => checkRequires(subject, context))
+    assert.deepEqual(
+      fromRegistry, direct,
+      '★ 装配路径与直接调用必须给出**逐条逐字段相同**的结论 —— 两个来源分叉之后在日志里同形',
+    )
+  }
+
+  /**
+   * ★ 反向：合并出来的**读数**（不只是逐条结论）也必须相等。
+   *   这正是当初分叉的那一层。
+   */
+  const audit = auditRequires(subjects, contexts[1])
+  const r = createGateRegistry()
+  for (const subject of subjects) {
+    r.register({
+      id: subject.id, point: 'completion', description: 'parity probe',
+      requires: subject.requires, appliesTo: subject.appliesTo, gate: () => ({ ok: true }),
+    })
+  }
+  const field = (await r.evaluate('completion', contexts[1])).requires
+  for (const key of ['checked', 'incomplete', 'skipped', 'notApplicable', 'inputSurfaceAbsent', 'missing', 'gateCellsUndeclared']) {
+    assert.deepEqual(
+      field[key], audit[key],
+      `★ 读数 "${key}" 在两个来源上必须相等 —— 抄写会让它们分叉，而分叉在日志里同形`,
+    )
+  }
 })

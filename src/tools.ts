@@ -57,7 +57,9 @@ import {
   taskKindOf,
 } from './state.ts'
 import { appendTaskEvidence } from './quality-gates.ts'
-import { registry } from './gates/index.ts'
+import { gateModuleViews, registry } from './gates/index.ts'
+import { auditRequires } from './gates/requires.ts'
+import type { GatePoint } from './gates/index.ts'
 import { observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
 import type { ContractAmendmentInput } from './state.ts'
 import type { AcceptanceResult, CommandResult, ReviewFinding, ReviewVerdict, TaskKind } from './types.ts'
@@ -1726,6 +1728,97 @@ function waitObservationFor(
 }
 
 /**
+ * ── ★ 判据的输入面：A 层核对的【唯一】接线点（t10）────────────────────────────
+ *
+ * 这个函数是编排层对 `src/gates/requires.ts` 的全部使用。八处调用点一个不少地
+ * 走它 —— 包括那六处 `runtime` 调用点，它们全部经 {@link evaluateRuntimeGates}
+ * 进来，而那个入口是注入面（`wait` / `waits`）**唯一**的构造点。
+ *
+ * ── ★ 为什么必须逐格手接会输（这段话是本任务存在的理由）───────────────────────
+ *
+ * MEASURED（2026-10-05 复盘）：11 条判据的输入面**每一格都是手工单独接的**，而五次
+ * 同形缺陷全部落在这一格上：
+ *
+ *     inScope 缺席 → verify 缺席 → 执行器缺席 → event 名不匹配 → 窗口表没接线
+ *
+ * 五次都不是判据写错，而是"判据要的那一格 ctx 没接上"。它们的共同形状是：
+ * **判据照常跑、照常说话，只是它说的是"我没能测量"** —— 在日志里与"这一步没问题"
+ * 同形。⇒ 判据自己声明 `requires`（B 层类型），编排层在这里按声明核对**真实 ctx**
+ * （A 层实测），"接没接上"于是成为一次机械核对，而不是人眼审查。
+ *
+ * ── ★ 三条纪律，每条都对着一个已经踩过的坑 ────────────────────────────────────
+ *
+ * ① **先核对、再求值**。顺序是刻意的：核对读的是**调用方交出去的那份 ctx**，
+ *    所以"判据要的格子在不在"这个问题必须在判据开口之前就回答。反过来（先求值
+ *    再核对）会让核对结果依赖判据自己有没有副作用地补上某一格 —— 那时它核对的
+ *    已经不是调用方的接线了。
+ *
+ * ② **不适用 ⇒ 不核对、不报**（`requires.ts` 的闸门）。11 条判据 × 8 个调用点
+ *    = 88 种组合，**大部分本来就该"不适用"**：一条只在 `task-status` 上开口的
+ *    探活判据，在 `task-created` 那一刻缺时钟，本来就是设计的一部分。在那些组合上
+ *    喊"缺这缺那"正是"教人忽略门禁"的老路（本队已有实测：噪音与误报同样有害）。
+ *    所以这里**原样转发**判据自己的 `appliesTo`，且用与注册表**同一份函数引用**
+ *    —— 两份口径会分叉，而分叉的两次调用在日志里同形。
+ *
+ * ③ **核对不拒绝任何东西**（先软后硬，用户裁定）。本函数只**产出**一份旁路结果，
+ *    它进求值结果的 `requires` 字段，与 `observed` 平级；它不参与
+ *    `ok` / `blockers` / `unmeasured`，也不改 `evaluated` / `skipped` / `registered`
+ *    任何一个计数。一个自己还没被验证过的新机制没有资格当场否决别人的任务 ——
+ *    这正是本队"判据误伤的代价比漏报更贵"那条的同一个形态。
+ *
+ * ── ★ 三条边界，必须与注册表那一份对齐（否则核对会报出一个判据不认的结论）──────
+ *
+ *   · **核对谁**：`auditRequires(subjects, ctx)` 把 `applies` 交给
+ *     `checkRequires` 去问 `subject.appliesTo` —— 与注册表求值时调的是**那个
+ *     函数**，只不过它由审计层调一次、由注册表调一次（每轮各一次，纯读）。
+ *     ⇒ 只有在 `appliesTo` 带副作用或自己读时间时两者才可能不同，而本仓库的
+ *       11 条 `appliesTo` 全部是纯读（它们在 `src/gates/**` 里，本任务不改）。
+ *     不适用的仍落在 `skipped`、不报缺失 —— 于是 `requires.checks` 与 `ran[]`
+ *     按 id 一一对得上。
+ *   · **`requires` 缺席**：`checkRequires` 给 `skipped` + `undeclared`，这**不是**
+ *     噪音（它不进 `missing`）—— 它是"这条判据的输入面还没被声明"的覆盖率读数。
+ *   · **`appliesTo` 抛错**：`checkRequires` **不捕获**（与注册表同口径）。一个
+ *     "核对层能容错、求值层不能"的分叉会让那一刻的核对结果变成幻觉。
+ */
+function auditGateRequires(point: GatePoint, context: unknown) {
+  /**
+   * ★ 判据的形状从哪来：`gateModuleViews()` —— 而它的**唯一真值来源是注册表**
+   *   （`registry.list()`），顺序 = 注册顺序。
+   *
+   * ★★ 不是在这里再写一份清单，也不是去读装配点的静态 `ALL_GATES`
+   *   —— MEASURED（t10 第一版就写错了）：`ALL_GATES` 只有**装配时**那 11 条，
+   *   运行期 `registry.register(...)` 加进来的判据（夹具探针、以及任何后来的
+   *   插件）在核对层里**根本不存在** ⇒ 核对报出的是一份**关于别的判据**的结论，
+   *   而它读起来完全正常（`incomplete: 0`，一切齐整）。
+   *
+   *   ⇒ 这是本任务要消灭的那个形状的另一种写法：**两份真相**。一份"谁需要哪些格"
+   *     的表只能有一条来路，而它是注册表。
+   *   ⇒ 顺带保证 `requires.checks` 与求值结果的 `ran[]` 按 id 一一对得上。
+   */
+  const subjects = gateModuleViews()
+    .filter((module) => module.point === point)
+    .map((module) => ({
+      id: module.id,
+      /**
+       * ★ `requires` 与 `hasRequires` 是两件事（注册表的同一条纪律）：
+       *   没声明 ⇒ 留 `undefined`（审计层给 `undeclared`，那是**没声明**的读数）；
+       *   声明了空数组 ⇒ 交空数组（审计层给"核对过、不需要任何一格"）。
+       *   合成 `?? []` 会让"没声明"伪装成"声明过、且不需要任何东西"，
+       *   于是输入面接线覆盖率的读数会虚高 —— 而虚高正是本轮要消灭的那件事。
+       */
+      ...module.hasRequires ? { requires: module.requires ?? [] } : {},
+      /**
+       * ★ 适不适用由**判据自己的** `appliesTo` 回答，与注册表求值时调的是
+       *   同一个函数引用（`registry.list()` 在 t10 起交出的就是那个函数本身）。
+       *   核对层不许另建一套口径（那会让"注册表跳过了它、核对却报了缺失"
+       *   这种自相矛盾的结论出现 —— 而它在日志里与正常情形同形）。
+       */
+      ...module.appliesTo === undefined ? {} : { appliesTo: module.appliesTo },
+    }))
+  return auditRequires(subjects, context)
+}
+
+/**
  * 跑 `runtime` 位置，并且**无论它返回什么都继续**（契约 §5 硬要求）。
  *
  * ★ 三态 + 一个不同的第四种情形，四种在返回值里【互不同形】：
@@ -1810,6 +1903,24 @@ async function evaluateRuntimeGates(
   const waits = team !== undefined && typeof team === 'object' && Array.isArray(team.tasks) && typeof team.id === 'string'
     ? teamWaitObservations(team, clock(), event)
     : undefined
+  /**
+   * ── ★ 输入面：本入口是**六处** runtime 调用点唯一的求值点，所以核对也在这里 ────
+   *
+   * → 八处调用点里六处（`member-dispatched` / `task-created` / `task-update` /
+   *   `task-update-settled` / `task-status` / `delivery-declared`）经本函数进来，
+   *   而 `wait` / `waits` / `event` 三格**只在这里**被注入。⇒ 核对放在这里，
+   *   六处调用点核对到的是**同一份**注入结果；放在调用点上会让六处各自拼一遍，
+   *   而六处会慢慢分叉、且它们在日志里同形（本任务要消灭的正是这个形状）。
+   *
+   * ★ 顺序：**注入完成之后、求值之前**。核对读的是**交出去的那份 ctx** ——
+   *   先求值再核对会让核对结果依赖判据有没有副作用地补上某一格。
+   */
+  const runtimeInputSurface = auditGateRequires('runtime', {
+    ...source,
+    ...wait === undefined ? {} : { wait },
+    ...waits === undefined ? {} : { waits },
+    event,
+  })
   let evaluation
   try {
     evaluation = await registry.evaluate('runtime' as never, {
@@ -1824,11 +1935,39 @@ async function evaluateRuntimeGates(
     judgeRuntimeGates('runtime gate threw', reason)
     return { ok: false, threw: reason } as unknown as JsonValue
   }
+  /**
+   * ★ 输入面缺格 ⇒ **只记录、不拒绝**（先软后硬 + 契约 §5 的双保险）。
+   *   runtime 位置本来就不得拒绝任务，所以这里连"要不要拒"这个问题都不存在。
+   *   措辞与"runtime 判据抛错"、"判据 unmeasured"**三者互不同形** —— 读日志的人
+   *   要能一眼分出"调用方没接这一格"与"判据测不了"。
+   */
+  if (runtimeInputSurface.incomplete > 0) {
+    ctx.logger.warn(`agent-teams: the runtime gate on "${event}" has an unfinished input surface (recorded, not rejected): ${runtimeInputSurface.missing.join('; ')}`)
+  }
   const outcome = evaluation.ok === false
     ? evaluation.unmeasured !== undefined ? `unmeasured: ${evaluation.unmeasured}` : `blocked: ${evaluation.blockers.join('; ')}`
     : evaluation.evaluated === 0 ? `ok (nothing evaluated: ${evaluation.registered} registered, all skipped)` : 'ok'
   judgeRuntimeGates(event, outcome)
-  return { ...(evaluation as unknown as Record<string, unknown>), outcome } as unknown as JsonValue
+  /**
+   * ── ★ 核对结论【随记录一起交出去】（`input_surface`）──────────────────────────
+   *
+   * ★ 为什么必须有一个可读的出口，而不是只写日志：本队对"观察"的纪律是
+   *   **读得出来才算数**。一个只进日志的核对结论会在"日志没开/被截断"时与
+   *   "输入面是齐的"同形 —— 而那正是本轮要消灭的形状。
+   * ★ 它与 `requires`（注册表自己那份）**不同源、互相印证**：注册表在求值中
+   *   核对的是它内部那份 ctx；这里是调用方在**注入完成的那一刻**核对的。
+   *   两者都在场时，"同一个缺格被两条路径分别报出来"才说明接线真的通了。
+   */
+  return {
+    ...(evaluation as unknown as Record<string, unknown>),
+    input_surface: {
+      checked: runtimeInputSurface.checked,
+      incomplete: runtimeInputSurface.incomplete,
+      skipped: runtimeInputSurface.skipped,
+      missing: runtimeInputSurface.missing,
+    },
+    outcome,
+  } as unknown as JsonValue
 }
 
 /**
@@ -1874,6 +2013,12 @@ async function rejectOnContractGates(
   what: string,
   inject: Record<string, unknown> = {},
 ): Promise<void> {
+  /**
+   * ★ 输入面核对（t10）：**求值之前**，按每条判据声明的 `requires` 核对这份真实 ctx。
+   *   ★ 它是**旁路数据**：下面的拒绝逻辑一个字都不看它 —— 核对报缺时流程照常走完
+   *   （先软后硬）。理由与「为什么不能先求值再核对」见 {@link auditGateRequires}。
+   */
+  const inputSurface = auditGateRequires('contract', { ...context, ...inject })
   const gates = await registry.evaluate('contract' as never, { ...context, ...inject })
   if (gates.ok === false) {
     if (gates.unmeasured !== undefined) {
@@ -1887,6 +2032,21 @@ async function rejectOnContractGates(
    */
   if (gates.evaluated === 0 && gates.registered > 0) {
     ctx.logger.warn(`agent-teams: ${what} reached the contract gate with no gate evaluated (${gates.registered} registered, all skipped); the contract was not checked`)
+  }
+  /**
+   * ── ★ 输入面：缺格时**只说、不拒**（先软后硬）────────────────────────────────
+   *
+   * MEASURED（2026-10-05 复盘）：本仓库五次同形缺陷里，**四次**是"判据要的那一格
+   * ctx 没接上"（inScope 缺席 → verify 缺席 → 执行器缺席 → event 名不匹配），
+   * 而它们在日志里与"这一步没问题"同形。⇒ 这里把核对结论**说出来**，且说得
+   * 与判据自己的 `unmeasured` 措辞**不同形**：那是"判据测不了"，这是
+   * "**调用方没把这一格交出去**"。
+   *
+   * ★ 为什么不并进上面那个分支：它会改裁决，而用户已经裁定"先软后硬"。一个
+   *   自己还没被验证过的新机制当场否决别人的任务，正是本队反复踩的形态。
+   */
+  if (inputSurface.incomplete > 0) {
+    ctx.logger.warn(`agent-teams: ${what} reached the contract gate with an unfinished input surface (recorded, not rejected): ${inputSurface.missing.join('; ')}`)
   }
 }
 
@@ -3475,11 +3635,22 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          * ★ 队长代报（caller 是队长）时拿不到成员会话 ⇒ 观察缺席 ⇒ 判据 unmeasured，
          *   而不是被当成通过。这是刻意的：没能观察就不能声称它诚实。
          */
-        const dispatchGates = await registry.evaluate('dispatch', {
+        /**
+         * ★ 输入面核对（t10）：**求值之前**，按每条判据声明的 `requires` 核对这份
+         *   真实 ctx。★ 它是**旁路数据** —— 下面的拒绝逻辑一个字都不看它：
+         *   核对报缺时流程照常走完（先软后硬，用户裁定）。见 {@link auditGateRequires}。
+         *
+         * ★ 这份 ctx 是【构造一次、用两次】的同一个对象（核对一次、求值一次）：
+         *   写成两份字面量会让"核对的 ctx"与"求值的 ctx"在多一次改动之后分叉，
+         *   而分叉之后核对结果会变成关于**另一份 ctx** 的结论 —— 它读起来完全正常。
+         */
+        const dispatchContext = {
           task,
           update: { changedPaths: input.changedPaths },
           observedChangedPaths: observedChangedPaths(caller.session),
-        })
+        }
+        const dispatchInputSurface = auditGateRequires('dispatch', dispatchContext)
+        const dispatchGates = await registry.evaluate('dispatch', dispatchContext)
         /**
          * ── ★ runtime 位置（跨步骤的过程约束，契约 §5）───────────────────────────
          *
@@ -3503,6 +3674,15 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
             throw new Error(`update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`)
           }
           throw new Error(`update_task rejected: ${dispatchGates.blockers.join('; ')}`)
+        }
+        /**
+         * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬）。它放在上面的拒绝逻辑【之后】，
+         *   不是为了顺序好看：放在之前会让"核对报缺"看起来像拒绝的理由，
+         *   而本机制的裁决权是零。措辞与判据的 `unmeasured` 不同形 ——
+         *   那是"判据测不了"，这是"调用方没把这一格交出去"。
+         */
+        if (dispatchInputSurface.incomplete > 0) {
+          ctx.logger.warn(`agent-teams: update_task reached the dispatch gate with an unfinished input surface (recorded, not rejected): ${dispatchInputSurface.missing.join('; ')}`)
         }
         /**
          * ── ★ 注入面：让每条判据拿到它声明的输入（缺则缺席，不注入空值）─────────
@@ -3622,7 +3802,18 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           knownTests: observedTestFiles ?? [],
         })
         const wantsCompleted = args.status === 'completed'
-        const completionGates = await registry.evaluate('completion', {
+        /**
+         * ── ★ 输入面：这是**最长的一份 ctx**，也是历史缺陷最集中的一格 ────────────
+         *
+         * 上一轮五次同形缺陷里，`inScope 缺席` / `verify 缺席` / `执行器缺席` 三次
+         * 都落在本调用点上（本队实测记录）—— 判据照常跑、照常说"我没能测量"，
+         * 而那在日志里与"这一步没问题"同形。
+         *
+         * ⇒ 核对必须在**求值之前**、对着**同一份** ctx：所以下面把 ctx 提成一个
+         *   具名常量，核对与求值**共用它**。写两份字面量之后，任何一次只改一处的
+         *   编辑都会让核对结果变成关于**另一份 ctx** 的结论 —— 而它读起来完全正常。
+         */
+        const completionContext = {
           task,
           update: {
             status: args.status,
@@ -3722,7 +3913,9 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
             const codes = await Promise.all(commands.map((command) => runVerifyCommand(workspace, command)))
             return Math.max(...codes)
           },
-        })
+        }
+        const completionInputSurface = auditGateRequires('completion', completionContext)
+        const completionGates = await registry.evaluate('completion', completionContext)
         /**
          * ── ★ t13 的运行时出口：有判据、却一条都没跑 ────────────────────────────
          *
@@ -3734,6 +3927,18 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         if (completionGates.evaluated === 0 && completionGates.registered > 0) {
           ctx.logger.warn(
             `agent-teams: update_task for task "${task.id}" reached completion with no gate evaluated (${completionGates.registered} registered, all skipped); this step was not checked`,
+          )
+        }
+        /**
+         * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬），放在拒绝逻辑**之前**是因为
+         *   它与下面三个分支讲的不是同一件事，而"这次完成本来会被拒"与"这次完成
+         *   的输入面没接完"必须都能读到 —— 只读到前者会让人以为是判据的结论。
+         *   与 t13 那条（`evaluated === 0`）也**不同形**：那是"判据一条都没跑"，
+         *   这是"判据跑了、而它要的某一格调用方没交"。
+         */
+        if (completionInputSurface.incomplete > 0) {
+          ctx.logger.warn(
+            `agent-teams: update_task for task "${task.id}" reached completion with an unfinished input surface (recorded, not rejected): ${completionInputSurface.missing.join('; ')}`,
           )
         }
         if (completionGates.ok === false) {
@@ -4278,8 +4483,18 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
        *   上游 `canDeclareDelivery` 的 blockers 与判据层的裁决，缺一样读日志的人就
        *   分不出"是契约层面不允许"还是"是某条判据发现了问题"。
        */
+      /**
+       * ★ 输入面核对（t10）：求值之前，对着**同一个** ctx。这里与 `task-status`
+       *   是**两个**调用点，各自核对一次 —— 不是因为会得到不同结论，而是因为
+       *   "报告"与"宣告"这两个入口必须都读得出输入面缺没缺（只在一个入口核对，
+       *   另一个入口的缺失就成了只能靠日志碰运气看见的东西）。
+       */
+      const deliveryInputSurface = auditGateRequires('delivery', deliveryContext)
       const deliveryEvaluation = await registry.evaluate('delivery' as never, deliveryContext)
       const runtimeRecord = await evaluateRuntimeGates(ctx, 'task-status', deliveryContext, clock)
+      if (deliveryInputSurface.incomplete > 0) {
+        ctx.logger.warn(`agent-teams: the status read reached the delivery gate with an unfinished input surface (recorded, not rejected): ${deliveryInputSurface.missing.join('; ')}`)
+      }
       const delivery = {
         ok: deliveryEvaluation.ok === false ? false : deliveryCheck.ok,
         blockers: [
@@ -4394,7 +4609,12 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       /**
        * ★ 与 status 用【同一个】求值面：报告与宣告必须读同一份事实，否则
        *   "status 说能交、declare 说不能"会成为一个新的、更难查的不一致。
+       *
+       * ★ 输入面核对（t10）：同样在求值之前、对着同一个 ctx。★ 它**不参与**下面
+       *   的拒绝 —— 核对报缺时这条宣告照常走完（先软后硬）。一个自己还没被验证过
+       *   的新机制当场否决交付，正是本队反复踩的形态。
        */
+      const deliveryInputSurface = auditGateRequires('delivery', deliveryContext)
       const evaluation = await registry.evaluate('delivery' as never, deliveryContext)
       const loop = describeQualityLoop(team)
       /**
@@ -4413,6 +4633,9 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       }
       if (evaluation.evaluated === 0 && evaluation.registered > 0) {
         ctx.logger.warn(`agent-teams: declare_delivery reached the delivery gate with no gate evaluated (${evaluation.registered} registered, all skipped); delivery was not checked`)
+      }
+      if (deliveryInputSurface.incomplete > 0) {
+        ctx.logger.warn(`agent-teams: declare_delivery reached the delivery gate with an unfinished input surface (recorded, not rejected): ${deliveryInputSurface.missing.join('; ')}`)
       }
       await evaluateRuntimeGates(ctx, 'delivery-declared', deliveryContext, clock)
       void stateRoot

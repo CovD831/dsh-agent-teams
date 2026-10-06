@@ -1160,12 +1160,57 @@ test('⑥ 判据源码与构建产物里都没有 I/O import，也没有真的�
     }
   }
 
-  /** ★ 判据只 import 注册表：不 import 别的判据、不 import 工具层。 */
+  /**
+   * ── ★ 判据只 import 注册表与 requires：不 import 别的判据、不 import 工具层 ──
+   *
+   * ★ 白名单从 `['../registry.ts']` 变成两项，是 t5 的接线带来的（这条断言
+   *   在 t5 之前是红的 —— 它把一条**合法的**接线报成了违规）。逐条说清为什么
+   *   第二项不破坏这条断言的用意：
+   *
+   *   · 它**仍然拦**「判据之间互相 import」：`../requires.ts` 是唯一新增的允许项，
+   *     而 `../completion/r5.ts` 这类仍然不在名单里 ⇒ 一 import 就红。
+   *     （那才是这条断言的用意：判据必须能独立求值、不互相调用，契约 §2 性质 2。）
+   *   · 它**仍然拦**工具层：上面那段 `node:fs` / `node:process` 的循环一个字没动，
+   *     而 `../tools.ts` 也不在名单里。
+   *
+   *   ★ 而 `requires.ts` 为什么可以进来：它是**纯类型 + 纯函数**，且本判据用的是
+   *     `import type { CtxPaths }` —— 类型 import 连一行运行时 import 都不产生
+   *     （所以对 `lib/` 的构建产物这一条本来就是空的，见下面那段断言）。
+   *     它给判据的只有"把 ctx 路径写成类型"这一件事，没有任何 I/O 能力。
+   *
+   *   ★ 与 `gate-requires.test.mjs` 那条纪律同源：`requires.ts` 自己
+   *     **不许 import 任何东西**（t6 已把它换成棘轮形状的臂）—— 于是这个白名单
+   *     的传递闭包是封闭的，不会经由第二项漏进别的东西。
+   */
+  const ALLOWED_GATE_IMPORTS = ['../registry.ts', '../requires.ts']
   const importLines = source.split('\n').filter((line) => /^\s*import\b/.test(line) || /^\s*\}?\s*from\s+['"]/.test(line))
+  const resolved = importLines.map((line) => line.match(/from\s+['"]([^'"]+)['"]/)?.[1]).filter(Boolean)
   assert.deepEqual(
-    importLines.map((line) => line.match(/from\s+['"]([^'"]+)['"]/)?.[1]).filter(Boolean),
-    ['../registry.ts'],
-    '★ 判据只能 import 注册表 —— 它必须是一个可独立求值的纯数据变换',
+    resolved,
+    ALLOWED_GATE_IMPORTS,
+    '★ 判据只能 import 注册表与 requires（纯类型）—— 它必须是一个可独立求值的纯数据变换',
+  )
+  /**
+   * ★ 反向断言（"断言不得恒真"）：名单里**没有**别的判据、也没有工具层。
+   *   只断言 `deepEqual` 的话，把 `ALLOWED_GATE_IMPORTS` 悄悄加宽一项
+   *   （例如为了方便把 `../tools.ts` 也加进去）不会有任何一条臂拦它。
+   */
+  for (const forbidden of ['../tools.ts', '../completion/r5.ts', '../dispatch/worktree.ts']) {
+    assert.ok(
+      !ALLOWED_GATE_IMPORTS.includes(forbidden),
+      `★ '${forbidden}' 不许进判据的白名单 —— 判据之间不互调、也不 import 工具层（契约 §2）`,
+    )
+  }
+  /**
+   * ★ 构建产物这一侧：类型 import 会被完全擦除，所以 `lib/` 里**不许**出现
+   *   对 `requires.js` 的运行时 import。这一条钉住"它真的只是类型"——
+   *   若哪天有人在 `requires.ts` 里放了需要运行时求值的东西并被判据 import，
+   *   这里会立刻红（而上面那条 `deepEqual` 是看不出来的：源码里形状一样）。
+   */
+  assert.doesNotMatch(
+    stripComments(built),
+    /requires\.js/,
+    '★ 构建产物里不许出现 requires.js 的运行时 import —— 它对判据必须只是类型',
   )
 
   /** ★ 它的输入面里**确实**有调用方注入的时钟：时长完全由 `wait.now` 决定。 */

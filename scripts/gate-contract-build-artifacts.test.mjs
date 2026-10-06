@@ -374,7 +374,8 @@ test('★ 输入面臂：把 `task` 从 ctx 里去掉 ⇒ 走注册表就是 `sk
    */
   const check = checkRequires({ id, requires, appliesTo }, { creating: true })
   assert.equal(check.status, 'skipped', '★ 闸门格缺席 ⇒ appliesTo 为假 ⇒ 跳过（不报缺）')
-  assert.match(String(check.skippedBecause), /appliesTo/)
+  assert.equal(check.skipReason, 'input-surface-absent', '★ 而成因要读得出来（t11）：它凭着一个没接上的闸门格说不适用')
+  assert.match(String(check.skippedBecause), /gating cell|appliesTo|not applicable/, '★ 跳过要说清理由（t11 后措辞会点名那个没接上的闸门格）')
   assert.deepEqual(check.missing, [], '★ 跳过的判据不许产出 missing —— 那是噪音的来源')
 
   /**
@@ -437,7 +438,7 @@ test('★ 输入面臂（★ 本任务的核心）：inScope 缺席【不得】�
     '★ 「契约在、inScope 故意缺席」与「契约整个没交出来」必须不同形',
   )
   assert.equal(noContract.status, 'skipped', '★ 整个契约缺席 ⇒ appliesTo 为假 ⇒ skipped（不报缺，但要记数）')
-  assert.match(String(noContract.skippedBecause), /appliesTo/)
+  assert.match(String(noContract.skippedBecause), /gating cell|appliesTo|not applicable/, '★ 同上：措辞点名了缺的那一格，比只说 appliesTo 更有用')
 })
 
 test('★ 输入面臂：声明必须与【未测量臂】一致（缺 X 就 unmeasured 的 X 必须在 requires 里）', () => {

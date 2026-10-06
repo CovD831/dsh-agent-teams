@@ -60,7 +60,7 @@
  *     package.json 的 test:gates 里显式列出，否则是"有 0 个读者"的测试）。
  */
 
-import { createGateRegistry } from './registry.ts'
+import { createGateRegistry, INSERTION_POINTS } from './registry.ts'
 import * as verifyRerun from './completion/verify-rerun.ts'
 import * as changedPaths from './dispatch/changed-paths.ts'
 import * as backtest from './completion/backtest.ts'
@@ -330,6 +330,89 @@ export function buildRegistry() {
 
 /** 进程级单例：编排层用它。 */
 export const registry = buildRegistry()
+
+/** `INSERTION_POINTS` 的元素类型 —— 编排层用它给核对入口标参数（t10）。 */
+export type GatePoint = (typeof INSERTION_POINTS)[number]
+
+/**
+ * ── ★ 判据的模块视图（t10）：供编排层按真实 ctx 核对输入面 ──────────────────────
+ *
+ * MEASURED（2026-10-06，t10）：A 层核对要知道"这一轮每条判据适不适用"
+ * （`appliesTo`），而 `registry.list()` 是给控制台读的**配置视图** ——
+ * 它只报告 `hasAppliesTo`，不报告那个函数是谁。
+ *
+ * ★ 如果核对层自己另判一遍（或干脆不判、无条件核对），它就会在 88 种组合里的
+ *   大部分上喊"缺这缺那"，而那些组合**本来就该不适用**（一条只在 `task-status`
+ *   上开口的探活判据，在 `task-created` 那一刻缺时钟是设计的一部分）。
+ *   噪音会教人忽略门禁 —— 与误报同样有害。
+ *
+ * ★ 所以这里交出**函数本身**（同一个引用，不是"再写一遍同样的判断"）：核对层
+ *   与注册表问的是同一个问题、同一份真值。它**不含任何判据语义**、不改求值路径、
+ *   不参与裁决 —— 与本文件"只做列清单"的纪律同源。
+ */
+export type GateRoute = { id: string; point: GatePoint; requires?: readonly string[]; hasAppliesTo: boolean; appliesTo?: (context: unknown) => boolean }
+
+/**
+ * 注册表的**路由清单**（一个位置一次遍历；顺序 = 注册顺序）。
+ *
+ * ★ `appliesTo` 直接来自注册表（`registry.list()` 在 t10 里多交了这一个字段）。
+ *   它**不是**从静态的 `ALL_GATES` 里找的 —— 见 {@link gateModuleViews} 的实测记录：
+ *   `ALL_GATES` 只有装配时那 11 条，运行期注册进来的判据不在里面，按它找会得到
+ *   一份**关于别的判据**的核对结论。
+ */
+export function gateRoutes(): GateRoute[] {
+  const out: GateRoute[] = []
+  const grouped = registry.list()
+  for (const point of INSERTION_POINTS) {
+    for (const listed of grouped[point] ?? []) {
+      out.push({
+        id: listed.id,
+        point,
+        hasAppliesTo: listed.hasAppliesTo,
+        ...listed.hasRequires ? { requires: listed.requires ?? [] } : {},
+        ...listed.appliesTo === undefined ? {} : { appliesTo: listed.appliesTo as (context: unknown) => boolean },
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * ── ★ 判据的模块视图（t10）：供编排层按真实 ctx 核对输入面 ──────────────────────
+ *
+ * MEASURED（2026-10-06，t10）：A 层核对要知道"这一轮每条判据适不适用"
+ * （`appliesTo`）。它的**唯一真值**是注册表 —— 见下面那段实测记录。
+ *
+ * ★ 如果核对层自己另判一遍（或干脆不判、无条件核对），它就会在 88 种组合里的
+ *   大部分上喊"缺这缺那"，而那些组合**本来就该不适用**（一条只在 `task-status`
+ *   上开口的探活判据，在 `task-created` 那一刻缺时钟是设计的一部分）。
+ *   噪音会教人忽略门禁 —— 与误报同样有害。
+ *
+ * ── ★★ 这一段是本任务最贵的一次实测（t10 第一版写错了，夹具抓出来的）───────────
+ *
+ * 第一版按**静态的 `ALL_GATES`** 遍历，想从判据模块上直接拿 `appliesTo`。
+ * 它的坏法非常隐蔽：`ALL_GATES` 只有**装配时**那 11 条，于是运行期
+ * `registry.register(...)` 加进来的判据（夹具探针、以及任何后来的插件）
+ * 在核对层里**根本不存在** ⇒ 核对报出的是一份**关于别的判据**的结论 ——
+ * 而那份结论读起来完全正常（`incomplete: 0`，一切齐整）。
+ *
+ * ⇒ 与"两份真相"是同一种病：本轮的整个由来就是"输入面每一格手工接"，而
+ *   **接线表有两个来源**只是它的另一种写法。⇒ 真值只有一份：**注册表**。
+ *   装配清单（`ALL_GATES`）只是把判据送进注册表的一个入口，不是第二份表。
+ *
+ * ★ 现在的实现：`appliesTo` 从 `registry.list()`（t10 起它多交这一个字段）
+ *   直接读 —— 与注册表求值时调的是**同一个函数引用**。
+ */
+export function gateModuleViews(): ReadonlyArray<{ id: string; point: GatePoint; hasRequires: boolean; requires?: readonly string[]; hasAppliesTo: boolean; appliesTo?: (context: unknown) => boolean }> {
+  return gateRoutes().map((route) => ({
+    id: route.id,
+    point: route.point,
+    hasRequires: route.requires !== undefined,
+    ...route.requires === undefined ? {} : { requires: route.requires },
+    hasAppliesTo: route.hasAppliesTo,
+    ...route.appliesTo === undefined ? {} : { appliesTo: route.appliesTo },
+  }))
+}
 
 export { createGateRegistry } from './registry.ts'
 export { ok, blocked, unmeasured, INSERTION_POINTS } from './registry.ts'

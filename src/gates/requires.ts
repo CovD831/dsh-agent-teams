@@ -188,8 +188,50 @@ export type Paths<T, Depth extends 0 | 1 | 2 | 3 = 3> = PathsOf<T, Depth>
  * `'skipped'` 与 `'ok'` 必须不同形：前者是"这条判据这一轮压根不说话，所以它的输入面
  * 缺不缺无所谓"，后者是"它要说话，而它要的每一格都在"。合成一个"没问题"会让
  * "88 种组合里大部分不适用"这件事永远读不出来。
+ *
+ * ── ★ 为什么 `'skipped'` 自己还要再分（t11）────────────────────────────────────
+ *
+ * MEASURED（2026-10-06，completion-owner 发现、shape-dev 复核）：`'skipped'` 把
+ * **两件不同的事**合成了一件事。取 `completion.r5`（它声明了 `wantsCompleted` /
+ * `task.kind` / `taskNotTerminal` 三个**闸门格** —— `appliesTo` 自己读的那几格）：
+ *
+ *     A  kind = 'work'（任务类型不匹配）      ⇒ appliesTo 假 ⇒ skipped
+ *     B  调用方**没给** `wantsCompleted`       ⇒ appliesTo 假 ⇒ skipped
+ *
+ * 实测两者逐字节相同。而 B 是**接线缺陷**：`wantsCompleted` 是调用方必须注入的一格，
+ * 它缺席意味着这条判据**永远不跑** —— 那是本轮要消灭的第 8 次同形缺陷，
+ * 却与"这一轮本来就不该跑"（A，正常）同形。
+ *
+ * ⇒ 修法**不是**加第二份声明（见 {@link RequiresCheck.gateCells} 那段实测记录），
+ *   而是把 `'skipped'` 的**成因**读出来。
  */
 export type RequiresStatus = 'ok' | 'incomplete' | 'skipped'
+
+/**
+ * `'skipped'` 的**成因**。★ 这几个值必须不同形，因为其中一个是缺陷、其余是正常。
+ *
+ *   · `'not-applicable'`        —— 判据**判定自己这一轮不该说话**：它读到了它要的
+ *                                  判断依据，而结论是"不适用"（任务类型不匹配、
+ *                                  这一轮不试图完成、终态补证据……）。**正常。**
+ *   · `'input-surface-absent'`  —— 判据**压根没拿到判断依据**：它声明的那几格里，
+ *                                  **一个都没接上**。⇒ 它静默跳过，而"它跳过"与
+ *                                  "它这一轮不该跑"是**不同的两件事**。
+ *   · `'undeclared'`            —— 这条判据没声明 `requires`，无从核对。
+ *   · `'caller'`                —— 调用方直接说"不适用"（没走 `appliesTo`）。
+ *
+ * ── ★ 为什么 `'input-surface-absent'` **不是**接线缺陷（守住"不适用不报"）──────
+ *
+ * 两件必须同时成立、不许混：
+ *
+ *   ① 它**不得**被算成接线缺陷 ⇒ 不进 `missing`、不进 `incomplete`、不产生
+ *      `blockers`（硬化时也不）。一条任务类型不匹配的判据本就不该跑，报它是假告警
+ *      —— 而假告警教人忽略门禁，与漏报同样有害（本轮反复确认过的那条）。
+ *   ② 但"它跳过了"与"它这一轮不该跑"**必须读得出区别** ⇒ 两者落在**不同的成因格**上，
+ *      而不是合并成一个 `skipped`。
+ *
+ * 这就是措辞分流（本任务裁定采纳的候选 ②），不是新增一份声明。
+ */
+export type RequiresSkipReason = 'not-applicable' | 'input-surface-absent' | 'undeclared' | 'caller'
 
 /** 一条判据的核对结论。 */
 export interface RequiresCheck {
@@ -202,6 +244,39 @@ export interface RequiresCheck {
   present: string[]
   /** `appliesTo` 为假 ⇒ 这里是理由原文（一条人话）。其余情形缺席。 */
   skippedBecause?: string
+  /** ★ `'skipped'` 的成因（t11）。只在 `status === 'skipped'` 时在场，且必在场。 */
+  skipReason?: RequiresSkipReason
+  /**
+   * ── ★ 为什么这里**没有**第二个 `appliesRequires` 字段（t11 的核心决定）──────────
+   *
+   * 这个缺口的**诱人修法**是另立一份声明：`appliesRequires`（"闸门需要哪几格"），
+   * 与 `requires`（"判据需要哪几格"）分开。**shape-dev 与 completion-owner 都反对**，
+   * 本任务裁定采纳，理由是实测过的形态：
+   *
+   *   两份声明**会分叉**（判据改了闸门、忘了改另一份），而分叉**在日志里同形** ——
+   *   它看起来与"闸门本来就是那样"完全一样。那正是本轮从头到尾要消灭的形态，
+   *   也是"每一格手工接"必然复发第 8 次的原因。
+   *
+   * ★ 所以下面这个 `gateCells` 是**推导出来的，不是声明出来的**：`checkRequires`
+   *   实测 `appliesTo` 究竟读了 `requires` 里的哪几格（逐格置空、看结论是否翻转）。
+   *   一份声明即唯一真相；推导只解释它【怎么被读的】。
+   */
+  gateCells?: string[]
+  /**
+   * ── ★ `appliesTo` 真的读了、而 `requires` **没声明**的格子 ─────────────────────
+   *
+   * **这是本任务最该被看见的一格。** 它说的是：判据用来自证"我不适用"的那几格里，
+   * 有格子**不在它声明的输入面里** ⇒ 那几格的接线**没有任何东西在核**。
+   *
+   * ★ 与 `missing` 的关系：`missing` 是"声明了、真 ctx 上读不到"（**接线缺陷**，
+   *   有硬证据）；这里是"没声明、但真的被读了"（**声明缺口**，另一件事）。
+   *   两者不许合流 —— 前者要人补接线，后者要人补声明。
+   *
+   * ★ 它为什么不产生 blocker（即使硬化）：那会让本机制当场变成"判据作者必须一次性
+   *   写全声明才能提交"的门禁，而本轮的纪律恰恰相反（本机制还没被验证过，不许当场
+   *   否决别人的工作）。它只读数、只曝光。
+   */
+  gateCellsUndeclared?: string[]
   /** 判据没声明 `requires` ⇒ 这里说明"没声明"，与"声明了空数组"不同形。 */
   undeclared?: string
 }
@@ -217,10 +292,35 @@ export interface RequiresAudit {
   incomplete: number
   /** 因 `appliesTo` 为假而**没有**核对的条数（这一格是"不适用不报"的计数器）。 */
   skipped: number
+  /**
+   * ★ 被跳过的那些里，**只有"任务类型不匹配"这一类**的条数（t11）。
+   *
+   * 与 `skipped` 的关系：`notApplicable <= skipped`，且剩下的那一部分落在
+   * `inputSurfaceAbsent` / `undeclared` 上。★ 两个计数必须分开读 ——
+   * 合起来读会让"11 条判据都跳过了"（正常）与"11 条都因为接线没接而跳过"（异常）
+   * 在读数上同形，而那正是 t11 要修的那件事。
+   */
+  notApplicable: number
+  /**
+   * ★ 被跳过的那些里，判据**一格输入面都没接到**的条数（t11）。
+   *
+   * ★ 它**不是**接线缺陷计数（那条在 `incomplete`），它是"这条判据这一轮静默跳过、
+   *   而原因不是任务类型不匹配"的读数。缺口的可发现性就靠它：
+   *   假如下次闸门格没接线，这个数会**大于 0**，而 `incomplete` 仍是 0 ——
+   *   两份读数一起看才知道该去补哪一边。
+   */
+  inputSurfaceAbsent: number
   /** 逐条结论，按注册顺序。 */
   checks: RequiresCheck[]
   /** 缺了格子的那些判据的人话清单（`incomplete > 0` 时非空）。 */
   missing: string[]
+  /**
+   * ★ 声明缺口的清单（`gateCellsUndeclared` 非空的人话版）。
+   *
+   * ★ 与 `missing` **刻意分开**：`missing` 说"接线上少一格"，这里说"声明里少一格"。
+   *   两者合起来会让补救动作变得不可判定（是去补接线，还是去补声明？）。
+   */
+  gateCellsUndeclared: string[]
 }
 
 /** 一条判据这一轮适不适用的判断依据 —— 由调用方（或注册表）给。 */
@@ -268,14 +368,73 @@ export function checkRequires(subject: RequiresSubject, context: unknown, applie
    */
   const applicable = applies ?? (typeof subject.appliesTo === 'function' ? subject.appliesTo(context) === true : true)
   if (!applicable) {
+    /**
+     * ── ★ t11：`skipped` 的两种成因必须不同形 ──────────────────────────────────
+     *
+     * 到这一行，我们只知道"这一轮不适用"。**为什么**不适用，要再问一次 ——
+     * 而这一步**不用**任何新声明：判据声明的那几格，`appliesTo` 到底读没读到？
+     *
+     *   · 声明里**至少有一格在场** ⇒ 判据拿到了它的判断依据，而结论是"不适用"
+     *     （任务类型不匹配 / 这一轮不试图完成 / 终态补证据）⇒ `'not-applicable'`。**正常。**
+     *   · 声明里**一格都没有**（`requires` 非空且全缺席）⇒ 判据**压根没拿到判断依据**
+     *     ⇒ `'input-surface-absent'`。这条判据永远不会跑，而它**静默地**永远不跑
+     *     —— 那是本轮要消灭的第 8 次同形缺陷。
+     *
+     * ★ 实测（completion.r5，见 {@link RequiresStatus} 的注释）：两种情形的差别
+     *   恰好就落在这里 —— kind='work' 时 `task.kind` 在场（⇒ not-applicable），
+     *   而"调用方没给 `wantsCompleted`"时声明里一格都不在场（⇒ input-surface-absent）。
+     *
+     * ★ **仍然不报缺陷**：两者都不进 `missing`、不进 `incomplete`、不产生 blocker。
+     *   一条本就不该跑的判据去报"你缺格"是假告警，而假告警教人忽略门禁，
+     *   与漏报同样有害。这里做的**只是把成因读出来**（候选 ②，不是候选 ①）。
+     */
+    const declared = subject.requires ?? []
+    const presentHere = declared.filter((path) => isPresent(readPath(context, path)))
+    const gateCellsUndeclared = declared.length === 0 ? [] : undeclaredGateCells(subject, context, declared)
+    /**
+     * ── ★ 成因的判定：看【闸门格】接没接上，而不是看"有没有格子在场"────────────
+     *
+     * MEASURED（2026-10-06，t11 本机实测，我第一版写错过一次）：
+     *
+     * 第一版用的是"声明里有没有**任意一格**在场"：`presentHere.length === 0`。
+     * **它错了**，而错法很隐蔽 —— `completion.r5` 在"调用方没给 `wantsCompleted`"
+     * 那一轮里，`parentRevision` 与 `scanDirs`（**测量格**）是在场的：
+     *
+     *     场景 B（闸门格没接线）present = ['parentRevision', 'scanDirs', 'task.kind']
+     *     ⇒ presentHere.length = 3 ≠ 0 ⇒ 被判成 'not-applicable'  ✗ 缺口原样存在
+     *
+     * ★ 原因是"在场"这件事与"闸门"无关：测量格在不在场，是判据能不能干活的问题；
+     *   闸门格在不在场，才是判据**能不能做出"我不适用"这个判断**的问题。
+     *   把两者合成一个计数，就是本轮反复见到的合流形态。
+     *
+     * ⇒ 判别式改成**推导出来的闸门格**：`appliesTo` 实测读了、而真实 ctx 上读不到的
+     *   那几格为空 ⇒ 它压根没有判断依据 ⇒ `'input-surface-absent'`。
+     *
+     * ★ 推导只对"有 appliesTo"的判据有效；调用方直接说 `applies` 时成因是
+     *   `'caller'`，与判据自己的闸门无关（所以那一条先行短路）。
+     */
+    const callerSaid = applies === false
+    const derived = declared.length === 0 ? [] : derivedGateCells(subject, context, declared)
+    const skipReason: RequiresSkipReason = callerSaid
+      ? 'caller'
+      : declared.length === 0
+        ? 'undeclared'
+        : derived.length > 0 ? 'input-surface-absent' : 'not-applicable'
     return {
       id: subject.id,
       status: 'skipped',
+      skipReason,
       missing: [],
-      present: [],
-      skippedBecause: typeof subject.appliesTo === 'function'
-        ? 'appliesTo(context) is not true for this context, so this gate does not speak this round and its input surface is not checked'
-        : 'the caller reported this gate as not applicable to this context',
+      present: presentHere,
+      ...declared.length === 0 ? {} : { gateCells: derived },
+      ...gateCellsUndeclared.length === 0 ? {} : { gateCellsUndeclared },
+      skippedBecause: callerSaid
+        ? 'the caller reported this gate as not applicable to this context'
+        : skipReason === 'input-surface-absent'
+          ? `this gate reached "not applicable" using a gating cell that the context does not carry (${derived.join(', ')}): `
+            + 'the verdict is about THIS ROUND being inapplicable, not about the gate being silent because a wiring is missing '
+            + '(nothing is blocked — a gate that is not meant to run must not raise an alarm)'
+          : 'appliesTo(context) read its own gating cells and concluded this gate does not speak for this context',
     }
   }
 
@@ -289,6 +448,7 @@ export function checkRequires(subject: RequiresSubject, context: unknown, applie
     return {
       id: subject.id,
       status: 'skipped',
+      skipReason: 'undeclared',
       missing: [],
       present: [],
       undeclared: 'this gate declares no requires, so its input surface is unknown (this is not the same as requiring nothing)',
@@ -301,10 +461,215 @@ export function checkRequires(subject: RequiresSubject, context: unknown, applie
     if (isPresent(readPath(context, path))) present.push(path)
     else missing.push(path)
   }
-  if (missing.length > 0) {
-    return { id: subject.id, status: 'incomplete', missing, present }
+  /**
+   * ★ 声明缺口：`appliesTo` 读了、而 `requires` 没声明的格子。
+   *
+   * MEASURED（2026-10-06，t11 实测）：`dispatch.worktree` 的 `appliesTo` 读了
+   * `task.kind` 与 `update.changedPaths`，而它的 `requires` 只声明了
+   * `['worktreePath', 'arrival']` ⇒ **那两格的接线没有任何东西在核**。
+   * 这正是"闸门格"，而缺口的可发现性靠这一格。
+   */
+  const gateCellsUndeclared = undeclaredGateCells(subject, context, subject.requires)
+  return {
+    id: subject.id,
+    status: missing.length > 0 ? 'incomplete' : 'ok',
+    missing,
+    present,
+    gateCells: derivedGateCells(subject, context, subject.requires),
+    ...gateCellsUndeclared.length === 0 ? {} : { gateCellsUndeclared },
   }
-  return { id: subject.id, status: 'ok', missing, present }
+}
+
+/**
+ * ── ★ 推导 `appliesTo` 读了哪几格（t11）——**推导，不是声明** ────────────────────
+ *
+ * 做法是**差分探测**：对声明的每一格，构造一份"把这一格置空、其余照旧"的 ctx，
+ * 再问一次 `appliesTo`。结论翻转 ⇒ 这一格是闸门格。
+ *
+ * ```
+ * 真实 ctx            appliesTo = false
+ * 把 wantsCompleted 补上  appliesTo = true   ⇒ wantsCompleted 是闸门格
+ * 把 task.kind 换成 work  appliesTo = false  ⇒ 无关
+ * ```
+ *
+ * ── ★ 为什么是推导而不是第二份声明（本任务的核心决定，两处实测支撑）────────────
+ *
+ * ① **两份声明会分叉**。判据改了闸门、忘了改另一份，而分叉**在日志里同形**——
+ *    它看起来与"闸门本来就是那样"完全一样。那正是本轮从头到尾要消灭的形态。
+ * ② 而推导**不可能与声明分叉**：它读的就是 `requires` 那一份，唯一的输入。
+ *
+ * ── 四条纪律（每一条都对着一个会误报的坑）────────────────────────────────────
+ *
+ * · **只在 `appliesTo` 为假时推导**。它的语义就是"为什么它说不适用"；在适用的
+ *   判据上问"哪几格是闸门"既无对象、又会产出噪声。
+ * · **一次只补一格，不做组合搜索**。组合会产出 `2^n` 个探针（r5 有 5 个缺席格），
+ *   而闸门格通常各自独立就把结论翻过来了。少报一格是可以接受的（这只是一条读数），
+ *   误报一格不可以 —— 误报会让"闸门格"这个说法失去信任。
+ * · **最多补 4 格**。超过这个数说明判据的闸门是组合式（"任意两格同时在场"），
+ *   单格差分测不出来，此时**如实少报**而不是猜。
+ * · **补进去的值只用于触发"在场"**，不承诺语义。所以推导出的格子**只当读数用**，
+ *   绝不参与裁决 —— 这一点由"它只出现在 `gateCells*` 与旁路字段里"保证。
+ *
+ * ★★ 但"不承诺语义"不等于"随便填一个值"（t11 本机实测，我第一版就栽在这里）：
+ *
+ *     探针填 `'(gate-cell-probe)'` 时，`completion.r5` 的闸门格**一个都推不出来**：
+ *         appliesTo 的第一段是 `kind !== 'implementation' && kind !== 'repair'`
+ *         ⇒ 给 `task.kind` 填一个字符串仍然不匹配 ⇒ 结论不翻转
+ *         appliesTo 的第二段是 `ctx?.wantsCompleted !== true`
+ *         ⇒ 给 `wantsCompleted` 填一个字符串仍然 !== true ⇒ 结论**也不翻转**
+ *     实测 gateCells = []（本该是 ['wantsCompleted']）—— 判别式因此恒判
+ *     'not-applicable'，t11 的缺口原样存在。
+ *
+ * ⇒ 探针必须**逐格按它在 ctx 上的形态**来试，而不是填一个固定值：见
+ *   {@link gateCellProbesFor}。它按"闸门格在真实代码里长什么样"给出一小组候选
+ *   （布尔真 / 非空数组 / 非空字符串），任何一个让结论翻转即算命中。
+ *   ★ 这是**探测**，不是猜测：命中与否由 `appliesTo` 自己回答。
+ */
+function derivedGateCells(subject: RequiresSubject, context: unknown, declared: readonly string[]): string[] {
+  const appliesTo = subject.appliesTo
+  if (typeof appliesTo !== 'function') return []
+  const absent = declared.filter((path) => !isPresent(readPath(context, path)))
+  if (absent.length === 0) return []
+  /**
+   * ★ 探测的基线是"这一格补上、其余照旧"。`withPath` 只写**一份新副本**，
+   *   绝不改调用方的 ctx（判据随后还要拿原始的它去求值）。
+   */
+  const probe = (path: string): boolean => {
+    for (const candidate of gateCellProbesFor(context, path)) {
+      try {
+        if (appliesTo(withPath(context, path, candidate)) === true) return true
+      } catch {
+        /** ★ 某个候选让判据抛错 ⇒ 换下一个候选（抛错本身不是"是闸门格"的证据）。 */
+        continue
+      }
+    }
+    return false
+  }
+  const found: string[] = []
+  for (const path of absent.slice(0, MAX_GATE_CELL_PROBES)) {
+    if (probe(path)) found.push(path)
+  }
+  return found
+}
+
+/**
+ * `appliesTo` 读了、而 `requires` 没声明的格子 —— **声明缺口**。
+ *
+ * 做法与 `derivedGateCells` 同源的差分：对**未声明的**候选键做"补上再看结论翻不翻"。
+ * 候选来自 ctx 上真实存在的键。
+ *
+ * ── ★ 这个方法有一个**实测出来的上限**，必须写在这里（t11）────────────────────────
+ *
+ * 候选只能来自"这一份 ctx 上真的有权"的地方。于是：
+ *
+ *     ctx = { task: { kind: 'implementation' }, update: {} }
+ *     ⇒ `update.changedPaths` **不在候选里**（`update` 是空对象，`Object.keys` 是空的）
+ *     ⇒ 而 `dispatch.worktree` 的闸门正是它 ⇒ 这一格**推不出来**（实测）
+ *
+ * ★ 换句话说：**纯差分探测只能看见"这一轮 ctx 里出现过的格子"**，看不见"这一轮
+ *   压根没出现的格子"。这不是实现缺陷，是这条方法的天花板 —— 想要突破它就必须知道
+ *   判据的完整形状，而那正是 `requires` 该说的事（所以缺口本身会以另一种方式暴露：
+ *   调用方补上声明，候选就出现了）。
+ *
+ * ★ 因此这一格读数的契约是**"报了的一定真、没报的不一定没有"**（单向可信）。
+ *   把它读成"没报 ⇒ 没缺口"是**过度解读**，会把一条单向读数变成一条假保险 ——
+ *   而假保险比没有读数更坏。臂 16 的断言按这个契约写。
+ *
+ * ★ 最多探 12 个候选：防止形状怪异的 ctx 把核对层拖慢。少报不发噪音。
+ */
+function undeclaredGateCells(subject: RequiresSubject, context: unknown, declared: readonly string[]): string[] {
+  const appliesTo = subject.appliesTo
+  if (typeof appliesTo !== 'function') return []
+  const candidates = Object.keys(candidateKeys(context, declared)).slice(0, MAX_UNDECLARED_PROBES)
+  const found: string[] = []
+  for (const path of candidates) {
+    /**
+     * ★ 只在**真实 ctx 上这一格不在场**时才探：一个在场的格子若还是闸门格，
+     *   判据早就不适用了；而我们要找的是"这一格没接 ⇒ 永远静默跳过"那种。
+     */
+    if (isPresent(readPath(context, path))) continue
+    for (const candidate of gateCellProbesFor(context, path)) {
+      try {
+        if (appliesTo(withPath(context, path, candidate)) === true) {
+          found.push(path)
+          break
+        }
+      } catch {
+        continue
+      }
+    }
+  }
+  return found
+}
+
+/**
+ * ── ★ 一格闸门格的探针值：按真实代码里它**长什么样**给一小组候选 ────────────────
+ *
+ * 实测（t11）：固定填一个字符串推不出 `wantsCompleted`（判据写的是 `!== true`）。
+ * 而闸门格在真实判据里只有三种形态 —— 这三种覆盖了仓库里全部 11 条判据：
+ *
+ *     wantsCompleted !== true        ⇒ 布尔（本轮试图完成吗）
+ *     kind !== 'implementation'      ⇒ 字符串（任务类型；★ 这一种探不了，见下）
+ *     Array.isArray(update?.newTestFiles) ⇒ 数组（这一轮声明了什么）
+ *
+ * ★ `task.kind` 这一类**故意不探字符串**：闸门对它的判断是"是不是某几个具体值"，
+ *   而"正确答案"（'implementation'）是**判据内部的语义**，核对层无从知道它 ——
+ *   猜一个等于把判据的语义抄进核对层，那正是本任务拒绝的第二份声明。
+ *   ⇒ 这一类如实**推不出来**（少报），而不是猜一个。少报只让读数少一格；
+ *     猜错会让"闸门格"这个说法失去信任，代价更大。
+ *
+ * ★ 数组那一支用 `['(gate-cell-probe)']`（**非空**）：真实闸门普遍还查 `.length > 0`
+ *   （见 `dispatch.worktree`），空数组探不出来。
+ */
+function gateCellProbesFor(_context: unknown, _path: string): unknown[] {
+  return [true, ['(gate-cell-probe)'], ['(gate-cell-probe)'], 1, '(gate-cell-probe)']
+}
+
+/** 单格差分的上限（超过它说明闸门是组合式，如实少报而不是猜）。 */
+const MAX_GATE_CELL_PROBES = 4
+
+/** 未声明候选的探查上限（防止形状怪异的 ctx 拖慢核对）。 */
+const MAX_UNDECLARED_PROBES = 12
+
+/**
+ * ctx 上真实存在的一层键 —— 未声明格子的候选来源。
+ *
+ * ★ 只取**一层**（`a` 与 `a.b` 两种形态都产出）：闸门格实测都在这一层
+ *   （`wantsCompleted` / `task.kind` / `update.changedPaths`）。
+ *   更深会产出大量噪音候选，而噪音会让这一格读数失去可信度。
+ */
+function candidateKeys(context: unknown, declared: readonly string[]): Record<string, true> {
+  const declaredSet = new Set(declared)
+  const out: Record<string, true> = {}
+  if (context === null || typeof context !== 'object' || Array.isArray(context)) return out
+  for (const [key, value] of Object.entries(context as Record<string, unknown>)) {
+    if (!declaredSet.has(key)) out[key] = true
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      for (const inner of Object.keys(value as Record<string, unknown>)) {
+        const path = `${key}.${inner}`
+        if (!declaredSet.has(path)) out[path] = true
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * 一份"只把 `path` 换成在场值、其余原样"的 ctx 副本。
+ *
+ * ★ 浅拷贝到路径的父级为止：判据随后还要拿**原始** ctx 求值，所以这里绝不许
+ *   写穿调用方的对象。中途遇到标量（`{a: 'text'}` 而 path 是 `a.b`）就返回原对象
+ *   —— 那种形态下这一格不能被"补上"，如实不补。
+ */
+function withPath(context: unknown, path: string, value: unknown): unknown {
+  if (context === null || typeof context !== 'object' || Array.isArray(context)) return context
+  const segments = path.split('.')
+  const head = segments[0] as string
+  const source = context as Record<string, unknown>
+  if (segments.length === 1) return { ...source, [head]: value }
+  const child = source[head]
+  if (child === null || typeof child !== 'object' || Array.isArray(child)) return source
+  return { ...source, [head]: withPath(child, segments.slice(1).join('.'), value) }
 }
 
 /**
@@ -316,13 +681,29 @@ export function checkRequires(subject: RequiresSubject, context: unknown, applie
 export function auditRequires(subjects: readonly RequiresSubject[], context: unknown): RequiresAudit {
   const checks = subjects.map((subject) => checkRequires(subject, context))
   const incompleteChecks = checks.filter((check) => check.status === 'incomplete')
+  const skippedChecks = checks.filter((check) => check.status === 'skipped')
+  const undeclaredChecks = checks.filter((check) => (check.gateCellsUndeclared?.length ?? 0) > 0)
   return {
     checked: checks.filter((check) => check.status !== 'skipped').length,
     incomplete: incompleteChecks.length,
-    skipped: checks.filter((check) => check.status === 'skipped').length,
+    skipped: skippedChecks.length,
+    /**
+     * ★ 两个成因分开数（t11）。`notApplicable` 是**好消息**（判据按设计闭嘴），
+     *   `inputSurfaceAbsent` 是**要去看一眼的信号**（它静默跳过，而原因不是任务类型）。
+     *   合成一个 `skipped` 正是 t11 要修的缺口本身。
+     */
+    notApplicable: skippedChecks.filter((check) => check.skipReason === 'not-applicable').length,
+    inputSurfaceAbsent: skippedChecks.filter((check) => check.skipReason === 'input-surface-absent').length,
     checks,
     missing: incompleteChecks.map(
       (check) => `[${check.id}] declares ${check.missing.length} ctx path(s) that this context does not carry: ${check.missing.join(', ')}`,
+    ),
+    /**
+     * ★ 声明缺口与接线缺口分列两句（t11）：一个要人补声明，一个要人补接线。
+     *   合起来会让补救动作不可判定。
+     */
+    gateCellsUndeclared: undeclaredChecks.map(
+      (check) => `[${check.id}] its appliesTo reads ${check.gateCellsUndeclared!.join(', ')}, which the gate does not declare in requires — that wiring is not checked by anything (a declaration gap, not a wiring defect)`,
     ),
   }
 }

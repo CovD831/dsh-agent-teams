@@ -162,8 +162,49 @@ export type Paths<T, Depth extends 0 | 1 | 2 | 3 = 3> = PathsOf<T, Depth>;
  * `'skipped'` 与 `'ok'` 必须不同形：前者是"这条判据这一轮压根不说话，所以它的输入面
  * 缺不缺无所谓"，后者是"它要说话，而它要的每一格都在"。合成一个"没问题"会让
  * "88 种组合里大部分不适用"这件事永远读不出来。
+ *
+ * ── ★ 为什么 `'skipped'` 自己还要再分（t11）────────────────────────────────────
+ *
+ * MEASURED（2026-10-06，completion-owner 发现、shape-dev 复核）：`'skipped'` 把
+ * **两件不同的事**合成了一件事。取 `completion.r5`（它声明了 `wantsCompleted` /
+ * `task.kind` / `taskNotTerminal` 三个**闸门格** —— `appliesTo` 自己读的那几格）：
+ *
+ *     A  kind = 'work'（任务类型不匹配）      ⇒ appliesTo 假 ⇒ skipped
+ *     B  调用方**没给** `wantsCompleted`       ⇒ appliesTo 假 ⇒ skipped
+ *
+ * 实测两者逐字节相同。而 B 是**接线缺陷**：`wantsCompleted` 是调用方必须注入的一格，
+ * 它缺席意味着这条判据**永远不跑** —— 那是本轮要消灭的第 8 次同形缺陷，
+ * 却与"这一轮本来就不该跑"（A，正常）同形。
+ *
+ * ⇒ 修法**不是**加第二份声明（见 {@link RequiresCheck.gateCells} 那段实测记录），
+ *   而是把 `'skipped'` 的**成因**读出来。
  */
 export type RequiresStatus = 'ok' | 'incomplete' | 'skipped';
+/**
+ * `'skipped'` 的**成因**。★ 这几个值必须不同形，因为其中一个是缺陷、其余是正常。
+ *
+ *   · `'not-applicable'`        —— 判据**判定自己这一轮不该说话**：它读到了它要的
+ *                                  判断依据，而结论是"不适用"（任务类型不匹配、
+ *                                  这一轮不试图完成、终态补证据……）。**正常。**
+ *   · `'input-surface-absent'`  —— 判据**压根没拿到判断依据**：它声明的那几格里，
+ *                                  **一个都没接上**。⇒ 它静默跳过，而"它跳过"与
+ *                                  "它这一轮不该跑"是**不同的两件事**。
+ *   · `'undeclared'`            —— 这条判据没声明 `requires`，无从核对。
+ *   · `'caller'`                —— 调用方直接说"不适用"（没走 `appliesTo`）。
+ *
+ * ── ★ 为什么 `'input-surface-absent'` **不是**接线缺陷（守住"不适用不报"）──────
+ *
+ * 两件必须同时成立、不许混：
+ *
+ *   ① 它**不得**被算成接线缺陷 ⇒ 不进 `missing`、不进 `incomplete`、不产生
+ *      `blockers`（硬化时也不）。一条任务类型不匹配的判据本就不该跑，报它是假告警
+ *      —— 而假告警教人忽略门禁，与漏报同样有害（本轮反复确认过的那条）。
+ *   ② 但"它跳过了"与"它这一轮不该跑"**必须读得出区别** ⇒ 两者落在**不同的成因格**上，
+ *      而不是合并成一个 `skipped`。
+ *
+ * 这就是措辞分流（本任务裁定采纳的候选 ②），不是新增一份声明。
+ */
+export type RequiresSkipReason = 'not-applicable' | 'input-surface-absent' | 'undeclared' | 'caller';
 /** 一条判据的核对结论。 */
 export interface RequiresCheck {
     /** 判据 id（与 `GateRegistration.id` 同一个）。 */
@@ -175,6 +216,39 @@ export interface RequiresCheck {
     present: string[];
     /** `appliesTo` 为假 ⇒ 这里是理由原文（一条人话）。其余情形缺席。 */
     skippedBecause?: string;
+    /** ★ `'skipped'` 的成因（t11）。只在 `status === 'skipped'` 时在场，且必在场。 */
+    skipReason?: RequiresSkipReason;
+    /**
+     * ── ★ 为什么这里**没有**第二个 `appliesRequires` 字段（t11 的核心决定）──────────
+     *
+     * 这个缺口的**诱人修法**是另立一份声明：`appliesRequires`（"闸门需要哪几格"），
+     * 与 `requires`（"判据需要哪几格"）分开。**shape-dev 与 completion-owner 都反对**，
+     * 本任务裁定采纳，理由是实测过的形态：
+     *
+     *   两份声明**会分叉**（判据改了闸门、忘了改另一份），而分叉**在日志里同形** ——
+     *   它看起来与"闸门本来就是那样"完全一样。那正是本轮从头到尾要消灭的形态，
+     *   也是"每一格手工接"必然复发第 8 次的原因。
+     *
+     * ★ 所以下面这个 `gateCells` 是**推导出来的，不是声明出来的**：`checkRequires`
+     *   实测 `appliesTo` 究竟读了 `requires` 里的哪几格（逐格置空、看结论是否翻转）。
+     *   一份声明即唯一真相；推导只解释它【怎么被读的】。
+     */
+    gateCells?: string[];
+    /**
+     * ── ★ `appliesTo` 真的读了、而 `requires` **没声明**的格子 ─────────────────────
+     *
+     * **这是本任务最该被看见的一格。** 它说的是：判据用来自证"我不适用"的那几格里，
+     * 有格子**不在它声明的输入面里** ⇒ 那几格的接线**没有任何东西在核**。
+     *
+     * ★ 与 `missing` 的关系：`missing` 是"声明了、真 ctx 上读不到"（**接线缺陷**，
+     *   有硬证据）；这里是"没声明、但真的被读了"（**声明缺口**，另一件事）。
+     *   两者不许合流 —— 前者要人补接线，后者要人补声明。
+     *
+     * ★ 它为什么不产生 blocker（即使硬化）：那会让本机制当场变成"判据作者必须一次性
+     *   写全声明才能提交"的门禁，而本轮的纪律恰恰相反（本机制还没被验证过，不许当场
+     *   否决别人的工作）。它只读数、只曝光。
+     */
+    gateCellsUndeclared?: string[];
     /** 判据没声明 `requires` ⇒ 这里说明"没声明"，与"声明了空数组"不同形。 */
     undeclared?: string;
 }
@@ -189,10 +263,35 @@ export interface RequiresAudit {
     incomplete: number;
     /** 因 `appliesTo` 为假而**没有**核对的条数（这一格是"不适用不报"的计数器）。 */
     skipped: number;
+    /**
+     * ★ 被跳过的那些里，**只有"任务类型不匹配"这一类**的条数（t11）。
+     *
+     * 与 `skipped` 的关系：`notApplicable <= skipped`，且剩下的那一部分落在
+     * `inputSurfaceAbsent` / `undeclared` 上。★ 两个计数必须分开读 ——
+     * 合起来读会让"11 条判据都跳过了"（正常）与"11 条都因为接线没接而跳过"（异常）
+     * 在读数上同形，而那正是 t11 要修的那件事。
+     */
+    notApplicable: number;
+    /**
+     * ★ 被跳过的那些里，判据**一格输入面都没接到**的条数（t11）。
+     *
+     * ★ 它**不是**接线缺陷计数（那条在 `incomplete`），它是"这条判据这一轮静默跳过、
+     *   而原因不是任务类型不匹配"的读数。缺口的可发现性就靠它：
+     *   假如下次闸门格没接线，这个数会**大于 0**，而 `incomplete` 仍是 0 ——
+     *   两份读数一起看才知道该去补哪一边。
+     */
+    inputSurfaceAbsent: number;
     /** 逐条结论，按注册顺序。 */
     checks: RequiresCheck[];
     /** 缺了格子的那些判据的人话清单（`incomplete > 0` 时非空）。 */
     missing: string[];
+    /**
+     * ★ 声明缺口的清单（`gateCellsUndeclared` 非空的人话版）。
+     *
+     * ★ 与 `missing` **刻意分开**：`missing` 说"接线上少一格"，这里说"声明里少一格"。
+     *   两者合起来会让补救动作变得不可判定（是去补接线，还是去补声明？）。
+     */
+    gateCellsUndeclared: string[];
 }
 /** 一条判据这一轮适不适用的判断依据 —— 由调用方（或注册表）给。 */
 export interface RequiresSubject {

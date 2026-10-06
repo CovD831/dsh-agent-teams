@@ -60,13 +60,31 @@ export interface RequiresAuditFieldView {
     checked: number;
     incomplete: number;
     skipped: number;
+    /**
+     * ── ★ `skipped` 的两种成因，分开数（t11）─────────────────────────────────────
+     *
+     * `notApplicable <= skipped`，其余落在 `inputSurfaceAbsent` / 未声明上。
+     * ★ 只读 `skipped` 的调用方读不出"11 条都按设计闭嘴"与"11 条都因为一格没接而
+     *   静默跳过"的区别 —— 而那正是 t11 要修的那件事，所以这两个计数必须都能读到。
+     */
+    notApplicable: number;
+    inputSurfaceAbsent: number;
+    /** 缺了格子的（接线缺陷）人话清单。 */
     missing: string[];
+    /** ★ 声明缺口的人话清单（`appliesTo` 读了、`requires` 没声明）—— 与 `missing` 不同形。 */
+    gateCellsUndeclared: string[];
     checks: ReadonlyArray<{
         id: string;
         status: 'ok' | 'incomplete' | 'skipped';
         missing: string[];
         present: string[];
         skippedBecause?: string;
+        /** ★ `'skipped'` 的成因（t11）；`status === 'skipped'` 时恒在场。 */
+        skipReason?: 'not-applicable' | 'input-surface-absent' | 'undeclared' | 'caller';
+        /** `appliesTo` 实测读到的、且在 `requires` 里声明了的格子。 */
+        gateCells?: string[];
+        /** `appliesTo` 读了、而 `requires` 没声明的格子（声明缺口）。 */
+        gateCellsUndeclared?: string[];
         undeclared?: string;
     }>;
 }
@@ -332,11 +350,27 @@ export declare function createGateRegistry(options?: {
         reason: string;
         registered: boolean;
     }>;
-    /** 控制台读它。按 point 分组，组内保持注册顺序。 */
+    /**
+     * 控制台读它。按 point 分组，组内保持注册顺序。
+     *
+     * ── ★ `appliesTo` 是【函数本身】，不是"有没有"（t10）──────────────────────────
+     *
+     * MEASURED（2026-10-06，t10 第一版）：清单最初只报 `hasAppliesTo: boolean`。
+     * 而编排层的**输入面核对**必须知道"这一轮每条判据适不适用"，且必须与注册表
+     * 求值时调的是**同一个函数**（另写一份判断会让两套口径分叉，分叉之后
+     * "注册表跳过了它、核对却报了缺失"这种自相矛盾的结论就会出现 —— 而它在
+     * 日志里与正常情形同形）。
+     *
+     * ⇒ 清单里多一个 `appliesTo` 字段。★ 它**不改变控制台的读法**
+     *   （`hasAppliesTo` 一个字节没动），只是让"这个函数是谁"也能被读到。
+     *   一份只有"有没有"的视图，会逼核对层去别处找第二份真相 —— 而那正是
+     *   本轮从头到尾在消灭的形状。
+     */
     list(): Record<InsertionPoint, Array<{
         id: string;
         description: string;
         hasAppliesTo: boolean;
+        appliesTo?: (context: any) => boolean;
         observing: boolean;
         observeReason?: string;
         requires?: readonly string[];

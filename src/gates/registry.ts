@@ -59,8 +59,33 @@ export interface RequiresAuditFieldView {
   checked: number
   incomplete: number
   skipped: number
+  /**
+   * ── ★ `skipped` 的两种成因，分开数（t11）─────────────────────────────────────
+   *
+   * `notApplicable <= skipped`，其余落在 `inputSurfaceAbsent` / 未声明上。
+   * ★ 只读 `skipped` 的调用方读不出"11 条都按设计闭嘴"与"11 条都因为一格没接而
+   *   静默跳过"的区别 —— 而那正是 t11 要修的那件事，所以这两个计数必须都能读到。
+   */
+  notApplicable: number
+  inputSurfaceAbsent: number
+  /** 缺了格子的（接线缺陷）人话清单。 */
   missing: string[]
-  checks: ReadonlyArray<{ id: string; status: 'ok' | 'incomplete' | 'skipped'; missing: string[]; present: string[]; skippedBecause?: string; undeclared?: string }>
+  /** ★ 声明缺口的人话清单（`appliesTo` 读了、`requires` 没声明）—— 与 `missing` 不同形。 */
+  gateCellsUndeclared: string[]
+  checks: ReadonlyArray<{
+    id: string
+    status: 'ok' | 'incomplete' | 'skipped'
+    missing: string[]
+    present: string[]
+    skippedBecause?: string
+    /** ★ `'skipped'` 的成因（t11）；`status === 'skipped'` 时恒在场。 */
+    skipReason?: 'not-applicable' | 'input-surface-absent' | 'undeclared' | 'caller'
+    /** `appliesTo` 实测读到的、且在 `requires` 里声明了的格子。 */
+    gateCells?: string[]
+    /** `appliesTo` 读了、而 `requires` 没声明的格子（声明缺口）。 */
+    gateCellsUndeclared?: string[]
+    undeclared?: string
+  }>
 }
 
 export interface GateRunEntry {
@@ -438,9 +463,24 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
       return [...observing.entries()].map(([id, reason]) => ({ id, reason, registered: byId.has(id) }))
     },
 
-    /** 控制台读它。按 point 分组，组内保持注册顺序。 */
-    list(): Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>> {
-      const out = {} as Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>>
+    /**
+     * 控制台读它。按 point 分组，组内保持注册顺序。
+     *
+     * ── ★ `appliesTo` 是【函数本身】，不是"有没有"（t10）──────────────────────────
+     *
+     * MEASURED（2026-10-06，t10 第一版）：清单最初只报 `hasAppliesTo: boolean`。
+     * 而编排层的**输入面核对**必须知道"这一轮每条判据适不适用"，且必须与注册表
+     * 求值时调的是**同一个函数**（另写一份判断会让两套口径分叉，分叉之后
+     * "注册表跳过了它、核对却报了缺失"这种自相矛盾的结论就会出现 —— 而它在
+     * 日志里与正常情形同形）。
+     *
+     * ⇒ 清单里多一个 `appliesTo` 字段。★ 它**不改变控制台的读法**
+     *   （`hasAppliesTo` 一个字节没动），只是让"这个函数是谁"也能被读到。
+     *   一份只有"有没有"的视图，会逼核对层去别处找第二份真相 —— 而那正是
+     *   本轮从头到尾在消灭的形状。
+     */
+    list(): Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; appliesTo?: (context: any) => boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>> {
+      const out = {} as Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; appliesTo?: (context: any) => boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>>
       for (const point of INSERTION_POINTS) out[point] = []
       for (const reg of byId.values()) {
         const observingGate = observing.has(reg.id)
@@ -449,6 +489,7 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
           id: reg.id,
           description: reg.description,
           hasAppliesTo: typeof reg.appliesTo === 'function',
+          ...typeof reg.appliesTo === 'function' ? { appliesTo: reg.appliesTo as (context: any) => boolean } : {},
           /**
            * ★ 观察状态是控制台**必须**看得见的东西：一条"开火了却不拦"的判据若
            *   在清单里与一条正常的判据同形，读清单的人会把流程当成被把关了。
@@ -535,11 +576,28 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
            * 组合上喊"缺这缺那"，正是"教人忽略门禁"的那条老路。⇒ 这一条只记
            * `status:'skipped'`，它进 `requires.skipped` 计数，**不进** `missing`。
            *
-           * ★ 为什么调用方要给 `applies`（而不是让核对层自己再调一次 appliesTo）：
-           *   跳过与否是**注册表的结论**。核对层自己调第二遍会造出两套口径
-           *   （判据的 appliesTo 若有副作用或读到时间，两次调用可能不同）。
+           * ── ★ 但"跳过"的【成因】要交给核对层去读（t11 修）────────────────────
+           *
+           * 此前这里传的是 `applies = false`（"调用方说不适用"），于是
+           * `skipReason` 恒为 `'caller'` —— **`'input-surface-absent'` 永远不会出现在
+           * 生产路径上**，t11 的缺口在真实运行里**看不见**，只在夹具直呼
+           * `checkRequires` 时看得见。
+           *
+           * ★ 实测（臂 20 对拍）：同一个 ctx，注册表给 `inputSurfaceAbsent: 0`，
+           *   而 `auditRequires` 给 `2` —— 两个来源对同一批 checks 分叉，
+           *   而它们都被叫做"输入面读数"。
+           *
+           * ⇒ 现在传 `undefined`：注册表仍然**已经判过**适不适用（上面那一行就是），
+           *   它不再重复判定的承诺由"`appliesTo` 只在这一行被调一次"保证；
+           *   而核对层在 `appliesTo` 为假时**重读成因**（读的是 `requires` 声明面，
+           *   不重跑 `appliesTo` 的语义判断 —— 语义那块由推导的闸门格回答）。
+           *
+           * ★ 为什么这个折中不违反"两套口径"：核对层**不重跑** `appliesTo` 来做
+           *   "适不适用"这个决定（那个决定已经由注册表做出了、由这次跳过表达了）；
+           *   它只是**解释**这次跳过。解释需要的信息（声明了哪几格、真实 ctx 上有哪几格）
+           *   本来就只在 `requires` 那一面。
            */
-          requiresChecks.push(checkRequires(reg, context, false))
+          requiresChecks.push(checkRequires(reg, context))
           continue
         }
         const produced = assertVerdict(await reg.gate(context), reg.id)
@@ -630,10 +688,36 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
        *   于是这段代码对裁决**零影响**。
        */
       const incompleteChecks = requiresChecks.filter((check) => check.status === 'incomplete')
+      const skippedChecks = requiresChecks.filter((check) => check.status === 'skipped')
+      const undeclaredChecks = requiresChecks.filter((check) => (check.gateCellsUndeclared?.length ?? 0) > 0)
+      /**
+       * ── ★ 这里的合并必须与 `auditRequires` 逐字段对齐（t11）───────────────────────
+       *
+       * 这一段以前是 `auditRequires` 的**抄写**：两处各写一遍合并规则。抄写的代价在
+       * t11 当场兑现了 —— `auditRequires` 加了两个成因计数，而这里没加，于是两处
+       * 对**同一批 checks** 产出不同的读数，而它们都被叫做 `requiresField`。
+       * 那正是本队反复见过的形态：同一件事有两个来源，分叉之后在日志里同形。
+       *
+       * ★ 修法不是"记得同步改两处"（那要靠纪律），而是让**形状**提示差异：
+       *   `RequiresAuditFieldView` 与 `RequiresAudit` 是同一个形状的两个视图，
+       *   下面每一项都逐条对着它的一个字段；臂 12 钉住"两处产出的读数相等"——
+       *   谁再抄漏一个字段，那条臂就红。
+       */
       const requiresField = {
         checked: requiresChecks.filter((check) => check.status !== 'skipped').length,
         incomplete: incompleteChecks.length,
-        skipped: requiresChecks.filter((check) => check.status === 'skipped').length,
+        skipped: skippedChecks.length,
+        /**
+         * ★ 两个成因分开数（t11）：`notApplicable` 是"判据按设计闭嘴"（正常），
+         *   `inputSurfaceAbsent` 是"它静默跳过、而原因不是任务类型"（要去看一眼）。
+         *   合成一个 `skipped` 正是 t11 要修的缺口本身。
+         */
+        notApplicable: skippedChecks.filter((check) => check.skipReason === 'not-applicable').length,
+        inputSurfaceAbsent: skippedChecks.filter((check) => check.skipReason === 'input-surface-absent').length,
+        /** ★ 声明缺口（要人补声明）与接线缺口 `missing`（要人补接线）分列，补救动作才可判定。 */
+        gateCellsUndeclared: undeclaredChecks.map(
+          (check) => `[${check.id}] its appliesTo reads ${check.gateCellsUndeclared!.join(', ')}, which the gate does not declare in requires — that wiring is not checked by anything (a declaration gap, not a wiring defect)`,
+        ),
         missing: incompleteChecks.map(
           (check) => `[${check.id}] declares ${check.missing.length} ctx path(s) that this context does not carry: ${check.missing.join(', ')}`,
         ),

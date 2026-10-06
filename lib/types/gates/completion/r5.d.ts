@@ -146,7 +146,38 @@ export interface R5Context {
         kind?: string;
         /** 写域（workspace 相对）。用于把新测试文件折成路径/基名两种形态。 */
         inScope?: string[];
-        /** ★ 任务的写域基准：判据只用它判断"这条测试在不在本任务的改动范围里"，不碰文件系统。 */
+        /**
+         * ── ★ 这是【工作区路径】，不是父版本 hash ──────────────────────────────────
+         *
+         * MEASURED（t12，修一条会误导下一人的注释）：这一格的注释原本写着
+         * "任务的写域基准"，读起来像是父版本 —— 而它**不是**。
+         *
+         * 接线实测（`src/tools.ts` 的 r5 注入点，搜 `parentRevision: worktreeBase`）：
+         *
+         *     parentRevision: worktreeBase   ← hash（父版本）
+         *     worktreePath:   workspace      ← 一个**目录路径**
+         *
+         * 而 `createTaskWorktree(...)` 的产物是 `{ path, base, missingIgnored }`：
+         *   · `base` 才是版本 hash ⇒ 派给 `parentRevision`；
+         *   · `path` 是被派发到的那个隔离工作目录 ⇒ 与本格同源。
+         *
+         * ★ 引用用【可搜的代码片段】而不是行号：行号会随别人接线而漂移（这一条
+         *   本身就实测印证过 —— 写这条注释的十分钟里，注入点从 3641 漂到 3833），
+         *   而一条指错地方的注释比没有注释更坏：它把人送到错误的行上。
+         *   ⇒ 只记片段 `parentRevision: worktreeBase`，不记行号。
+         *
+         * ⇒ 字段名 `worktreePath` 里的 "Path" 说的正是"路径"，不是"基准"。
+         *
+         * ── ★ 它现在【没有被任何代码读】────────────────────────────────────────────────
+         *
+         * 保留它是因为下一位接线的人会需要它（"这条测试在不在本任务的改动范围里"
+         * 要在工作区目录下判断），而那正是最容易被名字带偏的一步：把目录当成 hash
+         * 传给 `runTestOnRevision` 的第二个参数，会得到一条**永远失败**的 checkout
+         * —— 而它的症状会是一条 unmeasured，与"没测到"同形（本队反复交过学费的形态）。
+         *
+         * ★ 所以这里的措辞是刻意的：【路径 vs hash】必须一眼分得开。
+         *   要与它配对的父版本在下面那一格（`parentRevision`）。
+         */
         worktreePath?: string;
     };
     update?: {
