@@ -714,3 +714,173 @@ function countBy(values) {
   for (const value of values) out[value] = (out[value] ?? 0) + 1
   return out
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 11/12（t7 追加）：硬化开关显式且关得掉 + 八处调用点都不拒绝
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 11：硬化开关【显式且关得掉】—— 缺省只看不说；AGENT_TEAMS_ENFORCE_REQUIRES 才拒绝', async () => {
+  /**
+   * ── ★ t7 的验收里点名了这一条，而它此前**只在 requires.ts 的夹具里被钉住**──────
+   *
+   * `scripts/gate-requires.test.mjs` 钉的是 `createRequiresAuditPolicy` 这个**纯函数**
+   * 的解析规则。而本任务（t7）的验收要求的是**接线**层面的同一件事：
+   *
+   *     核对结果先进旁路/日志，不直接拒绝；硬化的开关必须显式且可关。
+   *
+   * ⇒ 所以本臂从**注册表入口**跑一次真的求值，把"缺省不拒 / 显式才拒 / 关得掉"
+   *   三态分别读出来。差别是实质的：纯函数夹具证明的是"解析规则写对了"，
+   *   本臂证明的是"那条规则真的接到了裁决的那条线上"。
+   *
+   * ── ★ 一条最容易被写错的边界：`=0` 看起来像"关掉"────────────────────────────
+   *
+   * MEASURED（2026-10-06，本臂实测）：一个"设了任意非空值就硬化"的读法会让
+   * `AGENT_TEAMS_ENFORCE_REQUIRES=0` 把门禁拧到**最硬** —— 而它在日志里读起来
+   * 像"我把这个开关关掉了"。这正是本队反复见到的形状：**两个相反的结论同形**。
+   * ⇒ 下面逐条钉住白名单（只认 `1`/`true`/`yes`/`on`，去空白、忽略大小写）。
+   *
+   * ★ 定向突变：把 `requiresModeFromEnv` 改成"非空即 enforce" ⇒ `=0` 与 `=false`
+   *   两条断言立刻红。
+   */
+  const { createGateRegistry } = await import('../lib/gates/registry.js')
+
+  /**
+   * ★ 每条都新建一个注册表实例，而不是改 `process.env` —— 与 `createGateRegistry`
+   *   的纪律同源：它在**构造时**读一次环境变量，进程内改环境变量会让同一次运行里的
+   *   两次求值用两套门禁（那是最难归因的一类缺陷）。`enforceRequiresFromEnv` 参数
+   *   正是为此而留的注入点。
+   */
+  const evaluateWith = async (enforceRequiresFromEnv) => {
+    const registry = createGateRegistry({ enforceRequiresFromEnv })
+    registry.register({
+      id: 'probe.enforce', point: 'completion', description: 'a probe with an unwired input surface',
+      requires: ['nopeThisPathIsNotOnAnyContext'],
+      gate: () => ({ ok: true }),
+    })
+    return await registry.evaluate('completion', { task: {} })
+  }
+
+  const defaults = await evaluateWith(undefined)
+  const zero = await evaluateWith('0')
+  const offWord = await evaluateWith('false')
+  const blank = await evaluateWith('')
+  const hard = await evaluateWith('1')
+  const hardWord = await evaluateWith('  Yes ')
+
+  /**
+   * ★ 前半：缺省 ⇒ **只看不说**（核对照常记录，裁决一个字节不动）。
+   */
+  for (const [label, evaluation] of [['no env', defaults], ['=0', zero], ['=false', offWord], ['= (blank)', blank]]) {
+    assert.equal(evaluation.ok, true, `★ ${label} 必须【不】拒绝：缺省方向是"只看不说"（漏读一个字段的结果必须是"照常记录"，不是"流程被卡死"）`)
+    assert.deepEqual(evaluation.blockers, [], `★ ${label} 不许产出任何 blocker`)
+    assert.equal(evaluation.requires.incomplete, 1, `★ ${label} 仍然要**核对**（"不拒绝"不等于"不记录"—— 否则先软后硬会变成"什么都看不见"）`)
+  }
+  /**
+   * ★ 后半：显式打开 ⇒ 缺格子的判据被拦下，且措辞说清"是输入面没接线"。
+   */
+  for (const [label, evaluation] of [['=1', hard], ['=  Yes ', hardWord]]) {
+    assert.equal(evaluation.ok, false, `★ ${label} 必须拒绝（显式硬化）`)
+    assert.equal(evaluation.blockers.length, 1, `★ ${label} 按"缺的每一格单独成条"计数`)
+    assert.match(evaluation.blockers[0], /input surface is not wired/, `★ ${label} 的措辞要说清"是输入面没接线"，而不是让人去一堆判据结论里找`)
+    assert.match(evaluation.blockers[0], /nopeThisPathIsNotOnAnyContext/, `★ ${label} 要指名缺的是哪一格`)
+  }
+})
+
+test('★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是零（逐位置实测，不是读源码）', async () => {
+  /**
+   * ── ★ 臂 9 只测了 contract 一处 ────────────────────────────────────────────────
+   *
+   * 而 t7 的验收说的是**八处调用点**。⇒ 本臂把一条"必然报缺"的探针逐个挂到
+   * 五个位置（runtime 一个入口覆盖六处），然后要求**每一个位置的真实工具调用
+   * 都照常走完**。
+   *
+   * ★ 为什么不能只读源码（臂 10 已经读了）：源码里"没有 throw"与"这条路径根本
+   *   跑不到"是两件事。臂 10 证明的是"接上了"，本臂证明的是"接上之后流程照常"。
+   *   两条合起来才是 t7 那两句话的完整覆盖。
+   *
+   * ★ 每一条都同时断言两半（缺一即恒真）：
+   *   (a) 工具照常返回（不被核对拒绝）；
+   *   (b) 核对结论里**确实**有那条缺格记录（否则"什么都没做的核对"也能过）。
+   */
+  const cases = [
+    {
+      label: 'contract',
+      point: 'contract',
+      run: async ({ call }) => {
+        const r = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+        assert.equal(typeof r?.task_id, 'string', '★ contract 位置：核对报缺时 create_task 必须照常返回')
+      },
+    },
+    {
+      label: 'dispatch',
+      point: 'dispatch',
+      run: async ({ call }) => {
+        const r = await call('agent_teams_update_task', {
+          task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
+        }, 'member-1').catch((error) => ({ error }))
+        /**
+         * ★ dispatch 位置**本来就会拒**（例如 worktree 建不出来），所以这里不断言
+         *   "一定成功"。断言的是：**如果**它被拒，理由里不许出现核对层的话。
+         *   —— 那才是"核对的裁决权是零"的可证伪形式。
+         */
+        if (r?.error !== undefined) {
+          assert.doesNotMatch(r.error.message, /input surface/, '★ dispatch 位置：拒绝理由里不许出现核对层的话（核对不参与裁决）')
+        }
+      },
+    },
+    {
+      label: 'completion',
+      point: 'completion',
+      run: async ({ call }) => {
+        const r = await call('agent_teams_update_task', {
+          task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
+        }, 'member-1').catch((error) => ({ error }))
+        if (r?.error !== undefined) {
+          assert.doesNotMatch(r.error.message, /input surface/, '★ completion 位置：拒绝理由里不许出现核对层的话')
+        }
+      },
+    },
+    {
+      label: 'delivery',
+      point: 'delivery',
+      run: async ({ call }) => {
+        const r = await call('agent_teams_status', { team_id: 'team' })
+        assert.equal(typeof r?.team_id, 'string', '★ delivery 位置：核对报缺时 status 必须照常返回（它本来就只是读操作）')
+      },
+    },
+    {
+      label: 'runtime',
+      point: 'runtime',
+      run: async ({ call }) => {
+        const r = await call('agent_teams_status', { team_id: 'team' })
+        assert.ok(r?.runtime_gates !== undefined, '★ runtime 位置：核对报缺时 runtime 记录必须照常产出')
+        assert.ok(r.runtime_gates.input_surface.incomplete >= 1, '★ runtime 位置：(b) 那一半 —— 核对结论里确实有缺格记录')
+      },
+    },
+  ]
+
+  for (const testCase of cases) {
+    const workspace = track(mkdtempSync(join(tmpdir(), `input-norefuse-${testCase.label}-`)))
+    await seedRunningTeam(workspace, { tasks: [RUNNING_TASK], members: [RUNNING_MEMBER] })
+    const { call, warnings } = pluginFixture(workspace)
+    const probe = withProbe(testCase.point, ['nopeThisPathIsNotOnAnyContextAtAll'])
+    try {
+      const before = gapsFromLogs(warnings).length
+      await testCase.run({ call, warnings })
+      /**
+       * ★ (b) 那一半的第二个出口：非 runtime 位置把缺格写进告警。这里只要求
+       *   "挂了探针之后确实多了一条记录" —— 有的位置这一轮本来就有别的缺格
+       *   （例如 completion.backtest 的 6 格），所以用"增量"而不是"恰好一条"。
+       */
+      if (testCase.point !== 'runtime') {
+        assert.ok(
+          gapsFromLogs(warnings).length > before
+          || gapsFromLogs(warnings).some((line) => line.includes('nopeThisPathIsNotOnAnyContextAtAll')),
+          `★ ${testCase.label} 位置：(b) 那一半 —— 核对结论里必须真的有这条缺格记录（否则"什么都没做的核对"也能过本臂）`,
+        )
+      }
+    } finally {
+      probe.dispose()
+    }
+  }
+})
