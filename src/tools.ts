@@ -17,6 +17,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { appendTeamEvent, captainSessionOf } from './events.ts'
 import {
@@ -1107,6 +1108,138 @@ export function stagedPlanFeedbackContext(teamName: string): string {
  */
 const RUNTIME_GATE_LOG_LIMIT = 50
 const runtimeGateLog: Array<{ at: number; event: string; outcome: string }> = []
+
+/**
+ * ── ★★ 「本进程持有的模块是不是旧的」—— 一个**可检测、可上报**的读数（t23）────────
+ *
+ * ── 它修的是什么（MEASURED，本轮五次拦截）──────────────────────────────────────
+ *
+ * 本队今晚被同一个东西拦了 **5 次**（t14 / t17 / t19 / t22 / t23 开工），而每一次
+ * 的**表面理由都不同**：
+ *
+ *     · dispatch.changed-paths 说"你虚报改动"
+ *     · completion.backtest    说"基准不可得"
+ *     · claim_task             说"依赖未满足"
+ *
+ * ⇒ 而真相只有一个：**进程加载的是构建前的模块**。
+ *   ★ 形态：**一个机制级的失效，伪装成一条业务规则**。成员看到判据拒绝会去查代码、
+ *     去查数据、去怀疑自己的申报 —— 而不是去重载。这个伪装是它最贵的地方：
+ *     它把成本从"重载一次"转成了"每一轮都重新误诊一次"。
+ *
+ * ── 为什么 ESM 让这件事必然发生（机制级解释，不是现象描述）───────────────────────
+ *
+ * `import { f } from './state.ts'` 建立的是**命名绑定**，它在**模块求值时**建立，
+ * 之后**永远指向同一个函数对象**。⇒ 盘上的 `.js` 被 `pnpm build` 覆盖之后，
+ * 进程里那个函数**还是旧的** —— 因为函数的**闭包环境**也是旧的。
+ *
+ * ★ 所以"每次调用时求值"这句话**不精确**：函数体确实每次跑，但它**本身**是从旧模块
+ *   实例拿来的。⇒ **任何静态 import 的东西都不会更新**，不只是 schema 类。
+ *
+ * ── 本读数回答什么、不回答什么（边界必须写清）──────────────────────────────────
+ *
+ *   回答：**该不该重载**（stamp 不一致 ⇒ 重载）。
+ *   **不**回答：哪一段是旧的。
+ *      （后者需要模块图内省，做不干净；而 5 次拦截里真正需要的判断是前者。）
+ *   ★ 已知边界：即使 stamp 一致，也可能有段落是旧的（见上面对 ESM 的解释）。
+ *     这一格**测不了** —— 把它写成边界，而不是假装覆盖了它（本队纪律）。
+ *
+ * ── ★ 三态，且「读不到」与「一致」必须不同形 ────────────────────────────────────
+ *
+ *   `unknown`     —— 读不到 stamp（还没 build / 文件被删 / 解析失败）⇒ **没能测量**
+ *   `current`     —— 读到了，且与加载时一致
+ *   `stale`       —— 读到了，且与加载时**不一致** ⇒ 明确报"请重载"
+ *
+ * ★ 把 `unknown` 读成 `current` 会让"我没能检查"伪装成"检查过了，是新的" ——
+ *   而那正是本任务要消灭的那个形态的又一次出现。
+ */
+export type ModuleFreshness =
+  | { status: 'current'; loaded: string; onDisk: string }
+  | { status: 'stale'; loaded: string; onDisk: string }
+  | { status: 'unknown'; loaded?: string; reason: string }
+
+/** 构建产物的指纹文件（`scripts/git-artifacts.mjs` 写的那一份）。 */
+const BUILD_STAMP_FILE = 'git-artifact-stamp.json'
+
+/** 读盘上当前的 stamp 的 `output` 摘要；拿不到 ⇒ `undefined`（**不是**空串）。 */
+function readStampOutput(root: string): string | undefined {
+  try {
+    const raw = readFileSync(join(root, 'lib', BUILD_STAMP_FILE), 'utf8')
+    const parsed = JSON.parse(raw) as { output?: unknown }
+    return typeof parsed.output === 'string' && parsed.output.trim() !== '' ? parsed.output : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 插件根目录 —— 与 `STATE_DIR_FOR_BASE_PERSIST` 同一种做法（`__dirname` 的上两级）。
+ *
+ * ★ 为什么不用 `process.cwd()`：插件的产物位置与**用户的工作目录**无关，
+ *   而 stamp 在插件的 `lib/` 里。用 cwd 会在"用户在别处起会话"时读错地方，
+ *   而那会**静默**把 `unknown` 变成常态（于是这条读数永远不报）。
+ */
+function pluginRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)))
+}
+
+/** 加载时记下的 output 摘要（**进程级、只在模块求值时写一次** —— 这正是被检测的对象）。 */
+let LOADED_STAMP_OUTPUT: string | undefined
+let LOADED_STAMP_READ = false
+
+/**
+ * 读一次**加载时**的 stamp。
+ *
+ * ★ 它必须**只做一次**：这个函数的返回值代表"这个进程当初加载的是什么"，
+ *   而那不是每次调用都该重新问的问题 —— 重复读会把它变成"每次调用时的读数"，
+ *   于是**它永远与盘上一致**，这条检测就恒为 `current`（本队记账的恒真写法）。
+ */
+function loadedStampOutput(): string | undefined {
+  if (!LOADED_STAMP_READ) {
+    LOADED_STAMP_OUTPUT = readStampOutput(pluginRoot())
+    LOADED_STAMP_READ = true
+  }
+  return LOADED_STAMP_OUTPUT
+}
+
+/**
+ * 这个进程持有的模块是新的还是旧的。
+ *
+ * ★ **不参与裁决**：它是部署状态的读数，判据不许因为它拒绝（先软后硬）。
+ *   调用方把它挂在**记录**上（人读得到），而不是并进 `blockers`。
+ */
+export function moduleFreshness(): ModuleFreshness {
+  const loaded = loadedStampOutput()
+  const onDisk = readStampOutput(pluginRoot())
+  if (onDisk === undefined) {
+    return { status: 'unknown', ...loaded === undefined ? {} : { loaded }, reason: `no build stamp at lib/${BUILD_STAMP_FILE} (not built, or removed)` }
+  }
+  if (loaded === undefined) {
+    /**
+     * ★ 加载时读不到、而现在读得到 ⇒ 仍是 `unknown`：**我当初加载的是什么**没人知道，
+     *   于是"盘上现在是什么"不能替它作证。把 `onDisk` 一并带上是为了让人读得出来
+     *   "现在有值了"—— 但它**不改**这条读数的结论（那正是三态的意义）。
+     */
+    return { status: 'unknown', reason: `the build stamp was unreadable when this process loaded (lib/${BUILD_STAMP_FILE}); the one on disk now is ${onDisk.slice(0, 12)}…` }
+  }
+  return loaded === onDisk
+    ? { status: 'current', loaded, onDisk }
+    : { status: 'stale', loaded, onDisk }
+}
+
+/**
+ * 一句人话（供工具记录与控制台读）。
+ *
+ * ★ 措辞必须**不用**业务语气：不能读起来像"你的申报有问题"。
+ *   它要说的是"**这个进程该重载了**" —— 那正是它要消灭的那个伪装。
+ */
+export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshness()): string {
+  if (freshness.status === 'current') return 'this process holds the current build'
+  if (freshness.status === 'stale') {
+    return `this process holds a build OLDER than the one on disk (loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…) — reload the plugin before trusting any judgement it makes`
+  }
+  return `whether this process holds an old build could NOT be determined (${freshness.reason}) — that is "not measured", not "up to date"`
+}
+
 
 /** 记一条运行记录（供 {@link evaluateRuntimeGates} 与夹具共用）。 */
 function judgeRuntimeGates(event: string, outcome: string): void {
@@ -2302,6 +2435,11 @@ interface FrictionCapture {
   stateRoot?: string
   /** 这条调用路径上读到的**未能测量**原文；缺席表示这一轮不是"没能测量"。 */
   couldNotObserve?: readonly string[]
+  /**
+   * ★ t23：记这条卡点时，本进程持有的 build 与盘上是否一致。
+   *   缺席 ⇒ 由 `recordFriction` 现读一次（生产路径不必显式传）。
+   */
+  moduleFreshness?: ModuleFreshness
 }
 
 /**
@@ -2457,6 +2595,20 @@ async function recordFriction(capture: FrictionCapture): Promise<string | undefi
         kindNone: false,
         /** ★ 只有拿到事件定位才算可重放 —— 不假装。 */
         replayable: refs !== undefined,
+      },
+      /**
+       * ── ★★ 部署状态：这条卡点是在【什么 build】上发生的（t23）─────────────────
+       *
+       * MEASURED（本轮五次拦截）：本队被"进程持有旧模块"拦了 5 次，而每一次的
+       * **表面理由都不同**（"你虚报改动" / "基准不可得" / "依赖未满足"）——
+       * 一个机制级的失效，伪装成一条业务规则。
+       *
+       * ⇒ 每条卡点都带上"当时的 build 对不对得上盘"，于是**下一次**读台账的人
+       *   一眼能看出"这条是不是在旧 build 上发生的"，而不是重新误诊一轮。
+       * ★ 它**不参与裁决**（部署状态的读数），只是记录里的一格。
+       */
+      deployment: {
+        moduleFreshness: capture.moduleFreshness ?? moduleFreshness(),
       },
       resolution: { blocking: false, fix: 'unfixed: recorded at the moment it happened, per f-0014', pool: 'self' },
     }

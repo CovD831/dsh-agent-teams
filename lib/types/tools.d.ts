@@ -147,6 +147,76 @@ export declare function stagedPlanApprovedContext(teamName: string): string;
 export declare function stagedPlanDiscardContext(teamName: string): string;
 /** Model-facing continuation that turns the review UI back into a conversation. */
 export declare function stagedPlanFeedbackContext(teamName: string): string;
+/**
+ * ── ★★ 「本进程持有的模块是不是旧的」—— 一个**可检测、可上报**的读数（t23）────────
+ *
+ * ── 它修的是什么（MEASURED，本轮五次拦截）──────────────────────────────────────
+ *
+ * 本队今晚被同一个东西拦了 **5 次**（t14 / t17 / t19 / t22 / t23 开工），而每一次
+ * 的**表面理由都不同**：
+ *
+ *     · dispatch.changed-paths 说"你虚报改动"
+ *     · completion.backtest    说"基准不可得"
+ *     · claim_task             说"依赖未满足"
+ *
+ * ⇒ 而真相只有一个：**进程加载的是构建前的模块**。
+ *   ★ 形态：**一个机制级的失效，伪装成一条业务规则**。成员看到判据拒绝会去查代码、
+ *     去查数据、去怀疑自己的申报 —— 而不是去重载。这个伪装是它最贵的地方：
+ *     它把成本从"重载一次"转成了"每一轮都重新误诊一次"。
+ *
+ * ── 为什么 ESM 让这件事必然发生（机制级解释，不是现象描述）───────────────────────
+ *
+ * `import { f } from './state.ts'` 建立的是**命名绑定**，它在**模块求值时**建立，
+ * 之后**永远指向同一个函数对象**。⇒ 盘上的 `.js` 被 `pnpm build` 覆盖之后，
+ * 进程里那个函数**还是旧的** —— 因为函数的**闭包环境**也是旧的。
+ *
+ * ★ 所以"每次调用时求值"这句话**不精确**：函数体确实每次跑，但它**本身**是从旧模块
+ *   实例拿来的。⇒ **任何静态 import 的东西都不会更新**，不只是 schema 类。
+ *
+ * ── 本读数回答什么、不回答什么（边界必须写清）──────────────────────────────────
+ *
+ *   回答：**该不该重载**（stamp 不一致 ⇒ 重载）。
+ *   **不**回答：哪一段是旧的。
+ *      （后者需要模块图内省，做不干净；而 5 次拦截里真正需要的判断是前者。）
+ *   ★ 已知边界：即使 stamp 一致，也可能有段落是旧的（见上面对 ESM 的解释）。
+ *     这一格**测不了** —— 把它写成边界，而不是假装覆盖了它（本队纪律）。
+ *
+ * ── ★ 三态，且「读不到」与「一致」必须不同形 ────────────────────────────────────
+ *
+ *   `unknown`     —— 读不到 stamp（还没 build / 文件被删 / 解析失败）⇒ **没能测量**
+ *   `current`     —— 读到了，且与加载时一致
+ *   `stale`       —— 读到了，且与加载时**不一致** ⇒ 明确报"请重载"
+ *
+ * ★ 把 `unknown` 读成 `current` 会让"我没能检查"伪装成"检查过了，是新的" ——
+ *   而那正是本任务要消灭的那个形态的又一次出现。
+ */
+export type ModuleFreshness = {
+    status: 'current';
+    loaded: string;
+    onDisk: string;
+} | {
+    status: 'stale';
+    loaded: string;
+    onDisk: string;
+} | {
+    status: 'unknown';
+    loaded?: string;
+    reason: string;
+};
+/**
+ * 这个进程持有的模块是新的还是旧的。
+ *
+ * ★ **不参与裁决**：它是部署状态的读数，判据不许因为它拒绝（先软后硬）。
+ *   调用方把它挂在**记录**上（人读得到），而不是并进 `blockers`。
+ */
+export declare function moduleFreshness(): ModuleFreshness;
+/**
+ * 一句人话（供工具记录与控制台读）。
+ *
+ * ★ 措辞必须**不用**业务语气：不能读起来像"你的申报有问题"。
+ *   它要说的是"**这个进程该重载了**" —— 那正是它要消灭的那个伪装。
+ */
+export declare function moduleFreshnessMessage(freshness?: ModuleFreshness): string;
 /** 运行记录的快照（控制台/夹具读它；返回副本，调用方改不动内部状态）。 */
 export declare function runtimeGateLogSnapshot(): ReadonlyArray<{
     at: number;
