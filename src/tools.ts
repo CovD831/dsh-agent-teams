@@ -60,7 +60,7 @@ import { appendTaskEvidence } from './quality-gates.ts'
 import { gateModuleViews, registry } from './gates/index.ts'
 import { auditRequires } from './gates/requires.ts'
 import type { GatePoint } from './gates/index.ts'
-import { observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
+import { gitChangedPaths, observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
 import type { ContractAmendmentInput } from './state.ts'
 import type { AcceptanceResult, CommandResult, ReviewFinding, ReviewVerdict, TaskKind } from './types.ts'
 import {
@@ -4124,6 +4124,21 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           task,
           update: { changedPaths: input.changedPaths },
           observedChangedPaths: observedChangedPaths(caller.session),
+          /**
+           * ── ★★ 第二观察面（t17）─────────────────────────────────────────────────
+           *
+           * 会话事件只看得见**本 session** 的写入。而"写入发生在别的 session"
+           * （captain 用 `cp` 并入、成员被 retire 后换人）与"零工作却自报改动"
+           * 在 `observedChangedPaths === []` 时**同形** —— 于是一个诚实的申报
+           * 被读成虚报，每一个被重派/并入的 attempt 都交不出终态。
+           *
+           * ⇒ 补一格"别处"的证据：工作区里到底脏没脏。改动**真的存在**这件事
+           *   与"是谁写的"无关，而 git 知道。
+           *
+           * ★ 三态与前一格逐条对齐：读不到 git ⇒ `undefined` ⇒ 这一格**不参与判定**
+           *   （判定退回原口径，**不是**放宽）。
+           */
+          gitChangedPaths: gitChangedPaths(workspace),
         }
         const dispatchInputSurface = inputSurfaceOf('dispatch', dispatchContext)
         const dispatchGates = await registry.evaluate('dispatch', dispatchContext)

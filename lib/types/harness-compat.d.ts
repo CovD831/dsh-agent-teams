@@ -51,6 +51,41 @@ export declare function sessionOwnEvents(session: Session): readonly SessionEven
  * 把这两件事混起来，会让一次读取失败伪装成一个关于工作的结论（契约 §3.4）。
  */
 export declare function observedChangedPaths(session: Session): string[] | undefined;
+/**
+ * ── ★★ 第二个观察面：工作区里【确实脏了】的路径（t17）─────────────────────────────
+ *
+ * ── 它解决的是什么问题（MEASURED，三人独立复现，含 captain 本人）─────────────────
+ *
+ * `observedChangedPaths` 只看得见**本 session** 的写入。而 `[]` 有两种成因，
+ * 它们在返回值上**同形**：
+ *
+ *   (i)  写入发生在**另一个 session** —— captain 用 `cp` 并入、成员被 retire 后
+ *        换人。此时改动**真实存在于工作区**，而本 session 一条写入都没有。
+ *        ⇒ 诚实申报被读成"虚报" ⇒ **每一个被重派/并入的 attempt 都交不出终态**。
+ *   (ii) **零工作却自报改动** —— `dispatch.changed-paths` 存在的理由。
+ *
+ * ⇒ 要区分它们，需要一格"别处"的证据。工作区就是那个别处：**改动真的存在**这件事，
+ *   git 知道，而它**与哪个 session 写的无关**。
+ *
+ * ── 三态（与 `observedChangedPaths` 逐条对齐，绝不合并）────────────────────────
+ *
+ *   `undefined` —— 没能读工作区（不是 git 仓库 / git 跑不起来）⇒ 不参与判定
+ *   `[]`        —— 读了，工作区是干净的
+ *   `[paths]`   —— 读了，这些路径确实脏
+ *
+ * ★ 为什么 `undefined` 与 `[]` 必须不同形：前者是"我没有证据"，
+ *   后者是"证据表明没有改动"。把前者当成后者，会让一次 git 故障被读成一个
+ *   关于成员工作的结论 —— 而那正是本文件反复强调的那条界线。
+ *
+ * ★ 为什么用 `git status --porcelain` 而不是 `git diff`：
+ *   新建文件（untracked）在 `diff` 里不出现，而它是最常见的一类真实改动。
+ *   `--porcelain` 同时覆盖 `??`（新增）与 ` M`（修改）。
+ *
+ * ★ 诚实边界：git 只知道"工作区脏了"，**不知道是谁改的**（全队共用一个目录，
+ *   见 START-HERE §5③）。⇒ 本函数**不能**用来判定归属，它只回答
+ *   「这些路径在工作区里确实变了吗」。归属仍由会话事件回答 —— 两格合起来才完整。
+ */
+export declare function gitChangedPaths(workspace: string): string[] | undefined;
 /** Install before the first request, including cold resume, with HMR cleanup. */
 export declare function installContinuableMemberSetup(ctx: Context, setup: Setup): void;
 /** Queue a distinct host-authored turn; never substitute model-message steer. */
