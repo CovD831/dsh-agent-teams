@@ -652,7 +652,7 @@ test('★ 臂 9（先软后硬）：核对报缺时流程照常走完 —— 删
 
 test('★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值之前核对了输入面', async () => {
   /**
-   * ★ 定向突变：删掉八处调用点里**任何一处**的 `auditGateRequires` ⇒ 本臂红。
+   * ★ 定向突变：删掉八处调用点里**任何一处**的核对 ⇒ 本臂红。
    *
    * ★ 为什么要有这一臂：上面每条臂都只验证了**一个**位置。八处调用点里漏接
    *   一两处完全可能（t6 的缺陷正是"注册表声明五个位置，只有两处真的被调用"）。
@@ -663,7 +663,19 @@ test('★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值
    *   而后者正是要抓的东西。
    *
    * ★ 数量守恒的口径：六处 runtime 调用点**共用** `evaluateRuntimeGates` 里的
-   *   一次 `registry.evaluate` 与一次 `auditGateRequires` ⇒ 按 point 计数必须相等。
+   *   一次 `registry.evaluate` 与一次核对 ⇒ 按 point 计数必须相等。
+   *
+   * ── ★★ t3：核对调用的名字换了，本臂跟着换口径（语义一个字没动）──────────────
+   *
+   * t3 把五处出口统一到 `inputSurfaceOf(point, ctx)` 上 —— 那个函数**内部**才是对
+   * `auditGateRequires(point, …)` 的唯一调用。⇒ 继续扫 `auditGateRequires` 会让
+   * 计数表变成**空对象**，而空表与 evaluate 表一比就红。
+   *
+   * ★ 本臂的**语义完全没变**：它问的仍是"八处求值调用点，每一处都在**求值之前**
+   *   核对了输入面吗"。变的只是"核对"这个名字 —— 而这正是本队那条纪律的应用：
+   *   夹具读的必须是**代码里现在写着的东西**，不是上一轮写着的东西。
+   * ★ 两处口径都扫（`inputSurfaceOf` 与它内部调用的 `auditGateRequires`），
+   *   于是"有人把 `inputSurfaceOf` 绕开、直接调 `auditGateRequires`"也仍被本臂看见。
    */
   const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
   assert.ok(source.length > 0, '★ 前置：必须读得到 src/tools.ts')
@@ -678,14 +690,17 @@ test('★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值
   const code = codeLines.join('\n')
 
   const evaluatePoints = [...code.matchAll(/registry\.evaluate\(\s*'(\w+)'/g)].map((match) => match[1])
-  const auditPoints = [...code.matchAll(/auditGateRequires\(\s*'(\w+)'/g)].map((match) => match[1])
+  const auditPoints = [
+    ...code.matchAll(/inputSurfaceOf\(\s*'(\w+)'/g),
+    ...code.matchAll(/auditGateRequires\(\s*'(\w+)'/g),
+  ].map((match) => match[1])
   const evaluateCounts = countBy(evaluatePoints)
   const auditCounts = countBy(auditPoints)
 
   assert.deepEqual(
     auditCounts,
     evaluateCounts,
-    '★ 每一处 `registry.evaluate(point, …)` 的位置都必须有【同数量】的 `auditGateRequires(point, …)`'
+    '★ 每一处 `registry.evaluate(point, …)` 的位置都必须有【同数量】的输入面核对（`inputSurfaceOf(point, …)`）'
     + `\n  evaluate: ${JSON.stringify(evaluateCounts)}`
     + `\n  audit   : ${JSON.stringify(auditCounts)}`,
   )
@@ -694,16 +709,39 @@ test('★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值
     assert.ok((auditCounts[point] ?? 0) >= 1, `insertion point "${point}" has an evaluate call site but no input-surface audit`)
   }
   /**
+   * ★★ 收口口径（t3）：八处调用点一律经 `inputSurfaceOf` —— **不许**有哪一处
+   *   直接调 `auditGateRequires`。
+   *
+   * ★ 为什么这条断言必须有（MEASURED）：上面那张计数表把两个名字**都**算进去，
+   *   于是"某处绕过 `inputSurfaceOf`、直接调 `auditGateRequires`"在计数上**看不出来**。
+   *   实测：把 `dispatch` 那一处换成直接调 `auditGateRequires`，本臂**照绿** ——
+   *   而那一处的**结构化出口就没了**（`auditGateRequires` 只返回核对结果，
+   *   不落任何字段）。那正是 t9 钉住的那个形态，从后门溜回来。
+   *   ⇒ 出口的唯一构造点是 `inputSurfaceOf`，绕过它必须当场红。
+   */
+  const directAuditPoints = [...code.matchAll(/auditGateRequires\(\s*'(\w+)'/g)].map((match) => match[1])
+  assert.deepEqual(
+    directAuditPoints,
+    [],
+    '★ 有调用点直接调了 `auditGateRequires` —— 那会**绕过结构化出口**（这个函数只返回核对结果，不落任何字段）。'
+    + `八处调用点一律经 \`inputSurfaceOf(point, ctx)\`：形状与"总是出现"两条纪律只有那一个构造点。`
+    + `实测绕过点：${JSON.stringify(directAuditPoints)}`,
+  )
+
+  /**
    * ★ 顺序口径：核对必须在**求值之前**。对每一处调用点，往前找最近的
-   *   `auditGateRequires(point` 必须存在，且**不能**是"求值之后"才出现。
+   *   核对调用必须存在，且**不能**是"求值之后"才出现。
    */
   for (const match of code.matchAll(/registry\.evaluate\(\s*'(\w+)'/g)) {
     const at = match.index
     const before = code.slice(0, at)
-    const nearestAudit = before.lastIndexOf(`auditGateRequires('${match[1]}'`)
+    const nearestAudit = Math.max(
+      before.lastIndexOf(`inputSurfaceOf('${match[1]}'`),
+      before.lastIndexOf(`auditGateRequires('${match[1]}'`),
+    )
     assert.ok(
       nearestAudit >= 0,
-      `★ "${match[1]}" 的那处求值**之前**没有对应的 auditGateRequires —— 核对必须在求值之前（读的是同一个 ctx）`,
+      `★ "${match[1]}" 的那处求值**之前**没有对应的输入面核对 —— 核对必须在求值之前（读的是同一个 ctx）`,
     )
   }
   assert.equal(evaluateCounts.runtime, 1, '★ 六处 runtime 调用点共用 `evaluateRuntimeGates` 里的唯一一次求值（本臂按这个口径计数）')

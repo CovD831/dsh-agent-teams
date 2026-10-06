@@ -1780,8 +1780,23 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
     '★ 前置：源里确实有"注释里提到求值调用"的样本 —— 没有它，本臂的"剥注释"就是一句空话'
   )
 
-  const audits = [...code.matchAll(/auditGateRequires\(\s*'(\w+)',\s*([^\n]*)\)/g)]
-    .map((match) => ({ point: match[1], expression: match[2].trim() }))
+  /**
+   * ── ★★ t3：核对调用的名字换了，本臂跟着换口径（语义一个字没动）──────────────
+   *
+   * t3 把五处出口统一到 `inputSurfaceOf(point, ctx)` 上 —— 那个函数**内部**才是对
+   * `auditGateRequires(point, …)` 的唯一调用（于是"形状四字段 + 有判据时总是出现"
+   * 两条纪律只有一个构造点）。⇒ 继续扫 `auditGateRequires` 会让 `audits` 恒为空数组。
+   *
+   * ★ 本臂的**语义完全没变**：它问的仍是"调用方核对的那个 ctx 与求值的那个 ctx
+   *   是不是**逐字相同的同一个表达式**"（两份不同的 ctx 会让"核对说缺、求值说齐"
+   *   成为可能，而它在日志里同形）。变的只是"核对"这个名字。
+   * ★ 两个名字都扫：`inputSurfaceOf` 与 `auditGateRequires`（后者仍然存在于
+   *   `inputSurfaceOf` 的实现里）——于是"有人绕过 `inputSurfaceOf` 直接调它"也仍被本臂看见。
+   */
+  const audits = [
+    ...code.matchAll(/inputSurfaceOf\(\s*'(\w+)',\s*([^\n]*?)\)\s*$/gm),
+    ...code.matchAll(/auditGateRequires\(\s*'(\w+)',\s*([^\n]*)\)/g),
+  ].map((match) => ({ point: match[1], expression: match[2].trim().replace(/,\s*$/, '') }))
   const evaluates = [...code.matchAll(/registry\.evaluate\(\s*'(\w+)'(?:\s+as\s+\w+)?,\s*([^\n]*)\)/g)]
     .map((match) => ({ point: match[1], expression: match[2].trim() }))
   assert.ok(

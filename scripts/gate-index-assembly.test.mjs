@@ -979,43 +979,135 @@ test('臂 4b ★ 集成臂：核对机制现在是【软的】—— 而硬化�
   }
 })
 
-test('臂 4c ★ 集成臂（读数出口）：核对结论的【可读出口】必须不止一条路径 —— 只写日志的出口在断言层面与"没核对"同形', () => {
+test('臂 4c ★ 集成臂（读数出口）：每个有判据的位置都必须有结构化出口 —— 而四处形状必须一致', () => {
   /**
-   * ── MEASURED（2026-10-06，t9 集成收口）：出口是不对称的 ────────────────────────
+   * ── ★★ 本臂的来历：从"记录不对称"翻成"断言机制形状"（t3，2026-10-06）────────
    *
-   * 六处 `auditGateRequires(...)` 调用点里：
+   * MEASURED（2026-10-06，t9 集成收口）：出口是不对称的 ——
    *   · **runtime** 把核对结论**随记录交出去**（`runtime_gates.input_surface`）——
    *     结构化的、断言读得到的出口；
    *   · 其余五处（contract / dispatch / completion / delivery ×2）**只有一个
    *     `logger.warn`** —— 日志被截断或被关掉时，它与"输入面是齐的"同形。
    *
-   * ★ 这不是"日志不好"，而是**同一个结论只有一条读取路径**时的固有弱点：本队
-   *   已经栽过一次同名形态 —— `gate-input-wiring.test.mjs` 臂 8 的第一版就是
-   *   "挂在 contract 位置、却去读只有 runtime 才有的 `input_surface`" ⇒ 断言**恒真**。
+   * 本臂当时把那条不对称**写成了一份断言**（`STRUCTURED_OUTLET_POINTS === ['runtime']`）。
+   * 那是 t9 那一刻的**现状快照**，而 t3 的任务恰恰是**消灭这条不对称**。
+   * ⇒ 快照按设计翻了。翻的方式**不是删断言**（那会把"不对称曾经存在"这件事的证据抹掉），
+   *   而是把它从"记录现状"改成"**断言机制形状**"：
    *
-   * ★ 所以本臂钉的是**这条不对称本身**，而不是"要求五处都补字段"（那是 t9 契约
-   *   之外的改动，且五处都是异步/异常路径，改形状要单独评估）：
-   *   · 哪一处有结构化出口、哪一处只有日志 —— 必须**说得清**；
-   *   · 有结构化出口的那一处，它必须真的在场（否则读者以为有、实际读不到）。
+   *     ① 每个**有判据**的位置都必须有结构化出口（回到"只写日志"⇒ 红）；
+   *     ② 四处出口的**形状必须一致**（与 runtime 逐字段同形）。
    *
-   * ⇒ 将来任何人给 contract/dispatch/completion/delivery 补上结构化出口，
-   *   本臂的名单会立刻红 —— 逼他把这句话改对，而不是让一份过期的名单留在注释里。
+   * ★ 为什么必须保留它的"回退可抓"性：本臂存在的理由是 t9 发现的**那个形态** ——
+   *   「只写日志的出口在断言层面与"没核对"同形」。把某处的结构化出口**再去掉**，
+   *   本臂必须立刻红。下面第 ① 条就是那句"回不去"的机械形式。
+   */
+  const STRUCTURED = 'inputSurfaceOf'
+  const code = read('src/tools.ts')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  /**
+   * ① **有判据的位置都要有结构化出口**。
+   *    口径：每一处 `inputSurfaceOf('<point>'` 是一次"这个位置交出结论"的接线点。
+   *    ★ 这里读的是**代码**（先剥注释）——注释里写着 `inputSurfaceOf` 这个词，
+   *      把它算进来会让读数虚高，而虚高的读数会让真正漏接的那一处藏起来。
+   */
+  const outletPoints = [...code.matchAll(/inputSurfaceOf\('(\w+)'/g)].map((match) => match[1])
+  const outletCounts = {}
+  for (const point of outletPoints) outletCounts[point] = (outletCounts[point] ?? 0) + 1
+  /**
+   * ★ 六处调用点按位置计数：contract ×1（`rejectOnContractGates`，被 create/amend 共用）、
+   *   dispatch ×1、completion ×1、delivery ×2、runtime ×1。
+   *   ⇒ 位置集合必须**恰好**是这五个，且 delivery 有两处（两个入口都必须读得出缺格）。
    */
   assert.deepEqual(
-    STRUCTURED_OUTLET_POINTS,
-    ['runtime'],
-    '★ 有结构化 `input_surface` 出口的位置名单变了 —— 变动本身可能是好事（补出口），'
-    + '但"哪些位置只能从日志读"这句话必须同时改对，否则下一位按它去找字段会读到一个不存在的出口（那正是臂 8 第一版恒真的原因）',
+    Object.keys(outletCounts).sort(),
+    ['completion', 'contract', 'delivery', 'dispatch', 'runtime'],
+    `★ 有结构化出口的位置名单变了：${JSON.stringify(outletCounts)} —— `
+    + '一个位置**有判据却只有日志**，就是 t9 钉住的那个不对称又回来了（日志被截断时"报缺"与"输入面是齐的"同形）',
   )
-  /** 反向：只写日志 ≠ 没核对 —— 五处都必须真的调用了核对（否则"出口在哪"无从谈起）。 */
+  assert.equal(outletCounts.delivery, 2, '★ delivery 有**两个**入口（status 报告 / declare_delivery 宣告）—— 只补一处会让另一个入口的缺失重新变成只能靠日志碰运气看见的东西')
+  assert.equal(outletCounts.runtime, 1, '★ 六处 runtime 调用点共用 `evaluateRuntimeGates` 里那一次核对（本臂按这个口径计数）')
+
+  /**
+   * ② **形状必须一致**：四个字段（`checked` / `incomplete` / `skipped` / `missing`）
+   *    只有一个构造点，五处出口都是它的产物。
+   *
+   * ★ 这是"可机械比对"那句话在源码层面的形式：只要有人给某处**单独**拼一份字面量
+   *   （于是形状可以慢慢分叉），这条立刻红。
+   */
+  const literalSites = [...code.matchAll(/input_surface:\s*\{/g)].length
+  assert.equal(
+    literalSites, 0,
+    `★ 还有 ${literalSites} 处**自己拼**的 input_surface 字面量 —— 形状必须只有一个构造点（${STRUCTURED}），`
+    + '四处照抄它。多一个构造点就多一处可以分叉的地方，而分叉之后两个出口在断言层面不再同形',
+  )
+  assert.ok(
+    code.includes(`function ${STRUCTURED}(`),
+    `★ 找不到 ${STRUCTURED} —— 那是五处出口唯一应当存在的那个构造点`,
+  )
+
+  /** 反向：只写日志 ≠ 没核对 —— 每个位置都必须真的调用了核对（否则"出口在哪"无从谈起）。 */
   assert.ok(
     AUDIT_CALL_SITES.length >= 6,
     `★ 调用点少于 6 处：本次接线的主语是"八处调用点都要核对"，实际读到 ${AUDIT_CALL_SITES.length} 处`,
   )
   for (const site of AUDIT_CALL_SITES) {
     assert.ok(
-      STRUCTURED_OUTLET_POINTS.includes(site.point) || site.logsGaps,
-      `★ ${site.point} 位置（${site.varName}）既不交结构化出口、也不写缺格日志 ⇒ 那处核对的结果没有任何读者`,
+      outletPoints.includes(site.point),
+      `★ ${site.point} 位置（${site.varName}）没有结构化出口 ⇒ 那处核对的结果只能从日志读，`
+      + '而日志被截断时它与"没核对"同形（t9 钉住的那条，本臂不许它回来）',
+    )
+    /**
+     * ★★ 这一条是**回退**能不能被抓住的关键（MEASURED，本臂第一次改完就漏了它）：
+     *
+     *   只断言"那个位置**调用过** `inputSurfaceOf`"是不够的 —— 调用完把结果**丢掉**
+     *   （`return undefined` / 不并进返回值）照样满足上面那一条。实测：把 contract
+     *   那一处的 `return { input_surface: … }` 改成 `return undefined`，本臂**照绿**。
+     *   一条只看得见"调用了核对"、看不见"交出去了"的断言，测的不是它声称的东西。
+     *
+     * ⇒ 追加一句：这个变量的值必须**被带走** —— 出现在同窗口里的一次 `input_surface`
+     *   交出去的动作（并进返回值 / 挂上抛出）或一次对它的返回。
+     */
+    /**
+     * ★ 窗口取 **600 行**，不是 80。
+     *
+     * MEASURED（本臂）：dispatch / completion 两处是 `update_task` 里**很长**的一段，
+     * 而"把结论带走"发生在那个工具 `execute` 的 `return` 里 —— 离核对点 460 行开外。
+     * 80 行的窗口 ⇒ 读不到那次交出去 ⇒ 本臂会**误报**"没有出口"，
+     * 而源码里明明写着。★ 误报与漏报一样有害：它会教人把这条臂忽略掉。
+     */
+    const source = read('src/tools.ts')
+    const lines = source.split('\n')
+    const index = lines.findIndex((line) => line.includes(site.line))
+    const window = lines.slice(index, index + 600).join('\n')
+    assert.ok(
+      /**
+       * ★ 口径要**宽到足以覆盖四种真实的交出去方式**，同时**窄到不会误判**：
+       *   · `input_surface: <变量>`       —— 直接并进返回值；
+       *   · `send_dispatch_input_surface: <变量>` / `contract_input_surface` …
+       *                                 —— 一次调用穿过两个位置时的**带前缀**字段名；
+       *   · `{ input_surface: inputSurface }`（contract 那个函数的返回）
+       *   · `return <变量>`            —— 函数把结论当返回值交给调用方（contract/delivery 的拒绝路径）。
+       */
+      new RegExp(`_?input_surface\\s*:\\s*${site.varName}\\b`).test(window)
+      || new RegExp(`${site.varName}\\b[^\\n]*_?input_surface`).test(window)
+      || new RegExp(`return\\s+${site.varName}\\b`).test(window),
+      `★ ${site.point} 位置（${site.varName}）**核对完了却没有把结论交出去** —— `
+      + '只"调用过 `inputSurfaceOf`"不等于"出口存在"：调用完丢掉结果，读者拿到的仍然是"没有结论"，'
+      + '与"输入面是齐的"同形（t9 钉住的那条形态，本臂不许它回来）',
+    )
+  }
+  /**
+   * ★ `logger.warn` **仍然要在**：结构化出口是**补充**，不是替代（用户裁定原话：
+   *   "保留现有 logger.warn（它是给人看的，不是被结构化出口替代）"）。
+   *   两半都要 —— 只留日志 ⇒ 上面红；只留字段、把日志删了 ⇒ 这里红。
+   */
+  for (const site of AUDIT_CALL_SITES) {
+    assert.ok(
+      site.logsGaps,
+      `★ ${site.point} 位置（${site.varName}）不再写缺格日志了 —— 结构化出口是**补充**，不是替代：`
+      + '日志是给人看的那一份，两者并存',
     )
   }
 })
@@ -1053,13 +1145,27 @@ const STRUCTURED_OUTLET_POINTS = (() => {
   return [...found].sort()
 })()
 
-/** 编排层里对 `auditGateRequires` 的每一次调用（变量名 / 位置 / 有没有写缺格日志）。 */
+/**
+ * 编排层里对核对层的每一次调用（变量名 / 位置 / 有没有写缺格日志）。
+ *
+ * ★★ 口径从 `auditGateRequires('<point>'` 换成了 **`inputSurfaceOf('<point>'`**（t3）。
+ *
+ * MEASURED（t3）：四处出口补齐之后，五个位置（六处调用点）**全部**改为经
+ * `inputSurfaceOf(point, ctx)` 核对 —— 那一个函数内部才是对 `auditGateRequires`
+ * 的唯一调用。⇒ 继续扫 `auditGateRequires` 会让本表**恒为空**，而空表上的
+ * `for` 循环一条断言都不执行（"夹具什么都没测"与"夹具全绿"在输出上同形）。
+ * ⇒ 扫"调用方交出去的那一次核对"（`inputSurfaceOf`），而它同时也是**出口**的接线点 ——
+ *   这正是本臂要问的那件事：每一处核对有没有一个**读得出来的**结论。
+ *
+ * ★ 位置名从调用点自己读，不手抄：手抄的那一份会与源码分叉，而分叉的两次读数在
+ *   断言层面同形。
+ */
 const AUDIT_CALL_SITES = (() => {
   const source = read('src/tools.ts')
   const lines = source.split('\n')
   const sites = []
   lines.forEach((line, index) => {
-    const match = line.match(/(?:const\s+)?(\w+)\s*=\s*auditGateRequires\('(\w+)'/)
+    const match = line.match(/(?:const\s+)?(\w+)\s*=\s*inputSurfaceOf\('(\w+)'/)
     if (!match) return
     const window = lines.slice(index, index + 80).join('\n')
     sites.push({
