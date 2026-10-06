@@ -84,16 +84,15 @@ export const description =
  *   （`docs/REQUIREMENTS.md` 之类）—— 那是 I/O，判据不做（性质 ①）。产物表也是
  *   调用方交进来的一部分事实。
  *
- * ★ 为什么 `absorb` 与 `task.kind` **不进** requires：它们是**闸门**（见 `appliesTo`）。
- *   缺席时注册表直接跳过这条判据（`status: 'skipped'`），`gate()` 根本不会被调用。
- *   把它们写进 requires 会让每一次 review / 没有吸收声明的派发都产出一份缺格清单
- *   —— 而噪音会教人忽略门禁（requires.ts 的闸门那一节）。
+ * ★ 为什么 `absorb`（闸门格）**不进** requires：它缺席时 `appliesTo` 为假 ⇒ 注册表
+ *   直接跳过这条判据（`status: 'skipped'`），`gate()` 根本不会被调用。把它写进
+ *   requires 会让每一次"没有吸收声明"的派发都产出一份缺格清单 —— 而噪音会教人
+ *   忽略门禁（requires.ts 的闸门那一节）。
  *
- *   ★ 一处刻意的口径差异：`task.kind` **在两处都读**（`appliesTo` 读它决定说不说话，
- *     `gate()` 读它决定"产物一个都没见过"是可判定的事实还是没能测量）。声明进
- *     requires 之后，核对层就会报"kind 缺席"—— 而那种 ctx 上 `appliesTo` 本来就
- *     为假、判据按设计闭嘴，这正是 requires.ts 明令不许报的情形。
- *     ⇒ `task.kind` 不声明，判据在 kind 缺席时**自行**说 unmeasured 而不是 blocked。
+ *   ★ t12：`task.kind` 曾经也被写在这里，理由是"它在 `appliesTo` 与 `gate()` 两处
+ *     都被读"。修完之后 `kind` **一处都不再被读**（见 `appliesTo` 的长注释），
+ *     所以它既不进 requires，也不再是任何形式的口径差异 —— 本判据对 `kind`
+ *     零依赖，ctx 上有没有它都不影响任何一个裁决。
  */
 export const requires: CtxPaths<AbsorbContext>[] = [
   'observedDocumentChanged',
@@ -108,7 +107,22 @@ export const requires: CtxPaths<AbsorbContext>[] = [
  * "文档路径 + 内容"。
  */
 export interface AbsorbContext {
-  task?: { id?: string; kind?: string }
+  /**
+   * 任务标识。★ **只为写进人话里**（"是哪个任务在声称吸收了"）：裁决一个字都不读它。
+   *
+   * ── ★★ t12：`kind` 从这里【删掉】了，而这件事本身就是修复的一部分 ─────────────
+   *
+   * 它此前是 `task?: { id?: string; kind?: string }`，而 `kind` 被 `appliesTo`
+   * 与 `gate()` **两处**读来判断"这是不是需求阶段"。两处用的都是本仓**不存在**的
+   * 取值（见 `appliesTo` 的长注释）⇒ 判据永远不发言。
+   *
+   * ★ 删掉 `kind` 比"留着但不再读"好：留着一个**在场却无人读**的格子，会让下一个
+   *   读这份 ctx 的人以为"kind 是有关的"—— 而那正是这个缺陷当初被写进来的原因
+   *   （作者以为有个叫 `requirement` 的 kind）。
+   *   ⇒ 类型上不再有这一格之后，"再用 kind 做闸门"就必须先改类型，改不动就成了
+   *     一次**显式的**决定，而不是一次顺手的引用。
+   */
+  task?: { id?: string }
   /**
    * ── ★ 主会话**自报**的那句话 ────────────────────────────────────────────────
    *
@@ -187,18 +201,73 @@ const CLAIMED_NOTHING = 'nothing-to-change'
 /**
  * 只对【声称吸收了审查意见】的主会话生效。
  *
- * ★ 两个条件的由来：
- *   · 没填 `absorb.claims` ⇒ 没有可核对的声明（多数调用点本就不填）；
- *   · 只对 `requirement` / `plan` 类任务生效 —— 那是"成团之前"的产物类型。
+ * ★ 唯一的闸门是**声明本身**：没有 `absorb.claims` ⇒ 没有可核对的东西
+ *   （多数调用点本就不填），本判据不说话。
  *
- * ★ 这两格**不进 `requires`**（见上面的声明）：它们缺席时本函数为假 ⇒ 注册表跳过
+ * ★ 这一格**不进 `requires`**（见上面的声明）：它缺席时本函数为假 ⇒ 注册表跳过
  *   ⇒ "这条判据这一轮不说话"与"它说话了、但输入面缺一格"必须不同形。
+ *
+ * ── ★★ 为什么闸门【不】依赖 `task.kind`（t12 修，本队记账的第 7 次同族缺陷）────
+ *
+ * MEASURED（2026-10-06，本任务）：本函数曾经还有第二个条件 ——
+ *
+ *     return kind === 'requirement' || kind === 'plan'
+ *
+ * 而 `src/types.ts` 的 `TASK_KINDS` 是：
+ *
+ *     ['requirements','implementation','verification','review','repair','integration','work']
+ *      ↑ 是 `requirements`（复数），本仓**压根没有** `'requirement'` / `'plan'` 这两个值
+ *
+ * 实测（把 kind 逐个换成真实值）：**七个真实 kind 全部 ⇒ false**，
+ * 而两个**不存在的** kind ⇒ true。⇒ 本判据在真实运行中**永远不发言**。
+ *
+ * ★ 为什么这一次特别难发现 —— 它是前 6 次「装了但调不到」的**升级版**：
+ *
+ *     前几次：判据没被调用 / 输入面没接上   ⇒ 症状是"它不见了"
+ *     这一次：判据被调用了、输入面也给了，
+ *             而它自己说"这一轮不适用"      ⇒ 症状是"它很有礼貌"
+ *
+ *   ⇒ 而"不适用 ⇒ 不报"是本队**刻意保护的纪律**（requires.ts 的闸门那一节：
+ *     不制造噪音，因为噪音教人忽略门禁）。于是这个缺陷恰好被那条纪律**庇护**了：
+ *     它读起来完全正常，且与"这一轮本来就不该审"**同形**。
+ *     ⇒ 纪律本身没有错，但它需要一条臂来防止**永不适用的闸门**借用它。
+ *       `scripts/gate-admission-absorb.test.mjs` 的「臂 0」就是那条臂。
+ *
+ * ── ★ 为什么选「不依赖 kind」而不是「改成 'requirements'」──────────────────────
+ *
+ * 改成 `'requirements'` 只有一行，但它保留了一个**更根本**的问题：
+ *
+ *     `kind` 是**调用方自己贴的标签**。用调用方给的标签来决定判据说不说话，
+ *     与本层存在的全部理由（"不采信自述"、`dispatch.changed-paths` /
+ *     `completion.verify-rerun` 堵的都是"把判据的输入交给被判的一方"）**同源**。
+ *     一个把产物写成 `.md`、却把任务标成 `work` 的主会话，会让本判据静默闭嘴
+ *     —— 而那正是这条判据唯一该开口的时刻。
+ *
+ * ★ 判据真正需要的信号是「**有没有要审的产物文档**」，而那是 `producedDocuments`
+ *   （调用方注入的**观察**，不是自报的标签）。于是：
+ *
+ *     有产物清单 ⇒ 说话（产物可能是 `[]`，那本身就是一条可判定的结论）
+ *     没有产物清单 ⇒ 那是 `gate()` 里的 `unmeasured`，**不是**这里的"不适用"
+ *
+ *   两者不同形，而后者比"安静地跳过"有用得多：`unmeasured` 会说
+ *   "我没能测量"，而跳过什么都不说 —— 本队记账的"把没测到并进通过"。
+ *
+ * ── ★ 与两条兄弟判据的口径（三条都在 `admission`，口径必须说得清）────────────
+ *
+ *     `admission.checkpoint`  闸门 = `Array.isArray(ctx.documents)`
+ *                             —— **同样不依赖 kind**：它要的信号是"有没有产物清单"
+ *     `admission.convene`     闸门 = 恒真 —— 它问的是"成团这个动作"本身，
+ *                             每一次成团尝试都该被问起
+ *     `admission.absorb`（本条）闸门 = **有没有声明**（`absorb.claims`）
+ *                             ★ 与 checkpoint 同源：不依赖 kind，依赖"观察/声明在不在场"
+ *
+ * ★ 本条与 checkpoint 唯一的差别是**第一格**：checkpoint 问"有没有产物要审"，
+ *   本条问"有没有人声称他吸收了"。两条都在自己的第一格上无条件开口，都不看 kind。
+ *   ⇒ 口径一致：**闸门只判"这一轮有没有我要审的东西"，绝不判"调用方说这是什么"**。
  */
 export function appliesTo(ctx: AbsorbContext | undefined): boolean {
   const claims = ctx?.absorb?.claims
-  if (claims !== CLAIMED_ABSORBED && claims !== CLAIMED_NOTHING) return false
-  const kind = ctx?.task?.kind
-  return kind === 'requirement' || kind === 'plan'
+  return claims === CLAIMED_ABSORBED || claims === CLAIMED_NOTHING
 }
 
 /**
@@ -254,23 +323,25 @@ export function gate(ctx: AbsorbContext): GateVerdict {
    *
    * 顺序是刻意的，两个理由：
    *
-   * ① 闸门（`claims` / `kind`）不进 `requires`，所以**判据要自己对它们负责**：
-   *    一个既没声称、又没 kind 的 ctx 走到这里，正确答案是"我没能测量"（我没被
-   *    喂饱），**不是** "产物一个都没有 ⇒ 拒绝"。后者会在一份完全合规的空 ctx 上
-   *    开火 —— 那就是误伤，而误伤的代价比漏报更贵（判据注册表 §3.5）。
+   * ① 闸门（`claims`）不进 `requires`，所以**判据要自己对它负责**：
+   *    一个没声称吸收的 ctx 走到这里，正确答案是"我没能测量"（我还没被喂饱），
+   *    **不是** "产物一个都没有 ⇒ 拒绝"。后者会在一份完全合规的空 ctx 上开火
+   *    —— 那就是误伤，而误伤的代价比漏报更贵（判据注册表 §3.5）。
    *
    * ② `producedDocuments` 缺席与为空不同形（见上面 interface 的注释）。把这条
    *    排在"有没有产物"之前，是为了让"没人接线"在这条判据上**永远**是 unmeasured。
+   *
+   * ★★ t12：这里此前还有第三段 —— `kind` 不是 `'requirement'` / `'plan'` 就
+   *    unmeasured。它与 `appliesTo` 的闸门是同一条错（两个值在本仓都不存在），
+   *    而且它更坏：`appliesTo` 为假时注册表**直接跳过**，这段代码根本到不了；
+   *    而一旦 `appliesTo` 被修正、这段却留着，判据就会在真实运行里改说
+   *    "这不是需求阶段" —— 一个**同样永远为真**的挡箭牌。
+   *    ⇒ 两处必须一起改。这正是本队记账的「守卫检查了另一个同名的东西」：
+   *      两处检查着同一个 `kind`，只修一处等于没修。
    */
   if (absorbed !== true && nothingToChange !== true) {
     return unmeasured(
       `this run never claimed to have absorbed a review (neither "${CLAIMED_ABSORBED}" nor "${CLAIMED_NOTHING}"), so there is no claim to check against reality`,
-    )
-  }
-  const kind = ctx?.task?.kind
-  if (kind !== undefined && kind !== 'requirement' && kind !== 'plan') {
-    return unmeasured(
-      `task.kind is "${String(kind)}", which is not a requirement/plan artefact phase, so "did this absorb anything" is not a question about this run`,
     )
   }
 
