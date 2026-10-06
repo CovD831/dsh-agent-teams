@@ -130,17 +130,88 @@ function withInputSurfaceOnError<T extends { execute: (...args: never[]) => unkn
       const surface = inputSurfaceFromThrown(error)
       if (surface === undefined || error === null || typeof error !== 'object') throw error
       /**
-       * ★ 纪律 ①：**先到的那一份说话**。`INPUT_SURFACE_PROPERTY` 已经在场上 ⇒
-       *   这一份是**前面某个位置**的结论，不是这一份的落点 ⇒ 原样放行，不做任何改动。
+       * ★★ 纪律 ①：**先到的那一份说话**。已经搬过的那一份不许被覆盖。
+       *
+       * ── MEASURED（2026-10-06，verifier5 抓到的 blocker；本任务的 FINDING-1）────────
+       *
+       * 这里此前写的是 `if (INPUT_SURFACE_PROPERTY in error) throw error` —— 而那一句
+       * **对每一次 `throwWithSurface` 抛出都为真**：`throwWithSurface` 刚把这个属性
+       * 挂上去，它就是带着它抛出来的。⇒ 包装**当场放弃搬运**，下一行的搬运**永不执行**。
+       *
+       * ⇒ 后果不是"某一处少了个字段"，是**整条拒绝路径的出口失效**：
+       *
+       *      update_task { changedPaths: ['src/out-of-scope.ts'] }   ← 一次真实拒绝
+       *        error.agentTeamsInputSurface = {checked:2,incomplete:1,…}  ← 结论在
+       *        error.input_surface          = undefined                    ← 边界没搬
+       *
+       *   于是四处里只有**成功**路径补上了出口，一旦被拒就回到 t9 钉住的那个不对称
+       *   （只剩一个 `logger.warn`）—— 而拒绝**恰恰是最需要读到输入面**的那一刻：
+       *   一次真实拒绝里，"是契约本身不合法"与"是判据要的那一格没接上"正是最容易
+       *   合流的两件事（前者是拒绝的理由，后者不是）。
+       *
+       * ── 为什么"检查错了属性"是特别难看见的一种错 ────────────────────────────
+       *
+       * 两个名字只差一点：`INPUT_SURFACE_PROPERTY`（**判据挂的内部属性**，
+       * = `'agentTeamsInputSurface'`）与 `input_surface`（**工具结果的字段**）。
+       * 守卫要判断的明明是后者（"这一跳搬过没有"），却写成了前者 ⇒ 它**恒真**。
+       * ★ 一个永远为真的守卫不是"更严格"，是**不存在**。而它在断言层面读起来完全正常：
+       *   属性在场、值也对，只是搬运从未发生。
+       * ⇒ 本队把这记作「恒真写法」的**第四种**：**守卫检查了另一个同名的东西**。
+       *
+       * ── 修法：检查**搬运后的落点** ──────────────────────────────────────────
+       *
+       * `Object.hasOwn(error, 'input_surface')` 问的正是"这一跳搬过没有"。
+       * ⇒ 「先到的那一份说话」这条语义**一个字没变**：第一个搬运的赢，后来的
+       *   （例如一次 `update_task` 里 completion 位置在 dispatch 之后抛出）不许覆盖它。
+       * ★ 用 `Object.hasOwn`（自有属性）而不是 `'input_surface' in error`：后者会把
+       *   原型链上的同名属性也算进来 —— 而"从原型继承来的字段"与"我自己搬过"
+       *   是两件事。
        */
-      if (INPUT_SURFACE_PROPERTY in error) throw error
+      if (Object.hasOwn(error, 'input_surface')) throw error
       /**
-       * ★ 只在这里挂一次：`input_surface` 是**工具结果**的字段名（与 runtime 那个
+       * ★ 只在这里搬一次：`input_surface` 是**工具结果**的字段名（与 runtime 那个
        *   出口逐字段同形），而异常上的那个自有属性叫 `agentTeamsInputSurface`
        *   （见 `INPUT_SURFACE_PROPERTY`）。两个名字分开，于是"挂在哪"读得出来。
+       * ★ 上面那句守卫已经保证了"没搬过"，所以这里**直接赋值**，不再写一次
+       *   `=== undefined` 判断 —— 同一个条件写两遍，就是两处会慢慢分叉的地方。
+       *
+       * ★★ 落到**哪个**字段名由抛出方决定（`inputSurfaceFieldOf`）：一次
+       *   `update_task` 穿过两个位置，成功路径上它们各挂各的
+       *   （`dispatch_input_surface` / `completion_input_surface`）⇒ **拒绝路径
+       *   必须落到同一个名字上**，否则"同一个位置在两条路径上不同形"，而按位置名
+       *   去找的读者会读不到（那与"这个位置没判据"同形）。
        */
-      const carrier = error as { input_surface?: unknown }
-      if (carrier.input_surface === undefined) carrier.input_surface = surface
+      ;(error as Record<string, unknown>)[inputSurfaceFieldOf(error)] = surface
+      /**
+       * ★★ 拒绝路径**同时**挂泛用名（t4 修；MEASURED：verifier5 的臂 1/7 复跑暴露）──
+       *
+       * 一次 `update_task` 穿过两个位置，它们在成功路径上**各挂各的**
+       * （`dispatch_input_surface` / `completion_input_surface`）。拒绝路径只挂位置名
+       * 会造出一个新的不同形：**同一位置**在成功路径上读 `dispatch_input_surface`、
+       * 在拒绝路径上就读不到（而它其实**有**结论）——"读不到"与"没有结论"同形。
+       *
+       * ⇒ 两条路都留：位置名（按位置去找的读者用）+ 泛用名（按"这次调用有没有交出
+       *   结论"去找的读者用）。
+       *
+       * ★★ **它们是同一个对象的两个名字，不是两份真相。**（user 裁定已明确批准这个
+       *   形状；这一句必须写在这里，因为下一个人看到两个字段名会以为那是两份独立数据。）
+       *   实现上就是**同一行** `surface` 被赋给两个键 —— 中间没有任何一次重新计算：
+       *
+       *       const surface = inputSurfaceFromThrown(error)   // ← 唯一的那一份
+       *       error[inputSurfaceFieldOf(error)] = surface     // ← 位置名
+       *       error.input_surface               = surface     // ← 泛用名（同一个对象）
+       *
+       *   ⇒ 可机械核对：`JSON.stringify(error.input_surface) ===
+       *      JSON.stringify(error.dispatch_input_surface)`。若哪天有人在两个键之间插入
+       *      一次"重新算一遍"，这条相等立刻不成立 —— 而那时它们**真的**成了两份真相
+       *      （本队反复见过的那种分叉）。
+       *
+       * ★ 泛用名只在**没人占**的时候写：一次调用穿过两个位置时，第一个拒绝的已经
+       *   写过了 ⇒ 后来的不许覆盖（"先到的那一份说话"，与上面那句守卫同一条纪律）。
+       */
+      if (!Object.hasOwn(error, 'input_surface')) {
+        ;(error as { input_surface?: unknown }).input_surface = surface
+      }
       throw error
     }
   }
@@ -2251,7 +2322,26 @@ async function rejectOnContractGates(
  *   抛出的仍然是一个普通 `Error`（`instanceof Error` 与 `message` 逐字不变），
  *   只是多挂了一个自有属性。
  */
-function throwWithSurface(message: string, surface: ReturnType<typeof inputSurfaceOf>): never {
+function throwWithSurface(
+  message: string,
+  surface: ReturnType<typeof inputSurfaceOf>,
+  /**
+   * ★★ 这一次拒绝属于**哪个位置** —— 决定结论在工具结果上落到**哪个字段名**（t4 修）。
+   *
+   * MEASURED（2026-10-06，verifier5 的臂 1/7 复跑时暴露）：
+   *   成功路径上，一次 `update_task` 的两个位置**各挂各的**
+   *   （`dispatch_input_surface` / `completion_input_surface`）—— 那是刻意的，
+   *   因为"哪一个位置缺哪一格"必须读得出来。
+   *   而**拒绝路径**当时只有一格泛用的 `input_surface` ⇒ 同一个位置在两条路径上
+   *   **字段名不同形**。读者按位置的名字去找（`dispatch_input_surface`）会读不到，
+   *   而"读不到"与"这个位置没判据"在断言层面同形 —— 正是本任务要消灭的那件事。
+   *
+   * ⇒ 现在拒绝也带位置：`dispatch` ⇒ `dispatch_input_surface`，`completion` ⇒
+   *   `completion_input_surface`，其余位置（contract / delivery 各只有一个入口）
+   *   仍用泛用的 `input_surface`（与它们成功路径上的字段名一致）。
+   */
+  field = 'input_surface',
+): never {
   const error = new Error(message)
   /**
    * ★ 有判据才挂：`undefined` ⇒ 这个位置这一轮没有挂判据 ⇒ 属性不出现
@@ -2262,6 +2352,16 @@ function throwWithSurface(message: string, surface: ReturnType<typeof inputSurfa
     Object.defineProperty(error, INPUT_SURFACE_PROPERTY, {
       value: surface,
       /** 可枚举：它是一条**结论数据**，不是内部实现细节（宿主/夹具可以直接看见它）。 */
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    })
+    /**
+     * ★ 位置名随结论一起走：工具边界据此把结论搬到**同一个**字段名上 ——
+     *   于是"同一个位置在成功路径与拒绝路径上长得一样"。
+     */
+    Object.defineProperty(error, INPUT_SURFACE_FIELD_PROPERTY, {
+      value: field,
       enumerable: true,
       writable: false,
       configurable: false,
@@ -2279,6 +2379,21 @@ function throwWithSurface(message: string, surface: ReturnType<typeof inputSurfa
  *   才被搬成那个字段（见 `defineTool` 的返回处）。两个名字分开，"挂在哪"读得出来。
  */
 const INPUT_SURFACE_PROPERTY = 'agentTeamsInputSurface'
+
+/**
+ * 结论**应该落到哪个字段名**（见 {@link throwWithSurface} 的 `field` 参数）。
+ *
+ * ★ 与 `INPUT_SURFACE_PROPERTY` 分开的第二个名字：一个是"结论本体"，一个是"落点"。
+ *   ★ 缺席 ⇒ 落点用缺省的 `input_surface`（那四个只有单一入口的位置）。
+ */
+const INPUT_SURFACE_FIELD_PROPERTY = 'agentTeamsInputSurfaceField'
+
+/** 一次拒绝要落到工具结果的哪个字段上（缺省 `input_surface`）。 */
+function inputSurfaceFieldOf(error: unknown): string {
+  if (error === null || typeof error !== 'object') return 'input_surface'
+  const field = (error as Record<string, unknown>)[INPUT_SURFACE_FIELD_PROPERTY]
+  return typeof field === 'string' && field.trim() !== '' ? field : 'input_surface'
+}
 
 /**
  * 从一次抛出里取回核对结论（见 {@link throwWithSurface}）。
@@ -3923,9 +4038,9 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
              * ★ 未测量与"发现问题"不同形（§3.4）。措辞必须分开 —— 读日志的人要能
              *   看出"判据没能测量"，而不是"判据发现了问题"。
              */
-            throwWithSurface(`update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`, dispatchInputSurface)
+            throwWithSurface(`update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`, dispatchInputSurface, 'dispatch_input_surface')
           }
-          throwWithSurface(`update_task rejected: ${dispatchGates.blockers.join('; ')}`, dispatchInputSurface)
+          throwWithSurface(`update_task rejected: ${dispatchGates.blockers.join('; ')}`, dispatchInputSurface, 'dispatch_input_surface')
         }
         /**
          * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬）。它放在上面的拒绝逻辑【之后】，
@@ -4205,9 +4320,9 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
              * ★ 未测量与"发现问题"不同形（§3.4）。措辞必须分开 —— 读日志的人要能
              *   看出"判据没能测量"，而不是"判据发现了问题"。
              */
-            throwWithSurface(`update_task rejected: the completion gate could not measure (${completionGates.unmeasured})`, completionInputSurface)
+            throwWithSurface(`update_task rejected: the completion gate could not measure (${completionGates.unmeasured})`, completionInputSurface, 'completion_input_surface')
           }
-          throwWithSurface(`update_task rejected: ${completionGates.blockers.join('; ')}`, completionInputSurface)
+          throwWithSurface(`update_task rejected: ${completionGates.blockers.join('; ')}`, completionInputSurface, 'completion_input_surface')
         }
         /**
          * 判据【通过时】交出的产出：把判据层亲眼看到的 exitCode 并回 commandsRun，

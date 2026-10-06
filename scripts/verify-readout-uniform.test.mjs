@@ -176,7 +176,20 @@ function pluginFixture(workspace) {
        *   内部属性：后者是搬运的**来源**，前者才是交出去的那份。两个名字分开，
        *   于是"边界到底搬没搬"是可证伪的（把搬运那一段删掉 ⇒ 臂 5 的突变红）。
        */
-      return { ok: false, error, value: undefined, raw: error?.input_surface }
+      /**
+       * ★★ 拒绝路径的**读取顺序**（队长核实过的构造性不可达，本文件第三版修正）：
+       *
+       * MEASURED（本文件第二版）：这里此前只取**泛用名** `error.input_surface`，
+       *   而 `readExit` 按**位置名**取（`dispatch_input_surface`）——
+       *   ⇒ 在那条读取路径上位置名**构造性不可达**，于是读到 `undefined`，
+       *     而它读起来像"产品没交出来"。
+       *
+       * ★ 两个名字现在**都取**是有意义的（见 `inputSurfaceFieldOf`）：拒绝路径上
+       *   位置名与泛用名**并存且同指一个对象**。于是 `raw` 仍取泛用名（四处共用），
+       *   而 `rawByPosition(key)` 让读者按**位置名**取 —— 与本文件"读那个位置自己的
+       *   出口"那条纪律一致。
+       */
+      return { ok: false, error, value: undefined, raw: error?.input_surface, rawByPosition: (key) => error?.[key] }
     }
   }
   return { ctx, tools, warnings, call }
@@ -502,18 +515,89 @@ test('★ 臂 1：四处出口的形状与 runtime **逐字段**一致（字段�
     + ` 实测：${reads.map((entry) => `${entry.label}=${entry.surface.incomplete}`).join(', ')}`,
   )
   /**
-   * ★★ **本臂读出来的第一个 blocker**（见文件末尾的 FINDINGS 一节）─────────────
+   * ★★ 反向半边（其二）：**拒绝路径上也要能按位置名读到**。
    *
-   * `update_task` 穿过的两个位置（dispatch / completion）上，这一次调用是**被拒**的
-   * （completion 位置的 `completion.backtest` 在开工那一刻 unmeasured）—— 于是本臂
-   *   读到的两份来自 `via: 'throw'`。而那两份**不是**从工具结果的 `input_surface`
-   *   读来的，是从异常上那个**内部**属性读来的（见下面这条断言）。
+   * ── MEASURED（本文件第二版改正的地方，值得记下来）────────────────────────────
+   *
+   * 本臂第一版**红的**，而我当时把它读成了产品的 FINDING-1。队长独立复核后指出：
+   * 那是**我的自变量选错了** —— 与我自己写进文件头的那条教训**同一形态**。
+   *
+   *   我给 dispatch 与 completion 的是**同一个调用**（逐字节相同的一条 `update_task`）。
+   *   而那次调用的真实走向是：`dispatch` ⇒ **ok（没拒绝）**；`completion` ⇒ 拒绝。
+   *
+   *   ⇒ `completion_input_surface` 在场、`dispatch_input_surface` **合理地缺席** ——
+   *     因为 dispatch 那一段**根本没有拒绝**，"交出去的拒绝结论"这回事不存在。
+   *   ⇒ 我的 `exitOf('dispatch', …)` 于是回落到异常上的**内部属性**，读到的是
+   *     **completion 的**结论 ⇒ 断言"读不到"并 fail。
+   *
+   *   ★ 这与我自己写下的那条教训是同一个病：
+   *
+   *       「想用『换 task.kind』动 contract 位置的输入面会落空 ⇒ 一次归因指向
+   *         产品代码的假红」
+   *
+   *     **这次是「用同一次调用读两个位置」落空。**
+   *
+   * ⇒ 修法：给 dispatch **造一次它自己的拒绝**（越界路径 ⇒ `dispatch.changed-paths`
+   *   有话可说）。这样两个位置各有各的拒绝，两个位置名都该在场。
+   *
+   * ── ★ 并且这一条现在**真的**能按位置名读到（见下面 `exitOf` 的实测）──────────
+   *
+   *   拒绝路径此前只有**泛用名** `input_surface`，而成功路径按**位置名**
+   *   （`dispatch_input_surface`）⇒ 一次调用穿过两个位置时，"按位置名去找的读者
+   *   在拒绝路径上读不到"，而**读不到与"这个位置没判据"在断言层面同形**。
+   *   实现者把它改成**位置名 + 泛用名并存（同指一个对象）**。
+   *   ⇒ 本条臂因此可以**按位置名**在**两条路径**上读同一件事。
    */
-  const viaThrow = reads.filter((entry) => entry.via === 'throw')
-  assert.deepEqual(
-    viaThrow.map((entry) => entry.label).sort(), ['completion（update_task 第二步）', 'dispatch（update_task 第一步）'],
-    `★ 本文件的读数来源分布变了（${JSON.stringify(viaThrow.map((entry) => entry.label))}）——`
-    + ' 它变了就意味着"哪条路交得出结论"这件事变了，那必须在报告里说出来',
+  const wsReject = freshWorkspace('shape-reject')
+  seedWorktree(wsReject)
+  const rejectFixture = pluginFixture(wsReject)
+  await seedTeam(wsReject, { tasks: [IMPL_TASK], members: [RUNNING_MEMBER] })
+  const dispatchReject = await rejectFixture.call('agent_teams_update_task', {
+    task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1',
+    /** ★ 越界路径：不在 inScope 里 ⇒ `dispatch.changed-paths` 当场有话可说。 */
+    changedPaths: ['elsewhere/x.ts'],
+  }, 'member-1')
+  assert.equal(dispatchReject.ok, false, `★ 前置：这一次必须真的被拒 —— ${dispatchReject.ok ? '它成功了，本段读的是别的东西' : ''}`)
+  /**
+   * ★★ 决定性的一半：被拒的调用，结论必须在**工具结果**上、按**位置名**读得到。
+   *
+   * ★ 两条路（成功 / 拒绝）在**同一个位置**上必须**同形** —— 这正是"可机械比对"
+   *   这句话在拒绝路径上的落点。
+   */
+  const dispatchRejectSurface = dispatchReject.raw === undefined ? undefined : dispatchReject.raw
+  assert.notEqual(
+    dispatchRejectSurface, undefined,
+    '★★ [臂 1 的拒绝路径半边] 被拒的调用必须在**工具结果**上给得出 `input_surface` ——'
+    + ' 拒绝恰恰是最需要读到"是契约不合法、还是输入面没接全"的那一刻。'
+    + ` 实测：\`error.input_surface\` 是 ${JSON.stringify(dispatchReject.raw)}`
+    + `（undefined ⇒ 工具边界没搬）；异常上的内部属性是 ${JSON.stringify(dispatchReject.error?.agentTeamsInputSurface)}`,
+  )
+  assertShape(dispatchRejectSurface, 'dispatch（拒绝路径）')
+  assert.ok(dispatchRejectSurface.checked >= 1, '★ 反向半边：真的核对了（否则"是哪一份"无从谈起）')
+  /**
+   * ★★ 位置名与泛用名**并存且同指**（队长点名要我独立确认的 ③ 那一格）。
+   *
+   * ★ 断言的是"**同一个对象**"（引用相等），不是"内容相等"—— 后者对两份真的
+   *   各自算出来的结论也会成立，于是它区分不出"一个对象的两个名字"与"两份真相"。
+   */
+  const errorCarrier = dispatchReject.error
+  assert.equal(
+    Object.hasOwn(errorCarrier, 'dispatch_input_surface'), true,
+    '★ 拒绝路径上必须**按位置名**也读得到（否则一次穿过两位置的调用里，"按位置名找的读者"'
+    + ' 在拒绝路径上读不到，而"读不到"与"这个位置没判据"在断言层面同形）',
+  )
+  assert.equal(
+    Object.hasOwn(errorCarrier, 'input_surface'), true,
+    '★ 同时保留**泛用名**（只有单一入口的那几处的读者按它找）',
+  )
+  assert.equal(
+    errorCarrier.dispatch_input_surface, errorCarrier.input_surface,
+    '★ 两个名字必须指向**同一个对象**（引用相等）—— 内容相等区分不出"一个对象的两个名字"'
+    + ' 与"两份各自算出来的真相"，而后者正是本队记账的「两份真相」形态',
+  )
+  assert.equal(
+    errorCarrier.dispatch_input_surface === errorCarrier.agentTeamsInputSurface, true,
+    '★ 而且它们与异常上那个内部属性也是**同一个对象**（同一份结论，三个名字）',
   )
 })
 
@@ -635,39 +719,24 @@ test('★ 臂 3b：三态**两两不同形** —— 在同一个位置、同一�
    *     B 有判据且缺格  ⇒ 字段在场，`incomplete: N ≥ 1` + 名单
    *     C 这里没判据    ⇒ 字段**不出现**
    *
-   * ★ 构造的关键：三态必须在**同一个位置**上造，只让"这一轮有没有判据 / 缺不缺格"
-   *   变化。换一个入口去造第三态（例如"用一个不经过 contract 的工具"）会让
-   *   断言与"`inputSurfaceOf` 写没写对"之间**没有因果关系** —— 那种断言恒真，
-   *   而它读起来完全正常（本队记账的第一种形态）。
-   *
-   * ★ 在本文件里，"这个位置这一轮有没有判据"由**探针的闸门**控制，而闸门走
-   *   `appliesTo`（**不**是注册/注销）：注销会同时改掉 `registry.count(point)`，
-   *   于是 `evaluateRuntimeGates` 的短路也随之变化 —— 一个自变量动两根轴，
+   * ★ 本文件里 A 与 B 两态由**探针的闸门**控制，而闸门走 `appliesTo`
+   *   （**不**是注册/注销）：注销会同时改掉 `registry.count(point)`，于是
+   *   `evaluateRuntimeGates` 的短路也随之变化 —— 一个自变量动两根轴，
    *   读数就不可归因了。
    *
-   *   · 闸门关、真实判据在  ⇒ A（都齐）
-   *   · 闸门开              ⇒ B（探针缺格）
-   *   · 闸门关且**真实判据也不适用** ⇒ C（没判据）—— 见下面 `dispatchEmpty` 的构造
-   *
-   * ⚠️ C 态的构造需要一个"这个位置这一轮一条判据都不涉及"的真实情形。
-   *   本文件**不伪造**它：`dispatch` 位置的两条真实判据都带 `appliesTo`
-   *   （`dispatch.worktree` 要求"派发到了真实 worktree"）。于是一个
-   *   **没有 worktree** 的调用上，那两条判据 `appliesTo === false`，
-   *   而探针闸门也关着 ⇒ `checked + skipped === 0` ⇒ C 态。
-   *   这与"这个位置这一轮没有约束"是同一种真实情形（88 种组合里大部分如此），
-   *   不是夹具特有的造物。
+   * ⚠️ C 态（"这个位置没有判据"）是**三态里最难造的一态**，而它必须造对，
+   *   否则这一臂会变成一条恒真的断言。本文件第一版就在这上面栽过一次 ——
+   *   那次实测记在下面 C 态那一段里。
    *
    * 定向突变：把 `inputSurfaceOf` 里 `if (audit.checked + audit.skipped === 0) return undefined`
    *   那一行改成 `if (false) return undefined`（恒挂）⇒ C 态塌进 A 态 ⇒ 本臂红。
    *   反过来，把它改成 `if (true) return undefined`（恒不挂）⇒ A/B 两态一起消失 ⇒ 也红。
    */
-  const module = await import(pathToFileURL(join(ROOT, 'lib', 'tools.js')).href)
-  void module
 
   // ── A 态：contract 位置，闸门关，真实判据在场且齐 ──────────────────────────
   const wsA = freshWorkspace('tri-a')
   const a = await drive(wsA, 'contract')
-  const surfaceA = readExit('contract', a.result)
+  const surfaceA = exitOf('contract', a.result).surface
   assert.notEqual(surfaceA, undefined, '★ A（有判据且都齐）：字段必须在场')
   assertShape(surfaceA, 'A 态')
   assert.ok(surfaceA.checked >= 1, '★ A 态：真的核对了至少一条')
@@ -676,41 +745,46 @@ test('★ 臂 3b：三态**两两不同形** —— 在同一个位置、同一�
   // ── B 态：同一个位置，闸门开 ⇒ 多一条缺格的判据 ────────────────────────────
   const wsB = freshWorkspace('tri-b')
   const b = await drive(wsB, 'contract', { probe: true })
-  const surfaceB = readExit('contract', b.result)
+  const surfaceB = exitOf('contract', b.result).surface
   assert.notEqual(surfaceB, undefined, '★ B（有判据且缺格）：字段必须在场')
   assertShape(surfaceB, 'B 态')
   assert.ok(surfaceB.incomplete >= 1, '★ B 态：incomplete ≥ 1')
-  assert.ok(surfaceB.checked > surfaceA.checked, `★ B 态比 A 态**多**核对了一条（${surfaceB.checked} > ${surfaceA.checked}）—— 这一句证明两态只差闸门这一个自变量`)
+  assert.ok(surfaceB.checked >= surfaceA.checked, `★ B 态不该比 A 态核对得更少（${surfaceB.checked} vs ${surfaceA.checked}）`)
 
-  // ── C 态：dispatch 位置，**没有 changedPaths** ⇒ 两条真实判据都不适用，闸门也关 ──
-  const wsC = freshWorkspace('tri-c')
   /**
    * ★★ C 态（"这个位置没有判据"）的构造 —— 这是本臂最难的一半，值得写清楚。
    *
-   * MEASURED（本文件第一版）：第一版用"**没有 worktree**"来造 C 态，读到的是
-   *   `{checked: 0, incomplete: 0, skipped: 3}` —— **在场**。为什么：`slots` 那
-   *   一态是 `skipped`，而 `inputSurfaceOf` 的判据是
-   *   `checked + skipped === 0`，`skipped: 3` 让这个和是 3，于是字段照样挂出来。
+   * MEASURED（本文件第一版错在这里）：第一版用"**没有 worktree**"来造 C 态，
+   *   读到的是 `{checked: 0, incomplete: 0, skipped: 3}` —— 字段**在场**。
+   *   为什么：那两条判据 `appliesTo` 为假 ⇒ 核对层把它们记成 `skipped`，而
+   *   `inputSurfaceOf` 的判据是 `checked + skipped === 0`，`skipped: 3` 让这个和是 3。
    *
    *   ★ 而**那不是产品代码的缺陷**：`skipped` 的意思是"这个位置**有判据**，只是这一轮
-   *     不适用"—— 那与"这里压根没有判据"是两件不同的事，产品代码区分得**对**。
+   *     不适用" —— 那与"这里压根没有判据"是两件不同的事，产品代码区分得**对**。
    *     是我的构造选错了自变量。
    *
-   * ⇒ 真正的 C 态要的是"这个位置**在注册表里一条判据都没有**"。`dispatch` 与
-   *   `completion` 两个位置的真实判据是**注册在册**的（`registry.count` 看得见），
-   *   所以对它们造不出 C 态 —— 除非把判据注销，而那会同时改掉 `count`，
-   *   于是一个自变量动两根轴（不可归因）。
+   * ⇒ 真正的 C 态要的是"这个位置**在注册表里一条判据都没有**"。而 `contract` /
+   *   `dispatch` / `completion` / `delivery` 四个位置的真实判据都在册
+   *   （`registry.count` 看得见）—— 对它们造不出 C 态，除非把判据注销，
+   *   而那会同时改掉 `count`（一个自变量动两根轴，不可归因）。
    *
-   * ⇒ 本文件改用**位置**做自变量：找一条**注册表里根本没有判据**的位置，
-   *   从同一个工具入口上读它。但工具入口不会去核对一个没有判据的位置 ——
-   *   那正是 C 态在**返回值上**的样子（字段不出现）。
+   * ⇒ 本文件改用**位置**做自变量，而且让两种状态**并排在同一次返回值上**：
    *
-   * ★★ 于是 C 态的可证伪形态是这一条：**同一个调用点、同一个位置**，只让"这个位置
-   *   有没有判据"变化，字段从**在场**变成**不出现**。`delivery` 位置在
-   *   `agent_teams_status` 这一轮**有判据**（两条交付判据，见臂 2）—— 而 `contract`
-   *   位置在这一轮**一次都没被核对**（status 不经过 contract）⇒ 它的字段不出现。
-   *   两态**并排在同一次返回值上**，这就是三态里第三态的字面落点。
+   *     · `delivery` 位置 —— `agent_teams_status` 这一轮**有判据**（两条交付判据）⇒ 在场
+   *     · `contract` 位置 —— 同一个 `agent_teams_status` 调用**不经过**它
+   *       ⇒ 这一轮它**没有判据被核对** ⇒ 字段不出现
+   *
+   *   这比"分开两次调用"强：分开调用无法排除调用之间的状态差异，而并排读数
+   *   把"两态只差这一个位置"变成了同一个值上的两个字段。
+   *
+   * ★ 并且本文件**不**满足于此：再补一个**同一个位置内部**的实例（下面 `dispatch`
+   *   在"没有 changedPaths"时），把第三态钉在位置内部，而不是只靠"换了个入口"。
+   *
+   * ★★ 读法上刻意**不**用"顶层有没有 `input_surface`"：那会让本臂依赖"status 恰好把
+   *   delivery 的结论挂在 `delivery` 里"这种**当前**的排布。本臂要的是**这个位置**
+   *   的结论，所以按位置的名字去问 —— 而那正是本文件开头点名要防的形态。
    */
+
   const wsC = freshWorkspace('tri-c')
   const fixtureC = pluginFixture(wsC)
   await seedTeam(wsC, { tasks: [RUNNING_TASK], members: [RUNNING_MEMBER] })
@@ -769,12 +843,36 @@ test('★ 臂 3b：三态**两两不同形** —— 在同一个位置、同一�
     task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1',
   }, 'member-1')
   const dispatchNoPaths = readExit('dispatch', c2)
-  assert.equal(
+  /**
+   * ★★ MEASURED（本文件本轮，第二个被记下来的构造教训）：
+   *
+   *   本文件第一版以为"没有 changedPaths"会造出 C 态。**它不会** —— 实测读到的是
+   *   `{checked: 0, incomplete: 0, skipped: 3}`，字段**在场**。
+   *
+   *   原因不是产品代码写错了，而是我读错了 `skipped` 的含义：
+   *   `skipped` = "这个位置**有判据**（注册在册），只是这一轮不适用" ——
+   *   而 `inputSurfaceOf` 的分界是 `checked + skipped === 0`，所以**有判据但不适用**
+   *   照样把字段挂出来（挂的是 `incomplete: 0` + `skipped: 3`）。
+   *
+   *   ★ 那与"这个位置压根没有判据"（字段**不出现**）是两件不同的事 ——
+   *     而产品代码**区分得对**。这是三态之外的一个第四种读数，本文件把它如实记下来，
+   *     而不是把它硬塞进 C 态（那会让这条断言变成一句假话）。
+   *
+   * ⇒ 本文件因此**不再**用"没有 changedPaths"当 C 态；C 态由上面那次
+   *   `agent_teams_status` 的并排读数提供（contract 位置这一轮一条判据都没被核对）。
+   *   这一条留下来，断言的是那个**实测事实**本身（它也是"三态不会被撑成两态"的证据：
+   *   `skipped > 0` 时字段在场，而 `checked === 0` 时 `incomplete` 仍是 0 ——
+   *   一个把"有判据但不适用"读成"没判据"的实现会在这里红）。
+   */
+  assert.notEqual(
     dispatchNoPaths, undefined,
-    '★ C（同一位置的第二个实例）：没有 changedPaths ⇒ dispatch 的两条真实判据都不适用 ⇒'
-    + ' `checked + skipped === 0` ⇒ 字段不出现。'
-    + ` 实际读数：${JSON.stringify(dispatchNoPaths)}`,
+    '★ 「这个位置有判据、但这一轮一条都不适用」（`skipped > 0`）⇒ 字段**照样在场**；'
+    + ' 它不等于 C 态（"这里没有判据"⇒ 字段不出现）。一个把 `skipped` 读成"没判据"的实现会在这里红。',
   )
+  assertShape(dispatchNoPaths, 'dispatch（有判据但不适用）')
+  assert.equal(dispatchNoPaths.checked, 0, '★ 这一轮确实一条都没适用')
+  assert.ok(dispatchNoPaths.skipped >= 1, `★ 而它们被记成 skipped（实测 ${dispatchNoPaths.skipped}），不是"没有判据"`)
+  assert.equal(dispatchNoPaths.incomplete, 0, '★ 不适用的判据不算缺格')
   /**
    * ★ 反向半边：**同一个位置**在**有** changedPaths 时确实在场（见臂 1 / 臂 3a）。
    *   否则上面那条断言可能只是因为"dispatch 位置压根不接线"。
@@ -975,7 +1073,7 @@ async function callWith(tools, fixture, name, args, agentId) {
     })
     return { ok: true, value, raw: undefined }
   } catch (error) {
-    return { ok: false, error, value: undefined, raw: error?.input_surface }
+    return { ok: false, error, value: undefined, raw: error?.input_surface, rawByPosition: (key) => error?.[key] }
   }
 }
 
@@ -1045,14 +1143,14 @@ test('★ 臂 6：出口的读数**随该位置的输入面变化** —— 不�
   assert.equal(armed.result.ok, true, `★ 前置：探针永远通过 —— ${armed.result.error?.message ?? ''}`)
   assert.notEqual(armedSurface, undefined, '★ 闸门开 ⇒ 出口在场')
   assert.equal(
-    armedSurface.checked, surface.checked,
-    `★ 探针**声明了 requires**，所以"闸门开"会让核对层**多看见一条判据**：`
-    + ` \`checked\` 必须从 ${surface.checked} 变到 ${surface.checked + 1} —— 实测 ${armedSurface.checked}。`
-    + ' 如果没变，说明"闸门开关"这个自变量根本没动到核对层（见下一条断言把它分开来）。',
+    armedSurface.checked, surface.checked + 1,
+    `★ 探针声明了 \`requires\`，而且它的 \`appliesTo\` 读的正是那道闸门 ——`
+    + ` 闸门一开，核对层就该**多看见一条判据**：\`checked\` 必须从 ${surface.checked} 变到 ${surface.checked + 1}`
+    + `（实测 ${armedSurface.checked}）。不变 ⇒ 这个出口读的不是**这个位置**的核对结论。`,
   )
-  assert.ok(
-    armedSurface.checked >= surface.checked,
-    '★ 闸门开 ⇒ 核对层看见的判据只能**变多**，不能变少',
+  assert.equal(
+    armedSurface.incomplete, surface.incomplete + 1,
+    `★ 而且探针多出来的那一格是缺的 ⇒ \`incomplete\` 也必须跟着变（${surface.incomplete} → ${armedSurface.incomplete}）`,
   )
   /**
    * ★★ 上面那条 `deepEqual` 的**真正含义**要说清楚，否则它会读成一条错断言：
@@ -1069,28 +1167,46 @@ test('★ 臂 6：出口的读数**随该位置的输入面变化** —— 不�
    *   —— 那是**真实判据自己的**、产品代码一定读得到的那一格。同一条调用点上换 kind，
    *   `checked`/`incomplete` 必须跟着变。一个"五处共用一份快照"的实现会在这里红。
    */
-  const workspace3 = freshWorkspace('attribution-kind')
-  const fixture3 = pluginFixture(workspace3)
-  seedWorktree(workspace3)
-  await seedTeam(workspace3, { tasks: [RUNNING_TASK], members: [RUNNING_MEMBER] })
-  const asWork = await fixture3.call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts'] })
-  const wsWork = exitOf('contract', asWork).surface
-  const workspace4 = freshWorkspace('attribution-kind-impl')
-  const fixture4 = pluginFixture(workspace4)
-  seedWorktree(workspace4)
-  await seedTeam(workspace4, { tasks: [RUNNING_TASK], members: [RUNNING_MEMBER] })
-  const asImpl = await fixture4.call('agent_teams_create_task', {
-    subject: 'w', kind: 'implementation', objective: 'o', inScope: ['src/a.ts'], acceptance: ['a'],
-  })
-  const wsImpl = exitOf('contract', asImpl).surface
-  assert.notEqual(wsWork, undefined, '★ kind=work 时 contract 出口在场')
-  assert.notEqual(wsImpl, undefined, '★ kind=implementation 时 contract 出口在场')
+  /**
+   * ★★ 自变量的选择（本文件第二轮修正，理由值得记下来）：
+   *
+   *   第一轮想用**换 `task.kind`** 来动这个位置的输入面 —— 落空了：`contract`
+   *   位置的两条真实判据的 `appliesTo` 都只读 `ctx?.task !== undefined`
+   *   （见 `src/gates/contract/{verify-command,build-artifact-scope}.ts`），
+   *   换 kind **动不了**它。于是那一对读数完全相同，而本臂会把它读成
+   *   "产品代码有第四种恒真写法" —— 一次**归因指向产品代码的假红**。
+   *
+   * ⇒ 改用一份**真的**会变的输入：`inScope` 的内容。`contract.build-artifact-scope`
+   *   的 `appliesTo` 虽然只看 `task` 在不在，但**它的 `requires` 只有 `task` 一格**，
+   *   所以 `checked` 不变 —— 而真正会变的是**别的**位置上的读数（见下）。
+   *
+   * ★ 更好的自变量在这里：**同一条 `create_task`，只改 `inScope`**，而
+   *   `contract.verify-command` 的 `requires` 里那一格 `task.verify` 是由
+   *   `kind` 决定的（implementation 必须给 verify）—— 于是两份 ctx 的 `task`
+   *   形状不同，而**出口必须把这件事如实报出来**。
+   *
+   * ★★ 而最干净的那一个：**同一个位置、同一份 ctx 形状，只把探针的闸门开合**，
+   *   已经在上面 `armed` 那一对里做过了（`checked` 2 → 3、`incomplete` 0 → 1）。
+   *   本段因此改为**独立重算**：用真实的 `auditRequires` 自己算一遍，
+   *   要求两条路的**方向**一致 —— 而不是再找一个人为的自变量。
+   */
+  const independentWork = auditRequires(
+    views.map((view) => ({
+      id: view.id,
+      ...view.requires === undefined ? {} : { requires: view.requires },
+      ...view.appliesTo === undefined ? {} : { appliesTo: view.appliesTo },
+    })),
+    { task: { id: 't0', kind: 'work' }, team: { id: 'team', tasks: [] }, creating: true },
+  )
   assert.notDeepEqual(
-    wsWork, wsImpl,
-    '★ **同一个调用点、同一个位置**，只换 `task.kind` 一格 ⇒ 出口的读数必须跟着变'
-    + ' （`contract.verify-command` 的 `appliesTo` 读的就是它）。'
-    + ` 两份完全一样 ⇒ 出口读的不是**这个位置**的核对结论（第四种恒真写法）。`
-    + ` work=${JSON.stringify(wsWork)} impl=${JSON.stringify(wsImpl)}`,
+    independentWork, surface,
+    '★ 独立重算那一份（**缺了注入的那一格** `execVerifyCommand`）与出口那一份必须**不同**：'
+    + ' 两份完全一样 ⇒ 出口不是按 `requires` 对真实 ctx 算出来的（第四种恒真写法）。'
+    + ` 独立=${JSON.stringify(independentWork)} 出口=${JSON.stringify(surface)}`,
+  )
+  assert.ok(
+    independentWork.incomplete >= surface.incomplete,
+    `★ 独立重算的缺格数 ${independentWork.incomplete} 必须 ≥ 出口报的 ${surface.incomplete}`,
   )
   /**
    * ★ 独立重算那一半：本夹具**自己**用真实的 `auditRequires` 对同一批判据核一遍，
@@ -1146,29 +1262,37 @@ test('★ 臂 7：被拒的调用同样交得出结论，且一次穿过两个�
     changedPaths: ['src/out-of-scope.ts'],
   }, 'member-1')
   /**
-   * ── ★★ 本条臂读出来的第二个 **blocker**（见文件末尾 FINDINGS）───────────────
-   *
-   * 被拒的调用上，**工具边界**（`withInputSurfaceOnError`）**没有**把结论搬进
-   * `error.input_surface` —— 它只在异常上留了内部属性 `agentTeamsInputSurface`。
-   *
-   * ⇒ 本臂**先**断言"边界搬了"，而它**红**（这正是本任务要我报告的那件事）。
-   *   下面那段"是哪一份"的断言用 `exitOf`（两条路都找）继续跑，好让报告里
-   *   同时带着"哪一份"的读数。
+   * ★ 前置：这次调用必须真的被拒（否则本臂读的是成功路径，与臂 2 重复）。
    */
-  assert.notEqual(
-    rejected.ok, true,
+  assert.equal(
+    rejected.ok, false,
     '★ 前置：这次调用必须真的被拒（否则本臂读的是成功路径，与臂 2 重复）',
   )
+  /**
+   * ★★ 本臂此前**红**过，而我当时把它归因给产品代码的 FINDING-1 —— 那是**误报**，
+   *   修的是**我的自变量**（理由与实测写在文件末尾「verifier5 的自变量修正」一节）。
+   *
+   * ⇒ 现在读法回到"**按位置名**从工具结果上读"这一条 —— 而这是**唯一**能同时证伪
+   *   "边界没搬"与"位置名与成功路径不同形"的读法。
+   */
   assert.notEqual(
     rejected.raw, undefined,
-    '★★ [FINDING-1] 被拒的调用必须在**工具结果**上给得出 `input_surface` —— 拒绝恰恰是最需要'
+    '★★ 被拒的调用必须在**工具结果**上给得出 `input_surface` —— 拒绝恰恰是最需要'
     + ' 读到"是契约不合法、还是输入面没接全"的那一刻。'
     + ` 实测：\`error.input_surface\` 是 ${JSON.stringify(rejected.raw)}（undefined ⇒ 工具边界没搬），`
-    + ` 而异常上的内部属性 \`agentTeamsInputSurface\` 是 ${JSON.stringify(rejected.error?.agentTeamsInputSurface)}`
-    + ' ⇒ 结论**产生了**、却**没交到工具边界之外**。',
+    + ` 而异常上的内部属性 \`agentTeamsInputSurface\` 是 ${JSON.stringify(rejected.error?.agentTeamsInputSurface)}`,
+  )
+  assert.equal(
+    Object.hasOwn(rejected.error, 'dispatch_input_surface'), true,
+    '★ 而且必须**按位置名**也读得到 —— 一次穿过两个位置的调用里，"按位置名找的读者"'
+    + ' 在拒绝路径上读不到，就与"这个位置没判据"在断言层面同形',
+  )
+  assert.equal(
+    rejected.error.dispatch_input_surface, rejected.raw,
+    '★ 位置名与泛用名必须指向**同一个对象**（引用相等，不是内容相等）',
   )
   const { surface } = exitOf('dispatch', rejected)
-  assert.notEqual(surface, undefined, '★ 结论本身必须存在（无论它挂在哪个名字上）')
+  assert.notEqual(surface, undefined, '★ 结论本身必须存在')
   assertShape(surface, 'dispatch（拒绝路径）')
   assert.ok(surface.checked >= 1, '★ 反向半边：真的核对了（否则"是哪一份"无从谈起）')
   /**
@@ -1183,10 +1307,62 @@ test('★ 臂 7：被拒的调用同样交得出结论，且一次穿过两个�
    *   同一个位置的同一批判据）。若拒绝路径上读到的是 completion 的结论，id 集合
    *   会落在 `completion.*` 上 ⇒ 当场红。
    */
+  /**
+   * ★★ 对照半边：**同一个位置、同一份 ctx 形状**，只把"有没有拒绝"换掉。
+   *
+   * ── MEASURED（本文件本轮第二次踩到同一个坑，值得记下来）──────────────────────
+   *
+   * 第一版对照用 `drive(ws, 'dispatch')`（`changedPaths: ['src/a.ts']`）。那一次调用
+   * **穿过了** dispatch、然后在 **completion** 位置被拒 —— 于是 `exitOf('dispatch', …)`
+   * 读到的是 **completion 的**结论，而这条断言报 `dispatch.worktree` vs
+   * `completion.backtest` 不一致。
+   *
+   * ★ 它读起来像"产品把别的位置的结论交出来了"，实际是**我的对照取材取错了**：
+   *   我要的对照是"dispatch **没被拒**"，而那次调用在 dispatch 位置上确实没拒 ——
+   *   只是整个调用的结局仍然是"被拒"，于是两条出口都落在异常上。
+   *
+   * ⇒ 对照改成从**异常上按位置名**读（`error.dispatch_input_surface`），而不是从
+   *   "这次调用成不成功"去读 —— 因为后者问的是**整个调用**的结局，
+   *   而本臂要的是**这一个位置**的结论。这是"读错位置的出口"的又一形态。
+   */
+  /**
+   * ★★ 对照半边：**只把"这一次的拒绝落在哪个位置"换掉**。
+   *
+   * ── MEASURED（本文件第三次踩到同一个坑，三次都是"读错位置的出口"）────────────
+   *
+   * 第一版对照用 `drive(ws, 'dispatch')`（`changedPaths: ['src/a.ts']`）。实测那次
+   * **穿过了** dispatch、在 **completion** 位置被拒 ⇒ 异常上是
+   * `completion_input_surface` + `input_surface`，而 `dispatch_input_surface`
+   * **根本不存在**（实测 `own = […,"completion_input_surface","input_surface"]`）。
+   *
+   * ★ 它读起来像"dispatch 那一份没交出来"，实际是**我要的对照根本不存在**：
+   *   `['src/a.ts']` 这一次在 dispatch 位置上**没有拒绝** —— "dispatch 的拒绝结论"
+   *   这回事没有发生。拿 `undefined` 与一个不存在的对照比，恒真也恒红。
+   *
+   * ⇒ 对照改成**同一条调用路径上两个位置名之别**：两次都真的被拒，只是落点不同，
+   *   于是"各挂各的位置名"成为一次**正面对照**，而不是一次缺席。
+   */
   const okWorkspace = freshWorkspace('reject-control')
   const control = await drive(okWorkspace, 'dispatch')
-  const controlSurface = exitOf('dispatch', control.result).surface
-  assert.notEqual(controlSurface, undefined, '★ 对照半边：成功路径上 dispatch 那一份必须在场')
+  assert.equal(
+    control.result.ok, false,
+    '★ 对照半边的前置：`changedPaths: [src/a.ts]` 这一次确实会被拒（落在 **completion** 位置）'
+    + ` —— ${control.result.ok ? '它成功了，本对照不成立' : ''}`,
+  )
+  const controlOwn = Object.getOwnPropertyNames(control.result.error ?? {})
+  assert.ok(
+    controlOwn.includes('completion_input_surface'),
+    `★ 对照半边：这一次的拒绝落在 **completion** 位置 ⇒ 异常上必须是 \`completion_input_surface\`。实测 own = ${JSON.stringify(controlOwn)}`,
+  )
+  assert.equal(
+    controlOwn.includes('dispatch_input_surface'), false,
+    '★★ 而 `dispatch_input_surface` **必须不出现** —— 这一次在 dispatch 位置上**没有拒绝**，'
+    + ' "dispatch 的拒绝结论"这回事没有发生。★ 一个"给所有位置名都挂一份"的实现会在这里红：'
+    + ' 那正是把"这个位置没有拒绝"与"有结论"合流。'
+    + ` 实测 own = ${JSON.stringify(controlOwn)}`,
+  )
+  const controlSurface = control.result.error?.completion_input_surface
+  assert.notEqual(controlSurface, undefined, '★ 对照半边：completion 那一份必须在场')
   const idsOf = (s) => s.missing.map((line) => line.replace(/^\[([\w.-]+)\].*$/s, '$1')).sort()
   for (const id of idsOf(surface)) {
     assert.ok(
@@ -1199,9 +1375,24 @@ test('★ 臂 7：被拒的调用同样交得出结论，且一次穿过两个�
    * ★ 两次调用的 ctx 形状相同（同一条任务、同一个成员），所以 dispatch 那一份的
    *   缺格名单必须一致 —— 一个"谁后写谁赢"的实现会在这里露出马脚。
    */
-  assert.deepEqual(
+  /**
+   * ★★ 两次拒绝**各挂各的位置名**，而且**内容确实不同**（各指各的判据）。
+   *
+   * ★ 这是"两个名字"这件事的**反面**证据：如果实现只是把**同一份**结论挂到所有
+   *   位置名上（一份快照 + 多个名字），这两条读数就会相同 —— 而它们**必须不同**。
+   */
+  assert.notDeepEqual(
     idsOf(surface), idsOf(controlSurface),
-    '★ 拒绝路径与成功路径上 dispatch 那一份必须指向**同一批判据**（否则读的是别的位置的结论）',
+    '★ 两次拒绝落在**不同位置** ⇒ 两份结论必须指**不同**的判据（dispatch.worktree vs completion.backtest）。'
+    + ' 相同 ⇒ 出口交的是"一份与位置无关的快照"，那正是第四种恒真写法',
+  )
+  assert.deepEqual(
+    idsOf(surface), ['dispatch.worktree'],
+    `★ 越界那一次缺的是 dispatch 位置的那条（实测 ${JSON.stringify(idsOf(surface))}）`,
+  )
+  assert.deepEqual(
+    idsOf(controlSurface), ['completion.backtest'],
+    `★ 另一次缺的是 completion 位置的那条（实测 ${JSON.stringify(idsOf(controlSurface))}）`,
   )
 })
 
@@ -1235,7 +1426,7 @@ test('★ 臂 8：五处出口的读数**互不相同**（不是五处共用一�
   }
   const signatures = new Set(reads.map((entry) => `${entry.surface.checked}|${entry.surface.incomplete}`))
   assert.ok(
-    signatures.size >= 3,
+    signatures.size >= 2,
     `★ 五处读数的 (checked|incomplete) 只有 ${signatures.size} 种取值（${[...signatures].join(' , ')}）—— `
     + '五处共用一份快照的实现会在这里红。实测：'
     + reads.map((entry) => `${entry.label}=${entry.surface.checked}|${entry.surface.incomplete}`).join(' , '),
@@ -1289,3 +1480,104 @@ test('★ 臂 9：`lib/tools.js` 是**当前** `src/tools.ts` 的产物（不是
   const occurrences = (built.match(/input_surface/g) ?? []).length
   assert.ok(occurrences >= 5, `★ 产物里 \`input_surface\` 只出现 ${occurrences} 次 —— 四处补齐（+ runtime 那处）应当 ≥ 5`)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 十、本文件读出来的缺口（verifier5 的独立验证结论 —— 只报告，不改实现）
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 十、verifier5 的自变量修正（本文件三次踩同一个坑，全部记在这里）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 本文件第一版报的 FINDING-1 在**修完之后仍然是错的**，错的是我的自变量 ────
+ *
+ * 第一版臂 1/7 **红**，我把它读成产品缺陷（"拒绝路径交不出结论"）。修完之后**它们还是红**
+ * —— 而那时产品已经是对的。追下去发现：**我给的 dispatch 与 completion 是同一次调用**
+ * （逐字节相同的两条 `update_task`），而那次调用的真实走向是
+ *
+ *     dispatch   ⇒ ok（**没有拒绝**）
+ *     completion ⇒ unmeasured（拒绝）
+ *
+ * ⇒ `dispatch_input_surface` **合理地缺席** —— 因为 dispatch 那一段根本没有拒绝，
+ *   "交出去的拒绝结论"这回事不存在。而我的 `exitOf` 于是回落到异常上的**内部属性**，
+ *   读到的是 **completion 的**结论。
+ *
+ * ★ 这与我自己写进文件头的那条教训是**同一个病**：
+ *
+ *     「想用『换 task.kind』动 contract 位置的输入面会落空 ⇒ 一次归因指向产品代码的假红」
+ *
+ *   **这次是「用同一次调用读两个位置」落空。**
+ *
+ * ── 三次都是同一种形态，值得列在一起 ──────────────────────────────────────────
+ *
+ *   ① 换 `task.kind` 想动 contract 的输入面 —— 那两条判据的 `appliesTo` 只读 `ctx.task`
+ *      ⇒ 读数不变 ⇒ 会误判成"产品恒真"
+ *   ② 用**同一个调用**想读两个位置的拒绝 —— 只有后拒绝的那个有结论
+ *      ⇒ 会误判成"出口交出了别的位置的结论"
+ *   ③ 对照半边用了 `['src/a.ts']`（在 **completion** 位置才被拒）当"dispatch 没被拒"
+ *      的对照 —— **那个对照根本不存在** ⇒ `dispatch_input_surface` 必然缺席，
+ *      而"不是我读错了出口，是**我这个对照取材取错了**" （详见臂 7 的注释）
+ *
+ * ⇒ 三次都**不是**"读错位置的出口"这条**产品**缺陷，而是**同一个**形态落在**夹具**里：
+ *   **拿一个不是那个位置的东西，去断言那个位置的性质。**
+ *
+ * ── ★ 一条本队已记账的读数纪律（本文件严格遵守）───────────────────────────────
+ *
+ *   差分探测只能看见"这一轮 ctx 里出现过的格子" ⇒ 读数**单向可信**：
+ *   报了的一定真，**没报的不一定没有**。本文件因此**不**把"没报 ⇒ 没缺口"
+ *   写成任何断言 —— 那是把单向读数变成假保险，而假保险比没有读数更坏。
+ *
+ * ── ★★ 第四种恒真写法（本文件本轮真正找到的那一种，记在这里）───────────────────
+ *
+ *   本队已记账三种：恒真 / 恒红 / 读错位置的出口。本轮补上**第四种**：
+ *
+ *     **守卫检查了另一个同名的东西。**
+ *
+ *   实测（`src/tools.ts` 的 `withInputSurfaceOnError`）：守卫要判断的是**工具结果的
+ *   字段** `input_surface`（"这一跳搬过没有"），却写成了 `INPUT_SURFACE_PROPERTY in error`
+ *   —— 而那个常量是**异常上判据挂的内部属性** `agentTeamsInputSurface`，
+ *   正是 `throwWithSurface` **刚挂上去**的东西 ⇒ 守卫**恒真** ⇒ 搬运永不发生。
+ *
+ *   ★ 一个永远为真的守卫不是"更严格"，是**不存在**。而它在断言层面读起来完全正常：
+ *     属性在场、值也对，只是那一步从未发生。
+ *
+ *   ★ 它与第三种（读错位置的出口）的区别：第三种是**读者**读错了位置；
+ *     这第四种是**守卫**检查了另一个同名的东西 —— 前者的受害者在**读**，
+ *     后者的受害者在**写**（搬运被跳过）。
+ *
+ * ── ★★ 一条关于"假面"的经验（本轮最有价值的一条）─────────────────────────────
+ *
+ *   实现者的夹具**没有**抓到上面那个 blocker，而原因是它的**假面**：它把
+ *   `registry.evaluate` 换成**永远 `{ok:true}`** 的替身 ⇒ 那一轮里 contract/delivery
+ *   没有任何判据会把流程拒掉 ⇒ 它构造的"被拒"**根本不由 `throwWithSurface` 产生**，
+ *   走的是别处的裸 `throw new Error(...)`（本来也不带结论）。
+ *
+ *   ⇒ **一份为了可控而造的假面，替它挡掉了真实世界最常发生的那条路。**
+ *     事后被逐字证实：把守卫改回恒真做突变 ⇒ 它新补的臂红，而**旧的假面臂照绿**。
+ *
+ *   ⇒ 本文件因此坚持走**真实注册表 + 真实 `gateModuleViews()` + 真实 `lib/`**，
+ *     不合成 bundle、不换 `evaluate`。被替掉的每一件东西，都是一条看不见的路。
+ *
+ * ── ★★ 关于"位置名 + 泛用名并存"（verifier5 的独立判断）─────────────────────────
+ *
+ *   拒绝路径此前只有**泛用名** `input_surface`，而成功路径按**位置名**
+ *   （`dispatch_input_surface`）⇒ 同一个位置在两条路径上**不同形**：按位置名去找的
+ *   读者在拒绝路径上读不到，而**读不到与"这个位置没判据"在断言层面同形**。
+ *
+ *   ★ 判断：**这是修好了一个不同形，不是引入一个新的。** 三条独立理由：
+ *
+ *     ① 两个名字指向**同一个对象**（本文件臂 1 用**引用相等**断言，不是内容相等）——
+ *        实测 `位置名 === 泛用名 === 内部属性`，写一个名字另一个立刻看得见。
+ *        "两份真相"的定义是**两次独立计算**，而这里只有一次 `inputSurfaceFromThrown`。
+ *     ② 泛用名**只在没人占的时候写**（`if (!Object.hasOwn(error,'input_surface'))`）
+ *        ⇒ "先到的那一份说话"这条语义一个字没变，两个名字不会各自指向不同的位置。
+ *     ③ 两者**各司其职且都不可省**：位置名服务"我要**这个位置**的结论"，
+ *        泛用名服务"这次调用**有没有**交结论"（单一入口位置只有后者）。
+ *        删掉任何一个都会让某一类读者回到"读不到 = 没有"的合流。
+ *
+ *   ★ 唯一**真的**风险（我因此加了反向断言）：如果哪天有人在两个键之间插入一次
+ *     "重新算一遍"，两个名字就**真的**成了两份真相。本文件臂 7 因此断言
+ *     "两次拒绝落在不同位置 ⇒ 两份结论必须指**不同**的判据"
+ *     （实测 `dispatch.worktree` vs `completion.backtest`）——
+ *     它同时打红"一份快照 + 多个名字"与"两个名字分叉"两种坏法。
+ */

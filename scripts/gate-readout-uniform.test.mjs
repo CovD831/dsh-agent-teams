@@ -1065,8 +1065,29 @@ test('★ 臂 8：被拒的调用也交得出结论 —— 且一次穿过两个
    *     读出来的是 completion 的结论 —— 字段在场、读得到、数值也对，只是它
    *     不是读者以为的那个位置报的。**读错位置的出口**，本队已记账的第三种恒真写法。
    *
-   * 定向突变：把 `withInputSurfaceOnError` 里那句 `if (INPUT_SURFACE_PROPERTY in error) throw error`
-   *   删掉 ⇒ 本臂的"先到那一份说话"半边红（后到的覆盖掉先到的）。
+   * 定向突变：把 `throwWithSurface` 换成裸 `throw new Error(...)` ⇒ 本臂的"结论交得出来"
+   *   半边红（拒绝路径上再没有任何结论）。
+   *
+   * ── ★★ 本臂**盖不到**的那条路（t4 的记录；本队「假绿」的又一种写法）────────────
+   *
+   * MEASURED（2026-10-06，verifier5）：本臂此前声称它会被"把守卫改成恒真"打红。
+   * **它不会。**
+   *
+   * 本臂构造的"被拒"里，contract / dispatch / completion / delivery **没有任何判据会拒** ——
+   * 本夹具的假面为了让读数可控，把 `registry.evaluate` 换成了一个**永远 `{ok: true}`**
+   * 的替身。⇒ 这次拒绝走的是**别处的裸 `throw new Error(...)`**（例如状态机不合法），
+   * 根本不经过 `throwWithSurface`，也就不可能碰到那个守卫。
+   *
+   * ⇒ 于是 `withInputSurfaceOnError` 里那个"检查错属性、因而恒真"的守卫
+   *   （`INPUT_SURFACE_PROPERTY in error` —— 它对每一次 `throwWithSurface` 抛出都为真）
+   *   让**整条拒绝路径的出口失效**，而本臂**照绿**。实测：把守卫改回恒真，
+   *   本臂绿、**臂 8b 红**。
+   *
+   * ★★ **一份为了可控而造的假面，替它挡掉了真实世界最常发生的那条路。**
+   *   假面不是写错了 —— 它是为了**稳定**而造的，而"稳定"与"真实"在这一处恰好相反。
+   *
+   * ⇒ 本臂保留，但它现在只负责**成功路径上两个位置各挂各的**（那半边它测得住）；
+   *   "拒绝路径交得出结论"由 **臂 8b**（真实 `lib/` + 真实注册表 + 判据自己产生的拒绝）持有。
    */
   const module = bundle.module
   const workspace = track(mkdtempSync(join(tmpdir(), 'readout-reject-')))
@@ -1108,6 +1129,123 @@ test('★ 臂 8：被拒的调用也交得出结论 —— 且一次穿过两个
     true,
     '★ 成功路径上两个位置**各挂各的**（`dispatch_input_surface` / `completion_input_surface`），'
     + '不是"一个字段谁后写谁赢"',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 8b：★★ 走【真实 evaluate + 真实注册表】的被拒臂 —— 本任务 FINDING-1 的入口
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 8b：真实注册表下的**真实拒绝**也要交出结论 —— 这是上面那条"被拒"臂盖不到的路', async () => {
+  /**
+   * ── ★★ 本臂存在的理由：上面那条"被拒"臂**替被测代码挡掉了真实世界最常走的那条路** ──
+   *
+   * MEASURED（2026-10-06，verifier5 抓到的 FINDING-1，也是本队「假绿」的又一种写法）：
+   *
+   *   本夹具为了让读数**可控**，把假面里的 `registry.evaluate` 换成了一个
+   *   **永远 `{ok: true}`** 的替身（见 `buildReadoutBundle` 那段）。
+   *   ⇒ 那一轮里 contract / dispatch / completion / delivery **没有任何判据会拒**。
+   *   ⇒ 臂 8 构造的"被拒"**根本不由 `throwWithSurface` 产生** —— 它走的是别处的
+   *     裸 `throw new Error(...)`（例如"状态不能从 pending 移到 in_progress"、
+   *     "这个任务不属于你"）。
+   *
+   *   ⇒ 于是 `withInputSurfaceOnError` 里那个**检查错属性的守卫**（`INPUT_SURFACE_PROPERTY in error`
+   *     对每一次 `throwWithSurface` 抛出都恒真）**一直没被本夹具碰到**：
+   *     拒绝路径的结构化出口整条失效，而 10 条臂**全绿**。
+   *
+   * ★★ **一份为了可控而造的假面，替它挡掉了真实世界最常发生的那条路。**
+   *   这是本队「假绿」形态里最隐蔽的一种：假面不是写错了，它是**为了稳定而造的**，
+   *   而"稳定"与"真实"在这一处恰好相反。
+   *
+   * ── 修法：这一条臂**不合成 bundle、不换 evaluate** ────────────────────────────
+   *
+   * 它用**真实的 `lib/` 产物** + **真实的注册表**（`lib/gates/index.js` 的单例），
+   * 走真实工具入口，造一次**由判据自己产生的**拒绝：
+   *
+   *     `update_task { changedPaths: ['src/out-of-scope.ts'] }`
+   *       ⇒ `dispatch.changed-paths` 发现"报了改却没观察到写" ⇒ 判据 blocked
+   *       ⇒ `throwWithSurface(...)` 抛出 ⇒ 工具边界必须把它搬进 `error.input_surface`
+   *
+   * ★ 三条断言，缺一不可（只留一条都会恒真）：
+   *   ① 这次调用**真的被拒**（否则读的是成功路径，与臂 1/2/3 重复）；
+   *   ② 拒绝**来自 `throwWithSurface`**（`error` 上带着内部属性
+   *      `agentTeamsInputSurface`）—— 「被拒」有很多种来源，只有这一种会带结论；
+   *   ③ 结论**搬到了工具结果的落点上**（`error.input_surface` 不再是 `undefined`），
+   *      且与内部属性**逐字段相同**（搬的是同一份，不是重新算的一份）。
+   *
+   * ★ 定向突变（打红它）：把 `withInputSurfaceOnError` 里那句守卫改回
+   *   `if (INPUT_SURFACE_PROPERTY in error) throw error` ⇒ ③ 红。
+   *   ★ MEASURED：那个恒真守卫让搬运**永不执行**，而臂 8（假面那条）照绿。
+   */
+  /**
+   * ★ **真实的** `lib/` 产物（不是本夹具合成的 bundle）：`tools` 提供工具入口，
+   *   `state` 提供 `createTeamDir` —— 两个都从构建产物里取，与
+   *   `scripts/verify-readout-uniform.test.mjs` 的做法同源。
+   */
+  const fixtureModule = await import(pathToFileURL(join(ROOT, 'lib', 'tools.js')).href)
+  const stateModule = await import(pathToFileURL(join(ROOT, 'lib', 'state.js')).href)
+  const workspace = track(mkdtempSync(join(tmpdir(), 'readout-real-reject-')))
+  /**
+   * ★ 一个**真实的 git 仓库 + 成员 worktree**：`dispatch.worktree` 的闸门要求它存在，
+   *   而本臂要的正是"判据真的开火"（不是 skipped）。没有它，这次调用照样会被拒 ——
+   *   但拒的理由会落在别处，而那时本臂读到的就不是判据的结论了。
+   */
+  seedWorktree(workspace)
+  const fixture = pluginFixture(fixtureModule, workspace)
+  await seedTeam(stateModule, workspace, { tasks: [IMPL_TASK], members: [RUNNING_MEMBER] })
+
+  const rejected = await fixture.call('agent_teams_update_task', {
+    task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1',
+    /**
+     * ★ 越界路径：它不在 `IMPL_TASK.inScope` 里，而成员会话里**观察到**的写入是
+     *   `src/a.ts` ⇒ `dispatch.changed-paths` 有话说 ⇒ 判据自己把这次调用拒掉。
+     */
+    changedPaths: ['src/out-of-scope.ts'],
+  }, 'member-1')
+
+  /** ① 真的被拒。 */
+  assert.equal(
+    rejected.ok, false,
+    '★ 前置：这次调用必须真的被拒（否则本臂读的是成功路径，与上面几条臂重复）',
+  )
+  /**
+   * ② 拒绝**来自 `throwWithSurface`** —— 判据就是"异常上带着内部属性"。
+   *    ★ 这一半防止本臂被"别处的裸 throw"顶替：那样的话下面 ③ 绿得毫无意义
+   *      （裸 throw 本来就不带结论，而它也不该带）。
+   */
+  assert.notEqual(
+    rejected.error?.agentTeamsInputSurface, undefined,
+    '★ 前置：这次拒绝必须**由判据/核对层产生**（异常上带 `agentTeamsInputSurface`）——'
+    + ' 若它来自别处的裸 `throw`，本臂证明不了"边界把结论搬出来了"这件事',
+  )
+  /** ③ ★★ 结论真的搬到了工具结果的落点上 —— 这就是 FINDING-1 的那一条。 */
+  assert.notEqual(
+    rejected.raw, undefined,
+    '★★ [FINDING-1] 被拒的调用必须在**工具结果**上给得出 `input_surface` —— 拒绝恰恰是最需要'
+    + ' 读到"是契约不合法、还是输入面没接全"的那一刻。'
+    + ` 实测：\`error.input_surface\` 是 ${JSON.stringify(rejected.raw)}（undefined ⇒ 工具边界没搬），`
+    + ` 而异常上的内部属性 \`agentTeamsInputSurface\` 是 ${JSON.stringify(rejected.error?.agentTeamsInputSurface)}`
+    + ' ⇒ 结论**产生了**、却**没交到工具边界之外**',
+  )
+  requireShape(rejected.raw)
+  assert.deepEqual(
+    rejected.raw, rejected.error?.agentTeamsInputSurface,
+    '★ 搬过去的必须是**那一份**（逐字段相同），不是边界另算的一份 —— 两份真相会慢慢分叉，'
+    + '而分叉之后"边界上读到的"与"判据报出的"在断言层面同形',
+  )
+  /**
+   * ★ 第四半：这份结论**确实是 dispatch 位置的**（不是别的位置的）。
+   *   缺格名单里指名的那条判据必须属于 dispatch —— 否则读的是别的位置的出口，
+   *   也就是本队记账的第三种恒真写法。
+   */
+  assert.ok(
+    rejected.raw.checked >= 1,
+    '★ 反向半边：真的核对了至少一条（否则读到的是一份空结论）',
+  )
+  assert.ok(
+    rejected.raw.missing.some((line) => line.includes('[dispatch.')),
+    `★ 这份结论必须来自 **dispatch** 位置（缺格名单里要出现 \`[dispatch.<id>]\`）——`
+    + ` 实际：${JSON.stringify(rejected.raw.missing)}`,
   )
 })
 
