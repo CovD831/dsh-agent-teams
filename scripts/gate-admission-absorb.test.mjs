@@ -79,6 +79,31 @@ import { TASK_KINDS as REAL_TASK_KINDS } from '../lib/types.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SOURCE = join(ROOT, 'src', 'gates', 'admission', 'absorb.ts')
 const BUILT_GATE = join(ROOT, 'lib', 'gates', 'admission', 'absorb.js')
+/** ★ t16：真值表的**源码**那一份 —— 用来与构建产物对拍（见臂 0）。 */
+const SOURCE_TYPES = join(ROOT, 'src', 'types.ts')
+
+/**
+ * ── 从 `src/types.ts` 的源码里解析出 `TASK_KINDS` 的字面量 ──────────────────────
+ *
+ * ★ 为什么用解析源码而不是直接 `import '../src/types.ts'`：本仓跑的是构建产物
+ *   （`link:` 安装 ⇒ 必须 build），`node` 不能直接跑 `.ts`；而这一条要回答的
+ *   恰恰是"**源码**与**产物**是否一致"，所以必须分别读两份、各自取值。
+ *
+ * ★ 解析失败【抛错】而不是返回空数组：一个静默返回 `[]` 的实现会让
+ *   `deepEqual([], [...TASK_KINDS])` 在绝大多数情况下红，但**在它本该红的那种
+ *   情形下（TASK_KINDS 被改名/挪走）反而可能绿** —— 那就成了一个恒真守卫。
+ */
+function parseTaskKindsFromSource(source) {
+  const declaration = source.match(/export\s+const\s+TASK_KINDS\s*:[^=]*=\s*\[([^\]]*)\]/)
+  if (declaration === null) {
+    throw new Error('★ 解析不到 src/types.ts 的 `TASK_KINDS` 声明 —— 它被改名/挪走了，而这一条正是防静默失效的那一条')
+  }
+  const kinds = [...declaration[1].matchAll(/'([^']*)'/g)].map((match) => match[1])
+  if (kinds.length === 0) {
+    throw new Error('★ `TASK_KINDS` 声明里解析不出任何字面量 —— 它可能被改成了常量拼接或 import 来的表')
+  }
+  return kinds
+}
 
 /** 收窄助手：把"这条断言期望哪一种裁决"写进断言本身（三态必须不同形）。 */
 function expectBlocked(v) {
@@ -450,8 +475,23 @@ test('appliesTo ★ 唯一的闸门是"有没有声称" —— `kind` 不是闸�
  *   build 才生效 —— 这是本仓的硬约束）。读 `src/` 会在"源码改了但没 build"的
  *   那一刻给出一个**关于别的代码**的结论。
  *
- * ★ 定向突变（本条打红它）：把 `kind` 判断加回 `appliesTo`（用任一不存在的值）
- *   ⇒ 上面七个真实 kind 全部转假 ⇒ 本条**必须红**。
+ * ── ★★ t16 补：读构建产物**还不够**，必须再把 src 与 lib 钉在一起 ───────────────
+ *
+ * MEASURED（本任务复核时发现的一个真缺口）：这一臂此前只读 `lib/types.js`，
+ * 而**从不检查它是否等于 `src/types.ts`**。于是：
+ *
+ *     types.ts 把 'requirements' 改名成别的、而没人 build
+ *       ⇒ lib/ 还是旧表 ⇒ 本臂拿**旧的真值**去断言 ⇒ 绿
+ *       ⇒ 而生产（build 之后）会因为新名字与判据不再匹配而**静默失配**
+ *
+ * ★ 这正是本任务在修的那个缺陷的**同一种形状**：同一个东西有两个来源
+ *   （`src/types.ts` 与 `lib/types.js`），而比较只用其中一个 ⇒ 分叉之后
+ *   两边在断言里同形。本队为这条已经交过多次学费（"两份真相"）。
+ *
+ * ⇒ 修法：臂 0 除了读 lib，还**从 src/types.ts 的源码里解析出真值**并断言两者
+ *   逐字相等。这样"源码改了但忘了 build"会在**这一条**上红，而不是等到生产里
+ *   才以"判据又不发言了"的形式暴露 —— 而那种暴露与"这一轮本来不适用"同形，
+ *   正是把 t12 藏了那么久的那层伪装。
  */
 test('★★ 臂 0（防再发臂）：用【真实 TASK_KINDS】的每个值构造 ctx ⇒ 判据必须发言', async () => {
   const { TASK_KINDS } = await import('../lib/types.js')
@@ -466,6 +506,21 @@ test('★★ 臂 0（防再发臂）：用【真实 TASK_KINDS】的每个值构
     `★ 真值表必须有内容（实测 ${TASK_KINDS?.length}）—— 空集合上"每个都合格"是恒真的`,
   )
   assert.ok(TASK_KINDS.includes('requirements'), '★ 真值表里必须有本仓的需求类 kind（否则这条臂测的是别的仓）')
+
+  /**
+   * ── ★★ ③（t16 补）src 与 lib 必须逐字一致 —— 否则这一臂测的是一份**过期的真值** ──
+   *
+   * 从 `src/types.ts` 的源码里解析 `TASK_KINDS` 的字面量，与构建产物对拍。
+   * ★ 解析失败**必须抛**（不能静默跳过）：一个"解析不到就放行"的检查，
+   *   会在 `TASK_KINDS` 改名/挪走之后静默失效 —— 而它恰好是防静默失效的那一条。
+   */
+  const sourceKinds = parseTaskKindsFromSource(readFileSync(SOURCE_TYPES, 'utf8'))
+  assert.deepEqual(
+    sourceKinds, [...TASK_KINDS],
+    '★ `src/types.ts` 与构建产物 `lib/types.js` 的 TASK_KINDS 必须逐字相等 —— '
+    + '不相等说明【源码改了但没 build】，于是本臂拿的是一份过期的真值：'
+    + '它会在生产里以"判据又不发言了"的形式暴露，而那个症状与本任务修的缺陷同形',
+  )
 
   for (const kind of TASK_KINDS) {
     const context = ctx({ task: { id: 't7', kind } })
