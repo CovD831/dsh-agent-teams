@@ -60,6 +60,21 @@ import { spawnSync } from 'node:child_process'
 import { gate, appliesTo, id, point, requires } from '../lib/gates/admission/absorb.js'
 import { checkRequires } from '../lib/gates/requires.js'
 import { createGateRegistry } from '../lib/gates/registry.js'
+/**
+ * ── ★★ t16：`TASK_KINDS` 是**真值**，不是夹具手抄的一份表 ───────────────────────
+ *
+ * MEASURED：t12 的缺陷（闸门用 `'requirement'`/`'plan'` 而本仓没有这两个值 ⇒
+ * 判据永不发言）之所以骗过了 27 条臂，就是因为臂里的 `kind` 是**手写字面量**：
+ *
+ *     臂里写 'requirement'  ⇒ 闸门为真 ⇒ 绿
+ *     真实是 'requirements' ⇒ 闸门为假 ⇒ 判据永不发言
+ *
+ * ⇒ 从这里 import **构建产物里那份真值表**（生产跑的就是 `lib/`），
+ *   让"夹具全绿"与"生产里一次都不跑"不再能同时成立。
+ *   ★ 它在模块顶层 import（而不是在臂里 `await import`）：这条臂要证明的是
+ *     "**真实值**下判据会发言"，真值表必须和被测判据来自同一次构建。
+ */
+import { TASK_KINDS as REAL_TASK_KINDS } from '../lib/types.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SOURCE = join(ROOT, 'src', 'gates', 'admission', 'absorb.ts')
@@ -85,10 +100,22 @@ const OTHER_DOC = 'docs/PLAN.md'
 /**
  * 一个最小 ctx。**每一格都显式给值**，好让每条臂只改它要测的那一格
  * —— 一个"顺手把别的格也拿掉"的夹具会让失败的归因失效。
+ *
+ * ── ★★ t16：默认的 `kind` 从**真值表**里取，不再手写字面量 ──────────────────────
+ *
+ * 它此前写死的是 `kind: 'requirement'` —— 一个**本仓不存在**的值。那正是 t12 的
+ * 缺陷能骗过全部 27 条臂的原因：夹具喂给判据的输入，与真实运行喂进去的输入
+ * **不是同一个东西**，而两者在断言里同形。
+ *
+ * ⇒ 现在默认值是 `REAL_TASK_KINDS[0]`（真实表里的第一个，即 `'requirements'`）。
+ *   ★ 取数组首项而不是写死 `'requirements'`：真值表改名时，这里跟着变，
+ *     而写死的字符串只会在生产里静默失配。
+ *   ★ 若真值表某天为空 ⇒ 这里会是 `undefined`，而 `appliesTo` 对 `kind` 零依赖，
+ *     所以整份夹具仍然有效（它不会因为"取不到 kind"而假绿）。
  */
 function ctx(overrides = {}) {
   return {
-    task: { id: 't7', kind: 'requirement' },
+    task: { id: 't7', kind: REAL_TASK_KINDS[0] },
     absorb: { claims: 'absorbed' },
     producedDocuments: [DOC],
     /** 会话事件里观察到的：产物被动过（或没有）。 */
@@ -192,11 +219,25 @@ test('臂 2d ★ 未测量臂：产物表缺席 ⇒ unmeasured；而产物表为
   assert.match(empty.join('\n'), /declares no requirement\/plan document at all/)
 })
 
-test('臂 2e ★ 未测量臂：闸门格（本次没声称 / kind 不是需求阶段）⇒ unmeasured，不是 blocked', async () => {
+test('臂 2e ★ 未测量臂：唯一的闸门格（本次没声称）⇒ unmeasured，不是 blocked', async () => {
   /**
-   * ★ 闸门格**不进 requires**（见 absorb.ts 的声明注释），所以判据要自己对它们
+   * ★ 闸门格**不进 requires**（见 absorb.ts 的声明注释），所以判据要自己对它
    *   负责：一份完全合规的空 ctx 走到这里，正确答案是"我没被喂饱"，绝不是
    *   "产物一个都没有 ⇒ 拒绝"。后者是一次误伤，而误伤的代价比漏报更贵。
+   *
+   * ── ★★ t16：本条删掉了一个不再成立的分支（曾被记为"旧行为"）────────────────
+   *
+   * 它此前还有第三段断言：`kind='implementation'` ⇒ unmeasured，措辞
+   * `/not a requirement\/plan artefact phase/`。那是 t12 修的缺陷的**另一半**：
+   * 判据曾用 `kind === 'requirement' || 'plan'` 做闸门，而这两个值在本仓
+   * **根本不存在** ⇒ 判据在真实运行中永远不发言。
+   *
+   * ★ 所以这一段不是"测试写错了"，它是**当时行为的忠实记录** ——
+   *   而它忠实地记录了一个错误行为，于是一条红的臂同时也是"修复已经生效"的证据。
+   *   ⇒ 删它是修复的一部分，不是为了让红灯变绿。
+   *
+   * ★ 现在判据对 `kind` **零依赖**：`ctx.task` 上连 `kind` 这一格都不再声明。
+   *   下面只钉唯一的那条闸门（有没有声称）。
    */
   assert.match(expectUnmeasured(await gate({})), /never claimed to have absorbed/)
   assert.match(
@@ -204,10 +245,8 @@ test('臂 2e ★ 未测量臂：闸门格（本次没声称 / kind 不是需求�
     /never claimed to have absorbed/,
     '★ 认的只有那两个取值 —— "done" / "ok" 这类含糊的话读作"没说清"，不是"已声称"',
   )
-  assert.match(
-    expectUnmeasured(await gate(ctx({ task: { id: 't7', kind: 'implementation' } }))),
-    /not a requirement\/plan artefact phase/,
-  )
+  /** ★ `absorb` 整个缺席，与"在场但 claims 是别的值"走同一条路（都是"没声称"）。 */
+  assert.match(expectUnmeasured(await gate(ctx({ absorb: undefined }))), /never claimed to have absorbed/)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,16 +378,160 @@ test('判据元数据：id / point 与注册表的插入点一致', () => {
   assert.equal(point, 'admission')
 })
 
-test('appliesTo ★ 两个条件缺一不可，且"含糊的话"不算声称', () => {
-  // 声称 + 需求阶段 ⇒ 生效
+test('appliesTo ★ 唯一的闸门是"有没有声称" —— `kind` 不是闸门（t12 修）', () => {
+  // 声称（任一取值）⇒ 生效
   assert.equal(appliesTo(ctx()), true)
-  assert.equal(appliesTo(ctx({ absorb: { claims: 'nothing-to-change' }, task: { id: 't', kind: 'plan' } })), true)
+  assert.equal(appliesTo(ctx({ absorb: { claims: 'nothing-to-change' } })), true)
   // 没声称 ⇒ 不生效（没有可核对的东西）
   assert.equal(appliesTo(ctx({ absorb: {} })), false)
   assert.equal(appliesTo(ctx({ absorb: { claims: 'done' } })), false, '★ 取值之外的话不算声称')
   assert.equal(appliesTo(undefined), false)
-  // 不是需求/计划阶段 ⇒ 不生效
-  assert.equal(appliesTo(ctx({ task: { id: 't', kind: 'implementation' } })), false)
+
+  /**
+   * ── ★★ t16：这一条曾经断言的是**旧行为**，而旧行为是一个缺陷 ────────────────
+   *
+   * 它此前写着：
+   *
+   *     assert.equal(appliesTo(ctx({ task: { id: 't', kind: 'implementation' } })), false)
+   *
+   * 以及同一 `ctx()` 里默认的 `task.kind = 'requirement'` —— 断言"声称 + 需求阶段
+   * ⇒ 生效"。**两半都是错的**，因为 `'requirement'` / `'implementation'` 里
+   * 前者根本不存在于本仓（`TASK_KINDS` 是 `'requirements'`，复数）。
+   *
+   * ⇒ 改成：`kind` 取**任何**值都不改变裁决（下面从真实的 `TASK_KINDS` 逐个验）。
+   *   这才是"闸门不依赖 kind"的可执行形式。
+   */
+  for (const kind of REAL_TASK_KINDS) {
+    assert.equal(
+      appliesTo(ctx({ task: { id: 't', kind } })),
+      true,
+      `★ kind='${kind}'（真实值）下"声称了"就必须发言 —— 判据不许因为调用方贴的标签而闭嘴`,
+    )
+  }
+  /** ★ 反向半边：不依赖 kind 也意味着 **kind 缺席**不改变裁决。 */
+  assert.equal(appliesTo(ctx({ task: { id: 't' } })), true, '★ 连 kind 这一格都没有 ⇒ 照样发言')
+  assert.equal(appliesTo(ctx({ task: undefined })), true, '★ 连 task 都没有 ⇒ 照样发言')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 臂 0（防再发臂）：用【真实的 TASK_KINDS】构造 ctx —— 判据必须真的发言
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 为什么要有这一臂，以及它为什么必须是【这一条】── 本队记账第 7 次同族缺陷 ────
+ *
+ * MEASURED（2026-10-06，t12）：`admission.absorb` 的闸门曾经是
+ *
+ *     return kind === 'requirement' || kind === 'plan'
+ *
+ * 而 `src/types.ts` 的 `TASK_KINDS` 里**没有这两个值**（真实值是 `'requirements'`，
+ * 复数）。实测：七个真实 kind **全部** ⇒ `appliesTo === false`，
+ * 而两个**不存在的** kind ⇒ `true`。⇒ 判据在真实运行中**永远不发言**。
+ *
+ * ★★ 为什么 27 条臂没有一条发现它 —— 这是本臂存在的全部理由 ──────────────────
+ *
+ *   因为它们（包括上面那条 `appliesTo` 臂）用的 `kind` 是**夹具自己手写的字符串**：
+ *
+ *       臂里写：kind: 'requirement'   ⇒ 闸门为真 ⇒ 绿
+ *       真实里：kind: 'requirements'  ⇒ 闸门为假 ⇒ 判据永不发言
+ *
+ *   ⇒ **夹具的输入不是从真实类型来的**。手写的字面量与真实值之间没有任何东西
+ *     把它们绑在一起，于是"夹具全绿"与"生产里一次都不跑"可以同时成立。
+ *     这正是本队反复记的那句：**假面可能替真实路径挡路**。
+ *
+ * ★★ 所以这一臂的做法是**从真值读出 kind**，一个字面量都不写：
+ *
+ *     ① 从 `lib/types.js` 读 `TASK_KINDS`（**构建产物**，即生产里真正用的那份）；
+ *     ② 逐个 kind 构造一份**其余各格都齐**的 ctx，断言 `appliesTo` 为真、
+ *        且 `gate()` 给出的**不是**"不适用/拒绝"这一类裁决；
+ *     ③ 并断言 `TASK_KINDS` 非空 —— 一个空的真值表上"每个都合格"是恒真的。
+ *
+ * ★ 为什么读 `lib/` 而不是 `src/`：生产跑的是 `lib/`（`link:` 安装下改动必须
+ *   build 才生效 —— 这是本仓的硬约束）。读 `src/` 会在"源码改了但没 build"的
+ *   那一刻给出一个**关于别的代码**的结论。
+ *
+ * ★ 定向突变（本条打红它）：把 `kind` 判断加回 `appliesTo`（用任一不存在的值）
+ *   ⇒ 上面七个真实 kind 全部转假 ⇒ 本条**必须红**。
+ */
+test('★★ 臂 0（防再发臂）：用【真实 TASK_KINDS】的每个值构造 ctx ⇒ 判据必须发言', async () => {
+  const { TASK_KINDS } = await import('../lib/types.js')
+
+  /**
+   * ★ 真值表非空、且是**真实那份**：一个空数组上"每个 kind 都合格"恒真，
+   *   而一份手抄的小数组会随 `src/types.ts` 改动而悄悄过期。
+   */
+  assert.ok(Array.isArray(TASK_KINDS), '★ TASK_KINDS 必须能从构建产物里读到')
+  assert.ok(
+    TASK_KINDS.length >= 5,
+    `★ 真值表必须有内容（实测 ${TASK_KINDS?.length}）—— 空集合上"每个都合格"是恒真的`,
+  )
+  assert.ok(TASK_KINDS.includes('requirements'), '★ 真值表里必须有本仓的需求类 kind（否则这条臂测的是别的仓）')
+
+  for (const kind of TASK_KINDS) {
+    const context = ctx({ task: { id: 't7', kind } })
+
+    assert.equal(
+      appliesTo(context),
+      true,
+      `★ kind='${kind}'（**真实** TASK_KINDS 里的值）下判据必须发言 —— `
+      + '它曾经用 `requirement`/`plan` 做闸门，而这两个值在本仓不存在，'
+      + '于是判据在真实运行中永远不发言，且症状与"这一轮本来就不适用"完全同形',
+    )
+
+    /**
+     * ★ 第二半：**不只是"闸门为真"**，还要 `gate()` 真的对一份齐备的 ctx
+     *   给出一个**关于内容**的裁决。
+     *
+     *   一个"闸门为真、而 gate() 自己又另写一段 kind 判断挡回来"的实现过不了这里
+     *   —— 而 t12 的缺陷恰好就是**两处各写了一遍**（`appliesTo` 与 `gate()`），
+     *   本队记账的「守卫检查了另一个同名的东西」。
+     */
+    const verdict = gate(context)
+    assert.equal(
+      verdict.ok, true,
+      `★ kind='${kind}'：一份各格齐备、产物真的变了的 ctx 必须拿到 ok，实际 ${JSON.stringify(verdict)}`,
+    )
+    assert.equal(
+      'unmeasured' in verdict, false,
+      `★ kind='${kind}'：不许把"调用方贴的标签"折成"没能测量" —— 那两句是完全不同的结论`,
+    )
+    assert.deepEqual(verdict.absorbReport.absorbedDocuments, [DOC])
+  }
+})
+
+/**
+ * ★ 反向半边（**与上面那条成对，缺一条就排除不掉"恒真"**）：真实 `kind` 之外的值
+ *   也必须发言 —— 这正是修复的关键，因为**断言"只有真实 kind 才发言"会重新引入
+ *   同一个缺陷**（它把判据的开关又交回给调用方的标签）。
+ *
+ *   定向突变：把 `appliesTo` 改成"只对 `TASK_KINDS` 里的值发言" ⇒ 本条红。
+ */
+test('★★ 臂 0b（反向半边）：`kind` 是【本仓不存在的值】或【完全缺席】时，判据照样发言', async () => {
+  const { TASK_KINDS } = await import('../lib/types.js')
+
+  for (const kind of ['requirement', 'plan', 'no-such-kind-at-all']) {
+    assert.equal(
+      TASK_KINDS.includes(kind), false,
+      `★ 前提：'${kind}' 必须**不在** TASK_KINDS 里 —— 否则本条测的不是"不存在的值"`,
+    )
+    assert.equal(
+      appliesTo(ctx({ task: { id: 't7', kind } })),
+      true,
+      `★ kind='${kind}'（不存在的值）下也必须发言 —— 判据不许依赖调用方贴的标签；`
+      + '"只有已知 kind 才发言"会在标签拼错时把判据静默关掉，而那正是本任务要修的缺陷本身',
+    )
+    assert.equal(gate(ctx({ task: { id: 't7', kind } })).ok, true)
+  }
+
+  /** ★ 连 `task` 这一格都不给 ⇒ 依旧发言、依旧给出同样的裁决。 */
+  assert.equal(appliesTo(ctx({ task: undefined })), true, '★ kind 缺席不是"不适用"')
+  assert.equal(gate(ctx({ task: undefined })).ok, true)
+
+  /**
+   * ★ 而"闸门格真的能关掉判据"这件事仍然成立 —— 否则上面全部是恒真：
+   *   唯一的闸门（有没有声称）必须真的能把判据关掉。
+   */
+  assert.equal(appliesTo(ctx({ absorb: undefined })), false, '★ 唯一那条闸门必须真的关得掉')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,7 +592,14 @@ test('★ A 层核对：适用而缺一格 ⇒ 核对【报出缺的是哪一格
   assert.deepEqual([...withoutObservation.missing].sort(), ['documentsRead', 'observedDocumentChanged'])
 
   // ③ 不适用（本次没声称吸收）⇒ 一格缺席【不报】—— 不制造噪音
-  const notApplicable = checkRequires(subject, { task: { kind: 'requirement' } })
+  /**
+   * ★ t16：这里此前传 `{ task: { kind: 'requirement' } }` —— 一个**不存在的 kind**。
+   *   现在传一份**真的没有声称吸收**的 ctx（`kind` 取真实值）。
+   *   ★ 这一改不是装饰：旧写法下"不适用"的成因是**kind 不认识**（一个缺陷），
+   *     改对之后成因是**没有声称**（设计如此）。两者在 `skipReason` 上同形
+   *     （都是 `not-applicable`），所以只有把输入改对，这条臂测的才是它声称的东西。
+   */
+  const notApplicable = checkRequires(subject, { task: { id: 't7', kind: REAL_TASK_KINDS[0] }, absorb: {} })
   assert.equal(notApplicable.status, 'skipped')
   assert.equal(notApplicable.status === 'skipped' && notApplicable.skipReason, 'not-applicable')
   assert.deepEqual(notApplicable.missing, [], '★ 不适用不许产出噪音')
@@ -483,7 +673,7 @@ test('★ A 层核对：`observedDocumentChanged: false` 是【在场】的观�
  */
 function absorbCtx(overrides = {}) {
   return {
-    task: { id: 't7', kind: 'requirement' },
+    task: { id: 't7', kind: REAL_TASK_KINDS[0] },
     absorb: { claims: 'absorbed' },
     producedDocuments: [DOC],
     observedDocumentChanged: true,
@@ -498,8 +688,13 @@ function writeProbeFile(path) {
   writeFileSync(path, `
 import { gate } from ${JSON.stringify(BUILT_GATE)}
 const DOC = ${JSON.stringify(DOC)}
+/**
+ * ★ t16：\`kind\` 取【真实 TASK_KINDS 的值】（由父进程注入），不写死不存在的字面量。
+ *   突变探针要证明的是"把 kind 判断加回去 ⇒ 判据永远不发言"，而只有在
+ *   **真实 kind** 之下，那个突变才会真的表现为"不发言"。
+ */
 const ctx = (o) => ({
-  task: { id: 't7', kind: 'requirement' },
+  task: { id: 't7', kind: ${JSON.stringify(REAL_TASK_KINDS[0])} },
   absorb: { claims: 'absorbed' },
   producedDocuments: [DOC],
   observedDocumentChanged: true,
@@ -512,6 +707,8 @@ process.stdout.write(JSON.stringify({
   lieAboutWrite: gate(ctx({ observedDocumentChanged: false, producedContent: { [DOC]: 'v1: 需求第一版\\n' } })).ok,
   lieAboutReading: gate(ctx({ documentsRead: {} })).ok,
   control: gate(ctx()).ok,
+  /** ★ t16 追加：真实 kind 下判据到底发不发言（突变体上必须是 false）。 */
+  speaksUnderRealKind: gate(ctx()).ok,
 }))
 `)
 }
@@ -575,7 +772,7 @@ test('★ 定向突变：把「产物真的变了」那半边改成恒真（只�
     const baseline = readVerdicts(probePath)
     assert.deepEqual(
       baseline,
-      { lieAboutContent: false, lieAboutWrite: false, lieAboutReading: false, control: true },
+      { lieAboutContent: false, lieAboutWrite: false, lieAboutReading: false, control: true, speaksUnderRealKind: true },
       '★ 突变之前，臂 1 的三个输入必须全被拒、对照臂必须通过 —— 否则下面测的不是突变，是别的东西',
     )
 
@@ -625,7 +822,7 @@ test('★ 定向突变：把「产物真的变了」那半边改成恒真（只�
   try {
     assert.deepEqual(
       readVerdicts(restoredProbe),
-      { lieAboutContent: false, lieAboutWrite: false, lieAboutReading: false, control: true },
+      { lieAboutContent: false, lieAboutWrite: false, lieAboutReading: false, control: true, speaksUnderRealKind: true },
       '★ 还原之后必须与突变前逐字一致 —— 否则盘上留着一份没人认得的判据',
     )
   } finally {
@@ -663,7 +860,13 @@ test('★ 装配形状：这条判据交给注册表时不会当场抛错（缺�
   assert.deepEqual(evaluation.outputs[id].absorbDocuments ?? evaluation.outputs[id].absorbReport.absorbedDocuments, [DOC])
 
   /** ★ 反向半边：不适用时它必须**不说话**，而不是"说 ok"。 */
-  const silent = await r.evaluate(point, { task: { kind: 'requirement' } })
+  /**
+   * ★ t16：这里此前传 `{ task: { kind: 'requirement' } }`（不存在的值）。
+   *   它当时**碰巧**测到了"跳过"，但跳过的成因是**kind 不认识**（一个缺陷），
+   *   而不是"这一轮没有声称、所以没什么可核对的"。换成真实 kind + 没有声称之后，
+   *   这条臂测的才是它声称的东西。
+   */
+  const silent = await r.evaluate(point, { task: { id: 't7', kind: REAL_TASK_KINDS[0] } })
   assert.equal(silent.evaluated, 0)
   assert.equal(silent.skipped, 1)
   assert.equal(silent.ok, true, '★ 跳过是正常情形，不翻成 ok:false')
@@ -699,4 +902,184 @@ test('夹具自检：产物"变没变"的那两个内容快照来自【两个不
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 串行突变臂（**放在文件最末** —— 顺序本身是一条约束，见下）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// MEASURED（t16，本任务实测）：这两条突变臂此前放在文件**中间**，于是它们之后
+// 的每一条臂都读到一个**已经被重建过的** `lib/`：
+//
+//     · 突变臂 ② 把源码改成变异体、`pnpm build`、问一次、还原、再 `pnpm build`
+//     · 而**同一个测试进程**里，其它臂的 `import` 是在文件**开头**就绑定好的
+//     · ⇒ 还原之后的那次 rebuild 把 `lib/` 换成了新文件，而进程里已经在用的
+//       模块图不会重新加载 ⇒ 后面的臂读到的是一份**说不清是哪一代**的代码
+//
+// 实测症状（第一版）：`★ 装配形状` 臂报 `evaluated 0 !== 1` —— 它读到了变异体
+// 留下的痕迹，而失败的**归因是错的**（读的人会以为装配坏了）。
+//
+// ⇒ 修法不是"记得还原"，而是让**顺序本身**不再能造成这个后果：
+//   把突变臂放到文件最末，它们后面没有任何臂。
+//
+// ★ 这与本仓那条硬约束同源：`rm -rf lib/` 的窗口 ⇒ 收口必须串行。
+//   把突变放在末尾，等于在**文件内部**也遵守了同一条纪律。
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ t16 定向突变：把 `kind` 判断【加回去】（用本仓不存在的值）⇒ 臂 0 必须红
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一次突变复现的是**真实发生过的那个缺陷**，不是一个人造的错误 ───────────────
+ *
+ * t12 的缺陷原文就是一行：
+ *
+ *     return kind === 'requirement' || kind === 'plan'
+ *
+ * 本文件把它**原样**加回 `appliesTo`，然后验证两件事：
+ *
+ *     ① 臂 0（真实 TASK_KINDS 臂）**必须红** —— 这就是"定向突变能打红"的字面落点；
+ *     ② 在**突变之前**，臂 0 是绿的（上面那条），所以这次变红是突变造成的，
+ *        不是它本来就红。
+ *
+ * ★ 为什么这一次突变特别值得跑：它证明的不是"我加了一条臂"，而是
+ *   **"我把那个真实缺陷放回去，新臂会抓住它"**。规则二的原话：
+ *   没被突变抓住的修复等于没修 —— 而这里的突变体就是那个缺陷本身。
+ *
+ * ★ 与上面那次突变同一条纪律（t7 的教训）：还原放最外层、**永不抛**、
+ *   `process.on('exit')` 兜底、突变体的裁决由**子进程**问（父进程的 `gate`
+ *   绑定永远指向基线）。
+ */
+test('★★ t16 定向突变：把不存在的 kind 判断加回 `appliesTo` ⇒ 臂 0 必须红', async (t) => {
+  if (process.env.AGENT_TEAMS_ABSORB_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_ABSORB_MUTATION=1 时运行（读数见任务 output）')
+    return
+  }
+
+  const original = readFileSync(GATE_SOURCE, 'utf8')
+  const restore = () => {
+    try { writeFileSync(GATE_SOURCE, original) } catch { /* 还原尽力而为 */ }
+  }
+  process.on('exit', restore)
+
+  /**
+   * ── 突变体 = t12 那个缺陷的【原文】──────────────────────────────────────────
+   *
+   * 针脚是修复之后**唯一**那条闸门（`return claims === ...`）。把它换成
+   * "闸门 + 不存在的 kind" 就是缺陷当初的样子。
+   */
+  const NEEDLE = `  const claims = ctx?.absorb?.claims
+  return claims === CLAIMED_ABSORBED || claims === CLAIMED_NOTHING`
+  const mutated = original.replaceAll(
+    NEEDLE,
+    `  const claims = ctx?.absorb?.claims
+  if (claims !== CLAIMED_ABSORBED && claims !== CLAIMED_NOTHING) return false
+  const kind = (ctx as { task?: { kind?: string } } | undefined)?.task?.kind
+  return kind === 'requirement' || kind === 'plan' // MUTANT: the t12 defect, restored verbatim`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那条闸门 —— 没匹配上的替换会让这次突变恒不生效')
+
+  /** 探针：在真实 kind 下问"判据会发言吗"。突变体上答案必须是 false。 */
+  const probePath = join(realpathSync(mkdtempSync(join(tmpdir(), 'absorb-kind-mutation-'))), 'probe.mjs')
+  writeFileSync(probePath, `
+import { appliesTo, gate } from ${JSON.stringify(BUILT_GATE)}
+import { createGateRegistry } from ${JSON.stringify(join(ROOT, 'lib', 'gates', 'registry.js'))}
+const DOC = ${JSON.stringify(DOC)}
+const realKind = ${JSON.stringify(REAL_TASK_KINDS[0])}
+const ctx = (kind) => ({
+  task: { id: 't7', kind },
+  absorb: { claims: 'absorbed' },
+  producedDocuments: [DOC],
+  observedDocumentChanged: true,
+  documentsRead: { [DOC]: 'v1: 需求第一版\\n' },
+  producedContent: { [DOC]: 'v2: 吸收后改过\\n' },
+})
+/**
+ * ★★ "判据发不发言"【只有注册表知道】——  \`appliesTo\` 是给它读的，而
+ *   \`gate()\` 被直接调用时【根本不看】appliesTo（它只判内容）。
+ *   实测教训（本任务第一版探针）：拿 \`gate().ok\` 当"发不发言"的读数，
+ *   在突变体上会读出 \`true\` —— 那是本队记账的第三种恒真写法
+ *   （**读错位置的出口**），而它读起来完全正常。
+ *   ⇒ 读数必须走注册表：\`evaluated\` 才是"它有没有发言"。
+ */
+const speaks = async (kind) => {
+  const r = createGateRegistry()
+  r.register({ id: 'admission.absorb', point: 'admission', description: 'x', gate, appliesTo, requires: ['observedDocumentChanged', 'documentsRead', 'producedDocuments'] })
+  const e = await r.evaluate('admission', ctx(kind))
+  return e.evaluated === 1
+}
+const ids = {}
+process.stdout.write(JSON.stringify({
+  realKindApplies: appliesTo(ctx(realKind)),
+  realKindSpeaks: await speaks(realKind),
+  ghostKindApplies: appliesTo(ctx('requirement')),
+  ghostKindSpeaks: await speaks('requirement'),
+  missingKindSpeaks: await speaks(undefined),
+}))
+`)
+
+  try {
+    /** ① 基线：修复之后，真实 kind 必须发言（否则下面测的是别的东西）。 */
+    const baseline = readVerdicts(probePath)
+    assert.deepEqual(
+      baseline,
+      { realKindApplies: true, realKindSpeaks: true, ghostKindApplies: true, ghostKindSpeaks: true, missingKindSpeaks: true },
+      '★ 突变之前：真实 kind、不存在的 kind、乃至 kind 缺席，都必须发言 —— 判据对 kind 零依赖',
+    )
+
+    /** ② 把 t12 的缺陷原文加回去并重建。 */
+    writeFileSync(GATE_SOURCE, mutated)
+    const built = rebuild()
+    assert.equal(built.status, 0, `★ 突变体必须编译得过:\n${built.output}`)
+
+    /** ③ 子进程里问突变体。 */
+    const mutant = readVerdicts(probePath)
+    /**
+     * ★★ 这一条就是臂 0 的"红"：缺陷放回去之后，**真实 kind 下判据不再发言**。
+     *   ★ 读的必须是注册表的 \`evaluated\`（见探针里的注释：直接问 \`gate().ok\`
+     *     会读到一个与"发言与否"无关的出口 ⇒ 恒真）。
+     */
+    assert.equal(
+      mutant.realKindSpeaks, false,
+      '★ 缺陷复现必须让真实 kind 下的判据闭嘴 —— 这正是臂 0 要抓的形态；'
+      + '它没红说明臂 0 没有真的钉住"闸门用了不存在的值"这件事',
+    )
+    /**
+     * ★ 反向对照：突变体对**不存在的** kind 仍然发言 —— 这一条与上面的
+     *   `realKindSpeaks === false` **成对**，合起来才是缺陷的完整指纹：
+     *
+     *       不存在的值 ⇒ 发言      ← 缺陷的"正面"
+     *       真实的值   ⇒ 闭嘴      ← 缺陷的"反面"（也就是它实际造成的后果）
+     *
+     *   只断言前一半（或只断言后一半）都排除不掉"闸门写反了"或"闸门恒假"。
+     */
+    assert.equal(mutant.realKindApplies, false, '★ 闸门自身也必须对真实 kind 为假')
+    assert.equal(mutant.ghostKindApplies, true, '★ 缺陷的另一半：不存在的 kind 反而会让闸门为真')
+    assert.equal(mutant.ghostKindSpeaks, true, '★ 而且它真的会发言 —— 缺陷的"正面"')
+    assert.equal(mutant.missingKindSpeaks, false, '★ 而 kind 缺席 ⇒ 也闭嘴（原实现里 `kind !== undefined` 那半让它一并挡掉）')
+    assert.notDeepEqual(mutant, baseline, '★ 突变体与基线的读数必须真的不同 —— 相同说明这次突变什么都没测到')
+  } finally {
+    writeFileSync(GATE_SOURCE, original)
+    rmSync(dirname(probePath), { recursive: true, force: true })
+  }
+
+  /** ★ 还原：build 成功 + 源码逐字回到原文 + 读数与基线一致。 */
+  const restored = rebuild()
+  assert.equal(restored.status, 0, `★ 还原之后必须能重新 build 成功:\n${restored.output}`)
+  assert.equal(readFileSync(GATE_SOURCE, 'utf8'), original, '★ 源码必须逐字回到原文')
+})
+
+test('★ t16 二次对照：这一次突变的针脚也必须逐字存在', () => {
+  /**
+   * ★ 与上面那条同一条纪律：针脚不在 ⇒ 突变静默失效 ⇒ 报告会读成
+   *   "臂 0 打不红"（一个方向相反的结论）。所以它单独钉一条。
+   */
+  const NEEDLE = `  const claims = ctx?.absorb?.claims
+  return claims === CLAIMED_ABSORBED || claims === CLAIMED_NOTHING`
+  assert.equal(
+    readFileSync(GATE_SOURCE, 'utf8').includes(NEEDLE),
+    true,
+    '★ kind-突变的针脚必须逐字存在于 absorb.ts 的 appliesTo 里',
+  )
 })

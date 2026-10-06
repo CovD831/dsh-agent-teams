@@ -111,6 +111,16 @@ export const id = 'admission.convene'
 export const point = 'admission'
 export const description =
   '自动成团的三条件：产物非空 + 无未审改动（读 admission.checkpoint 的结论）+ 无待确认问题（读 open-questions.json 的观察）；三条全过即 ok，缺哪条说哪条，成员数破上限则回到要人确认'
+/**
+ * ── ★ 修复记录（t13 复审：把这条读数钉在这里，免得它又被变异体盖住）───────────────
+ *
+ * MEASURED：条件 ③ 曾经把「`open-questions.json` 没被接上」读成「没有未回答的问题」
+ * —— 缺席与 `[]` 返回**逐字相同的 JSON**（都 `ok`、都 `noPendingQuestion: true`）。
+ * 成因不是逻辑写错，而是那次交付里留着一个定向突变的变异体（`MUTANT C` 的恒假短路）。
+ * ⇒ 现在缺席落 `unmeasured`、形状坏落另一个 `unmeasured`、`[]` 才落 `ok`，
+ *   三者由夹具的臂 2e / 2e′ / 2f 各钉一条；
+ *   并有一条**总是运行**的污染检查防止变异体再被交付（见夹具同名臂）。
+ */
 
 /**
  * ── 上游判据的 id（第 ② 条的证据来源）─────────────────────────────────────────

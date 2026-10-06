@@ -59,6 +59,16 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SOURCE = join(ROOT, 'src', 'gates', 'admission', 'convene.ts')
 const BUILT_GATE = join(ROOT, 'lib', 'gates', 'admission', 'convene.js')
 
+/**
+ * ── ★ t13 复审记录：本文件的臂 2e / 2e′ / 2f 与"污染检查"是为一个真实缺陷加的 ──────
+ *
+ * 缺陷：条件 ③ 把「`open-questions.json` 没被接上」读成「没有未回答的问题」——
+ * 缺席与 `[]` 返回**逐字相同的 JSON**（都 `ok`、都 `noPendingQuestion: true`）。
+ * 成因：交付的源码里留着一个定向突变的变异体（`MUTANT C`），而不是逻辑写错。
+ * ⇒ 三件事同时落地：① 缺席落 unmeasured；② 形状坏落**另一个** unmeasured；
+ *   ③ 一条**不依赖任何突变是否还原**的污染检查，防它再被交付。
+ */
+
 /** 收窄助手：把"这条断言期望哪一种裁决"写进断言本身（三态必须不同形）。 */
 function expectBlocked(v) {
   if (v.ok !== false || !('blockers' in v)) throw new Error(`expected a blocked verdict, got ${JSON.stringify(v)}`)
