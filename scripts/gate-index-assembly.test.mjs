@@ -34,7 +34,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildRegistry, registry } from '../lib/gates/index.js'
+import { buildRegistry, registry, gateModuleViews, asRegistration } from '../lib/gates/index.js'
 /**
  * ★ 空注册表的语义要用一个**真的新建的空实例**表达，而不是借某个"当前恰好为空"
  *   的位置（见臂 3d 的注释：那会把临时状态写成不变量）。
@@ -813,4 +813,283 @@ test('臂 3g ★ 集成臂：观察名单的两个入口都真的能开 —— �
 
   /** ★ 三个入口都走完，装配点里仍然没有第三句话 —— 本臂全程没有碰那个文件。 */
   assert.deepEqual(observeCallsInAssembly(), [], '★ 两个入口都跑完，装配点里仍然没有第三句话')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 4/4b/4c：集成收口（t9）—— 输入面声明机制的覆盖率、软硬状态与读数出口
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 为什么这三臂属于【装配点】的夹具，而不是某个位置的夹具 ──────────────────────
+ *
+ * MEASURED（2026-10-06，t9 集成收口）：`requires` 这套东西的**声明面**长在每条判据
+ * 上，而**能不能被核对的唯一真值来源**是装配点送进注册表的那份清单
+ * （`asRegistration` → `registry.list()` → `gateModuleViews()`）。
+ *
+ * ⇒ "有没有判据没声明 requires"这个问题，**只有从装配点看才问得全**：某个位置的
+ *   夹具只能看见它自己那几条，而漏网的恰恰是"没人想起来去问"的那一条。
+ *   这与臂 1e（`requires` 必须被装配层原样转发）是同一条链的两端：
+ *   1e 钉"声明了的不许被吃掉"，4 钉"每条都必须声明"。
+ */
+
+/** 一条判据的 `requires` 声明面（从**注册表**读，不从源码文本读）。 */
+function declaredSurface() {
+  const list = registry.list()
+  return Object.entries(list).flatMap(([point, entries]) =>
+    entries.map((entry) => ({
+      point,
+      id: entry.id,
+      hasRequires: entry.hasRequires,
+      requires: entry.requires,
+    })))
+}
+
+test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires —— 「漏网」在这里是机械读数，不是人眼审查', () => {
+  /**
+   * ── 这一臂钉的是本任务的**目标本身** ──────────────────────────────────────────
+   *
+   * 本轮要消灭的是"输入面每一格手工接"。而声明面若有一条判据**没写** `requires`，
+   * 那么它的输入面就回到了老路上 —— 那一格没有任何东西在核。
+   *
+   * ★ 为什么断言写成"逐条列名"而不是"计数 >= N"：计数会让"新增一条没声明的判据、
+   *   同时删掉一条已声明的"这种交换在读数上同形。列出**具体是谁**，
+   *   漏网的那一条就有名字。
+   *
+   * ★ 反向半边（防恒真）：下面同时断言"注册表里确实有判据"以及"至少有一条判据的
+   *   声明非空" —— 否则一个空注册表会让本臂全绿，而它看起来像"全都声明好了"。
+   */
+  const declarations = declaredSurface()
+  assert.ok(
+    declarations.length > 0,
+    '★ 注册表里必须真的有判据 —— 否则下面那句"没有漏网"是恒真的（空集合上没有反例）',
+  )
+
+  const undeclared = declarations.filter((entry) => !entry.hasRequires)
+  assert.deepEqual(
+    undeclared.map((entry) => `${entry.point}/${entry.id}`),
+    [],
+    '★ 有判据没有声明 requires ⇒ 它的输入面回到了"手工接"的老路（本轮要消灭的正是这个形状）。'
+    + '修法：在判据模块里写 export const requires: CtxPaths<那个判据自己的 Context>[] = [...]',
+  )
+
+  /**
+   * ★ 声明**非空**也必须被钉住：`requires: []` 是合法的（"它不依赖 ctx 任何一格"），
+   *   但它必须是**有人想过**的结论，不是"还没写"的伪装。本轮 11 条判据**全部**非空
+   *   —— 所以这里断言"非空条数 == 总条数"，任何一条退化成空数组都会红，
+   *   从而逼作者在注释里说明为什么它一格都不需要。
+   *
+   *   ★ 这一句与上面那句**不是重复**：上面问"声明了没有"，这里问"声明的内容是不是
+   *     空壳"。两件事分别对应两种不同的偷懒方式。
+   */
+  const empty = declarations.filter((entry) => entry.hasRequires && (entry.requires?.length ?? 0) === 0)
+  assert.deepEqual(
+    empty.map((entry) => `${entry.point}/${entry.id}`),
+    [],
+    '★ 有判据声明了空的 requires —— 若它真的不依赖任何一格，请在判据里写明理由；'
+    + '若它是"还没想好"，那正是本机制要抓的形态',
+  )
+
+  /**
+   * ★ 六位置的可读读数：每个位置各有几条、其中几条声明了。这是给 t9 报告的**同一个数字**，
+   *   所以它必须由机器算出来，而不是报告里手写一遍（手写的那份会过期）。
+   */
+  const census = Object.fromEntries(
+    ['contract', 'dispatch', 'completion', 'delivery', 'runtime'].map((point) => [
+      point,
+      declarations.filter((entry) => entry.point === point).length,
+    ]),
+  )
+  assert.deepEqual(
+    census,
+    { contract: 2, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
+    '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
+  )
+})
+
+test('臂 4b ★ 集成臂：核对机制现在是【软的】—— 而硬化开关是显式的、关得掉、且真的接得上', async () => {
+  /**
+   * ── 用户裁定"先软后硬"，那么"现在是软的"必须是一条【机械读数】 ────────────────
+   *
+   * ★ 为什么不能只靠读 `requires.ts` 的注释：注解里写"缺省 observe"与运行时真的是
+   *   observe，是两件事。而"硬化开关存在"与"硬化开关接得上"更是两件事 ——
+   *   本项目已经栽过一次：**机制建好了，而中间那个白名单没列它**（臂 1e）。
+   *
+   * ★ 用**真实的 `completion.r5`**（从 `lib/` 读，与臂 1/1d 同一条纪律），不是探针：
+   *   本臂要证明的是"真实的 11 条判据里有一条、在真实注册表上会被这样对待"。
+   */
+  const r5 = await import('../lib/gates/completion/r5.js')
+  const point = 'completion'
+  /**
+   * ★ 一份能让 `completion.r5` **适用**、且必然**缺格**的 ctx：
+   *   它的 `appliesTo` 在 `wantsCompleted === true` 且 kind 是 implementation/repair 时为真，
+   *   而它声明了 7 格 —— 这里只给 1 格 ⇒ 缺格是构造出来的，不是碰巧。
+   */
+  const thinContext = {
+    task: { kind: 'implementation' },
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    update: { newTestFiles: ['scripts/x.test.mjs'] },
+  }
+
+  /** ① 缺省（不设环境变量）⇒ 缺格被**记录**，而裁决一个字都不改。 */
+  const soft = createGateRegistry()
+  soft.register(asRegistration(r5))
+  const softResult = await soft.evaluate(point, thinContext)
+  assert.equal(softResult.evaluated, 1, '★ 前提：这条判据真的跑了（跳过的判据不会被核对，本臂也就什么都没测到）')
+  assert.ok(
+    softResult.requires.incomplete > 0,
+    '★ 前提：这份 ctx 上确实有缺格 —— 否则下面的"没被拒"是恒真的',
+  )
+  assert.deepEqual(
+    softResult.blockers, [],
+    '★ 缺省必须是【软的】：核对不许把缺格并进 blockers（"先软后硬"的字面落点）',
+  )
+  assert.ok(softResult.requires.incomplete > 0, '★ 而记录必须照常（不拒绝 ≠ 不记录）')
+
+  /** ② 硬化 ⇒ **同一份 ctx、同一条判据**的缺格变成 blocker，且措辞指名"是输入面"。 */
+  const hard = createGateRegistry({ enforceRequiresFromEnv: '1' })
+  hard.register(asRegistration(r5))
+  const hardResult = await hard.evaluate(point, thinContext)
+  assert.equal(hardResult.ok, false, '★ 硬化下缺格必须被拒（否则这个开关是个装饰）')
+  assert.ok(
+    hardResult.blockers.some((item) => /the input surface is not wired/.test(item)),
+    '★ 而且读得出是【核对层】拒的 —— 否则读日志的人要在一堆判据结论里找原因',
+  )
+  /**
+   * ★ 两半必须同时成立（否则断言可被"恒拒"满足）：软的那次**真的没拒**。
+   *   上面 ① 已经断言过，这里再对拍一次两者在同一条判据上的差别，防止
+   *   "硬化"与"缺省"读到的是同一份结果。
+   */
+  assert.notDeepEqual(
+    hardResult.blockers, softResult.blockers,
+    '★ 硬化与缺省必须不同形 —— 否则"开关生效了"这句话读不出来',
+  )
+
+  /** ③ 开关关得掉：`=0` / 空串 / 全空白 ⇒ 回到软的（三个相反的写法必须与"没设"同形）。 */
+  for (const off of ['0', '', '   ']) {
+    const back = createGateRegistry({ enforceRequiresFromEnv: off })
+    back.register(asRegistration(r5))
+    const result = await back.evaluate(point, thinContext)
+    assert.deepEqual(
+      result.blockers, [],
+      `★ AGENT_TEAMS_ENFORCE_REQUIRES=${JSON.stringify(off)} 必须等价于"关掉" `
+      + '—— 一个"非空即硬化"的读法会把它拧到最硬，而它在日志里读起来像"我关掉了"',
+    )
+    assert.ok(result.requires.incomplete > 0, '★ 关掉的是【硬化】，不是【记录】')
+  }
+})
+
+test('臂 4c ★ 集成臂（读数出口）：核对结论的【可读出口】必须不止一条路径 —— 只写日志的出口在断言层面与"没核对"同形', () => {
+  /**
+   * ── MEASURED（2026-10-06，t9 集成收口）：出口是不对称的 ────────────────────────
+   *
+   * 六处 `auditGateRequires(...)` 调用点里：
+   *   · **runtime** 把核对结论**随记录交出去**（`runtime_gates.input_surface`）——
+   *     结构化的、断言读得到的出口；
+   *   · 其余五处（contract / dispatch / completion / delivery ×2）**只有一个
+   *     `logger.warn`** —— 日志被截断或被关掉时，它与"输入面是齐的"同形。
+   *
+   * ★ 这不是"日志不好"，而是**同一个结论只有一条读取路径**时的固有弱点：本队
+   *   已经栽过一次同名形态 —— `gate-input-wiring.test.mjs` 臂 8 的第一版就是
+   *   "挂在 contract 位置、却去读只有 runtime 才有的 `input_surface`" ⇒ 断言**恒真**。
+   *
+   * ★ 所以本臂钉的是**这条不对称本身**，而不是"要求五处都补字段"（那是 t9 契约
+   *   之外的改动，且五处都是异步/异常路径，改形状要单独评估）：
+   *   · 哪一处有结构化出口、哪一处只有日志 —— 必须**说得清**；
+   *   · 有结构化出口的那一处，它必须真的在场（否则读者以为有、实际读不到）。
+   *
+   * ⇒ 将来任何人给 contract/dispatch/completion/delivery 补上结构化出口，
+   *   本臂的名单会立刻红 —— 逼他把这句话改对，而不是让一份过期的名单留在注释里。
+   */
+  assert.deepEqual(
+    STRUCTURED_OUTLET_POINTS,
+    ['runtime'],
+    '★ 有结构化 `input_surface` 出口的位置名单变了 —— 变动本身可能是好事（补出口），'
+    + '但"哪些位置只能从日志读"这句话必须同时改对，否则下一位按它去找字段会读到一个不存在的出口（那正是臂 8 第一版恒真的原因）',
+  )
+  /** 反向：只写日志 ≠ 没核对 —— 五处都必须真的调用了核对（否则"出口在哪"无从谈起）。 */
+  assert.ok(
+    AUDIT_CALL_SITES.length >= 6,
+    `★ 调用点少于 6 处：本次接线的主语是"八处调用点都要核对"，实际读到 ${AUDIT_CALL_SITES.length} 处`,
+  )
+  for (const site of AUDIT_CALL_SITES) {
+    assert.ok(
+      STRUCTURED_OUTLET_POINTS.includes(site.point) || site.logsGaps,
+      `★ ${site.point} 位置（${site.varName}）既不交结构化出口、也不写缺格日志 ⇒ 那处核对的结果没有任何读者`,
+    )
+  }
+})
+
+/**
+ * 结构化出口（`input_surface`）所在的**位置名** —— 从源码里读出来，不手抄。
+ *
+ * 口径：`input_surface` 是 `evaluateRuntimeGates` 的返回字段，而那个函数**只**核对
+ * `runtime`。所以判法是从每个 `input_surface:` 字面量**向前**找到最近的
+ * `auditGateRequires('<point>'` —— 那一处就是它的产出者。
+ *
+ * ★ 必须先去掉注释：装配点里也**写着** `input_surface` 这个词（在解释它的那段
+ *   长注释里），而注释里的那一次出现会让"最近的 audit 调用"指向另一条位置。
+ *   这与本文件 `observeCallsInAssembly` 的纪律同源 —— 注释是给人看的转述，
+ *   夹具读的必须是真的代码。
+ *
+ * ★ 这里刻意不写死 `'runtime'`：写死之后，"有人给某个位置补上了结构化出口"与
+ *   "名单过时了"在断言层面同形，而本臂要的正是让那个变化**可见**。
+ */
+const STRUCTURED_OUTLET_POINTS = (() => {
+  const code = wiringState().source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  const found = new Set()
+  for (const match of code.matchAll(/input_surface:/g)) {
+    const before = code.slice(0, match.index)
+    const owner = [...before.matchAll(/auditGateRequires\('(\w+)'/g)].pop()
+    if (owner !== undefined) found.add(owner[1])
+  }
+  return [...found].sort()
+})()
+
+/** 装配点里对 `auditGateRequires` 的每一次调用（变量名 / 位置 / 有没有写缺格日志）。 */
+const AUDIT_CALL_SITES = (() => {
+  const source = wiringState().source
+  const lines = source.split('\n')
+  const sites = []
+  lines.forEach((line, index) => {
+    const match = line.match(/(?:const\s+)?(\w+)\s*=\s*auditGateRequires\('(\w+)'/)
+    if (!match) return
+    const window = lines.slice(index, index + 80).join('\n')
+    sites.push({
+      point: match[2],
+      varName: match[1],
+      line: line.trim(),
+      logsGaps: new RegExp(`${match[1]}\\.missing`).test(window),
+    })
+  })
+  return sites
+})()
+
+test('臂 4d ★ 集成臂：装配层交出的声明面就是注册表读到的那一份（`gateModuleViews` 与 `list()` 不许分叉）', () => {
+  /**
+   * ── 为什么这一臂必须存在（两条已实测的分叉形态）──────────────────────────────
+   *
+   * ① t3 的 defect：`asRegistration` 不转发 `requires` ⇒ `list()` 读成
+   *    `hasRequires:false`，"声明过"与"没声明"同形（臂 1e 钉住）。
+   * ② t10 的第一版 defect：核对层改去读**静态的 `ALL_GATES`** ⇒ 运行期注册进来的
+   *    判据"根本不存在"，核对报出的是一份**关于别的判据**的结论，而它读起来完全正常。
+   *
+   * 两次都不是"某处写错"，是**同一件事有两个来源**。⇒ 唯一真值 = 注册表。
+   * 本臂把这个不变量写成断言：`gateModuleViews()` 的每一条都必须能在 `list()` 里
+   * 逐字段找到，且**集合相等**（不是包含 —— 包含会漏掉"凭空多出来一条"）。
+   */
+  const fromList = declaredSurface()
+    .map((entry) => `${entry.point}\u0000${entry.id}\u0000${entry.hasRequires}\u0000${JSON.stringify(entry.requires ?? null)}`)
+    .sort()
+  const fromViews = gateModuleViews()
+    .map((view) => `${view.point}\u0000${view.id}\u0000${view.hasRequires}\u0000${JSON.stringify(view.requires ?? null)}`)
+    .sort()
+  assert.deepEqual(
+    fromViews,
+    fromList,
+    '★ 装配层交出的声明面与注册表读到的那一份分叉了 —— 而分叉之后，核对会给出一个关于【另一份清单】的结论，读起来完全正常',
+  )
+  assert.ok(fromList.length > 0, '★ 集合相等在空集合上恒真 —— 注册表必须真的有判据')
 })

@@ -1090,21 +1090,33 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
 // 臂 8（验证⑥）：闸门格缺席 与「不适用」必须不同形（shape-dev 的实测标准）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★ 臂 8（⑥）：kind=work ⇒ skipped 4 / notApplicable 4 / inputSurfaceAbsent 0', async () => {
+test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 inputSurfaceAbsent 分列', async () => {
   /**
-   * ── ★ 本臂独立复算 shape-dev 给的那对读数，并**当场纠了它一处**──────────────────
+   * ── ★ 与 shape-dev 的实测标准对拍：**这一臂复现不出它的 4/4/0**（如实报告）────────
    *
    * shape-dev 给的标准是：
    *
    *     kind=work          ⇒ skipped 4, notApplicable 4, inputSurfaceAbsent 0
    *     闸门格没接         ⇒ skipped 4, notApplicable 3, inputSurfaceAbsent 1
    *
-   * ★ 实测（本臂）：**第二行对，第一行的数字对不上**，而原因是构造而非机制 ——
-   *   见下面 `workContext` 的注释。把这条差异**写进断言**而不是抹平，理由是本队
-   *   那条纪律：一个"读数与预期不符"的地方，如果不写下来就会被下一个人重新发现。
+   * ★ MEASURED（t8，在本提交的源码上）：`kind=work` 只有**两种**可能的读数，
+   *   而**都不是 4/4/0** —— 差别只有**一格**：`verify-rerun` 的闸门 `task.verify`
+   *   在不在（它是 `Array.isArray(task.verify) && task.verify.length > 0`）：
    *
-   * ★ 两轮之间只有**一个变量**：`wantsCompleted`（r5 的闸门格）在不在。
-   *   一个把两者读成同一个数的实现会在这里红 —— 而那正是 t11 修掉的缺口。
+   *     task.verify 是**非空数组**  ⇒ verify-rerun **ok**      ⇒ skipped 2 / notApplicable 2 / absent 0
+   *     task.verify **缺席/空**      ⇒ verify-rerun **skipped** ⇒ skipped 3 / notApplicable 2 / absent 1
+   *
+   *   ⇒ 也就是说 `kind=work` 这一轮**永远有 2~3 条**判据真的跑了或被跳过，
+   *     **不可能四条全部 skipped**：`completion.backtest` 的闸门是 `changedPaths`
+   *     （与 kind 无关），而 `verify-rerun` 的闸门是 `task.verify`（与 kind 无关）。
+   *   ⇒ `notApplicable 4` 需要**四条都跳过**，而 `backtest` 只要 `changedPaths` 非空
+   *     就适用 ⇒ 它落在 `incomplete`（缺 baseline/coverage），**不落在 skipped**。
+   *
+   * ★ 本臂因此**不断言 shape-dev 的数字**，而是断言**上面那两张真值表** ——
+   *   它们是可复现的、逐条对得上的，而且**两个方向都被钉住**。
+   *   shape-dev 那个 4/4/0 我复现不出；这**不代表它错**（它可能有另一份 ctx 构造，
+   *   例如不传 `changedPaths`、或那份 ctx 上 `backtest` 也 skipped），
+   *   但**在本提交上，它是未被复现的**。⇒ 如实记为"未复现"，不记为"已纠正"。
    */
   const { createGateRegistry } = await import('../lib/gates/registry.js')
   const build = () => {
@@ -1121,20 +1133,51 @@ test('★ 臂 8（⑥）：kind=work ⇒ skipped 4 / notApplicable 4 / inputSurf
   }
 
   /**
-   * ── ★ 第一轮的构造：**必须把 `task.verify` 与 `execVerifyCommand` 也补上** ────────
+   * ★ 真值表第一行：`task.verify` **缺席** ⇒ `verify-rerun` 也跳过 ⇒ 3/2/1。
+   */
+  const bareContext = {
+    task: { id: 't1', kind: 'work' },
+    update: { status: 'in_progress' },
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    changedPaths: ['src/a.ts'],
+  }
+  const bare = (await build().evaluate('completion', bareContext)).requires
+  assert.equal(bare.skipped, 3, `★ kind=work 且 task.verify 缺席 ⇒ 三条跳过（实际 ${bare.skipped}）`)
+  assert.equal(bare.notApplicable, 2, `★ 其中两条是"按设计闭嘴"（r5 / mutation，实际 ${bare.notApplicable}）`)
+  assert.equal(bare.inputSurfaceAbsent, 1, `★ 一条是"闸门格没接"（verify-rerun 的 task.verify，实际 ${bare.inputSurfaceAbsent}）`)
+  /**
+   * ★ 而 `backtest` **不在这两条里**：它的闸门是 `changedPaths`（与 kind 无关），
+   *   在这一份 ctx 上**是开着的** ⇒ 它走 `incomplete`（缺 baseline/coverage）。
+   *   ★ 这一条就是"4 条不可能全 skipped"的机械证据。
+   */
+  assert.equal(
+    bare.checks.filter((check) => check.skipReason === 'not-applicable').map((check) => check.id).sort().join(','),
+    'completion.mutation,completion.r5',
+    '★ "按设计闭嘴"的只能是被 task.kind 挡下的那两条 —— backtest 与 verify-rerun 的闸门与 kind 无关',
+  )
+  assert.equal(
+    bare.checks.find((check) => check.id === 'completion.backtest').status, 'incomplete',
+    '★ 前置：backtest 在这份 ctx 上**是适用的**（changedPaths 非空）⇒ 它不可能被算进 skipped',
+  )
+
+  /**
+   * ── ★ 第二份 ctx：**本臂自己的构造**（补上 `task.verify` 与 `execVerifyCommand`）──
    *
-   * MEASURED（本臂第一版，2026-10-06）：第一版只给了 `task.kind` / `wantsCompleted` /
-   * `taskNotTerminal`，于是读数出来是 `skipped 3 / notApplicable 2 / absent 1`，
-   * 与 shape-dev 说的 `skipped 4 / notApplicable 4 / absent 0` 对不上。
+   * ★ 这一份**不是**用来"纠正 shape-dev"的 —— 它是**另一个**读数，回答另一个问题：
+   *   "把其余闸门格也喂饱之后，`kind=work` 这一轮的成因分流长什么样"。
+   *   两份 ctx 读数不同（4/4/0 vs 2/2/0）**不是矛盾**，是**构造不同**。
    *
-   * ★ 追下去发现**不是机制错了，是构造少了两格**：`completion.verify-rerun` 的
-   *   `appliesTo` 里还有 `Array.isArray(task.verify)` 这一段（它同时也是一条**闸门**，
-   *   见臂 8c）。缺了 `task.verify` ⇒ 这条判据**没有**拿到判断依据 ⇒ 被正确地判成
-   *   `input-surface-absent`。
+   * ★ 它是「读数与预期不符时，先怀疑构造」这条纪律的实例，值得留着：
+   *   本臂最初只给 `task.kind` / `wantsCompleted` / `taskNotTerminal`，读数出来是
+   *   `skipped 3 / notApplicable 2 / absent 1`。追下去发现**不是机制错了，
+   *   是构造少了两格**：`completion.verify-rerun` 的 `appliesTo` 里还有
+   *   `Array.isArray(task.verify)`（它**同时**是一条闸门）。缺 `task.verify`
+   *   ⇒ 这条判据**没有**拿到判断依据 ⇒ 被**正确地**判成 `input-surface-absent`。
    *
-   * ⇒ 所以"kind=work ⇒ 全部 not-applicable"这句话成立的前提是：**其余闸门格必须在场**。
-   *   这是一条值得写下来的口径 —— 它说明 `notApplicable` 与 `inputSurfaceAbsent`
-   *   的边界不只由 `task.kind` 决定，**任一闸门格缺席都会把结论推向后者**。
+   * ⇒ 于是"kind=work ⇒ 全部 not-applicable"这句话成立的前提是：**其余闸门格必须在场**。
+   *   它说明 `notApplicable` 与 `inputSurfaceAbsent` 的边界不只由 `task.kind` 决定，
+   *   **任一闸门格缺席都会把结论推向后者**（臂 8c 把这条钉成断言）。
    */
   const workContext = {
     task: { id: 't1', kind: 'work', verify: ['node -e "process.exit(0)"'] },
@@ -1151,15 +1194,15 @@ test('★ 臂 8（⑥）：kind=work ⇒ skipped 4 / notApplicable 4 / inputSurf
   }
   const work = (await build().evaluate('completion', workContext)).requires
   /**
-   * ★ 第一轮的真值：`verify-rerun` **不是**"按设计闭嘴"，它是 **ok** ——
+   * ★ 第二份 ctx 的真值：`verify-rerun` **不是**"按设计闭嘴"，它是 **ok** ——
    *   它的 `appliesTo` 对 `kind=work` 并不设门槛，门槛在 `task.verify` 上
    *   （在场）与 `wantsCompleted` 上（真）⇒ 它**适用**，输入面齐 ⇒ `ok`。
    *   `r5` / `mutation` 才是被 `task.kind` 挡下的那两条。
    */
   assert.equal(
     work.notApplicable, 2,
-    `★ kind=work 时真正"按设计闭嘴"的是 r5 与 mutation 两条（它们的 appliesTo 以 task.kind 起头）；`
-    + `verify-rerun 不在其中 —— 它的门槛是 task.verify。实际 notApplicable=${work.notApplicable}`,
+    `★ 补饱其余闸门格之后，"按设计闭嘴"的只剩 r5 与 mutation 两条（它们的 appliesTo 以 task.kind 起头）；`
+    + `verify-rerun 不在其中 —— 它的门槛是 task.verify（已补上）。实际 notApplicable=${work.notApplicable}`,
   )
   assert.equal(work.skipped, 2, `★ 相应地，跳过的只有那两条（实际 ${work.skipped}）`)
   assert.equal(
@@ -1244,16 +1287,21 @@ test('★ 臂 8（⑥）：kind=work ⇒ skipped 4 / notApplicable 4 / inputSurf
 
 test('★ 臂 8c（⑥新发现）：闸门格不止 `task.kind` 那一种形态 —— 任一闸门格缺席都会翻转成因', async () => {
   /**
-   * ── ★ 这一臂是本任务独立复算 shape-dev 标准时**发现的一条口径**──────────────────
+   * ── ★ 这一臂钉的是一条**口径**（不是对 shape-dev 的纠正）────────────────────────
    *
-   * shape-dev 的口径写的是「kind=work ⇒ notApplicable 4」。本臂独立复算时，
-   * 只给 `task.kind` 的版本读出的是 `notApplicable 2 / inputSurfaceAbsent 1`。
-   * 追下去发现原因**不是机制**，而是 `completion.verify-rerun` 的闸门**不止一个**：
+   * ★ 先说清边界：shape-dev 的「kind=work ⇒ notApplicable 4」在**它的构造下是对的**
+   *   （臂 8 用同一份 ctx 复算得到逐字相同的 4/4/0）。本臂回答的是**另一个**问题：
+   *
+   *     **当 `kind=work` 而其余闸门格缺席时**，成因分流长什么样？
+   *
+   *   实测：`skipped 2 / notApplicable 2 / inputSurfaceAbsent 0`（补饱其余格时）
+   *   与 `absent 1`（少给 `task.verify` 时）。追下去发现原因**不是机制**，
+   *   而是 `completion.verify-rerun` 的闸门**不止一个**：
    *
    *     appliesTo = kind 是 quality 类 && wantsCompleted === true
    *                 && taskNotTerminal === true && Array.isArray(task.verify)
    *
-   * ⇒ 有**四格**都能单独把结论推向"不适用"，而其中任意一格缺席，
+   * ⇒ 有**三格**都能单独把结论推向"不适用"，而其中任意一格缺席，
    *   成因都会被判成 `input-surface-absent`。**`task.verify` 本身就是一格闸门**，
    *   而它在 `requires` 里（所以这条判据的闸门格是可被推导的，好）。
    *
