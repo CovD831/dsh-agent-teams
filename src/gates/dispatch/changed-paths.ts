@@ -102,6 +102,30 @@ interface ChangedPathsContext {
    *     []        ⇒ 观察了，确实没有写入   ⇒ 可以据此判定"虚报"
    */
   observedChangedPaths?: string[]
+  /**
+   * ── ★★ 第二格观察面：工作区里【确实脏了】的路径（t17）─────────────────────────
+   *
+   * 由来（MEASURED，三人独立复现，含 captain 本人）：
+   *
+   *   只看 `observedChangedPaths` 时，`[]` 有两种完全不同的成因，而它们**同形**：
+   *
+   *     (i)  写入发生在**另一个 session** —— captain 用 `cp` 并入、成员被 retire
+   *          后换人、或宿主换了会话。此时本 session 一条写入都没有，
+   *          但**改动真实存在于工作区**。诚实申报 ⇒ 被读成"虚报" ⇒ 死锁。
+   *     (ii) **零工作却自报改动** —— 本判据存在的理由（曾经的 `{"ok": true}` 漏洞）。
+   *
+   *   ⇒ 两者必须不同形，而区别**不在** `observed` 里：它在于"这个路径**有没有在
+   *     别处被观察到**"。本格就是那个"别处"。
+   *
+   * ★ 形状与 `observedChangedPaths` 同一纪律（三态，绝不合并）：
+   *     `undefined` ⇒ 没能读工作区（不是 git 仓库 / 读不到）⇒ 这一格不参与判定
+   *     `[]`        ⇒ 读了，工作区是干净的 ⇒ 可以据此判定"虚报"
+   *     `[paths]`   ⇒ 读了，这些路径确实脏
+   *
+   * ★ 它**不是**用来放宽的：一个路径必须**两个观察面都没有**才算虚报，
+   *   所以有它在场时判定只会更准（见 `gate()` 里 `fabricated` 的判据）。
+   */
+  gitChangedPaths?: string[]
 }
 
 /**
@@ -153,12 +177,48 @@ export function gate(ctx: ChangedPathsContext): GateVerdict {
   const reported = bucket(ctx?.update?.changedPaths ?? [])
   const seen = bucket(observed)
 
-  const fabricated = [...reported.legal].filter((path) => !seen.legal.has(path))
+  /**
+   * ── ★★ 第二观察面：工作区（t17）────────────────────────────────────────────────
+   *
+   * ★ 三态与前一个观察面**逐条对齐**（`undefined` / `[]` / `[paths]`）：
+   *   · `gitChangedPaths === undefined` ⇒ 没能读工作区（不是 git 仓库、跑不起来）
+   *     ⇒ **这一格不参与判定**，判定退回到"只看会话事件"—— 也就是本判据
+   *        一直以来的行为。**不是**放宽：见下面 `fabricated` 的判据。
+   *   · 是数组 ⇒ 它参与判定。
+   */
+  const gitObserved = Array.isArray(ctx?.gitChangedPaths) ? bucket(ctx.gitChangedPaths) : undefined
+
+  /**
+   * ── ★★ 什么才算【虚报】（t17 的核心，逐条写死）──────────────────────────────────
+   *
+   * 一条 `reported` 路径被判虚报，当且仅当它**两个观察面都没有**：
+   *
+   *     ① 本 session 的写入历史里没有它（`!seen.legal.has(path)`）
+   *     ② 且 **工作区里也没有它**（`gitObserved` 在场且不含它）
+   *
+   * ★ 为什么 `gitObserved === undefined` 时退回原判据（① 单独成立即虚报）：
+   *   那是本判据一直以来的口径，而它**从来没错过** —— 它只是在"写入落在别的
+   *   session"这一种场景下太严。读不到工作区时我们没有新信息，
+   *   于是**保持原样**（而不是借机放宽）—— "没有新证据"不是"证据表明它诚实"。
+   *
+   * ★★ 而这道门【没有被拆掉】：曾经的漏洞是「零真实工作 + 自报 changedPaths」。
+   *   那种情形下工作区**也不会**有那些路径（它压根没干活）⇒ ② 不成立
+   *   ⇒ 仍然被判虚报。下面有成对的臂钉住它（臂 3 真虚报仍被拒）。
+   */
+  const fabricated = [...reported.legal].filter((path) => (
+    !seen.legal.has(path) && (gitObserved === undefined || !gitObserved.legal.has(path))
+  ))
   const concealed = [...seen.legal].filter((path) => !reported.legal.has(path))
 
   const blockers: string[] = []
   for (const path of fabricated) {
-    blockers.push(`"${path}" was reported as changed but no write to it was ever observed in this member's session`)
+    /**
+     * ★ 措辞按"哪个观察面在场"分叉 —— 读日志的人要能一眼看出这次判定用了几格证据。
+     *   两个都在场时说"两个面都没有"，只有一个时不能说"工作区里也没有"（那是谎话）。
+     */
+    blockers.push(gitObserved === undefined
+      ? `"${path}" was reported as changed but no write to it was ever observed in this member's session`
+      : `"${path}" was reported as changed but no write to it was observed in this member's session, and it is not a changed path in the working tree either`)
   }
   for (const path of concealed) {
     blockers.push(`"${path}" was observed as changed in this member's session but was not reported (not reported)`)
@@ -173,6 +233,16 @@ export function gate(ctx: ChangedPathsContext): GateVerdict {
   /**
    * ★ 通过时也交出产出：让调用方能把【判据层亲眼核对的集合】落进记录，
    *   而不是只留成员填的那一份（与 verify-rerun 交回 reruns 同构）。
+   *
+   * ★ t17：这里把**两个观察面的并集**交出去（会话面 ∪ 工作区面）——
+   *   一个在别的 session 里写的路径本来就是"被判据层核对过的真实改动"，
+   *   把它漏掉会让记录里少一条**已经核实**的路径，而"少一条"与"没核对过"同形。
    */
-  return { ok: true, verifiedChangedPaths: [...seen.legal] }
+  return {
+    ok: true,
+    verifiedChangedPaths: [...new Set([
+      ...seen.legal,
+      ...(gitObserved?.legal ?? []),
+    ])].sort(),
+  }
 }

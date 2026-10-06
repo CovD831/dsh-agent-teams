@@ -56,12 +56,19 @@ function expectOk(v) {
   return v
 }
 
-/** 一个最小 context：任务契约 + 成员自报 + 观察到的真实写入。 */
-function ctx({ inScope = [], outOfScope = [], changedPaths, observed, hasObservation = true }) {
+/** 一个最小 context：任务契约 + 成员自报 + 观察到的真实写入（+ 工作区观察，t17）。 */
+function ctx({ inScope = [], outOfScope = [], changedPaths, observed, hasObservation = true, gitObserved }) {
   return {
     task: { id: 't1', kind: 'implementation', inScope, outOfScope },
     update: { changedPaths },
     observedChangedPaths: hasObservation ? (observed ?? []) : undefined,
+    /**
+     * ★ t17：第二观察面（工作区）。
+     *   **不传** ⇒ 这一格缺席 ⇒ 判据退回**原口径**（只看会话事件）。
+     *   要表达"读了工作区、它是干净的"必须**显式**传 `[]` —— 缺席与空数组
+     *   在这条判据里从来不是同一件事（与 `observedChangedPaths` 同一纪律）。
+     */
+    ...gitObserved === undefined ? {} : { gitChangedPaths: gitObserved },
   }
 }
 
@@ -280,4 +287,215 @@ test('★ A 层核对：适用而缺观察 ⇒ 核对【报出缺的是那一格
     false,
     '★ 而`[]` 下自报了一条虚构改动 ⇒ 判据必须拒绝它（"在场"不等于"通过"）',
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t17：第二观察面（工作区）—— 「写入在别的 session」与「零工作却自报」必须不同形
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 这三臂防的是什么失效（MEASURED，三人独立复现，含 captain 本人）───────────
+ *
+ * `observedChangedPaths` 只看得见**本 session** 的写入，于是 `[]` 有两种成因，
+ * 而它们在返回值上**逐字同形**：
+ *
+ *   (i)  写入发生在**另一个 session** —— captain 用 `cp` 并入、成员被 retire 后
+ *        换人。改动**真实存在于工作区**，而本 session 一条写入都没有。
+ *        ⇒ 诚实申报被读成"虚报" ⇒ **每一个被重派/并入的 attempt 都交不出终态**。
+ *   (ii) **零工作却自报改动** —— 本判据存在的理由（曾经的 `{"ok": true}` 漏洞）。
+ *
+ * 三人各自撞上：point-dev（t14 收口）、admission-dev（t13）、captain（接管 t14）。
+ * 填空数组又被 r5/mutation 拒（它们要一个可测范围）⇒ **两条判据各自都对，
+ * 合起来没有任何合法输入**。
+ *
+ * ⇒ 修法：补一格"别处"的证据（工作区）。改动**真的存在**这件事与"是谁写的"无关。
+ * ★ 而门**没有被拆**：一个路径必须**两个观察面都没有**才算虚报（见臂 3）。
+ */
+
+test('★ t17 臂 1（对照臂）：本 session 有真实写入 ⇒ ok（原有行为一字不变）', async () => {
+  const v = await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/a.ts'],
+    observed: ['src/a.ts'],
+    gitObserved: ['src/a.ts'],
+  }))
+  const ok = expectOk(v)
+  assert.deepEqual(ok.verifiedChangedPaths, ['src/a.ts'])
+})
+
+test('★ t17 臂 2（新能力臂）：写入在【别的 session】，而工作区里确实脏 ⇒ ok', async () => {
+  /**
+   * ★ 这一臂就是本任务存在的理由。修之前它与臂 3 的输出**逐字相同**。
+   */
+  const v = await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/tools.ts'],
+    observed: [],
+    gitObserved: ['src/tools.ts'],
+  }))
+  const ok = expectOk(v)
+  /**
+   * ★ 产出里必须带着那条路径 —— 它在**工作区面**被核对过，是"判据层亲眼看到的
+   *   真实改动"。漏掉它会让记录少一条**已核实**的路径，而"少一条"与"没核对过"同形。
+   */
+  assert.deepEqual(
+    ok.verifiedChangedPaths, ['src/tools.ts'],
+    '★ 在别的 session 里写的路径，一旦被工作区面核实，就必须出现在 verifiedChangedPaths 里',
+  )
+
+  /**
+   * ★ 与臂 1 的交出物**相等是刻意的**，不是缺陷：
+   *   `verifiedChangedPaths` 回答的是「哪几条路径被核实了」，而不是
+   *   「是哪一面核实的」。两条路都核实了同一条路径 ⇒ 交出同一份集合。
+   *
+   * ★ MEASURED（本臂第一版写错过）：我原先在这里断言 `notDeepEqual`，
+   *   理由是"读的人要能分出是哪一面证实的" —— **那是我替判据发明的一个需求**。
+   *   真正需要区分的两种情形（放行 vs 判虚报）由 `ok` 本身分开（臂 2 vs 臂 3），
+   *   而"两条独立证据指向同一结论"恰恰应当收敛成同一个结论。
+   *   ⇒ 把它写成不相等，等于要求判据把**证据来源**也编码进产出 ——
+   *     那是另一种"两份真相"。
+   */
+  assert.deepEqual(
+    await gate(ctx({ inScope: ['src/'], changedPaths: ['src/tools.ts'], observed: ['src/tools.ts'], gitObserved: ['src/tools.ts'] })),
+    v,
+    '★ 两条独立证据核实同一条路径 ⇒ 同一份产出（产出说的是"核实了什么"，不是"谁核实的"）',
+  )
+})
+
+test('★ t17 臂 3（伪造臂，★ 门必须保住）：零工作却自报改动 ⇒ 仍然被拒', async () => {
+  /**
+   * ── ★★ 这一臂是硬约束：修法【不得】让"零真实工作 + 自报 changedPaths"变得可接受 ──
+   *
+   * 那道门的历史：上游只校验 changedPaths 的**形状**，从不校验它是否对应任何
+   * 真实发生过的写入 ⇒ 一个成员可以零工作、自报一组漂亮的 inScope 路径，
+   * 而判据层无从分辨 ⇒ `evaluateQualityCompletion` 返回 `{"ok": true}`。
+   *
+   * ★ 下面三个子情形逐条钉住它。**缺任何一个，这道门就有一个可以钻的角**：
+   */
+  /**
+   * ① 两个观察面**都在场**、且都是空的（工作区也干净）⇒ 虚报。
+   *    ★ 这是最完整的一格证据："你没写过，工作区也没有"。
+   */
+  const bothEmpty = expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/a.ts', 'src/b.ts'],
+    observed: [],
+    gitObserved: [],
+  })))
+  assert.equal(bothEmpty.length, 2, '★ 两条虚构路径都要报出来（不短路）')
+  assert.match(bothEmpty[0], /not a changed path in the working tree either/, '★ 措辞要说清这次用了几格证据')
+
+  /**
+   * ② 工作区面**读不到**（`undefined`）⇒ 退回原口径，**仍然判虚报**。
+   *    ★ 这是"没有新证据"不是"证据表明它诚实"—— 缺了这一格，
+   *      一次 git 故障就能把这道门整个绕过去。
+   */
+  const gitUnreadable = expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/a.ts'],
+    observed: [],
+    // gitObserved 不传 ⇒ 这一格缺席
+  })))
+  assert.match(
+    gitUnreadable[0], /no write to it was ever observed in this member's session/,
+    '★ 读不到工作区时退回原口径（不能借机放宽）',
+  )
+  assert.doesNotMatch(
+    gitUnreadable[0], /working tree/,
+    '★ 而措辞不许声称"工作区里也没有" —— 那一次我们根本没读到工作区（那是谎话）',
+  )
+
+  /**
+   * ③ ★ 最容易漏的那一格（captain 点名）：重派场景下，reported 里**混着**
+   *    "历史里有"与"历史里没有"的两条路径 ⇒ 前者放行、后者仍判虚报。
+   *    ★ 它防的是"整批放行"：一个按调用整体放宽的实现会在这里红。
+   */
+  const mixed = expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/tools.ts', 'src/ghost.ts'],
+    observed: [],
+    gitObserved: ['src/tools.ts'],
+  })))
+  assert.equal(mixed.length, 1, '★ 只许报那条两个面都没有的路径')
+  assert.match(mixed[0], /src\/ghost\.ts/, '★ 指名的是【虚构的那一条】')
+  assert.doesNotMatch(mixed[0], /src\/tools\.ts/, '★ 工作区里确实存在的那条不许被连带拒绝')
+
+  /**
+   * ④ 工作区面在场、报告里**漏报**了会话里真实写过的路径 ⇒ 仍然按"隐瞒"拒绝
+   *    （与虚报对称的那一半，t17 没有改动它）。
+   */
+  const concealed = expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/a.ts'],
+    observed: ['src/a.ts', 'src/b.ts'],
+    gitObserved: ['src/a.ts', 'src/b.ts'],
+  })))
+  assert.match(concealed[0], /was not reported/, '★ 隐瞒改动与虚报改动必须同样危险')
+})
+
+test('★ t17 臂 4（三态臂）：工作区面的缺席与空数组【不同形】', async () => {
+  /**
+   * ★ 与 `observedChangedPaths` 同一纪律：`undefined`（没能观察）与 `[]`
+   *   （观察了、工作区是干净的）必须分得开。把前者当成后者，会让一次 git 故障
+   *   被读成一个关于成员工作的结论。
+   *
+   * ★ 这一臂的可证伪形式：**同一份其余 ctx**，只改这一格 ⇒ 裁决的形状必须变。
+   */
+  const base = { inScope: ['src/'], changedPaths: ['src/a.ts'], observed: [] }
+  const absent = await gate(ctx(base))
+  const empty = await gate(ctx({ ...base, gitObserved: [] }))
+
+  assert.equal(absent.ok, false)
+  assert.equal(empty.ok, false)
+  // 两者都被拒（都该拒），但**措辞不同形** —— 读日志的人要能看出用了几格证据。
+  assert.notDeepEqual(
+    expectBlocked(absent), expectBlocked(empty),
+    '★ "读不到工作区"与"工作区是干净的"必须不同形 —— 否则一次 git 故障会伪装成一份关于成员的结论',
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：**同一份 ctx 跑两次**必须逐字相同 ——
+   *   判据是纯数据变换，没有隐藏状态。缺了这一半，"不同形"可能只是随机。
+   */
+  assert.deepEqual(await gate(ctx(base)), absent, '★ 判据必须确定：同一份输入两次跑出逐字相同的裁决')
+})
+
+test('★ t17 臂 5（★ 诚实边界臂）：工作区面【不为归属作证】—— 这一格判据测不了什么', async () => {
+  /**
+   * ── ★★ 这条臂钉的是本修法**明知**留下的边界，而不是一个缺陷被我藏起来 ─────────
+   *
+   * 对抗性自审（我对自己刚写的修法做的）：如果一个**零工作**的成员报了一条
+   * **恰好被别人改脏**的路径，工作区面会为它作证 ⇒ 放行。
+   *
+   * ★ 为什么接受它：
+   *   · 本判据说到底只回答**"这条改动真的存在吗"**，它**不回答"是谁改的"**——
+   *     `git status` 不知道作者（全队共用一个目录，START-HERE §5③ 已写明）。
+   *     归属由**会话事件**那一格回答，两格合起来才完整。
+   *   · 关键：一个零工作的成员**无法凭空造出一个脏文件**。要让那个路径变脏，
+   *     他真的得动那个文件 —— 而"真的动过"本身就是工作的一点。
+   *   · 而下游的 r5 / mutation / backtest 仍然要求**可测的真实范围**；
+   *     本判据放宽的是"能不能申报"，不是"能不能通过"。
+   *
+   * ★★ 为什么必须有一条臂把它**写下来**：一个不被写明的边界，下一个人会以为
+   *   它是漏洞并去"修"它 —— 而"修"它的方向（要求工作区面证明归属）在物理上
+   *   做不到，只会让这道门重新变成恒红。把它钉成断言，是为了让**取舍**留痕。
+   */
+  const v = await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/other-task.ts'],
+    observed: [],
+    gitObserved: ['src/other-task.ts'],
+  }))
+  expectOk(v)
+
+  /**
+   * ★ 而这道门仍然拦得住【凭空捏造】的那一条 —— 两个面都没有 ⇒ 拒。
+   *   缺了这一半，上面那条"接受"就变成了"什么都接受"（恒真）。
+   */
+  expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/other-task.ts', 'src/invented.ts'],
+    observed: [],
+    gitObserved: ['src/other-task.ts'],
+  })))
 })
