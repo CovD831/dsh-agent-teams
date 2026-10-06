@@ -36,9 +36,59 @@
  * ③ 三态：ok / blocked / unmeasured，且后两者不同形。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "contract.build-artifact-scope";
 export declare const point = "contract";
 export declare const description = "inScope \u58F0\u660E\u4E86 src/ \u4E0B\u4F1A\u6539\u52A8\u7684\u6587\u4EF6\u3001\u5374\u6CA1\u6709\u58F0\u660E\u5BF9\u5E94\u7684 lib/ \u6784\u5EFA\u4EA7\u7269 \u21D2 \u63D0\u793A\uFF08\u672C\u4ED3\u5E93\u5F3A\u5236 lib/ \u4E0E src/ \u540C\u6B65\uFF0C\u6210\u5458 build \u540E\u5FC5\u7136\u4EA7\u751F undeclared \u8DEF\u5F84\uFF09";
+/**
+ * ── ★ 输入面声明（B 层，编译期）────────────────────────────────────────────────
+ *
+ * ★ 这一份是本轮「可选输入怎么声明」的**第一个真实压力测试**，而结论是：
+ *   **不需要新形状 —— 需要的是一条口径。**
+ *
+ * ── 口径（与 shape-dev 的 paths 层、delivery-owner 的 (a)/(b)/(c) 三分法同源）
+ *
+ *     `requires` 只声明【这条判据无条件读的那几格】。
+ *     判据【可选地】读的东西不进 requires —— 它的在场与否由判据自己的裁决
+ *     （ok / unmeasured）持有，并由一条夹具臂钉住。
+ *
+ * ── 为什么这里只声明 `'task'`，而【不】声明 `'task.inScope'` ────────────────────
+ *
+ * 这条判据的语义**恰好**是一句「缺席不是缺失」（t11 的收口，见下面 `gate()` 的
+ * 两段注释 —— 它们逐字对着 `kind=work` 的真实契约：`create_task` 给 work 类
+ * **本来就不带 `inScope`**）：
+ *
+ *     inScope 整个缺席    ⇒ 这份契约没有提出同步要求 ⇒ **ok**（不适用）
+ *     inScope 在场但不可判 ⇒ 它提了要求而清单读不出   ⇒ **unmeasured**
+ *
+ * ⇒ 若把 `'task.inScope'` 写进 requires，核对层会在**每一个普通任务**上报
+ *   「contract.build-artifact-scope declares 1 ctx path that this context does not
+ *   carry: task.inScope」—— 而那正是这条判据明确拒绝报的东西。
+ *   ★ 那是**假告警**，而本队的定论是：假告警与不报警同样有害，它教人忽略门禁。
+ *
+ * ── 那"没接上"还发不发现得了 ────────────────────────────────────────────────────
+ *
+ * 能，而且分得比"报缺"更准 —— 三件事各归其位（与 requires.ts 文件头那三层同源）：
+ *
+ *     ① 拼错路径（`'task.inScpoe'`）          ⇒ 编译期 TS2322，永远不可能漏。
+ *     ② 调用方【整个没交出契约】（没有 task）  ⇒ 这不是静态判断，是**运行时**事实：
+ *        `appliesTo` 为假 ⇒ 注册表在进 `gate()` 之前就把它记成
+ *        `requires.checks[].status === 'skipped'`（`skippedBecause` 写明原因），
+ *        `requires.skipped` 计数把它抬出来。★ 跳过 ≠ 齐（不同形），所以
+ *        「这一轮根本没接上契约」不会被读成「判据通过了」。
+ *     ③ 契约在、而 inScope 故意缺席           ⇒ 判据自己判 **ok**（不适用）。
+ *
+ * ★ `'task'` 这一格是**必填**的：它既是 `appliesTo` 读的那一格，也是判据里唯一
+ *   一个**无条件**读的东西（`const inScope = ctx?.task?.inScope`）。它缺席 ⇒
+ *   判据根本不说话。于是"声明到判据真的读到的那条边界"在这里是自洽的：
+ *   声明 `'task'`、`appliesTo` 看 `ctx.task`、`gate()` 从 `ctx.task.inScope` 起读。
+ *
+ * ★ 它也不会让"漏接"从此看不见：真会产出 undeclared 路径的是**声明了 inScope 的
+ *   质量任务**，而那些任务必然带着 `task` ⇒ 核对层照常核对这一格；一条把契约
+ *   整个丢掉的调用点会在 `skipped` 计数上留下痕迹 —— 它本来就不在这条判据的
+ *   输入面里，硬报成"缺 task"会把"不适用"说成"没接线"。
+ */
+export declare const requires: CtxPaths<BuildArtifactScopeContext>[];
 interface BuildArtifactScopeContext {
     /**
      * 待建 / 待改的任务契约。取自 `create_task` 的任务草稿或 `amend_task` 修订后的任务。

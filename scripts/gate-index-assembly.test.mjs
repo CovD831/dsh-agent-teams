@@ -240,6 +240,59 @@ test('臂 1b ★ 伪造臂：非函数 appliesTo ⇒ 装配抛错，而不是被
   assert.equal(typeof asRegistration(goodModule({ appliesTo: () => false })).appliesTo, 'function')
 })
 
+test('臂 1e ★ 伪造臂：`requires` 声明必须被装配层【原样转发】，不许被白名单吃掉', async () => {
+  /**
+   * ── MEASURED（2026-10-06，t3 = dispatch 位置的接线任务）────────────────────────
+   *
+   * 判据文件写了 `export const requires = [...]`，`requires.ts` 的核对层也建好了，
+   * 而 `asRegistration` 只转发 id/point/description/gate/appliesTo ⇒
+   * `registry.list()` 里 **`hasRequires: false`**，于是"这条判据声明过输入面"
+   * 与"它压根没声明"读起来一模一样。
+   *
+   * ★ 形状与前五次同形问题完全一致：**声明写对了、机制也建好了、而中间那个
+   *   白名单没列它**。所以这条臂必须问【装配层】，不能只问判据模块 ——
+   *   后者在缺陷存在时照样是绿的。
+   *
+   * ★ 修法的边界：`appliesTo` 的缺席必须继续是"不转发"（那是可选格，缺省 =
+   *   全部适用），而 `requires` 的缺席必须是"不转发但可读为没声明"。两者都
+   *   不许被编成空数组 —— 空数组的语义是"声明过、不需要任何一格"，完全不同。
+   */
+  const { asRegistration, createGateRegistry } = await import('../lib/gates/index.js')
+
+  const forwarded = asRegistration(goodModule({ requires: ['task.kind'] }))
+  assert.deepEqual(forwarded.requires, ['task.kind'], '★ 声明必须原样穿过装配层')
+  assert.deepEqual(
+    asRegistration(goodModule()).requires,
+    undefined,
+    '★ 没声明 ⇒ 不许被编成空数组（"还没写"与"不需要"不同形，见 requires.ts）',
+  )
+  assert.deepEqual(
+    asRegistration(goodModule({ requires: [] })).requires,
+    [],
+    '★ 而声明了空数组要保留下来 —— 那是一条【有内容的】声明',
+  )
+
+  // 端到端：走真实注册表，`list()` 上读得到（控制台的数据源）
+  const r = createGateRegistry()
+  r.register(asRegistration(goodModule({ requires: ['task.kind'] })))
+  r.register({ ...goodModule(), id: 'completion.undeclared' })
+  assert.equal(r.list().completion[0].hasRequires, true, '★ 控制台要读得出"声明过输入面"')
+  assert.deepEqual(r.list().completion[0].requires, ['task.kind'])
+  assert.equal(r.list().completion[1].hasRequires, false, '★ 没声明与声明了空数组不同形')
+
+  // 而【真实装配清单】里已经声明过的判据，一个都不许在路上丢掉
+  const { registry } = await import('../lib/gates/index.js')
+  const lost = Object.values(registry.list()).flat()
+    .filter((entry) => entry.requires !== undefined && !entry.hasRequires)
+    .map((entry) => entry.id)
+  assert.deepEqual(lost, [], '★ 声明了 requires 却读成"没声明" ⇒ 装配层又把某一条吃掉了')
+  const declared = Object.values(registry.list()).flat().filter((entry) => entry.hasRequires).map((entry) => entry.id)
+  assert.ok(
+    declared.length >= 2,
+    `★ 至少 dispatch 位置的两条要声明了（t3 的产物）；实际读到 ${declared.length} 条：${declared.join(', ')}`,
+  )
+})
+
 test('臂 1c ★ 伪造臂：id 撞车 ⇒ 抛错（"我换了一条"与"两条都在、后一条赢了"不可同形）', async () => {
   const { createGateRegistry } = await registryLibrary()
   const r = createGateRegistry()

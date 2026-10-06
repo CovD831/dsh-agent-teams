@@ -199,6 +199,8 @@ interface GateModuleParts {
   description: string
   gate: (context: any) => unknown
   appliesTo?: (context: any) => boolean
+  /** ★ 输入面声明（t6 起的第六条可选导出）；见下面 `asRegistration` 里那段实测记录。 */
+  requires?: readonly string[]
 }
 
 /**
@@ -297,6 +299,23 @@ export function asRegistration(module: Record<string, unknown>): Parameters<Retu
     description: parts.description,
     gate: parts.gate as never,
     ...(typeof module.appliesTo === 'function' ? { appliesTo: parts.appliesTo } : {}),
+    /**
+     * ── ★ `requires` 必须在这里【显式】转发（缺陷发现于 t3 = dispatch 接线）─────────
+     *
+     * MEASURED（2026-10-06）：`asRegistration` 此前只转发 id / point / description /
+     * gate / appliesTo。判据模块写了 `export const requires = [...]`，核对层也建好了，
+     * 而装配层**不再往下交** ⇒ `registry.list()` 读出来是 `hasRequires: false`，
+     * 于是"这条判据声明了输入面"与"它压根没声明"在控制台上同形。
+     *
+     * ★ 这个缺陷的形状正是本轮要消灭的那一个：**声明写对了、机制也建好了、
+     *   而中间那个白名单没列它** —— 于是它静默地不生效。前四次同形问题
+     *   （inScope 缺席 → verify 缺席 → 执行器缺席 → event 名不匹配）都长这样。
+     *
+     * ★ 与 `appliesTo` 那条的区别：非函数 appliesTo 是被**静默丢掉**的，而
+     *   requires 丢掉之后至少还留着一条 `undeclared` 说明 —— 两者都不可接受，
+     *   因为"没声明"与"声明了但没转发"读起来一模一样。臂 1e 钉住这一行。
+     */
+    ...(module.requires === undefined ? {} : { requires: parts.requires as readonly string[] }),
   }
 }
 

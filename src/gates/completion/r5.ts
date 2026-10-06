@@ -74,6 +74,7 @@
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
+import type { CtxPaths } from '../requires.ts'
 
 export const id = 'completion.r5'
 export const point = 'completion'
@@ -121,6 +122,46 @@ export function appliesTo(ctx: R5Context | undefined): boolean {
   if (ctx?.wantsCompleted !== true || ctx?.taskNotTerminal !== true) return false
   return Array.isArray(ctx?.update?.newTestFiles)
 }
+
+/**
+ * ── 输入面声明（t4）───────────────────────────────────────────────────────────
+ *
+ * ★ 本条在上一轮【真的缺过输入】，而缺口就在这三格上，且症状与"通过"同形：
+ *
+ *   MEASURED（本轮开工前的复盘）：`parentRevision` / `scanDirs` /
+ *   `runTestOnRevision` 都曾经没接上。三者的缺口各自返回一条 `unmeasured`
+ *   （"no parent revision is available" / "no scan directories were declared" /
+ *   "no revision runner was injected"），而 `unmeasured` 在日志里与 `ok` 同形。
+ *   ⇒ 一条**从未运行过**的判据被读成了"R5 检查过了，没问题"。
+ *
+ * ★ 三格各自对着文件里的一处 `unmeasured`，逐条对齐（声明与未测量臂必须一致）：
+ *
+ *   · `runTestOnRevision` ⇒ `gate()` ① "no revision runner was injected"
+ *   · `scanDirs`          ⇒ `gate()` ② "no scan directories were declared by the caller"
+ *   · `parentRevision`    ⇒ `gate()` ④ "no parent revision is available"
+ *
+ * ★ `parentRevision` 是【来自 worktree 的 base】——由 t5 的 `onWorktree` 传递。
+ *   实测过的一次缺口正是它：没有 worktree ⇒ 没有 base ⇒ 判据静默 unmeasured。
+ *   声明它 = 把"这条判据需要一个隔离的父版本"变成一次机械核对，而不是一句注释。
+ *
+ * ★ `update.newTestFiles` 是【被审的对象】（③ 的 `targets.length === 0` 那支），
+ *   且 `appliesTo` 的第三个条件读的就是它。它与 `parentRevision` 不同形：
+ *   前者是"测什么"，后者是"拿什么当基准"。两格都缺时的措辞也不同（②/③ vs ④），
+ *   所以分开声明 —— 合成一格会让"没有新测试"与"没有基准"在核对结果里同形。
+ *
+ * ★ `task.kind` / `wantsCompleted` / `taskNotTerminal` 是 `appliesTo` 的闸门
+ *   （见上面的注释：它们是判据之间的不一致被修掉的那一处）。声明它们是同一口径的
+ *   要求 —— 不适用就不报，而"为什么不适用"必须读得出来（requires.ts 的闸门）。
+ */
+export const requires: CtxPaths<R5Context>[] = [
+  'runTestOnRevision',
+  'scanDirs',
+  'parentRevision',
+  'update.newTestFiles',
+  'task.kind',
+  'wantsCompleted',
+  'taskNotTerminal',
+]
 
 /** 调用方对"哪些文件是新测试"的声明（会话事件折叠后的结果）。 */
 export interface R5Context {

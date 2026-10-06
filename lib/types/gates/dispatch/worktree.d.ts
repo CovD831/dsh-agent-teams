@@ -62,9 +62,56 @@
  * ③ 三态：ok / blocked / unmeasured，且后两者不同形。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "dispatch.worktree";
 export declare const point = "dispatch";
 export declare const description = "\u6838\u5BF9\u58F0\u660E\u7684\u5DE5\u4F5C\u662F\u5426\u771F\u7684\u843D\u5728\u9694\u79BB worktree \u91CC\u3001\u4E14\u6CA1\u843D\u5230\u4E3B\u68C0\u51FA\uFF1B\u8BFB\u4E0D\u5230 worktree \u5373\"\u672A\u6D4B\u91CF\"\uFF08\u9632\u6B62\u9694\u79BB\u9000\u5316\u6210\u63D0\u793A\uFF09";
+/**
+ * ── ★ 输入面声明（B 层，编译期）────────────────────────────────────────────────
+ *
+ * ★ 本判据要的两格也都是【调用方注入的观察】，不是 ctx 上原生的字段：
+ *
+ *   · `worktreePath` —— 这个任务被派发到的隔离工作目录。它来自调度器的派发
+ *     （`kickMember` 里 `createTaskWorktree(...).path`，经 `onDispatched` 回流），
+ *     不是 ctx 里本来就有的东西。★ **它就是本判据的闸门**：缺席 ⇒ 判据返回
+ *     `{ok:true, landed:null, skipped:'no worktree was declared …'}`，
+ *     也就是"这里没有要测的东西"（不是"我测不了"）。
+ *   · `arrival`      —— 探针（在 worktree / 主检出两侧各读了一遍）。判据自己不读
+ *     文件系统，所以"有人真的去看过"这件事只能由这一格表达。
+ *
+ * ★ 为什么两格【都】声明，即使 `worktreePath` 缺席时判据并不 unmeasured：
+ *   声明的是"这条判据需要哪些格才说得出话"，而不是"哪些格缺席会让它 unmeasured"。
+ *   只声明 arrival 会让核对层在"没有隔离"的 ctx 上报出一格缺失，而那是
+ *   **正常情形**（review/work 类别本就不需要 worktree）—— 噪音。两格都声明，
+ *   核对层才有机会说清"这条判据要问的到达问题，连它的两个观察面都没注入"。
+ *   代价是"没有隔离要求"的 ctx 也会被报成 incomplete，这是**已知且刻意**的
+ *   取舍：那个读数在 `requires.checks` 里逐条可读，而在 `observe`（缺省）下
+ *   它不改变任何裁决（见 requires.ts 的先软后硬一节）。
+ *
+ * ── ★ 每一格都与一条 `unmeasured` 臂逐条对齐（本判据有三条）────────────────────
+ *
+ *     ① `arrival` 缺席          ⇒ "no arrival probe was injected"      ⇒ 声明 arrival
+ *     ② `arrival.worktreeReadable` 非真 ⇒ "the worktree … could not be read" ⇒ 声明 arrival
+ *     ③ `arrival.mainReadable` 非真     ⇒ "… cannot be certified"       ⇒ 声明 arrival
+ *
+ *   三条都落在 `arrival` 这一格上：它是**整份探针**在不在，而不是它的某个读数。
+ *   声明它一条就够（读数是判据自己的事，`readFile` 那种"执行器逐格声明"在这里
+ *   没有对象 —— 判据不读文件系统，它读的是别人交上来的读数），但**必须**声明：
+ *   否则"调用方忘了注入探针"会退回成一个静默的 unmeasured，而那正是本轮要消灭的。
+ *
+ * ★ `worktreePath` 也声明，尽管它缺席时判据走的是第三条路（"没有隔离要求"⇒ ok）：
+ *   它是本判据的**闸门**，而闸门格与输入格在这条判据上无法用 appliesTo 分开
+ *   （见下面 `appliesTo` 的注释：把"没有隔离"写成不适用，会让"不需要隔离"与
+ *   "该隔离却没隔离"同形 —— worktree.ts 的 WorktreeRefusal 整整一段都在讲这个坑）。
+ *   既然闸门留在 `gate()` 里，它就必须被声明，否则核对层永远说不出
+ *   "这条判据连它的工作目录都没注入"。
+ *
+ * ★ 而 `worktreeUnavailable`（降级派发：非 git 仓库）**不声明**：缺席时判据照常
+ *   按 landing 判定，它不是"这一格缺了就说不出话"的格。把它写成一条缺格会把
+ *   正常情形读成缺陷 —— 那一事实由调度器自己记进任务记录（见 `src/scheduler.ts`
+ *   的降级分支），不归这条判据。
+ */
+export declare const requires: CtxPaths<WorktreeContext>[];
 /** 只读得到一半时的降级证据（例如目录在、主检出读不到）。 */
 export interface WorktreeArrivalProbe {
     /** 工作目录里【存在】的路径（workspace 相对）。 */

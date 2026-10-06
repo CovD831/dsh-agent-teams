@@ -44,10 +44,17 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { gate, appliesTo, verifyCommandProblems, shellTokens, id, point } from '../lib/gates/contract/verify-command.js'
+import { gate, appliesTo, verifyCommandProblems, shellTokens, id, point, requires } from '../lib/gates/contract/verify-command.js'
 import { registry } from '../lib/gates/index.js'
+import { checkRequires } from '../lib/gates/requires.js'
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { createTeamDir } from '../lib/state.js'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
+
+/** 本仓库根（输入面臂要读源码：`requires` 是**声明**，它没有运行时行为可测）。 */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /* ── 三态的收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形 ── */
 
@@ -588,4 +595,172 @@ test('★ 不适用臂（t17）：同一次求值里，"缺席 ⇒ ok" 与 "在�
     Object.keys(unreadable).sort(),
     '★ 「没有这个要求」与「有这个要求而我没测成」必须不同形',
   )
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ★ 输入面臂（t2）：这条判据声明了它【需要执行器才说得出话】
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★ 输入面臂：执行器注入 ⇒ 核对 ok；没注入 ⇒ 逐条报出缺 `execVerifyCommand`', () => {
+  /**
+   * ── ★ 本条判据正是上一轮五次缺口里的**第三次「执行器缺席」**──────────────────
+   *
+   * MEASURED（2026-10-05，t17/t18）：contract 的两个调用点都没注入 `execVerifyCommand`
+   * ⇒ 本判据在生产路径上**永远** `unmeasured` ⇒ 而 unmeasured 等于拒绝
+   * ⇒ **implementation / repair 这类必须验的契约连 create_task 都过不去**。
+   *
+   * ⇒ 这一格必须进 `requires`：它缺席不是"判据安静一点"，而是"判据说不出它唯一
+   *   想说的事"。核对层报出它，与判据自己报 unmeasured 是**同一句话的两种说法**。
+   *
+   * ★ 与 `contract.build-artifact-scope` 恰好相反的口径（两条合起来才完整）：
+   *   那边【可选地读】的东西不进 requires（缺席是它的一条合法裁决）；
+   *   这边【需要它才说得出话】的东西必须进。
+   */
+  const declared = [...requires]
+  assert.deepEqual(declared, ['task', 'execVerifyCommand'], '★ 声明就是这两格：一份契约 + 一个执行器')
+
+  const withExecutor = {
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+    execVerifyCommand: async () => 0,
+  }
+  const withoutExecutor = {
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+  }
+
+  const full = checkRequires({ id, requires, appliesTo }, withExecutor)
+  assert.equal(full.status, 'ok', '★ 两格都在场 ⇒ 不报')
+  assert.deepEqual(full.present, ['task', 'execVerifyCommand'], '★ 在场的那两格要如实交出来')
+  assert.deepEqual(full.missing, [])
+
+  const bare = checkRequires({ id, requires, appliesTo }, withoutExecutor)
+  assert.equal(bare.status, 'incomplete', '★ 执行器没注入 ⇒ 必须报缺')
+  assert.deepEqual(bare.missing, ['execVerifyCommand'], '★ 点名缺的是执行器这一格，不是"task"')
+  assert.deepEqual(bare.present, ['task'])
+})
+
+test('★ 输入面臂：核对层的结论与判据自己的 unmeasured 说【同一件事】', async () => {
+  /**
+   * ★ 一条声明与判据的未测量臂若各说各的，那就是新的静默失效 ——
+   *   "缺 X 就 unmeasured"里的 X 必须出现在 requires 里（t2 验收 ②）。
+   *
+   * 本判据的 unmeasured 分支逐条对齐（也写在源码里那份声明的注释里）：
+   *
+   *     "no executor was injected …"                ⇒ execVerifyCommand ✔ 在 requires
+   *     "declares a verify value that is not a list" ⇒ task             ✔ 在 requires
+   *     "declares an empty verify list"              ⇒ task.verify      ✘ 不在（可选）
+   *
+   * ⇒ 唯一"缺 X 就 unmeasured 而 X 不在 requires 里"的是 `task.verify`，
+   *   而它**不是遗漏**：t17 的收口定下"verify 整个缺席 ⇒ ok（不适用）"，
+   *   所以它的缺席是一条**合法裁决**，由 gate 自己的分支持有（下面第三条断言钉住）。
+   */
+  const noExecutor = { task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] }, creating: true }
+  const check = checkRequires({ id, requires, appliesTo }, noExecutor)
+  assert.deepEqual(check.missing, ['execVerifyCommand'])
+  assert.match(
+    expectUnmeasured(await gate(noExecutor)),
+    /no executor was injected/,
+    '★ 判据自己也说"没有执行器"：两句话必须同源',
+  )
+
+  /**
+   * ★ 而 `task.verify` 的缺席【不得】被核对层报成缺 —— 那是 t17 那条修过的边界：
+   *   `kind=work` 的普通任务本来就不带 verify，报缺会把每一个普通任务变成假告警。
+   */
+  const workContract = { task: { id: 't1', kind: 'work' }, creating: true, execVerifyCommand: async () => 0 }
+  const workCheck = checkRequires({ id, requires, appliesTo }, workContract)
+  assert.equal(workCheck.status, 'ok', '★ verify 缺席是"不适用"，不是"输入没接上"')
+  assert.ok(!workCheck.missing.includes('task.verify'), '★ 核对层不许替这条判据说出它自己拒绝说的话')
+  assert.equal(shapeOf(await gate(workContract)), 'ok', '★ 而判据自己在这一格上也判 ok（两者的口径一致）')
+})
+
+test('★ 输入面臂（真品路径）：经注册表，缺执行器必须进 `requires.missing`（不能只是判据自己嘀咕）', async () => {
+  /**
+   * ★ 这一臂走【进程级注册表】。理由与 `build-artifact-scope` 那边的装配臂同源：
+   *   模块里写了 `export const requires`、而装配层（`asRegistration` 的白名单）
+   *   没往下交，这种缺陷**只有从注册表看得见** —— MEASURED（2026-10-06，
+   *   dispatch-owner 的 F1）：那正是本轮出现过一次的真实形态。
+   */
+  const evaluation = await registry.evaluate('contract', {
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+  })
+  const check = evaluation.requires.checks.find((item) => item.id === id)
+  assert.ok(check !== undefined, '★ 这条判据必须出现在 contract 位置的核对结论里')
+  assert.equal(check.status, 'incomplete', '★ 没注入执行器 ⇒ 核对必须报出这一格')
+  assert.deepEqual(check.missing, ['execVerifyCommand'])
+  assert.match(evaluation.requires.missing.join('\n'), /execVerifyCommand/, '★ 人话清单里要指名道姓')
+  assert.match(evaluation.requires.missing.join('\n'), new RegExp(id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '★ 且要说清是哪条判据')
+
+  /**
+   * ★ 先软后硬：上面这一整段**没有动裁决** —— 那次求值仍然是判据自己的
+   *   `unmeasured`，而不是多出一条"输入面没接线"的 blocker。
+   */
+  assert.ok(
+    !evaluation.blockers.some((line) => line.includes('the input surface is not wired')),
+    '★ 观察模式（缺省）下核对结果不得变成 blocker',
+  )
+
+  /** ★ 另一半：注入执行器之后，同一份声明必须安静。 */
+  const full = await registry.evaluate('contract', {
+    task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts', 'lib/a.js'], verify: ['pnpm test'] },
+    creating: true,
+    execVerifyCommand: async () => 0,
+  })
+  const fullCheck = full.requires.checks.find((item) => item.id === id)
+  assert.equal(fullCheck.status, 'ok', '★ 执行器注入 ⇒ 核对不得报缺')
+  assert.deepEqual(fullCheck.present, ['task', 'execVerifyCommand'])
+})
+
+test('★ 装配臂：requires 真的被装配层转发到注册表（"声明写了但没人交下去"是新形态）', () => {
+  const listed = registry.list().contract.find((entry) => entry.id === id)
+  assert.ok(listed !== undefined, '★ 这条判据必须在注册表清单里')
+  assert.equal(listed.hasRequires, true, '★ "声明过输入面"必须读得出来（false = 声明没被转发下去）')
+  assert.deepEqual(listed.requires, ['task', 'execVerifyCommand'], '★ 声明的内容也要原样读得出来')
+})
+
+test('★ 声明臂：源码里的 requires 用的是【类型层】声明（拼错的路径要能编译期就红）', () => {
+  /**
+   * ★ 运行时看不出一条声明"有没有挂上类型" —— 它照常工作，只是拼错的路径要等到
+   *   某天有人改它时才以"核对报了一个谁也没写过的格子"的形式露面。
+   */
+  const source = readFileSync(join(ROOT, 'src/gates/contract/verify-command.ts'), 'utf8')
+  const declaration = /export const requires:\s*CtxPaths<([A-Za-z0-9_]+)>\[\]\s*=\s*\[([^\]]*)\]/.exec(source)
+  assert.ok(declaration !== null, '★ 声明必须写成 `CtxPaths<本判据的 ctx 类型>[] = [...]` 的形状')
+  assert.equal(
+    declaration[1],
+    'VerifyCommandContext',
+    '★ 类型参数必须是这条判据自己的 ctx 类型 —— 换成宽类型会让拼错的路径重新变成运行时的惊喜',
+  )
+  assert.match(source, /import type \{ CtxPaths \} from '\.\.\/requires\.ts'/, '★ 类型要从 requires.ts 来（type-only import）')
+})
+
+test('★ 输入面臂（对照）：上一轮那个真实缺口形状 —— 完整调用点的 ctx 必须一格不缺', async () => {
+  /**
+   * ★ 这一臂把"t18 修好之后的生产形状"钉成一条正品断言：`create_task` 的
+   *   contract 调用点注入的就是 `{ team, task, creating: true, execVerifyCommand }`。
+   *   在这里复现那一份 ctx，核对必须 **ok**。
+   *
+   * ⇒ 于是"有人把注入那一行删了"这件事会**同时**打红两处：
+   *   工具层的放行臂（下面的 `create_task` 真品路径）与本夹具的这几条 ——
+   *   而它在本轮之前是**只能靠人眼审查**的。
+   */
+  const realShape = {
+    team: { id: 'team', tasks: [] },
+    task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'], verify: ['pnpm test'] },
+    creating: true,
+    execVerifyCommand: (command) => runForExitCode(command, process.cwd()),
+  }
+  const check = checkRequires({ id, requires, appliesTo }, realShape)
+  assert.equal(check.status, 'ok', `★ 生产调用点的 ctx 必须一格不缺；得到 ${JSON.stringify(check)}`)
+
+  /**
+   * ★ 规则二后半句的判法：把**这一格**单独去掉（其余一律不动），核对必须变结论。
+   *   一条恒不报的实现会让上面那条与这一条同时绿 —— 所以两条必须一起读。
+   */
+  const { execVerifyCommand: _dropped, ...withoutInjection } = realShape
+  const degraded = checkRequires({ id, requires, appliesTo }, withoutInjection)
+  assert.equal(degraded.status, 'incomplete', '★ 把注入那一行去掉 ⇒ 核对必须报缺（它测的就是这件事）')
+  assert.deepEqual(degraded.missing, ['execVerifyCommand'])
 })

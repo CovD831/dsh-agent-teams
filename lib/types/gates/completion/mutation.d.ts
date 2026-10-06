@@ -40,10 +40,45 @@
  * 这条同样适用于 L3 的契约违反体 —— 定义里的锚点必须落在这个范围内。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 import { type InvariantDefinition, type MutantRun, type MutationOperator, type SuiteTarget } from '../../mutation.ts';
 export declare const id = "completion.mutation";
 export declare const point = "completion";
 export declare const description = "\u5BF9\u3010\u6539\u52A8\u884C\u8303\u56F4\u3011\u6CE8\u5165 L1/L2/L3 \u53D8\u5F02\u4F53\u5E76\u91CD\u8DD1\u6740\u624B\u5957\u4EF6\uFF1A\u53D8\u5F02\u4F53\u5B58\u6D3B\u5373\u62D2\u7EDD\uFF08\u9632\u6B62\u88C5\u9970\u6027\u6D4B\u8BD5\uFF09\uFF1B\u5957\u4EF6\u591F\u4E0D\u5230\u88AB\u53D8\u5F02\u6587\u4EF6 \u21D2 unmeasured";
+/**
+ * ── 输入面声明（t4）───────────────────────────────────────────────────────────
+ *
+ * ★ 本条在上一轮【真的缺过输入】，而且缺的正是它自己写在文件头里的那三样：
+ *
+ *   MEASURED（本轮开工前的复盘）：`readFile` / `runTest` / `writeFile` 三个执行器
+ *   曾经没接上。`gate()` 把它们拼成一条 `unmeasured`："mutation testing is
+ *   unavailable (no runTest / writeFile injected), so whether the delivered tests
+ *   detect a broken implementation could not be measured" —— 而 `unmeasured`
+ *   在日志里与 `ok` 同形。**装饰性测试就这样溜过去了**，因为那条判据压根没跑。
+ *
+ * ★ 三格与 `gate()` 里那个 `missing` 数组逐条对齐（声明与未测量臂必须一致）：
+ *   判据自己算一遍 `missing`、核对层再按声明算一遍 —— 两份清单说的是同一件事，
+ *   而声明把这件事提前到了**求值之前**（不必先跑一遍才知道没执行器）。
+ *
+ * ★ `changedLines` 是【git 证据】，与 `changedFiles` 不同形，两者都要声明：
+ *   · `changedFiles` 缺席 ⇒ "this task declared no changed files"；
+ *   · `changedLines` 缺席 ⇒ "the changed-line ranges … could not be established
+ *     (no git evidence)"。
+ *   后者是 R1（`--lines` 语义）的入口：拿不到 git 证据时**不是**退回全文件，
+ *   而是 unmeasured。这正是那次缺口里最容易看漏的一格 —— 它看起来像"一个可选的
+ *   优化参数"，实际是判据正确性的前提（全文件变异会扭曲分母）。
+ *
+ * ★ `killerSuites` 也声明：空缺 ⇒ "no killer suite was declared for these changed
+ *   files, so survivors would be a fact about the probe rather than about the
+ *   tests" —— 这是本条判据存在的核心理由（探针够不到 ≠ 测试不够）。
+ *
+ * ★ 不声明的：`operators` / `invariants` / `minKillRate` / `mirrors` / `maxMutants`
+ *   等**有缺省值**的调参位。它们缺席时判据照常测量（用默认算子、默认镜像、
+ *   默认阈值），不是"没测成"。★ 这正是"声明"与"把 ctx 里每个字段都列一遍"的
+ *   分界线：**声明的是"这一格缺席 ⇒ 判据说不出话"的那些格**。多列会制造噪音，
+ *   而噪音会教人忽略核对 —— 与漏列同样有害。
+ */
+export declare const requires: CtxPaths<MutationContext>[];
 /** 默认的"装饰性"界线。杀伤率低于它 ⇒ 说清有多少条存活、覆盖范围是什么。 */
 export declare const DEFAULT_MIN_KILL_RATE = 0.6;
 /** 镜像：改 `src/x.ts` 的源码，`lib/x.js` 是与它同源的编译产物，必须一起改。 */

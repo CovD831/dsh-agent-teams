@@ -28,7 +28,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { gate, appliesTo, id, point } from '../lib/gates/dispatch/worktree.js'
+import { gate, appliesTo, id, point, requires } from '../lib/gates/dispatch/worktree.js'
 import { createTaskWorktree, provisionWorktreeDependencies } from '../lib/worktree.js'
 import { installTeamScheduler } from '../lib/scheduler.js'
 import { readTeam, withTeamLock } from '../lib/state.js'
@@ -273,6 +273,98 @@ test('★ appliesTo：只对声明了 changedPaths 的 implementation/repair 生
 test('★ 判据身份与装配约定一致（id/point 是装配点的键）', () => {
   assert.equal(id, 'dispatch.worktree')
   assert.equal(point, 'dispatch')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★ 输入面（t6 的 B 层 + A 层）：声明与实测必须一致
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 本判据的输入面**全是注入**：它自己不读文件系统（那是性质 ①），所以
+// "工作的到达"这件事能不能被说清，完全取决于调用方注入的两格 ——
+// 而这正是上一轮五次同形缺陷落在的那一格。
+
+test('★ 输入面声明：`requires` 与本判据的【三条】未测量臂逐条对齐', () => {
+  /**
+   * ── ★ 声明与未测量臂不一致 = 新的静默失效 ────────────────────────────────────
+   *
+   * 判据说「缺 X 就 unmeasured」，而 X 不在 requires 里 ⇒ 核对层永远不会报它缺
+   * ⇒ 那次未测量在核对读数里**看不见**。⇒ 钉法：拿掉声明的每一格，判据必须说不出话。
+   */
+  assert.deepEqual([...requires], ['worktreePath', 'arrival'], '★ 本判据要 ctx 的哪几格')
+
+  const repo = track(makeRepo())
+  const created = createTaskWorktree({ repo, taskId: 't-requires' })
+  track(created.path)
+  writeInWorktree(created.path, 'src/extra.ts', 'export const extra = 1\n')
+  const base = arrivalCtx(repo, created.path, ['src/extra.ts'])
+  expectOk(gate(base))   // ★ 前提：一格不缺时它是 ok —— 否则下面证明不了任何事
+
+  /**
+   * ① `arrival` 缺席 ⇒ unmeasured（三条未测量臂里的一条，另外两条是它的读数）。
+   *    ⇒ 它必须出现在 requires 里，否则"调用方忘了注入探针"退回成静默 unmeasured。
+   */
+  const { arrival: _dropped, ...withoutProbe } = base
+  assert.match(
+    expectUnmeasured(gate(withoutProbe)),
+    /no arrival probe was injected/,
+    '★ 声明的这一格缺席 ⇒ 判据必须说不出话（若它返回 ok，那这一格就不该进 requires）',
+  )
+
+  /**
+   * ② `worktreePath` 缺席 ⇒ **不适用**（ok + landed:null），不是 unmeasured。
+   *
+   * ★ 这一格与上一条【不同形】是刻意的，也是本判据最容易搞错的一处：
+   *   把"没有隔离要求"写成 unmeasured 会让每一次 review/work 类派发都变成
+   *   "没能测量"，而那是正常情形（噪音）。而"没公开说明缺哪一格"又是另一回事 ——
+   *   所以它进 requires（核对层要能说清工作目录根本没注入），
+   *   但它在 `gate()` 里走的**不是** unmeasured 那条路。
+   *   ⇒ 这一条同时钉住了两件事：语义（不适用）与声明（必须被声明）。
+   */
+  const { worktreePath: _noWorktree, ...withoutPath } = base
+  const noIsolation = expectOk(gate(withoutPath))
+  assert.equal(noIsolation.landed, null, '★ 没有隔离要求 ⇒ landed: null，不是 false')
+  assert.match(String(noIsolation.skipped), /no worktree was declared/, '★ 而且要与"未测量"读起来不同形')
+  assert.ok(requires.includes('worktreePath'), '★ 但这一格仍要声明：核对层要能说出"它连工作目录都没有"')
+})
+
+test('★ 输入面接线：注册表里读得到声明（转发链上一格都不许漏）', async () => {
+  /**
+   * ★ MEASURED（2026-10-06，t3）：这条断言上一版是**红的** —— 判据声明了 requires，
+   *   而 `asRegistration` 没有把这一格转发下去，`registry.list()` 里
+   *   `hasRequires: false` ⇒ "声明过"与"没声明"同形。
+   *   ⇒ 必须问【注册表】，不能只问判据模块（后者在缺陷存在时照样绿）。
+   */
+  const { registry } = await import('../lib/gates/index.js')
+  const listed = registry.list().dispatch.find((entry) => entry.id === id)
+  assert.ok(listed, '★ 这条判据必须在 dispatch 位置的注册清单里')
+  assert.equal(listed.hasRequires, true, '★ `hasRequires` 必须为真 —— 否则装配层又把声明吃掉了')
+  assert.deepEqual(listed.requires, ['worktreePath', 'arrival'], '★ 转发之后要逐字等于判据自己的声明')
+})
+
+test('★ A 层核对：注入了工作目录与探针 ⇒ 这一格读成在场；缺了 ⇒ 报出缺的是哪一格', async () => {
+  const { registry } = await import('../lib/gates/index.js')
+  const mine = (evaluation) => evaluation.requires.checks.find((check) => check.id === id)
+
+  const repo = track(makeRepo())
+  const created = createTaskWorktree({ repo, taskId: 't-requires-audit' })
+  track(created.path)
+  writeInWorktree(created.path, 'src/extra.ts', 'export const extra = 1\n')
+
+  // ① 两格都注入 ⇒ ok
+  const injected = await registry.evaluate('dispatch', arrivalCtx(repo, created.path, ['src/extra.ts']))
+  assert.equal(mine(injected).status, 'ok', '★ 两个观察面都注入了 ⇒ 这一格读成"在场"')
+  assert.deepEqual(mine(injected).present, ['worktreePath', 'arrival'])
+
+  // ② 适用（kind + changedPaths 都在）但缺注入 ⇒ 核对必须【逐格报出】
+  const { arrival: _a, worktreePath: _w, ...thin } = arrivalCtx(repo, created.path, ['src/extra.ts'])
+  const partial = await registry.evaluate('dispatch', thin)
+  assert.equal(mine(partial).status, 'incomplete', '★ 输入面缺格 ⇒ 核对必须报出来')
+  assert.deepEqual(mine(partial).missing, ['worktreePath', 'arrival'], '★ 一格一格报，不合并、不短路')
+
+  // ③ 不适用 ⇒ 这一格缺席【不报】（噪音闸门与 changed-paths 同一条纪律）
+  const notApplicable = await registry.evaluate('dispatch', { task: { id: 't1', kind: 'review' }, update: {} })
+  assert.equal(mine(notApplicable).status, 'skipped', '★ 不适用 ⇒ 没核对，且与"核对了、都齐"不同形')
+  assert.equal(notApplicable.requires.incomplete, 0, '★ 不适用不许产出噪音')
 })
 
 // ── 接线臂：机制必须【真的】生效 ─────────────────────────────────────────────

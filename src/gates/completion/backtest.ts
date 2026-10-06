@@ -70,16 +70,80 @@
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
+import type { CtxPaths } from '../requires.ts'
 
 export const id = 'completion.backtest'
 export const point = 'completion'
 export const description =
   '按依赖图选测并跑全量，证明改动没把别处改坏；基准不绿或选测来源不明即拒绝/未测量（不能归因时绝不放行）'
 
+/**
+ * ── 输入面声明（t4）───────────────────────────────────────────────────────────
+ *
+ * ★ 本条在上一轮【真的缺过输入】，缺的是 `baseline` / `coverage` / 两个执行器，
+ *   而四种缺口的症状全是 `unmeasured` —— 与 `ok` 在日志里同形：
+ *
+ *   · `baseline` 缺席 ⇒ "the baseline state is unavailable"
+ *   · `coverage` 缺席 ⇒ "no dependency graph / coverage data was provided"
+ *   · `execBacktestCommand` 缺席 ⇒ "no full-suite executor was injected"
+ *   · `execSelectedCommand` 缺席 ⇒ 只在真跑选测时才显形（见下面 §两个执行器不同形）
+ *   ⇒ 一条**从未回测过任何东西**的判据，读起来是"回测通过了"。
+ *
+ * ★ `baseline` 不是"一个字段"，而是【父/HEAD 上的测试结果】——它的缺席不是
+ *   "少了个参数"，是"这次改动没有基准可比"。判据的措辞说的正是这件事
+ *   （"a regression could not be told apart from a pre-existing failure"）。
+ *   所以它是**第一格必须声明的东西**：没有它，这条判据的核心结论（归因）
+ *   根本无从谈起。同理 `coverage` 是【依赖图数据】，不是"可选的分析输入"。
+ *
+ * ── ★ 两个执行器必须分开声明（它们不同形）─────────────────────────────────────
+ *
+ * `execSelectedCommand` 与 `execBacktestCommand` **不是同一个开关的两半**：
+ *
+ *   · `execBacktestCommand` ⇒ 全量的执行器。它缺席是**无条件的失败**
+ *     （"no full-suite executor was injected" ⇒ unmeasured，且这次裁决里
+ *     没有任何一条测试被跑过）。
+ *   · `execSelectedCommand` ⇒ 只在 `coverage.command !== undefined` 时才被用到。
+ *     它是**有条件的**：判据刻意允许"不跑选测"（"没给 ⇒ 不假装跑过"），
+ *     那时它缺席是**正常**的。
+ *
+ *   ⇒ 合成一格会让核对层在"本来就不该跑选测"的那些 ctx 上报一条假的缺口 ——
+ *     而本队已经定过：**不适用不报**，噪音与误报同样有害。
+ *
+ * ★ MEASURED（本任务的臂 A 抓到的）：`execSelectedCommand` **不进声明**。
+ *   第一版把它写进了数组，臂 A 立刻红：一份完全正常的 ctx（不跑选测 ⇒ 没有
+ *   `coverage.command`）被核对报成 `incomplete`，而判据自己在同一份 ctx 上
+ *   诚实地返回 `ok`。**核对层报了一个判据根本不认的缺口** —— 那不是"更严"，
+ *   那是噪音，而噪音会教人把核对整体忽略（与漏报同样有害）。
+ *
+ *   ⇒ 判据自己就是这条口径的唯一权威：`execSelectedCommand` 缺席**不必然**
+ *     使判据说不出话（`coverage.command === undefined` 时它压根不被调用），
+ *     所以它不是"缺席 ⇒ 判据沉默"的那一类，**不属于输入面**。
+ *     同理 `coverage.command` 也不声明：它是"要不要跑选测"的开关，缺席是正常的。
+ *
+ *   ★ 这正是"声明的是**哪几格缺席 ⇒ 判据说不出话**"那条分界线的第二次应用：
+ *     第一次是 `operators` 那些有默认值的调参位（见 mutation），
+ *     这一次是**有条件**的注入面。两次都是同一个问题：
+ *     "这一格在不在声明里"由"它缺席时判据还能不能说话"回答，不由"它看起来重不重要"回答。
+ *
+ * ★ `changedPaths` 与 `update.changedPaths` 都声明：`appliesTo` 读的是这两格的
+ *   **或**（`Array.isArray(fromUpdate) ? fromUpdate : fromCtx`），而 `gate()`
+ *   读的也是这两格的或。两处口径必须一致 —— 只声明其中一格，会让"闸门说适用、
+ *   声明说缺"这种自相矛盾的核对结论出现。
+ */
+export const requires: CtxPaths<BacktestContext>[] = [
+  'baseline',
+  'coverage',
+  'coverage.source',
+  'coverage.knownTests',
+  'coverage.selected',
+  'execBacktestCommand',
+  'changedPaths',
+]
+
 /** 跑一次命令，返回退出码。与 `completion.verify-rerun` 同一个注入形状。 */
 export type ExecCommand = (command: string) => Promise<number>
 
-interface BacktestContext {
+export interface BacktestContext {
   task?: { id?: string; kind?: string; inScope?: string[] }
   update?: { changedPaths?: string[] }
   /** ★ 本次改动涉及的文件（workspace 相对）。空数组 = 没声明，判据据此 unmeasured。 */

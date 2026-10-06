@@ -40,10 +40,17 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { gate, appliesTo, id, point } from '../lib/gates/contract/build-artifact-scope.js'
+import { gate, appliesTo, id, point, requires } from '../lib/gates/contract/build-artifact-scope.js'
 import { buildRegistry, registry } from '../lib/gates/index.js'
+import { checkRequires } from '../lib/gates/requires.js'
 import { classifyChangedPath } from '../lib/quality-gates.js'
+
+/** 本仓库根（下面几条臂要读源码：`requires` 是**声明**，它没有运行时行为可测）。 */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形。 */
 function expectBlocked(v) {
@@ -309,3 +316,338 @@ test('★ 接线臂（对照）：注册表在【合法契约】上不得因这�
   const entry = evaluation.ran.find((item) => item.id === 'contract.build-artifact-scope')
   assert.equal(entry?.verdict, 'ok', '★ 合法契约上这条判据必须安静')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★ 输入面臂（t2）：这条判据的 requires 声明，以及它【不】声明什么
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 输入面臂：声明的路径在真实 ctx 上都在场 ⇒ 核对 ok（不制造噪音）', () => {
+  /**
+   * ★ 契约位置两个调用点给的真实 ctx 形状都走这条臂：`create_task` 与
+   *   `amend_task` 都必然带着 `task`。
+   */
+  for (const ctx of [
+    { task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'] }, creating: true },
+    { task: { id: 't1', kind: 'work' }, creating: false },
+  ]) {
+    const check = checkRequires({ id, requires, appliesTo }, ctx)
+    assert.equal(check.status, 'ok', `★ 输入面齐 ⇒ 不得报缺；得到 ${JSON.stringify(check)}`)
+    assert.deepEqual(check.missing, [])
+    assert.deepEqual(check.present, ['task'], '★ 在场的那一格要如实交出来')
+  }
+})
+
+test('★ 输入面臂：把 `task` 从 ctx 里去掉 ⇒ 走注册表就是 `skipped`（★ 这一条实测出来的边界）', () => {
+  /**
+   * ── ★ 这一臂是本任务的第一个**实测发现**，而不是一条想当然的断言 ─────────────
+   *
+   * 我原本想写成「去掉 `task` ⇒ 核对报缺」。**实测说不是**：`task` 同时是
+   * `appliesTo` 读的那一格 —— 它一缺席，`appliesTo` 就为假，注册表在调用
+   * `checkRequires` 之前就走了跳过分支：
+   *
+   *     ran:      [{ id: 'contract.build-artifact-scope', verdict: 'skipped' }]
+   *     requires: { checked: 0, skipped: 1, incomplete: 0, missing: [] }
+   *
+   * ⇒ 于是出现一个**结构性盲区**：一条判据**不可能**通过 `requires` 报出
+   *   「它自己那道 `appliesTo` 闸门读的那一格缺失」—— 因为那一格缺失恰好让
+   *   闸门关上，而闸门关上就不核对。这一条对 **`build-artifact-scope` 与
+   *   `verify-command` 都成立**（两者的 `appliesTo` 都读 `ctx.task`）。
+   *
+   * ★ 它**不是**本任务引入的，也不是这两条判据特有的：它是 t6 的机制与
+   *   「`appliesTo` 闸门」之间的一般性质（已在 `lib/gates/registry.js` 上用
+   *   一个最小探针逐条复现）。本任务把它记在这里，是因为**这两个 contract 判据
+   *   的形状让它第一次变得可见**，而且它是本轮要消灭的那类失效的近亲。
+   *
+   * ★ 为什么仍然**可以接受**（而不是"必须修"）—— 三条依据：
+   *
+   *   ① 那一格缺失**不是静默的**：`skipped: 1` 与 `ran[].verdict === 'skipped'`
+   *      都把它记下来了，而且 `requires.skipped` 与 `checked` 分开计数 ⇒
+   *      「这一轮没核对」不会读成「核对过、都齐」（不同形）。
+   *   ② 判据的 `gate()` 在这个 ctx 上本来也不会说话（`appliesTo` 是它自己写的），
+   *      所以"没核对"没有掩盖任何一条判据会给出的结论。
+   *   ③ 真正会产出 undeclared 路径的是**声明了 inScope 的质量任务**，而那些任务
+   *      必然带着 `task` ⇒ 核对层照常核对这一格（见下一条臂的真品路径）。
+   *
+   * ★ 这一条臂的作用是**把边界钉成断言**（而不是留成一句印象）：
+   *   若将来有人把注册表的跳过分支改成"跳过前也核对一遍"，
+   *   这条臂会立刻红 —— 那时必须同时回答"`skipped` 还算不算不适用"。
+   */
+  const check = checkRequires({ id, requires, appliesTo }, { creating: true })
+  assert.equal(check.status, 'skipped', '★ 闸门格缺席 ⇒ appliesTo 为假 ⇒ 跳过（不报缺）')
+  assert.match(String(check.skippedBecause), /appliesTo/)
+  assert.deepEqual(check.missing, [], '★ 跳过的判据不许产出 missing —— 那是噪音的来源')
+
+  /**
+   * ★ 而**经过注册表**时，同一份 ctx 必须留下"没核对"的痕迹（不许无声无息）：
+   *   这正是①里那条依据，必须被一条断言钉住，否则它只是一句辩解。
+   */
+  return (async () => {
+    const { createGateRegistry } = await import('../lib/gates/registry.js')
+    const r = createGateRegistry()
+    r.register({
+      id, point: 'contract', description: 'probe for the gate-cell boundary',
+      gate: () => ({ ok: true }),
+      requires, appliesTo,
+    })
+    const evaluation = await r.evaluate('contract', { creating: true })
+    assert.equal(evaluation.requires.skipped, 1, '★ "没核对"必须被记下来（不许与"核对过、都齐"同形）')
+    assert.equal(evaluation.requires.checked, 0, '★ checked 只数真的核对了的')
+    assert.equal(evaluation.ran[0].verdict, 'skipped')
+  })()
+})
+
+test('★ 输入面臂（★ 本任务的核心）：inScope 缺席【不得】被报成缺输入 —— 那是假告警', () => {
+  /**
+   * ── ★ 为什么这一条是本任务最重要的一臂 ────────────────────────────────────
+   *
+   * 本判据的语义**恰好**是一句「缺席不是缺失」（t11 收口，见 gate 里那两段注释）：
+   *
+   *     inScope 整个缺席    ⇒ 这份契约没有提出同步要求 ⇒ **ok**（不适用）
+   *     inScope 在场但不可判 ⇒ 它提了要求而清单读不出   ⇒ **unmeasured**
+   *
+   * ⇒ 若把 `'task.inScope'` 写进 requires，核对层会在**每一个普通任务**上喊
+   *   「缺 task.inScope」，而 `kind=work` 的 `create_task` **本来就不带 inScope**。
+   *   那不是"判据严格"，那是把**不适用**报成**没测到** —— 而两者的代价方向相反。
+   *   ★ 而假告警与不报警同样有害：它教人忽略门禁。
+   *
+   * ★ 它同时防住"改回去"：下一个人如果顺手把 `'task.inScope'` 加进声明，
+   *   这一条臂立刻红 —— 也就是说，**这条口径是被一句断言钉住的，不是被一句注释**。
+   */
+  const absentScope = { task: { id: 't1', kind: 'work' }, creating: true }
+  const check = checkRequires({ id, requires, appliesTo }, absentScope)
+  assert.equal(
+    check.status,
+    'ok',
+    '★ inScope 缺席是这条判据的一条【合法裁决分支】，不是接线缺陷：核对层不得报缺',
+  )
+  assert.ok(
+    !check.missing.includes('task.inScope'),
+    '★ 核对层不许替这条判据说出它自己明确拒绝说的话',
+  )
+
+  /**
+   * ★ 而"整个契约缺席"与"inScope 缺席"必须【不同形】—— 前者才是"这一轮没接上"。
+   *   这两件事的收场完全不同（一个要修调用点，一个是正常情形），
+   *   合成一个就再也读不出来了。
+   */
+  const noContract = checkRequires({ id, requires, appliesTo }, { creating: true })
+  assert.notDeepEqual(
+    { status: check.status, missing: check.missing },
+    { status: noContract.status, missing: noContract.missing },
+    '★ 「契约在、inScope 故意缺席」与「契约整个没交出来」必须不同形',
+  )
+  assert.equal(noContract.status, 'skipped', '★ 整个契约缺席 ⇒ appliesTo 为假 ⇒ skipped（不报缺，但要记数）')
+  assert.match(String(noContract.skippedBecause), /appliesTo/)
+})
+
+test('★ 输入面臂：声明必须与【未测量臂】一致（缺 X 就 unmeasured 的 X 必须在 requires 里）', () => {
+  /**
+   * ── 本判据的未测量臂只有一条（gate 里的 unmeasured 分支）──────────────────────
+   *
+   *     inScope 在场但读不出内容 ⇒ unmeasured
+   *
+   * 而那个分支的**前提**是「inScope 在场」，也就是 `task` 在场 ⇒ 它的输入面
+   * 就是 `task`。★ 逐条对齐：本判据没有任何一条"缺某一格就 unmeasured"的分支
+   * 是 requires 里没有的（`task.inScope` 缺席走的是 **ok**，不是 unmeasured）。
+   *
+   * ★ 断言写成【集合关系】而不是字面量：把 `'task.inScope'` 加回去会立刻违反
+   *   上一条臂，把 `'task'` 删掉会违反这一条。两条一起就把这份声明钉死了。
+   */
+  const declared = [...requires]
+  assert.deepEqual(declared, ['task'], '★ 这一条判据的输入面就是"一份任务契约"这一格')
+
+  // 未测量臂问的那件事（inScope 在场、读不出）必须在声明的输入面之内
+  const unmeasuredArm = { task: { id: 't1', kind: 'implementation', inScope: [] } }
+  const check = checkRequires({ id, requires, appliesTo }, unmeasuredArm)
+  assert.equal(check.status, 'ok', '★ 未测量臂的 ctx 上，输入面本身是齐的（"没能测量"是判据的结论，不是核对层的）')
+  assert.equal(shapeOf(gate(unmeasuredArm)), 'unmeasured', '★ 而判据自己仍然说"我没能测量它"')
+})
+
+test('★ 输入面臂（真品路径）：经注册表 + 工具层，缺 `execVerifyCommand` 必须被核对报出来', async () => {
+  /**
+   * ── ★ 这一条臂补上上一条臂实测出来的那个盲区 ────────────────────────────────
+   *
+   * `task` 既是闸门格又是声明格 ⇒ 它缺席时走 `skipped`。而 `verify-command` 的
+   * **另一格**（`execVerifyCommand`）不是闸门格：`appliesTo` 不读它。
+   * ⇒ 于是「调用方漏了注入执行器」这件事**能被机械核对报出来** ——
+   * 正是上一轮第三次缺口（t17/t18：contract 两个调用点都没注入 ⇒
+   * implementation/repair 契约连 create_task 都过不去）。
+   *
+   * ★ 走【进程级注册表】而不是直接调 `checkRequires`：要证明的是"这一格真的
+   *   在装配之后被核对到"，而不是"核对函数本身写得对"。这两件事不同形 ——
+   *   一条声明写了、而装配层没交下去，只有从这里看得见（见下一条装配臂）。
+   */
+  const withExecutor = {
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+    execVerifyCommand: async () => 0,
+  }
+  const withoutExecutor = {
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+  }
+
+  const full = await registry.evaluate('contract', withExecutor)
+  const bare = await registry.evaluate('contract', withoutExecutor)
+
+  const checkFor = (evaluation) => evaluation.requires.checks.find((check) => check.id === 'contract.verify-command')
+  assert.equal(checkFor(full).status, 'ok', '★ 执行器注入 ⇒ 输入面齐，核对不得报缺')
+  assert.deepEqual(checkFor(full).missing, [])
+  assert.deepEqual(checkFor(full).present, ['task', 'execVerifyCommand'], '★ 两格都在场，要如实交出来')
+
+  assert.equal(checkFor(bare).status, 'incomplete', '★ 执行器没注入 ⇒ 必须报出缺这一格')
+  assert.deepEqual(checkFor(bare).missing, ['execVerifyCommand'], '★ 且要点名是执行器这一格')
+  assert.match(bare.requires.missing.join('\n'), /execVerifyCommand/)
+  assert.match(bare.requires.missing.join('\n'), /contract\.verify-command/, '★ 还要说清是哪条判据')
+
+  /**
+   * ★ 而它**同时**是"判据自己说的话"：判据在这个 ctx 上返回 `unmeasured`，
+   *   理由正是"没有执行器"。两句话必须说同一件事 —— 一条声明与判据的未测量臂
+   *   若各说各的，那就是本节要消灭的那种静默失效。
+   */
+  assert.match(
+    String(bare.unmeasured),
+    /no executor was injected/,
+    '★ 判据自己也要说"没有执行器"（核对层与判据口径必须一致）',
+  )
+
+  /**
+   * ★ 先软后硬：上面两条核对照常报告，而**裁决一个字节都没动** ——
+   *   不带执行器的求值仍然以判据自己的 unmeasured 收场（而不是多出一条
+   *   "输入面没接线"的 blocker）。这是本轮用户裁定的行为。
+   */
+  assert.ok(
+    !bare.blockers.some((line) => line.includes('the input surface is not wired')),
+    '★ 观察模式（缺省）下，核对结果不得变成 blocker —— 那正是"先软后硬"要保住的东西',
+  )
+})
+
+test('★ 输入面臂：`execVerifyCommand` 缺席与在场 ⇒ 判据裁决不同形（★ 但要在【判据层】看）', async () => {
+  /**
+   * ── ★ 这一臂的第一次写法错了，而错法本身值得记下来 ──────────────────────────
+   *
+   * 我最初用 `registry.evaluate('contract', …)` 取形状，断言"没有执行器 ⇒
+   * unmeasured"。**实测是 `blocked`** —— 因为同一个 ctx 上**兄弟判据**
+   * （`build-artifact-scope`）看到 `inScope: ['src/a.ts']` 而没看到 `lib/`，
+   * 它 blocked 了。而注册表的合并口径是「未测量优先」也只在**同一位置内**比较：
+   * 我这里取的形状是**位置级**的，不是这条判据的。
+   *
+   * ★ 这是一个真实的读数陷阱，也是本轮反复出现的那条纪律的又一例：
+   *   **"我在看哪一层的结论"必须说清**。位置级 = blocked/unmeasured 合并后的；
+   *   判据级 = 这条判据自己说的。两者不同形，混用会得出"判据报错了"的假结论
+   *   （我差一点就把它当成缺陷记下来）。
+   *
+   * ⇒ 正确的分法：**判据级**用 `gate()` 直接调（这正是三态契约的所在），
+   *   **位置级**用注册表（下面几条臂管的是核对与装配）。这与
+   *   `gate-contract-verify-command.test.mjs` 里既有臂的口径一致。
+   */
+  const { gate: verifyGate } = await import('../lib/gates/contract/verify-command.js')
+  const contract = (extra) => ({ task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] }, creating: true, ...extra })
+
+  const ok = await verifyGate(contract({ execVerifyCommand: async () => 0 }))
+  const noExecutor = await verifyGate(contract({}))
+  assert.equal(shapeOf(ok), 'ok')
+  assert.equal(shapeOf(noExecutor), 'unmeasured', '★ 没有执行器 ⇒ "没能测量"，绝不是 ok')
+  assert.notEqual(shapeOf(ok), shapeOf(noExecutor), '★ 两者必须不同形')
+  assert.match(String(noExecutor.unmeasured), /no executor was injected/)
+
+  /**
+   * ★ 而**位置级**的读数也要各自说清（它与判据级不同形，这不是缺陷）：
+   *   两次求值都真的跑到两条判据（声明不许让判据被跳过），
+   *   而"位置级是否 unmeasured"取决于兄弟判据在这一份 ctx 上的裁决 —— 所以
+   *   这里只钉"跑了几条"，不钉位置级的形状（那是 `gate-registry.test.mjs` 的活）。
+   */
+  const withExec = await registry.evaluate('contract', contract({ execVerifyCommand: async () => 0, task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts', 'lib/a.js'], verify: ['pnpm test'] } }))
+  const bare = await registry.evaluate('contract', contract({ task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts', 'lib/a.js'], verify: ['pnpm test'] } }))
+  assert.equal(withExec.evaluated, 2, '★ 两次求值都要真的跑到两条判据（声明不许让判据被跳过）')
+  assert.equal(bare.evaluated, 2)
+  assert.equal(positionOutcome(withExec), 'ok', '★ 执行器注入 + 契约齐 ⇒ 位置级通过')
+  assert.equal(positionOutcome(bare), 'unmeasured', '★ 执行器缺席 ⇒ 位置级 unmeasured（兄弟判据在合法契约上不搅局，所以这一次能读出来）')
+  assert.deepEqual(bare.blockers, [], '★ 而这条 unmeasured 的理由里不许混进"输入面没接线"（先软后硬）')
+})
+
+test('★ 装配臂：requires 真的被装配层转发到注册表（"声明写了但没人交下去"是新形态）', () => {
+  /**
+   * ★ MEASURED（2026-10-06，dispatch-owner 的 F1）：`asRegistration` 是一个
+   *   **白名单**，它此前只转发 id/point/description/gate/appliesTo。
+   *   判据声明了 `requires`，而装配层不再往下交 ⇒ `list()` 读出来 `hasRequires: false`
+   *   ⇒ 「这条判据声明了输入面」在控制台上与「它压根没声明」**同形**。
+   *
+   * ⇒ 这一臂走【真品装配路径】（进程级注册表），不是直接读模块导出：
+   *   模块里写了、而装配层没交下去，这种缺陷只有从这里看得见。
+   */
+  const listed = registry.list().contract.find((entry) => entry.id === id)
+  assert.ok(listed !== undefined, '★ 这条判据必须在 contract 位置的注册表清单里')
+  assert.equal(listed.hasRequires, true, '★ "声明过输入面"必须读得出来（false = 声明没被转发下去）')
+  assert.deepEqual(listed.requires, ['task'], '★ 声明的内容也要原样读得出来')
+
+  /**
+   * ★ 而"没声明"与"声明了空数组"仍然不同形（`buildRegistry()` 里其余判据还没声明，
+   *   它们必须是 `hasRequires: false` + `requires: undefined`，不许被编成 `[]`）。
+   */
+  const undeclared = registry.list().contract.filter((entry) => entry.hasRequires === false)
+  for (const entry of undeclared) {
+    assert.equal(entry.requires, undefined, `★ ${entry.id} 没声明 ⇒ 不许被编成空数组（那会让覆盖率虚高）`)
+  }
+})
+
+test('★ 声明臂：源码里的 requires 用的是【类型层】声明（拼错的路径要能编译期就红）', () => {
+  /**
+   * ★ 一条声明写对了、而类型没挂上，在运行时**完全看不出来** ——
+   *   它照常工作，只是拼错的路径要等到某天有人改它时才会以"核对报了一个
+   *   谁也没写过的格子"的形式露面。所以这一臂读源码，把"挂的是哪个类型"钉住。
+   *
+   * ★ 它断言的是一件**能被独立复核**的事：声明处的类型参数是**本判据自己的**
+   *   ctx 类型（而不是 `any` / `Paths<unknown>` / 手写字符串联合）。
+   *   本仓库的实测标准来自 t6：`'wait.typo' ⇒ TS2322`；那件事由
+   *   `scripts/gate-requires.test.mjs` 臂 7/8 在类型层钉住，这里钉的是**这一条
+   *   判据有没有接上那个机制**，两件事不重复。
+   */
+  const source = readFileSync(join(ROOT, 'src/gates/contract/build-artifact-scope.ts'), 'utf8')
+  const declaration = /export const requires:\s*CtxPaths<([A-Za-z0-9_]+)>\[\]\s*=\s*\[([^\]]*)\]/.exec(source)
+  assert.ok(declaration !== null, '★ 声明必须写成 `CtxPaths<本判据的 ctx 类型>[] = [...]` 的形状')
+  assert.equal(
+    declaration[1],
+    'BuildArtifactScopeContext',
+    '★ 类型参数必须是这条判据自己的 ctx 类型 —— 换成一个宽类型（any / unknown / Record）会让拼错的路径重新变成运行时的惊喜',
+  )
+  assert.match(
+    source,
+    /import type \{ CtxPaths \} from '\.\.\/requires\.ts'/,
+    '★ 类型要从 requires.ts 来（type-only import：它不该在运行时引入任何东西）',
+  )
+})
+
+/**
+ * 裁决的【形状】—— 三态不同形的机械判据（与集成夹具同一口径）。
+ * ★ 复制而不是 import：这条判据自己的夹具不该依赖另一个夹具文件的内部约定。
+ *
+ * ★ **判据级**专用。`gate()` 的三态是互斥的：`{ok:true}` / `{ok:false, blockers}` /
+ *   `{ok:false, unmeasured}` —— 所以"先看 blockers 再看 unmeasured"在这里是对的。
+ *
+ * ★ 而**位置级**（`registry.evaluate()` 的返回）**恒带 `blockers: []`**（那是一条
+ *   既有的纪律：空即空，而不是缺席），所以上面这个顺序在位置级上会把**任何**
+ *   未测量的求值读成 `blocked` —— 我在这条臂里正好踩到过一次（见下面那段记录）。
+ *   ⇒ 位置级读数用 {@link positionOutcome}，不用这个函数。
+ */
+function shapeOf(verdict) {
+  if (verdict === null || typeof verdict !== 'object') return `non-object:${JSON.stringify(verdict)}`
+  if (verdict.ok === true) return 'ok'
+  if (Array.isArray(verdict.blockers)) return 'blocked'
+  if (typeof verdict.unmeasured === 'string') return 'unmeasured'
+  return `malformed:${JSON.stringify(verdict)}`
+}
+
+/**
+ * 位置级（`registry.evaluate()`）的结论 —— ★ 与判据级的读法是**两个东西**。
+ *
+ * 位置级的合并口径（见 `registry.ts` 的 `evaluate`）：任何一条 unmeasured ⇒
+ * 整体 unmeasured（**未测量优先于 blocker**）；否则任一条 blocked ⇒ blocked；
+ * 否则 ok。⇒ 读位置级必须**先看 unmeasured**，与判据级恰好相反。
+ */
+function positionOutcome(evaluation) {
+  if (evaluation.ok === true) return 'ok'
+  if (typeof evaluation.unmeasured === 'string') return 'unmeasured'
+  if (Array.isArray(evaluation.blockers) && evaluation.blockers.length > 0) return 'blocked'
+  return `malformed:${JSON.stringify({ ok: evaluation.ok, blockers: evaluation.blockers, unmeasured: evaluation.unmeasured })}`
+}

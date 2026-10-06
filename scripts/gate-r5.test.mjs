@@ -379,7 +379,16 @@ test('⑪ 纯数据变换：判据不 import 任何 I/O，执行器只能由调�
    *   自由地提到 node:fs，那正是解释"为什么不许 import 它"的地方。
    */
   const imports = [...source.matchAll(/^\s*import[\s\S]*?from\s*'([^']+)'/gm)].map((match) => match[1])
-  assert.deepEqual(imports, ['../registry.ts'], '★ 判据只许 import 注册表的三种裁决构造器')
+  /**
+   * ★ 允许清单是【两个】接口文件，不是一个：注册表的裁决构造器，加上 t6 的
+   *   `requires.ts`（它只定义"这条判据要 ctx 的哪几格"这一个声明，自身不 import
+   *   任何东西、也不含任何判据语义）。
+   *
+   * ★ 断言仍然是【逐条列举】而不是"不超过白名单"：多一个 import 就会红，
+   *   因为这一条真正防的是"判据自己去做 I/O 了"（`node:fs` / `node:child_process`），
+   *   而放宽成前缀匹配会让 `../registry-io.ts` 这种东西悄悄进来。
+   */
+  assert.deepEqual(imports, ['../registry.ts', '../requires.ts'], '★ 判据只许 import 注册表的裁决构造器与 requires 的声明类型')
   assert.equal(/\bimport\s*\(/.test(source), false, '★ 动态 import 会绕过上面那条白名单')
   assert.equal(/\brequire\s*\(/.test(source), false)
   // 对照：没有执行器时它【说"我没测成"】，而不是"通过"

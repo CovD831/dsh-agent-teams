@@ -672,9 +672,20 @@ test('④ 每条判据只 import registry.ts（或另一个纯函数模块），
       if (!/^\s*import\b/.test(line) && !/^\s*\}?\s*from\s+['"]/.test(line)) continue
       const specifier = line.match(/from\s+['"]([^'"]+)['"]/)?.[1]
       if (specifier === undefined) continue
-      // 允许：同目录/上一级的 registry.ts，以及仓库里的纯函数模块。
+      /**
+       * 允许：同目录/上一级的 registry.ts，以及仓库里的纯函数模块。
+       *
+       * ★ `../requires.ts`（t6）是**判据的接口**，不是另一条判据：它只定义
+       *   `requires` 这个声明的路径类型与核对函数，不 import 任何东西、也不带
+       *   一条判据的语义（`gate-requires.test.mjs` 臂 11 单独钉住这一点）。
+       *   判据 import 它，与 import registry.ts 是同一件事：拿到自己那一份契约。
+       *   靠它来判"判据之间不许互相调用"仍然成立 —— 真正要拦的是
+       *   `completion/r5.ts imports "./mutation.ts"` 这种一条判据调另一条。
+       */
       const allowed = specifier === '../registry.ts'
         || specifier === '../../registry.ts'
+        || specifier === '../requires.ts'
+        || specifier === '../../requires.ts'
         || specifier === '../../mutation.ts'
         || specifier === '../../quality-gates.ts'
       if (!allowed) offenders.push(`${rel} imports "${specifier}"`)

@@ -26,9 +26,41 @@
  * `unmeasured`（★ 不是 `ok`）—— 没能重跑就不能声称验过了。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "completion.verify-rerun";
 export declare const point = "completion";
 export declare const description = "\u91CD\u8DD1\u4EFB\u52A1\u58F0\u660E\u7684 verify \u547D\u4EE4\uFF0C\u4E0E\u6210\u5458\u81EA\u62A5\u7684 exitCode \u6BD4\u5BF9\uFF1B\u4E0D\u4E00\u81F4\u5373\u62D2\u7EDD\uFF08\u9632\u6B62\u4F2A\u9020 passed\uFF09";
+/**
+ * ── 输入面声明（t4）───────────────────────────────────────────────────────────
+ *
+ * ★ 本条是上一轮的【重灾区】，且它的缺口就是本轮要消灭的那个形态：
+ *
+ *   MEASURED（本轮开工前的复盘）：`execVerifyCommand` 曾经没接上 ⇒ 判据照常跑、
+ *   照常说话，说的是 `unmeasured`（"verify re-execution is unavailable"）。
+ *   而 `unmeasured` 与 `ok` 在日志里**同形**——读的人看到的是"这一步没问题"。
+ *   一次【判据从未生效】被读成了【判据通过】。
+ *
+ * ⇒ 声明的不是"ctx 里有个字段"，而是 **"调用方真的注入了执行器"**。
+ *   `gate()` 的第一件事就是 `typeof exec !== 'function'` ⇒ `unmeasured`（见下），
+ *   所以 `execVerifyCommand` 是这条判据的输入面里**唯一不可替代**的那一格：
+ *   没有它，这条判据存在的全部理由（"不采信成员自报"）就不成立。
+ *
+ * ★ 其余三格是【闸门】（`appliesTo` 的三个条件），不是"测量用的输入"：
+ *   `wantsCompleted` / `taskNotTerminal` 决定这一轮要不要审，`task.verify` 是
+ *   被审的对象。它们缺席时 `appliesTo` 为假 ⇒ 判据不说话 ⇒ 核对层也按
+ *   "不适用不报"跳过（见 requires.ts 的闸门）。那么为什么还声明它们？
+ *
+ *   因为**声明与核对的口径必须是同一个**：`appliesTo` 读的就是这三格，
+ *   如果声明里不写，核对层就永远说不出"这条判据的闸门自己缺了输入"——
+ *   而"闸门缺输入"与"这一轮本来不适用"在 `appliesTo` 的返回里都是 `false`，
+ *   两者同形。声明出来之后，`requires` 至少把"要审一条命令，而它的 task 不在"
+ *   这种自相矛盾的 ctx 报出来。
+ *
+ * ★ `task` 与 `task.verify` 两格都写：`task` 管"整格在不在"，`task.verify` 管
+ *   "在、但这一格读不出命令"。两者在 `appliesTo` 里是同一个 `Array.isArray` 判断，
+ *   而分开声明才让核对结果能区分"这条判据不知道审什么"与"它知道审什么、但命令空"。
+ */
+export declare const requires: CtxPaths<VerifyRerunContext>[];
 /**
  * 只对【本次试图置为 completed】且【声明了 verify 命令】的【非终态】任务生效。
  *
@@ -40,7 +72,13 @@ export declare const description = "\u91CD\u8DD1\u4EFB\u52A1\u58F0\u660E\u7684 v
  *   · 没声明 verify 的任务不重跑 —— 没有可重跑的东西。
  */
 export declare function appliesTo(ctx: VerifyRerunContext | undefined): boolean;
-interface VerifyRerunContext {
+/**
+ * ★ 导出是为了让 `requires: CtxPaths<…>` 有一个**可被点名**的类型 ——
+ *   `CtxPaths` 的类型参数是这条判据自己的 ctx 类型；类型不必导出也能用于
+ *   声明（TS 的声明顺序不参与类型解析），但导出之后这条判据的输入面形状
+ *   就能被别的文件引用（夹具要用它，见 `scripts/gate-completion-requires.test.mjs`）。
+ */
+export interface VerifyRerunContext {
     task?: {
         id?: string;
         verify?: string[];

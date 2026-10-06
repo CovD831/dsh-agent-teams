@@ -101,6 +101,8 @@ export declare function buildRegistry(): {
         hasAppliesTo: boolean;
         observing: boolean;
         observeReason?: string;
+        requires?: readonly string[];
+        hasRequires: boolean;
     }>>;
     count(point: import("./registry.ts").InsertionPoint): number;
     evaluate(point: import("./registry.ts").InsertionPoint, context: unknown): Promise<import("./registry.ts").GateEvaluation>;
@@ -127,6 +129,8 @@ export declare const registry: {
         hasAppliesTo: boolean;
         observing: boolean;
         observeReason?: string;
+        requires?: readonly string[];
+        hasRequires: boolean;
     }>>;
     count(point: import("./registry.ts").InsertionPoint): number;
     evaluate(point: import("./registry.ts").InsertionPoint, context: unknown): Promise<import("./registry.ts").GateEvaluation>;

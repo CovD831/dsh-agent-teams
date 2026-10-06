@@ -67,9 +67,44 @@
  * ③ 三态：ok / blocked / unmeasured，且后两者不同形 —— ★ 见上面的三行表。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "delivery.convergence";
 export declare const point = "delivery";
 export declare const description = "\u4EA4\u4ED8\u65F6\u6BCF\u4E2A\u6210\u5458\u90FD\u5FC5\u987B\u5904\u5728\u6536\u655B\u6001\uFF1Bworking / unknown / \u7A7A\u767D\u56DE\u590D\u90FD\u4E0D\u662F\u6536\u655B \u21D2 \u62D2\u7EDD\uFF08idle \u2260 converged\uFF0C\u7A7A\u56DE\u590D\u4E0D\u662F\u6536\u655B\uFF09";
+/**
+ * ── 输入面：只声明 `team`，★ **不**声明 `members` ────────────────────────────────
+ *
+ * ★ 这条判据的整个存在理由，就是把**三种**东西分开（见文件头那张三行表）：
+ *
+ *     blocked    —— 拿得到状态，而有人**明确地**没收敛（含 ★「从未 spawn」）
+ *     unmeasured —— **拿不到成员状态**
+ *     ok         —— 拿得到状态，且都在收敛态
+ *
+ *   ⇒ `members` 缺席**恰好就是** `unmeasured` 那一行的输入，它是判据的合法输入。
+ *     把它写进 `requires`，核对层会在同一个事实上报第二遍，而硬化之后会把
+ *     这条**正确**的未测量裁决拦成"接线缺陷"—— 与 `coverage` 那一格同形。
+ *
+ * ── ★ 「从未 spawn」不得被写成缺失（本任务的点名要求）───────────────────────────
+ *
+ *   `state: 'never-spawned'` 是一个**可判定的事实**（它没起来过、也就没交回任何
+ *   东西）⇒ 判据据此 `blocked`。它**不是**"没能测量"。
+ *
+ *   ★ 而它与 `requires` 的关系有一处必须说清，否则下一个人会顺手写错：
+ *     `never-spawned` 说的是**数组里某个成员的状态**，而 `requires` 声明的是
+ *     **ctx 上的路径**。两者不在同一层 —— 所以"从未 spawn"这件事**根本不该**
+ *     出现在 `requires` 里，既不能声明成"必须有 `members[].spoke`"，也不能
+ *     声明成别的缺失。它由 `gate` 的白名单分支持有（`never-spawned` ⇒ blocked），
+ *     且 `spoke` 对这类成员**不求值**（见 `gate` 里 `unmeasuredSpokes` 的 filter）。
+ *
+ *   ⇒ 若把 `members[].spoke` 之类写进声明，核对层会把"一个从未 spawn 的成员
+ *     没有发言记录"报成缺格 —— 那正是 t15 要消灭的形状：
+ *     把一个**正确裁决**（我起不来 ⇒ 阻止交付）误报成**接线缺陷**。
+ *
+ * ★ 同 `coverage`：`team` 声明但不写子路径 —— `appliesTo` 读 `ctx.team` 是否存在，
+ *   而 `team.members` 只在 `members` 缺席时用来判断"这个队有没有成员"，
+ *   它缺席不影响本判据的裁决。
+ */
+export declare const requires: CtxPaths<ConvergenceContext>[];
 /**
  * 成员的收敛状态。**除了 `reported` / `idle` 之外的每一种都必须指名成员拒绝交付。**
  *

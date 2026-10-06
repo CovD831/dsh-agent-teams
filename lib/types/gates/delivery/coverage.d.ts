@@ -43,9 +43,43 @@
  * ③ 三态：ok / blocked / unmeasured，且后两者不同形。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "delivery.coverage";
 export declare const point = "delivery";
 export declare const description = "\u7528\u6237\u76EE\u6807\u7684\u6BCF\u4E2A\u6761\u76EE\u90FD\u5FC5\u987B\u6709\u4EFB\u52A1\u58F0\u79F0\u8986\u76D6\u5B83\uFF1B\u6709\u76EE\u6807\u65E0\u4EBA\u8BA4\u9886 \u21D2 \u4EA4\u4ED8\u65F6\u62D2\u7EDD\uFF08\u5176\u4F59\u4EFB\u52A1\u5168\u7EFF\u4F1A\u8BA9\"\u6CA1\u4EBA\u505A\u7684\u76EE\u6807\"\u770B\u8D77\u6765\u50CF\u90FD\u5B8C\u6210\u4E86\uFF09";
+/**
+ * ── 输入面：只声明 `team`，★ **不**声明 `coverage` ────────────────────────────────
+ *
+ * ```ts
+ * export const requires: CtxPaths<CoverageContext>[] = ['team', 'coverage']  // ✗ 错的
+ * ```
+ *
+ * ★ 反面写法看着更"完整"，而它会把本判据**唯一正确的未测量臂**当成接线缺陷 ——
+ *   这与本轮要消灭的形态同源，方向相反：
+ *
+ *     矩阵缺席      ⇒ `unmeasured`（没能测量）
+ *     矩阵在场但为空 ⇒ `ok`（测量结论：确实没有目标条目）
+ *
+ *   ⇒ `coverage` 的**缺席是判据的一条合法输入**（见 `gate` 的第一条分支）。
+ *     把它写进 `requires`，核对层就会在每一次"调用点没能提供目标清单"时，
+ *     与判据**同时**报同一件事 —— 而一旦硬化（`AGENT_TEAMS_ENFORCE_REQUIRES=1`），
+ *     核对层会把这条判据**唯一正确的未测量裁决**拦成"接线缺陷"：
+ *     一个"永远关着的门"，正是 `convergence` 头注里 t15 那个坑的镜像。
+ *
+ * ★ 这与"不适用不报"是**不同的一格**，别把两者合流：
+ *   · `appliesTo` 为假 ⇒ 这一轮本来就不该说话 ⇒ 核对层 `skipped`（不报）；
+ *   · `coverage` 缺席 ⇒ 它说话了、而且说的是"我没测到" ⇒ 那是**裁决**，不是缺陷。
+ *
+ * ★ `team` 声明但不写它的子路径：整格在不在是这一条判据的闸门（`appliesTo` 读的
+ *   就是它），而 `team.id` / `team.profile.protocol` 缺席**不影响**本判据的裁决
+ *   （`gate` 只读 `coverage`，`team` 仅用于 `appliesTo`）。声明用不到的格子
+ *   会让核对层报出判据自己都不关心的缺失。
+ *
+ * ★ 谁钉住"`coverage` 缺席 ⇒ unmeasured 与 `coverage: []` ⇒ ok 不同形"：
+ *   `scripts/gate-delivery-coverage.test.mjs` 的未测量臂/对照臂（本判据自带三臂）。
+ *   那条界线**不进 requires**，它由判据自己的裁决持有。
+ */
+export declare const requires: CtxPaths<CoverageContext>[];
 export interface CoverageContext {
     /** 团队状态。本判据只读它的目标条目（`profile.protocol`），不做别的判断。 */
     team?: {

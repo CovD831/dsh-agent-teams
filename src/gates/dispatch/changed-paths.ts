@@ -44,11 +44,51 @@
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
 import { normalizeWorkspacePath } from '../../quality-gates.ts'
+import type { CtxPaths } from '../requires.ts'
 
 export const id = 'dispatch.changed-paths'
 export const point = 'dispatch'
 export const description =
   '把成员自报的 changedPaths 与它会话里观察到的真实写入比对；虚报或隐瞒即拒绝（防止伪造改动清单）'
+
+/**
+ * ── ★ 输入面声明（B 层，编译期）────────────────────────────────────────────────
+ *
+ * ★ 本判据的输入【不是 ctx 上的一个普通字段】，而是【调用方注入的一次观察】：
+ *   它要的不是"ctx 里有个 diff 数组"，而是"有人真的去看过这个成员的会话"。
+ *   这两件事不同形 —— 前者是字段在场，后者是**观察真的发生过**。
+ *
+ * `observedChangedPaths` 由 `src/tools.ts` 用 `observedChangedPaths(caller.session)`
+ * 从 `tool/result` 的 `meta.diffs[].path` 折叠出来，**调用方自己去看了**才有值。
+ * 队长代报（caller 是队长）时拿不到成员会话 ⇒ 这一格缺席 ⇒ 判据 unmeasured。
+ *
+ * ★ 三条共同声明 `task.kind` 的理由：`appliesTo` 读的就是它（见下），
+ *   声明出来之后，核对层至少能把"要审一份改动清单，而这条 ctx 不知道是什么 kind"
+ *   这种自相矛盾报出来 —— 否则那件事与"这一轮本来不适用"在返回里同形。
+ */
+/**
+ * ── ★ 每一格都与本判据的一条 `unmeasured` 臂逐条对齐 ────────────────────────────
+ *
+ * 判据说「缺 X 就 unmeasured」，X 就必须出现在这里。本判据的未测量臂只有一条：
+ *
+ *     `observedChangedPaths` 不是数组 ⇒ "the member's write history could not be
+ *                                        observed (no session events were available)"
+ *
+ * ⇒ 声明 `observedChangedPaths`（`gate()` 那道 `Array.isArray` 闸门读的就是它）。
+ *
+ * ★ 而 `task.kind` / `update.changedPaths` **不进 requires**，这不是省事，是刻意的：
+ *   它们缺席时 `appliesTo` 为假 ⇒ 注册表直接跳过这条判据（`status: 'skipped'`），
+ *   `gate()` 根本不会被调用。"这一轮没有要审的东西"与"我要审、但它没接上"
+ *   是两件事，合成一件会让每一次 review/work 类的派发都产出一份缺格清单 ——
+ *   而噪音会教人忽略门禁（requires.ts 的闸门那一节）。
+ *
+ *   两处的边界因此是：**appliesTo 管"说不说话"，requires 管"说话时缺不缺输入"。**
+ *   一条判据的 requires 里列上门的那几格，等于把"不适用"也报成"缺输入"。
+ *
+ * ★ 认的是那条【注入的观察】在场，不是它的形状：`[]` 也算在场 ——
+ *   "观察了、确实没有写入"与"没能观察"必须不同形（见文件头 ② 与夹具臂 2）。
+ */
+export const requires: CtxPaths<ChangedPathsContext>[] = ['observedChangedPaths']
 
 interface ChangedPathsContext {
   task?: { id?: string; kind?: string; inScope?: string[]; outOfScope?: string[] }
@@ -71,6 +111,12 @@ interface ChangedPathsContext {
  *   · 没声明 changedPaths ⇒ 没有可核对的东西（work/review 等类别本就不填它）；
  *   · 只有 implementation/repair 的契约要求 changedPaths（见 scheduler 的派发提示），
  *     对其余类别做核对会把"本就不该填"误判成"漏报"。
+ *
+ * ★ 这两格**不进 `requires`**，是刻意的：它们缺席时本函数为假 ⇒ 注册表跳过这条
+ *   判据 ⇒ "这条判据这一轮不说话"，与"它说话了、但输入面缺一格"不同形。
+ *   把闸门声明进 requires 会让每一次不适用的调用都产出一份缺格清单 —— 噪音。
+ *   （`appliesTo` 的三格与 `requires` 的一格必须在**语义上**对齐：闸门管说话与否，
+ *     requires 管说话时缺不缺输入。）
  */
 export function appliesTo(ctx: ChangedPathsContext | undefined): boolean {
   const kind = ctx?.task?.kind

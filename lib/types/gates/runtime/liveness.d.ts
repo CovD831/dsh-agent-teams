@@ -58,9 +58,62 @@
  * 去读这条记录（§5 原话），而不是让过程约束当场把任务卡死。
  */
 import { type GateVerdict } from '../registry.ts';
+import type { CtxPaths } from '../requires.ts';
 export declare const id = "runtime.liveness";
 export declare const point = "runtime";
 export declare const description = "\u5468\u671F\u6027\u63A2\u6D3B\uFF1A\u4E24\u6B21\u63A2\u6D3B\u4E4B\u95F4\u6700\u540E\u6D3B\u52A8\u65F6\u523B\u6CA1\u53D8 \u21D2 \u544A\u8B66\u300C\u5361\u6B7B\u4E86\u300D\uFF1B\u8FD8\u5728\u6D3B\u52A8 \u21D2 \u53EA\u62A5\u300C\u8FD8\u5728\u8DD1\uFF0C\u5DF2 N \u5206\u949F\u300D\u3002\u6C38\u4E0D\u56E0\u4E3A\u7B49\u592A\u4E45\u800C\u8BF4\u8BDD\uFF08\u5B83\u662F\u63A2\u6D3B\uFF0C\u4E0D\u662F\u786C\u8D85\u65F6\uFF09\uFF0C\u4E5F\u4E0D\u62D2\u7EDD\u4EFB\u52A1\uFF08\u5951\u7EA6 \u00A75\uFF09";
+/**
+ * ── 输入面：`event` + ★ **`waits`** ──────────────────────────────────────────────
+ *
+ * ★ `waits` 是本轮那条「建好了但没接线」的**最佳样本**，也是把这类缺陷
+ *   机械抓住的地方：`waitWindows`（`tools.ts`）是完整实现 —— 有界（LRU 200）、
+ *   有陈旧界限（`WAIT_WINDOW_STALE_MS` = 3 个探活间隔）、注释写清了为什么 ——
+ *   而它**一度从来没有被任何地方读出来喂给判据**。于是判据的"卡死"那一半
+ *   永远算不出来，日志里却读着一切正常。
+ *
+ *   ⇒ 声明 `waits` 之后，"这张表被读出来了吗"变成一个**可核对的事实**：
+ *     团队级调用点若哪天忘了注入它，核对层会指名报出 `runtime.liveness`
+ *     缺 `waits` —— 而不是等一次真实的 63 分钟零进展。
+ *
+ * ── ★ 为什么 `waits` 敢声明（它是**位置相关**的一格，这里逐条核过）─────────────
+ *
+ *   只有 `task-status` / `runtime-liveness` 会让本判据开口（{@link LIVENESS_EVENTS}），
+ *   而 `task-status` 那个调用点传的是 `deliveryContext`（`{team, gate, coverage, …}`）
+ *   —— 它有 `team`（含 `id` 与 `tasks` 数组）⇒ `evaluateRuntimeGates` 的注入条件
+ *   成立 ⇒ **`waits` 在它唯一真正会开火的位置上确实在场**。
+ *   其余四个 runtime 调用点（`member-dispatched` / `task-created` / `task-update` /
+ *   `task-update-settled`）结构性拿不到 `waits`，但它们**也**不在
+ *   {@link LIVENESS_EVENTS} 里 ⇒ 本判据在那些点上 `appliesTo` 为假 ⇒
+ *   核对层 `skipped`、**不报**（这正是 requires.ts 那条"不适用就不说话"的闸门）。
+ *
+ *   ★ 所以这一格是安全的：**"能开火的位置"与"waits 在场的位置"是同一批**。
+ *     若将来有人把 `LIVENESS_EVENTS` 加长到一个没有 team 的调用点，
+ *     核对层会立刻报缺 —— 那正是这条声明该做的事（把"闸门与输入面不再重合"
+ *     这个事实变成机械可读的），不是噪音。
+ *
+ * ── ★ 不声明 `wait`（单数）与 `wait.*`：它们是**另一条**合法的输入路径 ─────────
+ *
+ *   `gate` 的复数面分支是"`waits` 在场就用它（哪怕空数组）"，单数面是
+ *   "`waits` 缺席 ⇒ 退回 `wait`"。两条路径**互为合法的替代**：
+ *   · 团队级（`task-status`）走 `waits`；
+ *   · 单任务级（夹具、将来的显式探活入口）走 `wait`。
+ *   ⇒ 把 `wait.now` 一类写进声明，会在团队级调用点上报一处判据**根本不需要**的
+ *     缺失（它走的是 `waits` 那一支）—— 那是噪音，而噪音会教人忽略门禁。
+ *
+ *   ★ 而"单数面拿不到观察 ⇒ `unmeasured`"这条界线**不进 requires**：
+ *     它是判据自己的缺省方向（`probeOne` 的第一条分支），由本判据的三臂夹具持有。
+ *
+ * ── ★ 声明了 `event`（闸门自己读的那一格）────────────────────────────────────────
+ *
+ *   与 `verify-rerun` 同一条理由：`appliesTo` 读的就是 `event`，若声明里不写，
+ *   核对层就永远说不出"这条判据的**闸门自己**缺了输入"—— 而"闸门缺输入"与
+ *   "这一轮本来不适用"在 `appliesTo` 的 `false` 里同形。声明出来之后，
+ *   两者在核对结果里不同形：前者 `incomplete`，后者 `skipped`。
+ *
+ * ★ 类型参数是**本判据自己的** ctx 类型，于是 `'wait.typo'` 这类拼写在编译期
+ *   就是 TS2322（已实测），而不是等到某次探活开火时才在运行时暴露。
+ */
+export declare const requires: CtxPaths<RuntimeLivenessContext>[];
 /** 探活间隔（毫秒）。用户裁定 10 分钟 —— 5 分钟对长任务太频繁、日志会被刷屏。 */
 export declare const DEFAULT_LIVENESS_INTERVAL_MS: number;
 /**
