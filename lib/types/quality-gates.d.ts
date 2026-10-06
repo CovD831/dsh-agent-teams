@@ -117,6 +117,89 @@ export declare function isReviewPolicy(value: unknown): value is ReviewPolicy;
 export declare function normalizeWorkspacePath(path: string): string | undefined;
 export declare function pathMatchesScope(path: string, pattern: string): boolean;
 export declare function classifyChangedPath(path: string, inScope?: readonly string[], outOfScope?: readonly string[]): PathClassification;
+/**
+ * ── ★★ f-0020：repair 的判别力证据，不是「本次新增的测试」───────────────────────
+ *
+ * ── 它修的是什么（MEASURED：本队 6 次同形终止，全部由 captain 代落终态）─────────
+ *
+ *     t13 / t16 / t19 / t25 / t26 cancelled · t27 failed
+ *
+ * 原因不是交付物有问题，而是三道完工门的**问句与 repair 的验收不是同一件事**：
+ *
+ *     r5 / mutation 度量：「为【新工作】写了新测试吗」   ← 输入面 = `newTestFiles`
+ *     repair 的验收    ：「改了【既有】夹具后它仍能判别吗」← 净改动全在既有文件上
+ *
+ * ⇒ `newTestFiles` 对一份 repair 恒为 `[]`（它数的是"新增"，而 repair 一个都没新增），
+ *   于是 r5 报 `unmeasured`（"none of the 0 reported file(s)…"）、mutation 拿不到
+ *   杀手套件。判据**没有撒谎** —— 它诚实地说"我没能测量"。
+ *   但一个恒常的 `unmeasured` 同样**交不出终态** ⇒ 无人值守退化成 captain 逐个手收。
+ *
+ * ── ★★ 这一格**只换了文件来源**，没有降低判别的强度 ─────────────────────────────
+ *
+ * 判据问的仍是同一个问题：「这条夹具**还能不能抓住缺陷**」。
+ * 变的只是"拿哪些文件去问"：
+ *
+ *     旧：本次【新增】的测试文件        ⇒ 对 repair 是空集 ⇒ 恒 unmeasured
+ *     新：本次【改动过的既有的】测试夹具 ⇒ repair 的真实证据 ⇒ 可测量
+ *
+ * ★ 而"装饰性测试"这一路**一步都没让**：一条恒绿的既有夹具同样过不了 r5
+ *   （它在父版本上就绿 ⇒ `decorative test` 拒绝）。见夹具的臂 3（定向突变）。
+ *   ⇒ 换句话说：**"是不是新文件"是无关的；"它还能不能判别"才是问题。**
+ *     旧口径读的是前者，代价是把后者的答案一起丢掉了。
+ *
+ * ── 三态（与 `observedChangedPaths` / `gitChangedPaths` 逐条对齐）──────────────
+ *
+ *   观察面缺席（`undefined`）    ⇒ 本函数返回 `[]`，且调用方**必须**报 unmeasured
+ *        —— "我没能观察" 与 "观察了、确实没有" 不同形（本队记账最久的那条界线）。
+ *   观察到了、一条夹具都没改动  ⇒ `[]`，同样是 unmeasured（没有可测量的判别力）。
+ *   观察到了、改了既有夹具      ⇒ 那些路径 —— r5 拿它们去跑红前绿后。
+ *
+ * ★ 为什么不做成"猜一个默认目录"：猜出来的路径会让运行器返回 `[]`，
+ *   而空集会被读成"没有新测试要查" ⇒ **ok**。那是把"没测到"并进"通过"，
+ *   正是 r5 的注释里已经点名过的那个坑（"用没有根据的默认值…⇒ ok"）。
+ *
+ * @param ctx - 一份完成更新的上下文（任务是 `repair` / `implementation`）。
+ * @returns 应当被当作判别力证据去测量的测试夹具路径（workspace 相对，已去重排序）。
+ */
+export declare function repairEvidenceFiles(ctx: RepairCompletionContext | undefined): string[];
+/**
+ * ── ★★ repair 的完工裁决：把「判别力证据」与「测量」分开报 ──────────────────────
+ *
+ * 这一格**不自己跑测试**（本文件保持零 I/O 的纪律）—— 它只回答一个可以在数据上
+ * 回答的问题：**这份 repair 有没有可测量的判别力证据**。
+ *
+ *   有 ⇒ `{ ok: true, evidence }`，调用方拿它去注入 r5/mutation
+ *        （于是 r5 能跑红前绿后，装饰品照旧被拒）。
+ *   没有 ⇒ `{ ok: false, unmeasured }`，且**必须**是 unmeasured 而不是 blocked：
+ *        没有夹具不等于"夹具是装饰品"（那是关于工作的结论，需要真的测过才能说）。
+ *        两者不同形 —— 把"我没能测量"说成"它有问题"，是反向的同一类错误。
+ *
+ * ★ 两句话必须不同形（本队记账）：
+ *     (i)  没能观察文件改动        ⇒ "could not observe any file change"
+ *     (ii) 观察到了、但没有既有夹具 ⇒ "the repair changed no test fixture"
+ *   否则"我瞎了"与"我看清了、确实没有"在日志里同形。
+ */
+export declare function repairCompletionVerdict(ctx: RepairCompletionContext | undefined): RepairCompletionResult;
+export interface RepairCompletionContext {
+    task?: {
+        id?: string;
+        kind?: string;
+        inScope?: string[];
+        changedPaths?: string[];
+    };
+    update?: {
+        changedPaths?: string[];
+        newTestFiles?: string[];
+    };
+    [key: string]: unknown;
+}
+export type RepairCompletionResult = {
+    ok: true;
+    evidence: string[];
+} | {
+    ok: false;
+    unmeasured: string;
+};
 export declare function collectChangedPaths(gitStatusText: string): string[];
 export declare function inScopeOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): string[];
 export declare function validateCreateTask(team: TeamState, input: CreateTaskInput): ValidateCreateTaskResult;

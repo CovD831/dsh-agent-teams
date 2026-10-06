@@ -264,6 +264,157 @@ export function classifyChangedPath(
   return 'undeclared'
 }
 
+/**
+ * ── ★★ f-0020：repair 的判别力证据，不是「本次新增的测试」───────────────────────
+ *
+ * ── 它修的是什么（MEASURED：本队 6 次同形终止，全部由 captain 代落终态）─────────
+ *
+ *     t13 / t16 / t19 / t25 / t26 cancelled · t27 failed
+ *
+ * 原因不是交付物有问题，而是三道完工门的**问句与 repair 的验收不是同一件事**：
+ *
+ *     r5 / mutation 度量：「为【新工作】写了新测试吗」   ← 输入面 = `newTestFiles`
+ *     repair 的验收    ：「改了【既有】夹具后它仍能判别吗」← 净改动全在既有文件上
+ *
+ * ⇒ `newTestFiles` 对一份 repair 恒为 `[]`（它数的是"新增"，而 repair 一个都没新增），
+ *   于是 r5 报 `unmeasured`（"none of the 0 reported file(s)…"）、mutation 拿不到
+ *   杀手套件。判据**没有撒谎** —— 它诚实地说"我没能测量"。
+ *   但一个恒常的 `unmeasured` 同样**交不出终态** ⇒ 无人值守退化成 captain 逐个手收。
+ *
+ * ── ★★ 这一格**只换了文件来源**，没有降低判别的强度 ─────────────────────────────
+ *
+ * 判据问的仍是同一个问题：「这条夹具**还能不能抓住缺陷**」。
+ * 变的只是"拿哪些文件去问"：
+ *
+ *     旧：本次【新增】的测试文件        ⇒ 对 repair 是空集 ⇒ 恒 unmeasured
+ *     新：本次【改动过的既有的】测试夹具 ⇒ repair 的真实证据 ⇒ 可测量
+ *
+ * ★ 而"装饰性测试"这一路**一步都没让**：一条恒绿的既有夹具同样过不了 r5
+ *   （它在父版本上就绿 ⇒ `decorative test` 拒绝）。见夹具的臂 3（定向突变）。
+ *   ⇒ 换句话说：**"是不是新文件"是无关的；"它还能不能判别"才是问题。**
+ *     旧口径读的是前者，代价是把后者的答案一起丢掉了。
+ *
+ * ── 三态（与 `observedChangedPaths` / `gitChangedPaths` 逐条对齐）──────────────
+ *
+ *   观察面缺席（`undefined`）    ⇒ 本函数返回 `[]`，且调用方**必须**报 unmeasured
+ *        —— "我没能观察" 与 "观察了、确实没有" 不同形（本队记账最久的那条界线）。
+ *   观察到了、一条夹具都没改动  ⇒ `[]`，同样是 unmeasured（没有可测量的判别力）。
+ *   观察到了、改了既有夹具      ⇒ 那些路径 —— r5 拿它们去跑红前绿后。
+ *
+ * ★ 为什么不做成"猜一个默认目录"：猜出来的路径会让运行器返回 `[]`，
+ *   而空集会被读成"没有新测试要查" ⇒ **ok**。那是把"没测到"并进"通过"，
+ *   正是 r5 的注释里已经点名过的那个坑（"用没有根据的默认值…⇒ ok"）。
+ *
+ * @param ctx - 一份完成更新的上下文（任务是 `repair` / `implementation`）。
+ * @returns 应当被当作判别力证据去测量的测试夹具路径（workspace 相对，已去重排序）。
+ */
+export function repairEvidenceFiles(ctx: RepairCompletionContext | undefined): string[] {
+  /**
+   * ★ 来源顺序是刻意的：**先看本次改动过的文件**，再看声明的新测试。
+   *
+   *   对 implementation：新增的测试通常也在 `changedPaths` 里 ⇒ 两者一致。
+   *   对 repair：`changedPaths` 里有既有夹具，而 `newTestFiles` 是空的
+   *     ⇒ 只有这一格能把它捞出来，而它正是 f-0020 的全部内容。
+   */
+  const declared = [
+    ...asStringArray(ctx?.update?.changedPaths),
+    ...asStringArray(ctx?.task?.changedPaths),
+    ...asStringArray(ctx?.update?.newTestFiles),
+  ]
+  const scopes = asStringArray(ctx?.task?.inScope)
+  const seen = new Set<string>()
+  const files: string[] = []
+  for (const path of declared) {
+    const normalized = normalizeWorkspacePath(path)
+    if (normalized === undefined) continue
+    /**
+     * ★ 只有**测试夹具**才算判别力证据，且必须落在任务的写域里。
+     *
+     *   不筛"是不是测试"会让 `src/impl.ts` 混进来，r5 会把它折成一条跑不起来的
+     *   测试路径 —— 那时的失败读起来像"夹具坏了"，而事实是"这压根不是夹具"。
+     *   那正是本队记账的「假面替真实路径挡路」。
+     *
+     *   ★ 写域缺席时**不筛**（而不是筛成空）：缺席是"没有声明"，不是"什么都不许"。
+     *     筛成空会让一个没声明 inScope 的任务永远拿不到证据 —— 一个新的恒 unmeasured。
+     *     而"文件不在写域里"这件事另有 `dispatch.changed-paths` 负责，不在这里判。
+     */
+    if (!isTestFixturePath(normalized)) continue
+    if (scopes.length > 0 && classifyChangedPath(normalized, scopes) !== 'in_scope') continue
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    files.push(normalized)
+  }
+  return files.sort()
+}
+
+/** 测试夹具路径（与 `src/gates/completion/r5.ts` 的 `TEST_SUFFIXES` 同一口径）。 */
+const TEST_FIXTURE_PATTERN = /\.(test|spec)\.(mjs|cjs|js|mts|cts|ts|jsx|tsx)$/u
+
+function isTestFixturePath(path: string): boolean {
+  return TEST_FIXTURE_PATTERN.test(path) || /(^|\/)(test|tests|__tests__)\//u.test(path)
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+}
+
+/**
+ * ── ★★ repair 的完工裁决：把「判别力证据」与「测量」分开报 ──────────────────────
+ *
+ * 这一格**不自己跑测试**（本文件保持零 I/O 的纪律）—— 它只回答一个可以在数据上
+ * 回答的问题：**这份 repair 有没有可测量的判别力证据**。
+ *
+ *   有 ⇒ `{ ok: true, evidence }`，调用方拿它去注入 r5/mutation
+ *        （于是 r5 能跑红前绿后，装饰品照旧被拒）。
+ *   没有 ⇒ `{ ok: false, unmeasured }`，且**必须**是 unmeasured 而不是 blocked：
+ *        没有夹具不等于"夹具是装饰品"（那是关于工作的结论，需要真的测过才能说）。
+ *        两者不同形 —— 把"我没能测量"说成"它有问题"，是反向的同一类错误。
+ *
+ * ★ 两句话必须不同形（本队记账）：
+ *     (i)  没能观察文件改动        ⇒ "could not observe any file change"
+ *     (ii) 观察到了、但没有既有夹具 ⇒ "the repair changed no test fixture"
+ *   否则"我瞎了"与"我看清了、确实没有"在日志里同形。
+ */
+export function repairCompletionVerdict(
+  ctx: RepairCompletionContext | undefined,
+): RepairCompletionResult {
+  const changed = [
+    ...asStringArray(ctx?.update?.changedPaths),
+    ...asStringArray(ctx?.task?.changedPaths),
+  ]
+  const observed = Array.isArray(ctx?.update?.changedPaths) || Array.isArray(ctx?.task?.changedPaths)
+  const evidence = repairEvidenceFiles(ctx)
+  if (evidence.length > 0) return { ok: true, evidence }
+
+  if (!observed) {
+    return {
+      ok: false,
+      unmeasured:
+        'the repair completion could not be judged: no file change was observed for this task '
+        + '(no changed-paths evidence was provided), so whether a test fixture still discriminates '
+        + 'could not be established',
+    }
+  }
+  return {
+    ok: false,
+    unmeasured:
+      `the repair completion could not be judged: none of the ${changed.length} changed file(s) `
+      + 'is a test fixture that can demonstrate the fix, so there is no discriminating evidence to '
+      + 'measure (this is not a finding about the work — nothing was run)',
+  }
+}
+
+export interface RepairCompletionContext {
+  task?: { id?: string; kind?: string; inScope?: string[]; changedPaths?: string[] }
+  update?: { changedPaths?: string[]; newTestFiles?: string[] }
+  [key: string]: unknown
+}
+
+export type RepairCompletionResult =
+  | { ok: true; evidence: string[] }
+  | { ok: false; unmeasured: string }
+
 export function collectChangedPaths(gitStatusText: string): string[] {
   const paths: string[] = []
   const seen = new Set<string>()
