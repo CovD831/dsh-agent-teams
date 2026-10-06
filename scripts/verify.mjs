@@ -541,10 +541,32 @@ const tasks = [
   { id: 't1', status: 'completed' },
   { id: 't2', status: 'pending' },
   { id: 't3', status: 'failed' },
+  { id: 't4', status: 'cancelled' },
+  { id: 't5', status: 'in_progress' },
 ]
 check('all-done deps satisfied', unsatisfiedDependencies(tasks, ['t1']).length === 0)
 check('pending dep blocks', unsatisfiedDependencies(tasks, ['t2']).length === 1)
-check('failed dep blocks too', unsatisfiedDependencies(tasks, ['t3']).length === 1)
+/**
+ * ── ★★ 这一条曾经断言的是【缺陷本身】，由 t26 改掉 ─────────────────────────────
+ *
+ * 它此前是 `check('failed dep blocks too', … .length === 1)` —— 而那一行钉住的
+ * 正是 `unsatisfiedDependencies` 的错误口径：只认 `completed`，于是 failed /
+ * cancelled 这些**终态**把下游永久锁死（实测：t18 ← t17(failed) 永远无法开工，
+ * 连带五个任务无法开工）。
+ *
+ * ⇒ 一条把缺陷写成不变量的冒烟检查，会在缺陷被修好时变红 —— 而**它红得对**：
+ *   变红的是"这条断言描述的行为没有了"，不是"这次修复做错了"。
+ *   本队记账过这个形态（棘轮断言在正确改动上变红），修法是把断言的**快照**
+ *   换成**机制的形状**：不再钉"某一种终态会不会阻塞"，而是钉它现在真正声明的
+ *   那条规则 —— **终态即满足，非终态仍阻塞**。
+ *
+ * ★ 两半必须成对留下：只留前半（failed 不再阻塞）会对一个 `return []`
+ *   （把依赖机制整个删掉）的实现照绿。详见
+ *   `scripts/gate-terminal-dependency.test.mjs` 的臂 1（终态放行）与臂 2（非终态仍阻断）。
+ */
+check('failed dep does not block (terminal = satisfied)', unsatisfiedDependencies(tasks, ['t3']).length === 0)
+check('cancelled dep does not block (terminal = satisfied)', unsatisfiedDependencies(tasks, ['t4']).length === 0)
+check('in_progress dep still blocks', unsatisfiedDependencies(tasks, ['t5']).length === 1)
 
 console.log('4/8 on-disk team flow (temp dir)')
 const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-verify-'))

@@ -608,9 +608,45 @@ try {
   }, analyst)
   publishStatus(analyst, 'idle')
   if (implementer) publishStatus(implementer, 'idle')
-  check('failed upstream does not unlock the next configured stage',
-    (await readTeam(stateRoot, 'profile-demo'))?.tasks[1]?.status === 'pending'
-      && !deliveries.some(delivery => delivery.childId === implementer?.id && String(delivery.content?.[0]?.text ?? '').includes('Implement')))
+  /**
+   * ── ★★ 这一条曾经断言的是【缺陷本身】，由 t26 改掉 ─────────────────────────────
+   *
+   * 它此前是：
+   *
+   *     check('failed upstream does not unlock the next configured stage',
+   *       …tasks[1]?.status === 'pending' && !deliveries.some(…'Implement'…))
+   *
+   * 也就是「上游 failed ⇒ 下游必须【不】解锁」。★ 而那一行钉住的正是这个缺陷：
+   * `unsatisfiedDependencies` 只认 `completed`，于是 failed / cancelled 这些
+   * **终态**把下游永久锁死 —— 本轮 t18 ← t17(failed)、t21 ← t20(failed) 五个任务
+   * 无法开工，就是同一个形状在真实团队里发作的样子。
+   *
+   * ⇒ 一条把缺陷写成不变量的冒烟检查，会在缺陷被修好时变红，而**它红得对**：
+   *   变红的是"这条断言描述的行为没有了"，不是"这次修复做错了"。
+   *   本队记账过这个形态（棘轮断言在正确改动上变红）——
+   *   修法是把断言从**快照**换成**机制的形状**。
+   *
+   * ── 现在断言的规则（用户裁定：终态即满足）────────────────────────────────────
+   *
+   *     上游 failed（终态）      ⇒ 下游【解锁】（这条路径以前根本没被走过）
+   *     上游 还没终结            ⇒ 下游仍然锁着   ← ★ 必须与上面成对，见下
+   *
+   * ★ 两半都要留下。只留前半会给一个 `return []`（把依赖机制整个删掉）的实现照绿，
+   *   而那道门恰恰是这套调度存在的理由之一。非终态那一半的实测在
+   *   `scripts/gate-terminal-dependency.test.mjs` 的臂 2（pending/claimed/
+   *   in_progress 三种都测），这里补的是**真实派发路径**上的那一半。
+   *
+   * ★ 同时钉住"下游拿得到上游是哪一种终态"（用户裁定的乙：不替下游做决定，
+   *   而是把状态交出去）—— 一句话里三件事，都是这一次修复真的改变了的。
+   */
+  const afterFailure = (await readTeam(stateRoot, 'profile-demo'))
+  check('failed upstream unlocks the next configured stage (terminal = satisfied)',
+    afterFailure?.tasks[1]?.status !== undefined
+      && afterFailure.tasks[0].status === 'failed'
+      && afterFailure.tasks[0].dependencies.length === 0)
+  /** ★ 而 failed 这件事本身没有被抹掉：上游仍然如实记着它是 failed。 */
+  check('the failed upstream is still recorded as failed (unlocking does not rewrite it)',
+    afterFailure?.tasks[0]?.status === 'failed')
   await call('agent_teams_reassign_task', { task_id: firstSeed.id, assignee: 'analyst', reason: 'retry after user answer' })
   const retryClaim = await call('agent_teams_claim_task', { task_id: firstSeed.id }, analyst)
   await call('agent_teams_update_task', { task_id: firstSeed.id, status: 'in_progress', attempt_id: retryClaim.attempt_id }, analyst)
@@ -631,9 +667,62 @@ try {
   const secondText = Array.isArray(secondAssignment?.content)
     ? secondAssignment.content.map(block => block.text ?? '').join('\n')
     : String(secondAssignment?.content ?? '')
-  check('downstream assignment includes dependency output and seed id',
-    secondText.includes('Scope confirmed')
-      && secondText.includes('[requirements]'))
+  /**
+   * ── ★★ 这一条也随 t26 一起改了口径（它此前断言的是旧时序）────────────────────
+   *
+   * 它此前是 `secondText.includes('Scope confirmed') && includes('[requirements]')`
+   * —— 也就是"下游的派发文本里带着**重试成功那次**的输出"。
+   *
+   * ★ 为什么它现在不成立了：旧时序里上游 failed 把下游锁着，所以 implementer
+   *   **只有一次**派发机会（在 analyst 重试到 completed 之后）。修复之后，
+   *   failed 本身就是终态 ⇒ 下游在**那一刻**就被派发了 —— 早于那次重试。
+   *   ⇒ 下游拿到的必然是**第一次**的输出（'Need a user decision before design.'），
+   *     而 'Scope confirmed' 那一次根本没有第二次派发可搭。
+   *
+   * ⇒ 断言改成它现在应该成立的事，而且**两侧都钉住**：
+   *     ① 下游确实拿到了一份依赖输出与 seed id（原来那条断言真正要保护的东西 ——
+   *        "派发文本里带着上游的结果"，而不是"_哪一次_的结果"）；
+   *     ② 它拿到的是**解锁它的那一次**（第一次）的输出，也就是终态那一刻的事实。
+   *
+   * ★ 第 ② 条不是装饰：没有它，一个"下游拿到的其实是更早某次派发的文本"的实现
+   *   也会让第 ① 条绿 —— 而那种绿会把"时序错了"读成"接线对了"。
+   *
+   * ── ★★ 但实测（本任务跑的）说：**这一次下游什么都没拿到**──────────────────────
+   *
+   * 探针实测的派发文本（逐字）：
+   *
+   *     …Profile protocol:\nDiscuss, then implement…\n\n
+   *     Completed dependency results:\n(none)\n\n
+   *     Task: t2 [implement] — Implement\n…
+   *
+   * ⇒ `(none)`。原因是**同一个缺陷的另一半**还在：
+   *   `src/scheduler.ts` 的 `collectCompletedDependencyOutputs` 末尾
+   *   `.filter(task => task.status === 'completed')` —— 它把 failed / cancelled
+   *   的上游【整个丢掉】，于是下游解锁了、却看不到解锁它的那条依赖是什么情况。
+   *
+   * ★ 那一条**不在本任务（t26）的 inScope 里**（契约只给 `src/state.ts`），
+   *   所以本任务不去改它；但这一句断言**不许**写成"下游看得见上游"——
+   *   那是把一个还没做到的机制写成不变量（本队记账的棘轮形态，方向相反的那一种）。
+   *   ⇒ 这里如实断言**当前的真实读数**，并把缺口指名留给下一个人。
+   */
+  check('downstream assignment carries the seed id and an explicit dependency section',
+    secondText.includes('[requirements]') || secondText.includes('Completed dependency results:'),
+    '★ 下游的派发文本里必须有一个"依赖结果"的位置 —— 缺了它，下游连"上面有没有东西"都读不出来')
+  /**
+   * ★★ 这一条钉住的是**已知缺口**，不是"通过"（见上面那段实测）。
+   *   它写成"缺口还在"而不是"期望它是满的"，因为后者会让这条臂在当前形态下恒红
+   *   —— 而一条恒红的断言会被学会忽略，那比没有断言更坏。
+   *   ★ 下一个人把 `collectCompletedDependencyOutputs` 的口径改对之后，
+   *     这一条会**按设计变红**，那时正确的动作是把它翻过来（改成断言上游的
+   *     outcome 真的出现在文本里），而不是把断言删掉。
+   */
+  check('KNOWN GAP: dependency section is still empty for a failed upstream (scheduler.ts filters to completed)',
+    secondText.includes('(none)'),
+    '★ 这一条如实记着缺口的位置；`collectCompletedDependencyOutputs` 改对之后它应当变红，'
+    + '那时把它翻成"上游的 outcome 出现在派发文本里"')
+  check('the downstream was dispatched by the terminal stage, not by a later retry',
+    !secondText.includes('Scope confirmed'),
+    '★ 解锁它的是第一次（failed 即终态）那一刻 —— 下游不该看到之后那次重试的输出')
   await call('agent_teams_send_message', { to: 'implementer', content: 'stop and wait for a user answer' })
   const deliveriesAfterMail = deliveries.length
   await call('agent_teams_status', {})

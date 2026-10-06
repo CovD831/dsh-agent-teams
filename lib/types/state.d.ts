@@ -49,13 +49,159 @@ export declare function teamLockQueueKeys(): readonly string[];
  */
 export declare function sanitizeKey(name: string): string;
 /**
- * Whether `dependencies` are all satisfied (every named task exists and
- * completed) for the given task list.
+ * ── ★★ 依赖是否满足：判「终态」，不是判「completed」──────────────────────────────
+ *
+ * MEASURED（2026-10-07，本机复现）：这一行此前是
+ *
+ *     return dependencies.filter((id) => byId.get(id)?.status !== 'completed')
+ *
+ * 它把「还没做完」与「做完了、结果是坏的」读成同一件事。而 failed / cancelled
+ * **也是终态**（`TASK_TRANSITIONS` 里两者都没有出边）⇒ 一条 failed 的上游会把
+ * 整条下游【永久】锁死：
+ *
+ *     t18 ← t17(failed)   ⇒ t18 永远不 ready，永远不会被派发
+ *     t21 ← t20(failed)   ⇒ 同上
+ *
+ * 而本轮的 t17 / t20 恰恰是**如实报告**：t17 的交付物已经并入、t20 的普查
+ * 正是它该红的那一份。机制把「诚实地说这份工作有问题」判成了「这份工作不存在」，
+ * 于是【如实报告会受到惩罚】—— 那会把成员推向"为了让下游能开工而谎报 completed"，
+ * 而那条路正是整个判据层存在的理由（不采信自述）。
+ *
+ * ── ★ 「终态即满足」不是放宽，是换一个更准的问题 ────────────────────────────────
+ *
+ *     「上游做完了吗」        —— 旧口径读不出来（failed 与 pending 同形）
+ *     「上游还欠不欠工作」    —— 新口径：终态 = 不再欠工作 = 依赖这件事已经了结
+ *
+ * 依赖要的是**因果上的了结**，不是**结果上的赞许**。上游失败了，下游要做的
+ * 不是"等一个永远不会到来的 completed"，而是"带着这个事实往下走"。
+ *
+ * ── ★★ 但"能开工"不等于"下游不知道发生了什么" ──────────────────────────────────
+ *
+ * 全都放行会带来一个新风险：**下游看不见上游是哪种终态**。用户裁定的是乙：
+ * 不替下游做决定，而是把状态交出去 —— 也就是**在这里只回答"欠不欠工作"**，
+ * 把"上游最后落在哪"交给 {@link dependencyOutcomes}（同一个文件、同一条口径）。
+ *
+ * ★ 两条出口必须分开读，不许合成一个布尔：合成之后"上游全做完了"与
+ * "上游全失败了但都了结了"在调用方眼里同形，而它们的补救动作完全不同
+ * （继续往下 vs 先看那份失败报告）。
+ *
  * @param tasks - the team's tasks.
  * @param dependencies - task ids the candidate depends on.
  * @returns the ids that are still unsatisfied, empty when claimable.
  */
 export declare function unsatisfiedDependencies(tasks: TeamTask[], dependencies: string[]): string[];
+/**
+ * ── ★★ 一个依赖【最后落在哪】—— 把上游的终态原样交给下游 ─────────────────────────
+ *
+ * 用户裁定的口径（乙）：**全都终态即满足，但下游能读到上游是哪种终态。**
+ * 判据层不替下游决定"这份失败要不要紧"，它只负责**不把那个事实藏起来**。
+ *
+ * ── 为什么失败要细分（用户裁定）────────────────────────────────────────────────
+ *
+ * 一个裸 `failed` 把三件不同的事压成一件，而它们的补救动作完全不同：
+ *
+ *     failed_delivery —— 交付物【真的有问题】（判据抓到了伪造 / 测试没红 / 工作没到）
+ *     failed_context  —— 环境或口径使它无法以 completed 收口（缺依赖、非 git、
+ *                        契约本身自相矛盾）—— ★ 交付物不一定有问题
+ *     inconclusive    —— 任务的性质就是"找问题"，而它【找到了】
+ *                        （一次普查报出缺陷、一次审查给出 needs_revision）
+ *                        —— ★ 这正是 "failed" 这个词最不该覆盖的那一类
+ *
+ * ★ 本轮的 t17 / t20 都落第三类：它们的"失败"就是它们的交付。
+ *   不细分，下游（和读日志的人）只能看到一个 failed，于是【如实报告】
+ *   与【真的做砸了】永远同形 —— 而那是本队记账最久的那个形态。
+ *
+ * ── 分类器刻意是「纯函数 + 只读已有的字段」────────────────────────────────────
+ *
+ * 它不改变任何任务的 status、不写任何东西、不认识工具层。它只是把一条已经
+ * 发生的终态**读成一个可比较的值**，好让下游与报告都能问"这是哪一种"。
+ * ★ 缺席（老记录、工作区里的历史任务）落 `failed_context` 而不是编一个
+ *   `failed_delivery`：**读不到的成因不许推断成"交付物坏了"** ——
+ *   那个方向会给一个没人检查过的任务扣上最重的帽子。
+ */
+/** 一条依赖最后落在哪。★ 三态 + 两种汇总，不是两个布尔。 */
+export type DependencyOutcome = 'completed' | 'failed_delivery' | 'failed_context' | 'inconclusive' | 'cancelled';
+/**
+ * 一次 failed 的细分。★ 取值与 `output` / `verdict` 上的既有事实**一一对应**，
+ * 不引入新的写入口（本轮不改 `src/tools.ts`）。
+ */
+export declare const FAILURE_KINDS: readonly ["failed_delivery", "failed_context", "inconclusive"];
+export type FailureKind = (typeof FAILURE_KINDS)[number];
+/**
+ * 把一条终态任务读成 {@link DependencyOutcome}。
+ *
+ * ★ 它只读**已经写在任务上**的事实（`status` / `verdict` / `acceptanceResults` /
+ *   `commandsRun`），不读时钟、不读盘、不调用任何判据 —— 所以它可以在任何
+ *   消费者（调度器、报告、下游提示）里被同一个引用调用，而不会有两份真相。
+ *
+ * @param task - the dependency task. `undefined` ⇒ 未知 id，如实报 `'failed_context'`
+ *   （"这条依赖我读不到"不是"它做完了"）。
+ */
+export declare function dependencyOutcomeOf(task: TeamTask | undefined): DependencyOutcome;
+/**
+ * 细分一次 `failed`。**顺序即优先级**（下面三条各自排除前面那些）。
+ *
+ * ★ 判据的顺序是从"最确定"到"最保守"：
+ *
+ *   ① `inconclusive` —— 有 `verdict` 的失败，是 review/requirements 类的**结论型**任务，
+ *      它的失败**就是**它查出了问题（`needs_revision` / `reject`）。这一类任务的性质
+ *      是"找问题"，找到即交付 ⇒ 这不是"做砸了"。
+ *   ② `failed_delivery` —— 有**实测证据**说交付物本身是坏的：验收项里有 failed，
+ *      或 verify 命令里有非 0 退出。这是可指名的、可复核的"东西不对"。
+ *   ③ `failed_context` —— 上面两条都不成立：没有结论、没有一条实测说交付物坏了。
+ *      ⇒ 最保守的读法，也是**缺省**（见下面那段实测记录）。
+ *
+ * ★★ 为什么 `failed_context` 是缺省而不是 `failed_delivery`（这条是刻意的）：
+ *   「没有证据说它坏了」与「有证据说它好了」是两件事。缺省成 failed_delivery
+ *   会让每一个**没人检查过**的失败都被扣上"交付物有问题"，而下游据此可能
+ *   直接放弃 —— 那是把"没测到"并进"测出来是坏的"，与并进"通过"同源。
+ */
+export declare function failureKindOf(task: TeamTask): FailureKind;
+/**
+ * ── ★★ 依赖的全貌：每一条依赖的 id + 终态 + 是否已经了结 ─────────────────────────
+ *
+ * 这是 {@link unsatisfiedDependencies} 的**信息面**版本，两个问题一起回答：
+ *
+ *     「下游能不能开工」        —— `satisfied`
+ *     「上游最后落在哪」        —— `outcome`
+ *
+ * ★ 它**不**取代 `unsatisfiedDependencies`，两者必须都能被读到：
+ *   前者是闸门（调度器用它决定派不派），后者是证据（下游与报告用它决定
+ *   "带着什么往下走"）。合成一个"能开工 + 一个布尔"会让第二件事消失。
+ *
+ * ★ 顺序与 `dependencies` 一致（不是重排、不是去重）：调用方交进来的顺序
+ *   就是它读得出的顺序，一个"顺手按 id 排序"的实现会让两份读数对不上。
+ */
+export interface DependencyStatus {
+    /** 依赖的任务 id，原样交回。 */
+    id: string;
+    /** 这条依赖最后落在哪。★ 未知 id / 非终态都落 `failed_context`（见上）。 */
+    outcome: DependencyOutcome;
+    /** ★ 这条依赖**已经了结**吗 —— 与 `unsatisfiedDependencies` 判的是同一个问题。 */
+    satisfied: boolean;
+    /** 任务在盘上的状态；未知 id 缺席（不是编一个 `pending`）。 */
+    status?: TaskStatus;
+}
+/**
+ * 把一组依赖读成 {@link DependencyStatus} 的清单。
+ *
+ * @param tasks - the team's tasks.
+ * @param dependencies - task ids the candidate depends on.
+ */
+export declare function dependencyStatuses(tasks: readonly TeamTask[], dependencies: readonly string[]): DependencyStatus[];
+/**
+ * 下游一句话能读到的"上游怎么了"。
+ *
+ * ★ 只在**有值得说的事**时产出内容：全 completed 时返回空串。
+ *   一个把"上游全都好好地做完了"也渲染成一行的实现，会让真正需要看的那一行
+ *   （上游失败了、而它是哪一种）淹没在每次派发都出现的噪音里 ——
+ *   而噪音会教人忽略告警（requires.ts 那一条的同源）。
+ *
+ * ★ 它**不**决定下游该怎么做（不写"请先修复"、"请不要继续"）。用户裁定的口径是
+ *   "把状态交出去"：这句话是**读数**，不是指示。加一句祈使句就等于替下游做了决定，
+ *   而下游知道的东西比这里多（它知道自己的 objective）。
+ */
+export declare function describeDependencyOutcomes(statuses: readonly DependencyStatus[]): string;
 /**
  * The allowed task status transitions, keyed by current status.
  * Terminal statuses have no outgoing transitions.
