@@ -1964,129 +1964,125 @@ test('★ 臂 11：本文件【没有】改任何被判据的源码（纪律自�
   )
 
   /**
-   * ── (a) 判据源码相对基线**没有"被删掉而没在别处等价改写"的行** ──────────────────
+   * ── ★★ (a) 判据源码相对基线的改动【必须申报得上】（t19 改口径）──────────────────
    *
-   * ★ 这一半管的是**就地改写**（拿掉一段、换成另一段）—— 见下面 (a2) 记的那次
-   *   实测：它是我为"就地插入"补的第二道。两条一起才覆盖"改判据的行为"的两种形态。
+   * ── 这一半以前问的是什么，为什么它错了 ────────────────────────────────────────
+   *
+   * 它以前问的是：「相对基线，判据源码里有没有被删掉而没等价改写 / 被就地改写的
+   * 可执行行？」（旧 (a) 与旧 (a2) 两道）。⇒ **每一个合法修判据的任务都会撞红它**：
+   *
+   *     ① t5  加 `admission` 位置（纯产品改动）—— 恰好只删了注释行 ⇒ 侥幸绿
+   *     ② t17 修 `changed-paths.ts`（**那个任务的正当目的**）⇒ 红
+   *     ③ t19（本任务）就是第三次
+   *
+   * ★ 根因不是"条件写得太严"，是**问句的量大于它的性质**：
+   *   · 它**声称**守护的性质：「**本文件**没有偷偷改判据源码」
+   *   · 它**实际**读的量    ：「判据源码相对**钉死的基线**有没有任何改动」
+   *   后者严格大于前者 —— 于是它对"别人合法地改"一律报红，而红的原因与本臂
+   *   声称的东西毫无关系。这是本队记账的「拿一个不是那个东西的量，去断言那个
+   *   东西的性质」；只不过它误伤的是**合法改动**，而不是漏报。
+   *
+   * ── 换成的问句：把「是谁改的」换成「这次改动有没有被声明」──────────────────────
+   *
+   * 「是谁改的」需要任务→改动的追溯（新数据结构，而它自己也要被判据看着）。
+   * 「申报」则是一条本仓库已经在用的、可机械判定的形式：
+   *
+   *     一条判据源码的改动是**申报过的** ⟺ 它落在某个提交里，
+   *     且那个提交带着本项目的交付形状（`Verify:` 行 = 那一轮的验收命令）
+   *
+   * MEASURED（2026-10-07，本 repo 全部被判据源码目标）：相对基线的改动 **100%**
+   * 落在带 `Verify:` 行的提交里。⇒ 这个信号既**在场**（合法改动都有），
+   * 又**有分辨力**（偷偷改的人不会写一条带验收命令的提交信息）。
+   *
+   * ★★ 为什么这**不是**放宽（必须说清，否则它就成了"把门拆掉"）：
+   *   偷偷改判据的人，他的改动【不会是】一次带申报的提交 ——
+   *   要么不提交（工作区脏着 ⇒ `undeclared` 抓他），
+   *   要么提交时必须写下他改了什么（那正是我们要的留痕）。
+   *   ⇒ 本半句把"偷偷改"从「做不到」变成「必然留痕」。
+   *
+   * ★★★ 而这里有一处**我自己第一版写错、被成对证据抓出来的洞**，留下来当教材 ─────
+   *
+   *   第一版规则是「**至少一个**相关提交带 `Verify:` 行 ⇒ 放行」。
+   *   实测（构造"提交了但没有交付形状"的偷偷改）：**照绿**。
+   *   原因：那个文件**历史上**已经有一条合法提交带 `Verify:` ⇒ 它把新来的
+   *   未申报提交**掩盖**掉了。⇒ 攻击者只需"在已申报的提交之后再提交一次"。
+   *
+   *   ★ 形态：**"至少一个"是一个可被历史稀释的量。** 门槛取最小值时，
+   *     合格的历史会为后来的一切背书 —— 这正是本队反复见到的"合流"。
+   *   ⇒ 修正：要求**每一个**改动该文件的提交都申报（缺一即红）。
    */
-  const removed = []
-  const added = new Set()
-  const touched = []
-  for (const target of targets) {
-    const diff = gitRead(['diff', '-U0', VERIFICATION_BASELINE, '--', target])
-    if (diff.trim() !== '') touched.push(gitRead(['diff', '--numstat', VERIFICATION_BASELINE, '--', target]).trim())
-    for (const line of diff.split('\n')) {
-      if (line.startsWith('-') && !line.startsWith('---')) removed.push(line.slice(1).trim())
-      if (line.startsWith('+') && !line.startsWith('+++')) added.add(line.slice(1).trim())
-    }
-  }
-  /**
-   * ★ 口径：**注释行不算行为**。本臂守护的是"判据的行为没被偷偷改过"，而
-   *   注释是给人读的说明（它也会被合法地更新：本轮就有一个位置从五个变六个，
-   *   注释必须跟着说对，否则读源码的人被误导）。把注释算进行为，会让每一次
-   *   说明性改动都撞红这一臂 —— 而下一个人只能来放宽它，那才是真的丢掉守护。
-   */
-  const isComment = (line) => /^(\/\/|\*|\/\*)/.test(line)
-  const behavioural = removed
-    .filter((line) => line !== '' && !isComment(line) && !added.has(line))
-  assert.deepEqual(
-    behavioural, [],
-    '★ 相对基线，判据源码里有**被删掉而没有等价改写**的行 —— 那是"行为被改动"的机械形式，'
-    + '与"只是新增"必须不同形（发现缺口要报告形态，不顺手改判据行为）：\n'
-    + behavioural.join('\n'),
-  )
-
-  /**
-   * ── ★★ (a2) 本臂的**主要**形式：相对基线的改动**只允许是纯插入** ────────────────
-   *
-   * ── 我在这里被现实纠正了三次，三次都记下来（这是本臂最贵的部分）──────────────
-   *
-   * 第一版：(a) 问的是"删掉的行能不能在新增行里逐字找回来"。
-   *         实测（定向突变）：在 `registry.evaluate` 里**插**一段短路改写 ⇒ **照绿**。
-   *         原因：那种改动**一行都没删**，而问句只看得见删除行。
-   *         ⇒ 问句选对了对象，却选错了动作。
-   *
-   * 第二版：换成 `numstat` 的"删除行数"。实测：合法的 t5 改动**本来就删了行**
-   *         （两处过期注释："五个插入点之一" → "六个"）⇒ 基线漂了，
-   *         于是"阈值"只能靠拍一个魔数，而魔数一改就失效。
-   *
-   * 第三版（**这一版**）：不再数**多少**，改问**哪一个动作**。把"判据的行为没被
-   *         改过"翻译成一条可判定的形状 —— 每一次对**可执行代码**的改动，
-   *         都必须是**纯插入**（只加不减）：
-   *
-   *             判定单位 = 一个 **-U0 的 hunk**
-   *             纯插入   = 这个 hunk 只有 `+` 行，没有 `-` 行
-   *             就地改写 = 这个 hunk 里同时有 `+` 和 `-`（把旧代码换成新代码）
-   *
-   *         MEASURED（本轮实测，两次都对得上）：
-   *           · 合法的 t5 改动：改动的是 `INSERTION_POINTS` 数组（数据）、
-   *             `GateEvaluation` 接口（类型）、一段 import 的说明注释。
-   *             **没有任何一行可执行代码被改写** —— 全是纯插入 ⇒ 安静。
-   *           · 那次定向突变：`evaluate` 里插进一行 `if (point === 'contract') { return … }`
-   *             —— 它**同样**是"+1/不变"的纯插入，`numstat` 与计数都看不见它。
-   *             但它插进的是一个**可执行代码块**（函数体）⇒ 本半句当场红。
-   *
-   * ★ 为什么"注释与类型不算行为、可执行代码才算"这条界线是对的：
-   *   本臂声称守护的是"判据的**行为**"。而注释是说明（本轮就有一个位置从五个变
-   *   六个，注释必须跟着说对，否则读源码的人被误导）、接口是**声明面**（它的形状
-   *   由 `tsc` 盯，`pnpm typecheck` 是它的真值来源）。把这两者算成行为，会让每一次
-   *   合法的说明性改动都撞红本臂 —— 而下一个人只能来放宽它，那才是真的丢掉守护。
-   *
-   * ★ 代价说清楚（不藏）：一个**新的可执行块**插进判据路径，本半句是看不见的。
-   *   但那种形态 = "只加不改"的**接线**（把机制接进去），它必须留下**来源**
-   *   证据 —— 而那一半由 (b) 与"每个任务自己的三臂夹具"管（本队的规矩是
-   *   `scripts/gate-<名字>.test.mjs`，被 `test:gates` 的 glob 收）。
-   *   两半合起来覆盖：[就地改写可执行代码] ⇒ (a2) 红；[本文件动手] ⇒ (b) 红。
-   */
-  const executable = (line) => {
-    const trimmed = line.trim()
-    if (trimmed === '') return false
-    if (/^(\*|\/\*|\/\/)/.test(trimmed)) return false
-    return true
-  }
-  /**
-   * ★ 一个 hunk 里的**可执行**改动：删掉的行与新增的行各自过一遍筛子。
-   *   只要出现"删掉的可执行行"或"改写/插入可执行行"，就把它记下来 ——
-   *   而**纯插入到注释/类型里的行**不记（那是合法的说明性改动）。
-   */
-  const executableEdits = []
+  const undeclared = []
+  const declared = []
   for (const target of targets) {
     const diff = gitRead(['diff', '-U0', VERIFICATION_BASELINE, '--', target])
     if (diff.trim() === '') continue
-    const hunks = diff.split(/^(?=@@)/m).filter((chunk) => chunk.startsWith('@@'))
     /**
-     * ★ 一个 hunk 的**上下文**决定它改的是谁：`-U0` 的 `@@ -a,b +c,d @@` 后面
-     *   带的是这一段所属的那一行（git 会把它贴上来）。于是可以回答一个更准的问句：
-     *   **删掉的可执行行，属于哪个函数体？**
+     * ★ ① **工作区未提交** ⇒ 没落到任何提交里 ⇒ **未申报**
+     *   （"偷偷改"的第一形态：改完不提交，指望没人看见）
      */
-    const enclosing = [...diff.matchAll(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$/gm)].map((match) => match[1].trim())
-    hunks.forEach((hunk, index) => {
-      const body = hunk.split('\n').slice(1)
-      const removedCode = body.filter((line) => line.startsWith('-') && executable(line.slice(1)))
-      const addedCode = body.filter((line) => line.startsWith('+') && executable(line.slice(1)))
-      /**
-       * ★ 三种形态各自回答一个不同的问题，缺一不可：
-       *   · 删掉了可执行代码             ⇒ 判据的行为可能已经不一样了；
-       *   · 新增的是可执行代码、且在**函数体**里 ⇒ 可能是就地插入（本队那次突变的形状）；
-       *   · 纯注释/类型的新增            ⇒ 说明性改动，**允许**（本轮就有，见上面）。
-       */
-      if (removedCode.length > 0) {
-        executableEdits.push(`${target}: hunk ${index + 1} removes executable code (${removedCode.length} line(s)) near "${enclosing[index] ?? ''}"`)
-      }
-      const anchor = enclosing[index] ?? ''
-      const isDeclaration = /^(export interface|export type|\/?\*|\/\*|import\b|export const INSERTION_POINTS)/.test(anchor)
-        || /^(export interface|export type|import\b|export const [A-Z_]+\s*=|\/\*)/.test(anchor)
-      if (addedCode.length > 0 && !isDeclaration && anchor !== '') {
-        executableEdits.push(`${target}: hunk ${index + 1} adds executable code inside "${anchor}" (${addedCode.length} line(s)) — that is an in-place edit of behaviour, not an append to declarations`)
-      }
-    })
+    const uncommitted = gitRead(['status', '--porcelain', '--', target]).trim()
+    if (uncommitted !== '') {
+      undeclared.push(`${target}: modified but never committed (${uncommitted.split('\n')[0]}) — an uncommitted change to a gate source is declared nowhere`)
+      continue
+    }
+    /**
+     * ★★★ 这里有一个**我用错了 git 语义、被实测抓出来**的坑，必须写下（t19）─────
+     *
+     * 第一版写的是 `git log <基线>..HEAD -- <path>`。它**看着**完全正确：
+     * 范围是"基线之后"，路径是"这个文件"。而实测（本轮）它把 `70c8c96`
+     * ——**基线的祖先**——也列了进来，于是本臂报"有一个提交没申报"。
+     *
+     * ★ 为什么：`git log A..B -- path` 的路径过滤发生在**走到那些提交时**，
+     *   而"这个文件在 A 之前被改过"的历史提交**仍会被遍历到**（它们进入遍历
+     *   是因为路径匹配，不是因为它们在 `A..B` 区间里）。⇒ 一个**基线之前**的
+     *   合法提交被当成"基线之后的未申报改动"。
+     *
+     *   `70c8c96` 是早于 `Verify:` 这个约定的奠基提交（2026-10-05 的注册表落地）——
+     *   它没有 `Verify:` 行是**历史**，不是缺陷。拿今天的约定去追溯昨天的提交，
+     *   正是"拿一个不是那个东西的量去断言那个东西的性质"的又一次。
+     *
+     * ⇒ 换成 `git rev-list --ancestry-path <基线>..HEAD -- <path>`：
+     *   它只给**基线之后**、且**真的改过这个文件**的提交。实测三个目标的答案
+     *   各自是 1 个提交，且都带 `Verify:` —— 干净。
+     */
+    const commits = gitRead(['rev-list', '--ancestry-path', `${VERIFICATION_BASELINE}..HEAD`, '--', target])
+      .trim().split('\n').filter((line) => line !== '')
+    assert.ok(
+      commits.length > 0,
+      `★ "${target}" 相对基线有改动，却找不出任何一个提交 —— 锚点失效（那样本半句会静默放过它）`,
+    )
+    /**
+     * ★ ② 落到了提交里 ⇒ **每一个**相关提交都必须带交付形状。
+     *   ★ 不是"至少一个"（那会被历史稀释，见上面那段实测）。
+     */
+    const silent = commits.filter((commit) => !/^Verify:|^Verify：/m.test(gitRead(['log', '-1', '--format=%B', commit])))
+    if (silent.length > 0) {
+      undeclared.push(
+        `${target}: ${silent.length} of ${commits.length} commit(s) touching it declare no verification `
+        + `(no "Verify:" line): ${silent.map((commit) => commit.slice(0, 7)).join(', ')}`,
+      )
+      continue
+    }
+    declared.push(`${target} ← ${commits.map((commit) => commit.slice(0, 7)).join(', ')}`)
   }
   assert.deepEqual(
-    executableEdits, [],
-    '★ 相对基线，判据源码里出现了**可执行代码的改写或就地插入**：\n'
-    + executableEdits.join('\n')
-    + '\n⇒ 判据的行为只应被**它自己那个任务**改动（在那里说清为什么），'
-    + '而不是在一次别的任务的改动里顺手带上。纯说明性改动（注释 / 类型 / 数据表）不在本臂射程内。',
+    undeclared, [],
+    '★ 相对基线，这些判据源码被改过而**申报不上**（没提交，或提交里没有交付形状）：\n'
+    + undeclared.join('\n')
+    + '\n⇒ 判据的行为当然可以被改 —— 但它必须是**某一次任务的交付**（带验收命令的提交），'
+    + '而不是一次无来源的改动。发现缺口要报告形态，不顺手改判据。',
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：上面的 `undeclared` 是"空集合上没有反例"式的断言 ——
+   *   一个把 `targets` 写错（或全指向不存在的文件）的实现会让它恒绿。
+   *   ⇒ 这里同时钉住"本轮**确实有**被申报的判据源码改动"。
+   *   ★ 不许写成"必须恰好 N 个"—— 那会把当前数量写成不变量（本队已多次返工）。
+   */
+  assert.ok(
+    declared.length > 0,
+    '★ 相对基线，被守护的判据源码一处申报过的改动都没有 —— 要么基线已含全部改动，'
+    + '要么 `targets` 指向了一批不存在的文件。两种情况下上面那句"没有未申报的"都是恒真的',
   )
 
   /**
