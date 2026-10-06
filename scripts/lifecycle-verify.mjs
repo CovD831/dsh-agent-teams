@@ -709,17 +709,56 @@ try {
     secondText.includes('[requirements]') || secondText.includes('Completed dependency results:'),
     '★ 下游的派发文本里必须有一个"依赖结果"的位置 —— 缺了它，下游连"上面有没有东西"都读不出来')
   /**
-   * ★★ 这一条钉住的是**已知缺口**，不是"通过"（见上面那段实测）。
-   *   它写成"缺口还在"而不是"期望它是满的"，因为后者会让这条臂在当前形态下恒红
-   *   —— 而一条恒红的断言会被学会忽略，那比没有断言更坏。
-   *   ★ 下一个人把 `collectCompletedDependencyOutputs` 的口径改对之后，
-   *     这一条会**按设计变红**，那时正确的动作是把它翻过来（改成断言上游的
-   *     outcome 真的出现在文本里），而不是把断言删掉。
+   * ── ★★ 这条断言【翻面了】（t32）：缺口已被 t28 补上 ──────────────────────────
+   *
+   * 它此前是：
+   *
+   *     check('KNOWN GAP: dependency section is still empty for a failed upstream …',
+   *       secondText.includes('(none)'))
+   *
+   * 也就是把 f-0018 的**缺口位置**钉成一条不变量 —— 而它自己的注释逐字交代了
+   * 这个形态的正确下场：
+   *
+   *     ★ 下一个人把 `collectCompletedDependencyOutputs` 的口径改对之后，
+   *       这一条会**按设计变红**，那时正确的动作是把它翻过来（改成断言上游的
+   *       outcome 真的出现在文本里），而不是把断言删掉。
+   *
+   * ⇒ t28 正是那次改动（`src/scheduler.ts` 的过滤从"只认 completed"改成"终态即交"）。
+   *   实测：本文件在 t28 之后按设计翻红（`FAIL KNOWN GAP: … (scheduler.ts filters to completed)`），
+   *   而现在正是翻它的时候 —— 不翻，全量会一直红着一条**已经过期的**缺口记录，
+   *   而那比没有断言更坏：一条恒红的断言会被学会忽略。
+   *
+   * ── 翻面时**实测**到的真实派发文本（本任务探针逐字取出，不是推断）──────────────
+   *
+   *     …Profile protocol:…\n\n
+   *     Completed dependency results:\n
+   *     - t1 [requirements] [failed] Requirements:\n
+   *       Need a user decision before design.\n\n
+   *     Task: t2 [implement] — Implement\n…
+   *
+   * ★ 注意它同时带着 `[requirements]`（seed id）与 `[failed]`（终态）——
+   *   两个标记各说各的事，缺一个下游就少一份读数。
+   *
+   * ── 翻成的三条：两侧都钉住，缺一不可 ────────────────────────────────────────
+   *
+   *   ① 文本里必须有 `[failed]` —— 下游据此才知道"上面出过事"；
+   *   ② 而它**不许**是 `[completed]` —— 一个把所有终态都印成 completed 的实现
+   *      会让"下游看得见上游"在字面上成立、而信息全丢；
+   *   ③ 不许再说 `(none)` —— 那是这条链上原来的症状本身。
+   *
+   * ★ 为什么三条而不是一条："下游看得见上游"这句话可以被三种不同的坏实现
+   *   满足（滤掉了标记 / 标记恒为 completed / 仍然说没有依赖），
+   *   而它们各自的补救动作不同。合成一条断言，就分不出是哪一种坏了。
    */
-  check('KNOWN GAP: dependency section is still empty for a failed upstream (scheduler.ts filters to completed)',
-    secondText.includes('(none)'),
-    '★ 这一条如实记着缺口的位置；`collectCompletedDependencyOutputs` 改对之后它应当变红，'
-    + '那时把它翻成"上游的 outcome 出现在派发文本里"')
+  check('dependency results carry the upstream terminal state for a failed upstream',
+    secondText.includes('[failed]'),
+    '★ 下游必须读得出上游落在 failed —— 这是 t28 补上的那一格')
+  check('a failed upstream is NOT rendered as completed (the two must not be conflated)',
+    !secondText.includes('[completed]'),
+    '★ 把 failed 印成 completed 会让"看得见"这句话在字面上成立、而信息全丢')
+  check('the dependency section is no longer lying about an empty upstream',
+    !secondText.includes('(none)'),
+    '★ `(none)` 是这条链上原来的症状 —— 它说过"没有前置依赖"，而上面其实出过事')
   check('the downstream was dispatched by the terminal stage, not by a later retry',
     !secondText.includes('Scope confirmed'),
     '★ 解锁它的是第一次（failed 即终态）那一刻 —— 下游不该看到之后那次重试的输出')
