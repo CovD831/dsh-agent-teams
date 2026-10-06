@@ -111,6 +111,20 @@ const CHECKPOINT_OK = { ok: true }
 const CHECKPOINT_BLOCKED = { ok: false, blockers: ['"docs/REQUIREMENTS.md" has an UNREVIEWED change: it was reviewed at aaa and is now at bbb'] }
 const CHECKPOINT_UNMEASURED = { ok: false, unmeasured: 'the current git revision of the produced documents could not be observed' }
 const ABSORB_OK = { ok: true }
+/**
+ * ── ★ 上游 absorb 的另外两态（t25 补）────────────────────────────────────────────
+ *
+ * ★ 三条各写一次，且**文本刻意不同**：这样"本判据有没有把上游的原文带上来"
+ *   才是可判的（若都用同一句话，"带没带"就看不出来）。
+ */
+const ABSORB_BLOCKED = {
+  ok: false,
+  blockers: ['the claim of absorption is false: the artefact was not changed by this session'],
+}
+const ABSORB_UNMEASURED = {
+  ok: false,
+  unmeasured: 'the write history could not be observed, so whether the session really absorbed the review could not be observed',
+}
 
 /**
  * 一个最小 ctx。**每一格都显式给值**，好让每条臂只改它要测的那一格
@@ -365,7 +379,129 @@ test('★ 臂 2f：提问表的形状坏了（含非字符串条目）⇒ unmeas
   }
 })
 
-test('★ 臂 2g：整个 `upstream` 缺席 ⇒ unmeasured（"没人接线"与"上游都说没事"不同形）', () => {
+/**
+ * ── ★★ 条件 ④（吸收）：本任务 t25 补的那一条 ────────────────────────────────────
+ *
+ * ── 它防的是什么失效 ────────────────────────────────────────────────────────
+ *
+ * MEASURED（t20 普查命中、captain 复现、本任务逐字复核）：补上条件 ④ **之前**，
+ * `convene` 对 `admission.absorb` 的裁决**完全无视** —— 四种吸收态返回**完全相同的
+ * 裁决**（都 `ok`、都 `autoApprove: true`）：
+ *
+ *     absorb = ok          ⇒ ok（正确）
+ *     absorb = blocked     ⇒ ok   ✘ 上游已经开火，成团闸门替它签了字
+ *     absorb = unmeasured  ⇒ ok   ✘ 不知道吸收发没发生，却宣布够格
+ *     absorb 键缺席         ⇒ ok   ✘ 上游压根没跑
+ *
+ * ★ 而代价特别高：用户裁定「判据全过 ⇒ 可自动成团，**不需要用户点头**」
+ *   ⇒ 一个"不确定有没有吸收"的时刻会**在没有人的情况下**成团。
+ *
+ * ★★ 而它的形状是本队记过的第四种恒真写法（**读错位置的出口**）最隐蔽的形态：
+ *   `UPSTREAM_ABSORB` 此前**出现在代码里**（`conveneReport.upstreamStates` 的回显），
+ *   于是日志里能看到 absorb 的态 —— 看起来像"读了"，实际对裁决零影响。
+ *   ⇒ "被记录下来"与"被用来判定"是两件事，而它们在日志里长得一样。
+ */
+
+test('★★ 臂 1f（t25 的真缺陷）：上游 absorb 报 blocked ⇒ blocked，且复述上游的【原文证据】', () => {
+  const blockers = expectBlocked(gate(ctx({
+    upstream: { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': ABSORB_BLOCKED },
+  })))
+  assert.ok(blockers.length >= 1, '★ 必须拒绝')
+  const joined = blockers.join('\n')
+  assert.match(joined, /condition ④/, '★ 必须点名是条件 ④ —— 否则读日志的人不知道缺的是"吸收"还是"再审"')
+  assert.match(joined, /could NOT be established/, '★ 必须说清缺的是什么（吸收没成立）')
+  /**
+   * ★★ 这一条是"读上游结论、不重算"的可观测落点：上游 blocker 的**原文**必须被带过来。
+   *   本判据的输入里没有任何"吸收痕迹"（它只有上游裁决），所以拿不到这段文本。
+   */
+  assert.match(joined, /the claim of absorption is false/, '★ 必须复述上游裁决的原文证据')
+  assert.doesNotMatch(joined, /condition ②/, '★ 不许连坐：checkpoint 这一格是健康的')
+})
+
+test('★★ 臂 2i（t25 的真缺陷）：上游 absorb 报 unmeasured ⇒ 本判据【跟着 unmeasured】，绝不是 ok', () => {
+  const verdict = gate(ctx({
+    upstream: { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': ABSORB_UNMEASURED },
+  }))
+  const reason = expectUnmeasured(verdict)
+  assert.match(reason, /condition ④/, '★ 必须点名条件 ④')
+  assert.match(reason, /could NOT be measured/, '★ 必须说清是"没能测量"')
+  assert.match(reason, /could not observe the absorption/, '★ 必须把上游那句理由带出来')
+  /**
+   * ★ 形状断言（不是措辞断言）：unmeasured 这一支里**没有** `ok:true`，也**没有** `blockers`。
+   */
+  assert.equal('blockers' in verdict, false, '★ unmeasured 不许同时带 blockers')
+  assert.equal(verdict.ok, false)
+})
+
+test('★★ 臂 2j（t25 的真缺陷）：上游【压根没有】absorb 这个键 ⇒ unmeasured（不是"吸收没问题"）', () => {
+  const reason = expectUnmeasured(gate(ctx({
+    upstream: { 'admission.checkpoint': CHECKPOINT_OK },
+  })))
+  assert.match(reason, /condition ④/, '★ 缺的是条件 ④')
+  assert.match(reason, /did not run in this step/, '★ 必须说清是"上游没跑"，不是"上游说没事"')
+  assert.match(reason, /never spoke is not a gate that said "yes"/, '★ 界线必须写在理由里')
+})
+
+test('★★★ 臂 2k（t25 的核心断言）：四种吸收态的裁决**必须两两不同形** —— 尤其是 ok 与其余三种', () => {
+  /**
+   * ── 这一条是 t20 普查臂 1 的**同构断言**，写在判据自己的夹具里 ────────────────────
+   *
+   * 普查臂 1 是**外部**检查（从真实注册表读这条判据）；这一条是**内部**回归
+   * （判据自己的三臂）。★ 两者都要有：外部那条防止"判据整体烂掉"，内部这条
+   * 让"补上条件 ④ 的人"在**改动的当次**就看见它。
+   *
+   * ★ 断言的形态刻意选"两两不同形"而不是"逐个举例"：
+   *   逐个举例会在将来多一个态时静默漏掉那个态 —— 那是本队记过的"漏记的那几条
+   *   会静默地不报 unmeasured，读起来就像它们通过了"。
+   */
+  const states = {
+    ok: ABSORB_OK,
+    blocked: ABSORB_BLOCKED,
+    unmeasured: ABSORB_UNMEASURED,
+    /** ★ 键缺席：上游没跑。 */
+    absent: undefined,
+  }
+  const reads = {}
+  for (const [name, absorb] of Object.entries(states)) {
+    const upstream = absorb === undefined
+      ? { 'admission.checkpoint': CHECKPOINT_OK }
+      : { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': absorb }
+    const whole = gate(ctx({ upstream }))
+    reads[name] = {
+      /** ★ 只取**裁决**三格 —— 不取 upstreamStates（那是回显，会掩盖合流，见下）。 */
+      decision: JSON.stringify({ ok: whole.ok, blockers: whole.blockers, unmeasured: whole.unmeasured }),
+      autoApprove: whole.conveneReport?.autoApprove,
+    }
+  }
+  /**
+   * ★★ 第一条断言就是那次缺陷的**字面落点**：四种态的裁决必须两两不同。
+   *   修复前它们**逐字相同**（`new Set(...).size === 1`）。
+   *
+   * ★ 这里刻意**不把 `upstreamStates` 算进 decision**：修复前那份回显就已经
+   *   是四态不同的（它照抄上游的态），所以把它算进去会让本臂在**有缺陷的实现上
+   *   也绿** —— 那正是"读错位置的出口"在夹具里的翻版：测了一个会变的东西，
+   *   而它与"裁决变了"无关。★ 判断"回显"与"判定"的差别，就靠把回显排除在外。
+   */
+  assert.equal(
+    new Set(Object.values(reads).map((entry) => entry.decision)).size, 4,
+    '★ 四种吸收态必须给出四种不同的裁决 —— 修复前它们返回完全相同的 JSON（都 ok）',
+  )
+  /**
+   * ★★ 第二条：**只有 ok 态**才产出 `autoApprove: true`。
+   *   其余三态必须是 `undefined`（没产出）—— 而"没产出"与"false"不同形：
+   *   前者是"这条判据没说可以"，后者会被误读成"它说了不可以"。
+   *   ★ 判据只在 ok 时交出产出（与 absorb 的 `absorbReport` 同一条纪律）。
+   */
+  assert.equal(reads.ok.autoApprove, true, '★ 吸收成立 ⇒ 确实产出 autoApprove: true')
+  for (const name of ['blocked', 'unmeasured', 'absent']) {
+    assert.equal(
+      reads[name].autoApprove, undefined,
+      `★ absorb=${name} 时**不许**产出 autoApprove —— 而这一格的代价是"真的会成团"（用户裁定不需要点头）`,
+    )
+  }
+})
+
+test('★ 臂 2l：整个 `upstream` 缺席 ⇒ unmeasured（"没人接线"与"上游都说没事"不同形）', () => {
   const reason = expectUnmeasured(gate(ctx({ upstream: undefined })))
   assert.match(reason, /were not provided/)
   assert.match(reason, /this is "not measured", not "the loop is done"/, '★ 界线必须写在理由里')
@@ -398,14 +534,14 @@ test('★★ 臂 2h：三种"没能测量"【互不同形】—— 一格没接�
 // 臂 3（对照臂）：三条都过 ⇒ ok
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 3 ★ 对照臂：产物非空 + 无未审改动 + 无待确认问题 ⇒ ok，且交出逐条证据', () => {
+test('臂 3 ★ 对照臂：产物非空 + 无未审改动 + 无待确认问题 + 吸收成立 ⇒ ok，且交出逐条证据', () => {
   const verdict = expectOk(gate(ctx()))
   const report = verdict.conveneReport
   assert.notEqual(report, undefined, '★ ok 时必须交出产出（编排层据此调 approve）')
   assert.deepEqual(
     report.conditions,
-    { artefactPresent: true, noUnreviewedChange: true, noPendingQuestion: true },
-    '★ 三条各自的读数都要交出来 —— 一句"够格了"与"什么都没查"在下游同形',
+    { artefactPresent: true, noUnreviewedChange: true, noPendingQuestion: true, absorptionEstablished: true },
+    '★ 四条各自的读数都要交出来 —— 一句"够格了"与"什么都没查"在下游同形',
   )
   assert.equal(report.autoApprove, true, '★ 用户裁定：判据全过 ⇒ 可自动成团，不需要点头')
   assert.deepEqual(report.producedDocuments, [DOC])
@@ -416,9 +552,10 @@ test('臂 3 ★ 对照臂：产物非空 + 无未审改动 + 无待确认问题 
   assert.equal(report.upstreamStates['admission.checkpoint'], 'ok')
   assert.equal(report.upstreamStates['admission.absorb'], 'ok')
   assert.deepEqual(report.memberCap, { state: 'within', current: 3, max: 8 })
-  assert.match(report.evidence.join('\n'), /①/, '★ 证据要逐条给：① 产物 ② 无未审改动 ③ 无未答问题')
+  assert.match(report.evidence.join('\n'), /①/, '★ 证据要逐条给：① 产物 ② 无未审改动 ③ 无未答问题 ④ 吸收成立')
   assert.match(report.evidence.join('\n'), /②/)
   assert.match(report.evidence.join('\n'), /③/)
+  assert.match(report.evidence.join('\n'), /④/)
 })
 
 test('★ 臂 3b：成员上限【没能核对】⇒ 不阻断成团，但证据里必须留下这句话', () => {
@@ -486,7 +623,16 @@ test('★ 漂移检查：本判据对上游三态的读数与 checkpoint 自己�
     'not-a-verdict',
   ]
   for (const sample of samples) {
-    const mine = gate(ctx({ upstream: { 'admission.checkpoint': sample } }))
+    /**
+     * ★★ 注意这里**必须把 absorb 那一格补回健康态**（本任务 t25 补条件 ④ 之后的修正）。
+     *
+     * `ctx({ upstream: {...} })` 是**整体替换** `upstream`（不是深合并）⇒ 只写 checkpoint
+     * 会让 `admission.absorb` 那一格**缺席**。补上条件 ④ 之前那是无所谓的（没人读它）；
+     * 补上之后，缺席的 absorb 会让**每一个样本**都落 `unmeasured`（condition ④），
+     * 于是这条臂测的就不再是"两个读数对不对得上"，而是条件 ④ 的缺格分支 ——
+     * ★ 一个**变量不唯一**的臂：它看起来还在验 checkpoint，实际验的是 absorb。
+     */
+    const mine = gate(ctx({ upstream: { 'admission.checkpoint': sample, 'admission.absorb': ABSORB_OK } }))
     const theirs = checkpointVerdictState(sample)
     /**
      * ★ 映射（逐条，刻意写全而不是用一个表达式）：
@@ -592,6 +738,19 @@ const NEEDLES = {
    *   在**收窄之前**改写它，才能单独打中"缺席"这一支（见突变 E 的实测记录）。
    */
   questionsRead: `  const questions = pendingQuestions(ctx?.openQuestions)`,
+  /**
+   * ── ★★ 突变 F 的针脚（t25）：条件 ④ 的两处入口 ────────────────────────────────
+   *
+   * 这两根一起改，才等价于"把吸收裁决**改回吞掉**"（本任务验收单列的那一条）：
+   *
+   *   ① 键缺席那一支的入口            —— 改成恒假 ⇒ 缺席不再落 unmeasured
+   *   ② `readUpstreamState` 的**调用** —— 改成恒 `'ok'` ⇒ blocked/unmeasured 都不再分形
+   *
+   * ★ 只改①会让 blocked/unmeasured 掉进②，只改②会让缺席掉进① ——
+   *   **一支会替另一支挡下同一份输入**（与条件 ① ③ 的实测同形）。
+   */
+  absorbMissingBranch: `  if (!(UPSTREAM_ABSORB in upstream)) {`,
+  absorbStateRead: `    const absorbState = readUpstreamState(absorbVerdict)`,
 }
 
 let restoreError = null
@@ -781,34 +940,50 @@ test('★ 定向突变：三条条件【各自】单独去掉 ⇒ 对应臂必�
   }
 
   /**
-   * ★ 三种读数，各自对应一条条件 —— 它们是**基线**，也是每次突变之后的探针。
-   *   全部走 `freshGate`：三种读数必须来自**同一个**模块实例上的**同一份**代码。
+   * ★ 各个读数，各自对应一条条件 —— 它们是**基线**，也是每次突变之后的探针。
+   *   全部走 `freshGate`：这些读数必须来自**同一个**模块实例上的**同一份**代码。
+   *
+   * ★★ MEASURED（t25）：下面每一格只要改 `upstream`，就**必须把另一格补回健康态** ——
+   *   `ctx({ upstream: {...} })` 是整体替换，不是深合并。补上条件 ④ 之前无所谓
+   *   （没人读 absorb）；补上之后，少写一格会让该探针落进**条件 ④ 的缺格分支**，
+   *   于是"它拒了"这件事与它声称要测的那条条件无关 —— **变量不唯一**的臂。
    */
   const probe = (fn) => ({
-    /** 臂 3（对照臂）的输入：三条都过。 */
+    /** 臂 3（对照臂）的输入：四条都过。 */
     allPass: fn(ctx()).ok,
     /** 臂 1a：产物为空。 */
     noArtefact: fn(ctx({ producedDocuments: [] })).ok,
-    /** 臂 1b：上游说有未审改动。 */
-    unreviewed: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_BLOCKED } })).ok,
+    /** 臂 1b：上游 checkpoint 说有未审改动（absorb 保持健康）。 */
+    unreviewed: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_BLOCKED, 'admission.absorb': ABSORB_OK } })).ok,
     /** 臂 1c：还有没回答的问题。 */
     pending: fn(ctx({ openQuestions: ['still open?'] })).ok,
-    /** ★ 臂 2a：上游自己没能测量 —— 这一格是"跟着 unmeasured"的探针。 */
-    upstreamUnmeasured: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_UNMEASURED } })).ok,
+    /** ★ 臂 2a：上游 checkpoint 自己没能测量（absorb 保持健康）。 */
+    upstreamUnmeasured: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_UNMEASURED, 'admission.absorb': ABSORB_OK } })).ok,
     /**
      * ★★ 臂 2e 的探针（t13 新增）：提问表**缺席**。
-     *   它是本次修复的**字面落点** —— 修复前这一格与"`[]`（读到、空的）"同形，
-     *   于是它返回 `true`；修复后它必须返回 `false`。
+     *   它是那次修复的**字面落点** —— 修复前这一格与"`[]`（读到、空的）"同形。
      */
     questionsAbsent: fn(ctx({ openQuestions: undefined })).ok,
     /** ★ 臂 2e′ 的探针：提问表的形状坏掉（非数组）。 */
     questionsMalformed: fn(ctx({ openQuestions: 'not-a-list' })).ok,
+    /**
+     * ── ★★★ t25 的四个探针：吸收裁决的四态（本任务修复的字面落点）─────────────
+     *
+     * ★ 修复前这四格**全部**返回 `true`（四态同形、都自动成团）；
+     *   修复后只有 `absorbOk` 返回 `true`，其余三格返回 `false`。
+     *   ⇒ 突变 F 必须让其中**至少三格**同时翻面（见下面突变 F 的断言）。
+     */
+    absorbOk: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': ABSORB_OK } })).ok,
+    absorbBlocked: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': ABSORB_BLOCKED } })).ok,
+    absorbUnmeasured: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_OK, 'admission.absorb': ABSORB_UNMEASURED } })).ok,
+    /** ★ 键缺席：上游 absorb 压根没跑（只交 checkpoint 那一格）。 */
+    absorbAbsent: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_OK } })).ok,
   })
 
   const baseline = probe(await freshGate('mutation=baseline'))
   /**
    * ★ 基线本身必须是对的（否则下面几次突变测的不是突变，是别的东西）：
-   *   三条都过要放行；三条各自缺一次都要拒；上游与提问表的"没能测量"也要拒。
+   *   四条都过要放行；每条缺一次都要拒；"没能测量"也要拒。
    */
   assert.deepEqual(
     baseline,
@@ -820,8 +995,13 @@ test('★ 定向突变：三条条件【各自】单独去掉 ⇒ 对应臂必�
       upstreamUnmeasured: false,
       questionsAbsent: false,
       questionsMalformed: false,
+      /** ★★ t25：只有 ok 态放行 —— 其余三态都必须被拒。 */
+      absorbOk: true,
+      absorbBlocked: false,
+      absorbUnmeasured: false,
+      absorbAbsent: false,
     },
-    '★ 突变之前：三条都过要放行、每条缺失都要拒、两种"没能测量"也要拒 —— 否则下面测的不是突变',
+    '★ 突变之前：四条都过要放行、每条缺失都要拒、各种"没能测量"也要拒 —— 否则下面测的不是突变',
   )
 
   const original = readFileSync(GATE_SOURCE, 'utf8')
@@ -1112,6 +1292,67 @@ test('★ 定向突变：三条条件【各自】单独去掉 ⇒ 对应臂必�
       for (const [name, reading] of Object.entries(mutated)) {
         assert.equal(reading, true, `★ 突变体 D（一律放行）必须让 "${name}" 也变红 —— 它仍然绿说明那条臂是恒真的`)
       }
+      assert.notDeepEqual(mutated, baseline)
+    },
+  )
+
+  /**
+   * ── ★★ 突变 F（t25 验收单列的那一条）：把【吸收裁决改回吞掉】⇒ 对应臂必须红 ──────
+   *
+   * 契约的验收逐字写的是：「定向突变能打红：**把吸收裁决改回吞掉** ⇒ 臂 1 必须红」。
+   * ⇒ 这一支就是那句话的字面执行：把条件 ④ 的两处入口一起改回"无视 absorb"，
+   *   然后确认四个吸收探针**同时翻面**（这正是修复前盘上的读数）。
+   *
+   * ★★ 这一支的形态**就是那个被修掉的缺陷本身**（`UPSTREAM_ABSORB` 只作回显、
+   *   不进任何判定）⇒ 它同时是这次缺陷的**回归测试**：只要有人再把这一支拆掉，
+   *   三个 absorb 探针会立刻同时变红。
+   *
+   * ★ 两根针脚必须**一起**改（见 NEEDLES 的注释）：只改一根时另一根会替它挡下
+   *   同一份输入 —— 与条件 ① ③ 的实测同形。
+   */
+  await withBuiltGate(
+    mutate([
+      [
+        `export function gate(ctx: ConveneContext): GateVerdict {`,
+        `const ABSORB_MUTATED: boolean = true // MUTANT F: the absorption verdict is swallowed again (the t25 defect)\nexport function gate(ctx: ConveneContext): GateVerdict {`,
+        'mutant F flag',
+      ],
+      [
+        NEEDLES.absorbMissingBranch,
+        `  if (!ABSORB_MUTATED && !(UPSTREAM_ABSORB in upstream)) { // MUTANT F: a missing absorb verdict is read as "absorption holds"`,
+        'missing absorb branch',
+      ],
+      [
+        NEEDLES.absorbStateRead,
+        `    const absorbState = ABSORB_MUTATED ? 'ok' as const : readUpstreamState(absorbVerdict) // MUTANT F: blocked/unmeasured are swallowed`,
+        'absorb state read',
+      ],
+    ], 'the absorption verdict (t25)'),
+    async () => {
+      const mutated = probe(await freshGate('mutation=absorb-swallowed'))
+      /**
+       * ★★ 关键断言：三个非 ok 态**必须同时翻面** —— 这正是修复前的读数
+       *   （四态同形、都 `ok`、都自动成团）。
+       *
+       * ★ 若只有其中一两格翻面，说明这两根针脚**没有覆盖全部三态**
+       *   （例如只改了 blocked 那一支）—— 那种突变体打红的是一个**更窄**的机制，
+       *   而报告会读作"这条臂是恒真的"。
+       */
+      assert.equal(mutated.absorbBlocked, true, '★ 突变体必须放行"吸收被上游拒了" —— 臂 1f 就是靠这一条变红的')
+      assert.equal(mutated.absorbUnmeasured, true, '★ 突变体必须放行"吸收没能测量" —— 臂 2i 就是靠这一条变红的')
+      assert.equal(mutated.absorbAbsent, true, '★ 突变体必须放行"上游没跑" —— 臂 2j 就是靠这一条变红的')
+      /**
+       * ★ 而"四条都过"仍然放行：这个突变体不是一个乱拒的实现。
+       */
+      assert.equal(mutated.absorbOk, true, '★ ok 态仍然放行（突变体不是"一律拒绝"）')
+      assert.equal(mutated.allPass, true, '★ 全健康仍然放行')
+      /**
+       * ★★ 反向半边（缺了它，本突变臂在"整条判据恒 ok"的实现上也会绿）：
+       *   另外三条条件**必须不受影响** —— 本次突变只动吸收那一支。
+       */
+      assert.equal(mutated.noArtefact, false, '★ 条件 ① 不受影响')
+      assert.equal(mutated.unreviewed, false, '★ 条件 ②（checkpoint）不受影响')
+      assert.equal(mutated.pending, false, '★ 条件 ③ 不受影响')
       assert.notDeepEqual(mutated, baseline)
     },
   )
