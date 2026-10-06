@@ -211,9 +211,13 @@ test('接线前置：contract / delivery / runtime 三个位置在源码与产�
    * ★ 这条臂钉的是"位置真的存在、且装配层认识它" —— 它是上面那些行为断言的
    *   前提。三个位置中的任何一个若被改名（或从 INSERTION_POINTS 里消失），
    *   这里必须在**接线**这一层炸，而不是让后面的用例以别的形状失败。
+   *
+   * ★ t5 追加 `admission`：它是**成团之前**的位置（判的是准入，不是契约合法性）。
+   *   本臂只钉"装配层认识它"这一格 —— 它现在一条判据都没有，而"现在为空"**不是**
+   *   不变量（t6/t7/t8 会往里挂），所以这里一个关于条数的字都不写。
    */
   const { INSERTION_POINTS } = await import('../lib/gates/index.js')
-  for (const point of ['contract', 'delivery', 'runtime']) {
+  for (const point of ['admission', 'contract', 'delivery', 'runtime']) {
     assert.ok(INSERTION_POINTS.includes(point), `insertion point "${point}" must exist`)
   }
 })

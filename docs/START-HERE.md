@@ -152,7 +152,8 @@ pnpm test:gates # 只跑判据测试（verify 里已含）
 ## 3. 判据层的形状（读 `docs/GATE-REGISTRY.md`）
 
 ```
-五个插入点（按流程位置，不按模块）：
+六个插入点（按流程位置，不按模块）：
+  admission   成团【之前】：够不够格进场（判准入，不是契约合法性）
   contract    建任务/改契约
   dispatch    派发前                ← 现有 1 条：changed-paths
   completion  成员汇报完成          ← 现有 1 条：verify-rerun

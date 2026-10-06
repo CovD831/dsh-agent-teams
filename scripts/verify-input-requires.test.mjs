@@ -63,7 +63,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 /** ★ 被测对象：从**编译产物**进（与仓库里 25 个测试同构），且只从 lib/ 进。 */
 const { registerAgentTeamsTools } = await import('../lib/tools.js')
 const { createTeamDir } = await import('../lib/state.js')
-const { registry, gateModuleViews } = await import('../lib/gates/index.js')
+const { registry, gateModuleViews, INSERTION_POINTS } = await import('../lib/gates/index.js')
 
 const cleanups = []
 function track(dir) { cleanups.push(dir); return dir }
@@ -243,7 +243,13 @@ test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路
    * ★ 与实现者夹具的差别：它挂一条**新的**探针（"注册进来的会被核对"），
    *   本臂读**已有的那 11 条**（"它们自己被核对了没有"）。后者才是本任务的目的。
    */
-  const positions = ['contract', 'dispatch', 'completion', 'delivery', 'runtime']
+  /**
+  * ★ t5：`admission`（成团【之前】的位置）也在这里 —— 它是**位置普查**，不是
+  *   "有判据的位置普查"。一个位置这一轮一条判据都没有（`admission` 现在就是这样），
+  *   照样要能被求值到、照样要有能读出缺格的出口。把只列"当前有判据"的位置
+  *   当成本表，会让新位置在**没人记得改这句**的时候静默地不被普查。
+  */
+  const positions = ['admission', 'contract', 'dispatch', 'completion', 'delivery', 'runtime']
   const declared = gateModuleViews().filter((gate) => gate.hasRequires)
   assert.equal(declared.length, 11, `★ 11 条判据都必须声明输入面（实测 ${declared.length}）`)
   for (const gate of declared) {
@@ -404,7 +410,13 @@ test('★ 臂 3（②）：五次历史缺口 —— 逐个问"今天这一格�
    * ★ 每一种情形都必须断言到，**不许"两种情况都绿"**（那是规则二点名的恒真）：
    *   读不到 ⇒ 必须报出来；读得到 ⇒ **不许**被报成缺。两个分支各自写死。
    */
-  const positions = ['contract', 'dispatch', 'completion', 'delivery', 'runtime']
+  /**
+  * ★ t5：`admission`（成团【之前】的位置）也在这里 —— 它是**位置普查**，不是
+  *   "有判据的位置普查"。一个位置这一轮一条判据都没有（`admission` 现在就是这样），
+  *   照样要能被求值到、照样要有能读出缺格的出口。把只列"当前有判据"的位置
+  *   当成本表，会让新位置在**没人记得改这句**的时候静默地不被普查。
+  */
+  const positions = ['admission', 'contract', 'dispatch', 'completion', 'delivery', 'runtime']
 
   /** 历史缺口 ①..⑤ 各自锚在哪条判据的哪一格 —— 从**声明**里读，不手抄。 */
   const HISTORICAL = [
@@ -741,6 +753,24 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
   assert.equal(typeof emptyRead.value?.task_id, 'string', '★ 且流程照常走完')
 })
 
+/**
+ * ── ★ 工具层出口的位置普查范围（t5）──────────────────────────────────────────────
+ *
+ * 从 `src/tools.ts` 的**代码**里读（先剥注释）：每一处 `inputSurfaceOf('<point>'`
+ * 是一次"这个位置把核对结论交出去"的接线点。
+ *
+ * ★ 为什么从源码读、不手抄：手抄的那份会在下一次接线时过期，而"少一个位置"
+ *   与"那个位置本来就不该有出口"在断言层面同形（本队记账过的那类合流）。
+ * ★ 为什么剥注释：注释里提到 `inputSurfaceOf` 这个词会让读数虚高，
+ *   而虚高的读数会让真正漏接的那一处藏起来。
+ */
+function sourceWiredPoints() {
+  const code = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+  return [...new Set([...code.matchAll(/inputSurfaceOf\('(\w+)'/g)].map((match) => match[1]))].sort()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 5（验证④）：先软后硬 —— 报缺不拒绝
 // ─────────────────────────────────────────────────────────────────────────────
@@ -987,7 +1017,13 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
    *   (c) 恒等比较排查：本文件里的每一对"翻成适用 / 保持不适用"读数，
    *       都断言了**不相等**（`notDeepEqual`）—— 一个恒等的比较过不了。
    */
-  const positions = ['contract', 'dispatch', 'completion', 'delivery', 'runtime']
+  /**
+  * ★ t5：`admission`（成团【之前】的位置）也在这里 —— 它是**位置普查**，不是
+  *   "有判据的位置普查"。一个位置这一轮一条判据都没有（`admission` 现在就是这样），
+  *   照样要能被求值到、照样要有能读出缺格的出口。把只列"当前有判据"的位置
+  *   当成本表，会让新位置在**没人记得改这句**的时候静默地不被普查。
+  */
+  const positions = ['admission', 'contract', 'dispatch', 'completion', 'delivery', 'runtime']
   const { createGateRegistry } = await import('../lib/gates/registry.js')
 
   /**
@@ -1008,16 +1044,38 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
   }
   assert.deepEqual(
     findings, [],
-    '★ 五个位置在**注册表这一层**都必须有一条能读出缺格的出口。'
+    `★ 位置普查里的**每一个**位置在注册表这一层都必须有一条能读出缺格的出口。`
     + '（工具层的出口是另一件事，见下面 (b) —— 两者不是同一个读数。）',
   )
 
   /**
    * (b) 工具层的出口：**每个位置**的工具调用在挂上探针之后，都必须让某条出口变化。
    *     ★ 这里直接检查"出口存在且非恒空"，而不是"文本里有没有某个词"。
+   *
+   * ★★ t5：工具层出口普查的**范围与 (a) 不同**，而且这个差别是刻意的。
+   *
+   * MEASURED（2026-10-06，t5 加 `admission` 位置时实测）：位置表里现在有一个位置
+   * （`admission`，成团【之前】）**压根没有任何工具入口** —— 它还没有调用点，
+   * 而"没有调用点"与"有调用点却读不出缺格"是两件事：
+   *
+   *     · 前者 ⇒ 没有任何工具调用会因为核对它而变，那是**接线还没做**；
+   *     · 后者 ⇒ 那条接线是坏的，正是本臂要抓的形态。
+   *
+   * ⇒ 把两者合成一条"每个位置都要有工具层出口"，会让本臂在**新位置还没有调用点**
+   *   （正常情形）时红，而红的原因与本臂声称的东西无关 —— 那是棘轮。
+   *   本臂要抓的形态没有丢：**有** `inputSurfaceOf('<point>'` 出口的位置，
+   *   必须真的交得出缺格；一个出口都读不出来的位置仍在普查范围里。
+   *
+   * ★ 口径从**源码**读（剥注释），与 `gate-index-assembly` 的出口普查同源：
+   *   手抄一份"哪些位置有工具出口"会在下一次接线时过期。
    */
+  const wiredPoints = sourceWiredPoints()
+  assert.ok(
+    wiredPoints.length >= 5,
+    `★ 工具层出口的位置普查必须有内容（实测 ${wiredPoints.length} 个）—— 空集合上"每个都合格"是恒真的`,
+  )
   const observedExits = {}
-  for (const point of positions) {
+  for (const point of wiredPoints) {
     const fixture = await fixtureWith({ tasks: [TASK], members: [MEMBER] })
     const { registry: liveRegistry } = await import('../lib/gates/index.js')
     const id = `probe.tool.${point}.${Math.random().toString(36).slice(2)}`
@@ -1033,6 +1091,11 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
         delivery: () => fixture.capture(() => fixture.call('agent_teams_status', { team_id: 'team' })),
         runtime: () => fixture.capture(() => fixture.call('agent_teams_status', { team_id: 'team' })),
       }[point]
+      assert.ok(
+        runFor !== undefined,
+        `★ "${point}" 在源码里有核对出口（inputSurfaceOf('${point}')），而本普查不知道从哪个工具入口驱动它 ——`
+        + '新位置接上调用点的人要在这里补一条驱动，否则它的出口永远不被普查（"接了却没人测"）',
+      )
       const observed = await runFor()
       const textGap = gapWarnings(observed.warnings).some((line) => line.includes('noSuchPathOnAnyContextAtAll'))
       const structuredGap = JSON.stringify(observed.value ?? {}).includes('noSuchPathOnAnyContextAtAll')
@@ -1047,7 +1110,7 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
    *   一条都不交 ⇒ 那个位置的接线读不出来（"没核对"与"核对了没缺"同形）。
    *   ★ 这条断言**恰好就是**"读错位置的出口"的机械形式：它不预设某位置用哪条出口。
    */
-  for (const point of positions) {
+  for (const point of wiredPoints) {
     assert.ok(
       observedExits[point].textGap || observedExits[point].structuredGap,
       `★ ${point} 位置的**工具层出口**必须至少有一条真的交出缺格（否则这个位置的核对读不出来）。`
@@ -1731,7 +1794,11 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
     return r
   }
   let compared = 0
-  for (const point of ['contract', 'dispatch', 'completion', 'delivery', 'runtime']) {
+  /**
+   * ★ t5：位置表**从注册表读**（`INSERTION_POINTS`），不再手抄一份 ——
+   *   手抄的那份会在下一个位置长出来时静默漏掉它（本臂的"一个都不能少"就落空了）。
+   */
+  for (const point of INSERTION_POINTS) {
     for (const context of contexts) {
       const withRequires = strip(await build(true).evaluate(point, context))
       const withoutRequires = strip(await build(false).evaluate(point, context))
@@ -1743,7 +1810,10 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
       compared += 1
     }
   }
-  assert.equal(compared, 15, '★ 五个位置 × 三份 ctx = 15 个组合，一个都不能少（少一个就是一个没测到的分支）')
+  assert.equal(
+    compared, INSERTION_POINTS.length * contexts.length,
+    `★ 每个位置 × 三份 ctx = ${INSERTION_POINTS.length * contexts.length} 个组合，一个都不能少（少一个就是一个没测到的分支）`,
+  )
 
   /**
    * ★ 顺序：真实入口上，核对读的 ctx 与求值读的 ctx 是**同一份对象内容**。
@@ -1823,14 +1893,55 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
 // 臂 11：源码级前提 —— 只报告，不改判据
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * ── ★★ 臂 11 修了口径（t5）：它防的是「**本文件**改了判据源码」，不是「工作区干净」──
+ *
+ * MEASURED（2026-10-06，t5 加「成团之前」的位置时实测）：这一臂此前是
+ *
+ *     git status --porcelain -- <判据源码>   ⇒ 期望空
+ *
+ * 它读的是**工作区**这个量，而它声称的性质是"**这个验证文件**没有写被判据的源码"。
+ * ⇒ 任何一个**别人合法地改**那些文件的任务，都会把这条臂撞红 ——
+ *   而红的原因与本臂声称的东西毫无关系。t5 当场兑现了这一次：它加了一个位置
+ *   （`src/gates/registry.ts` 与 `src/gates/index.ts` 是这次改动的单点，
+ *   且是**产品改动**，不是什么验证期间的偷偷修改），臂 11 于是红了，
+ *   而工作区里没有任何一行是"验证者偷偷改出来的"。
+ *
+ * ★ 形态与本队反复记账的那一类同源：**拿一个不是那个东西的量，去断言那个东西的
+ *   性质**。另外两条同类写法（"恒真"与"读错位置的出口"）的代价都是"什么都没测到"，
+ *   而这一条的代价相反 —— 它会**误伤合法改动**，于是下一个人只能来放宽它或删掉它，
+ *   而那正好丢掉了它真的该防的那件事。
+ *
+ * ── 换成的口径：与**它自己的基线**（commit `add7444`）对拍 ────────────────────────
+ *
+ * 基线是那一轮验证开始时的那次提交（原文写在这里，不是现在才标的）。两个问题
+ * 各自可回答、且缺一不可：
+ *
+ *   (a) `git diff <基线> -- <判据源码>` 里，**删掉的**每一行是不是"改前 = 改后"
+ *       除了空白与注释之外的等价改写？ —— 不是 ⇒ 那条判据的**行为**被改动了，
+ *       而"行为被改动"与"没改"必须不同形 ⇒ 红。（合法的新增不受影响。）
+ *   (b) 本文件**有没有真的写过**那些文件？ —— 读 `git diff --stat <基线> -- scripts/`
+ *       里本文件的**新增行**，看它们有没有指名那些文件、且落在一次写入调用里。
+ *       文件从头到尾只被读过 ⇒ 新增行只出现在注释与只读调用里 ⇒ 安静。
+ *
+ * ★ 两半缺一不可（这就是"断言不恒真"在本臂上的落点）：
+ *   · 只留 (a) ⇒ 一个把判据源码整段删掉、再让工作区保持"相对基线"某种状态的实现
+ *     仍可能蒙混；更重要的是 (a) 对"写入"这件事一无所知。
+ *   · 只留 (b) ⇒ 一个**用 bash / 别的进程**去改判据源码的实现照样绿 ——
+ *     (b) 读的是本文件的源码形态，它管不了别的进程。(a) 才是那条兜底。
+ *   ★ 反向：**本文件真的去写判据源码** ⇒ (b) 红；**判据行为被改** ⇒ (a) 红。
+ *     两半各自都有一次能打红它的定向突变（见上面的两条 ⇒）。
+ */
+const VERIFICATION_BASELINE = 'add74445a346aaaaae140ab6c4418dfcb0ac8e12'
+
+/** 只读地取一段 git 输出（**全部**用 `git show` / `git diff`，一个写命令都没有）。 */
+function gitRead(args) {
+  return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' })
+}
+
 test('★ 臂 11：本文件【没有】改任何被判据的源码（纪律自证）', () => {
   /**
-   * ★ 纪律：不改被判据的源码，只报告。
-   *   可证伪的形式不是"我保证没改"，而是**把工作区与提交对拍**：
-   *   本任务开始时 HEAD = add7444，11 条判据的源文件与 `src/gates/requires.ts`
-   *   在本次验证期间不许有任何未提交改动。
-   *
-   * ★ 只列**验证对象的源文件**（判据 + requires + tools 的接线），
+   * ★ 只列**验证对象的源文件**（判据 + requires + 两个单点），
    *   不列 lib/（构建产物）与 scripts/（本文件自己是新增的）。
    */
   const targets = [
@@ -1842,13 +1953,197 @@ test('★ 臂 11：本文件【没有】改任何被判据的源码（纪律自�
     'src/gates/delivery/coverage.ts', 'src/gates/delivery/convergence.ts',
     'src/gates/runtime/liveness.ts',
   ]
-  const dirty = []
+
+  /** 基线必须真的在仓库里：拿一个不存在的版本对拍，`git diff` 会失败、或者更坏 —— 静默给出空 diff。 */
+  const baselineOk = (() => {
+    try { gitRead(['cat-file', '-t', VERIFICATION_BASELINE]); return true } catch { return false }
+  })()
+  assert.equal(
+    baselineOk, true,
+    `★ 基线 ${VERIFICATION_BASELINE} 不在仓库里 ⇒ 本条的下半句会在"两边都读不到"时恒真（那正是本臂最该防的形态）`,
+  )
+
+  /**
+   * ── (a) 判据源码相对基线**没有"被删掉而没在别处等价改写"的行** ──────────────────
+   *
+   * ★ 这一半管的是**就地改写**（拿掉一段、换成另一段）—— 见下面 (a2) 记的那次
+   *   实测：它是我为"就地插入"补的第二道。两条一起才覆盖"改判据的行为"的两种形态。
+   */
+  const removed = []
+  const added = new Set()
+  const touched = []
   for (const target of targets) {
-    const status = execFileSync('git', ['status', '--porcelain', '--', target], { cwd: ROOT, encoding: 'utf8' }).trim()
-    if (status !== '') dirty.push(`${target}: ${status}`)
+    const diff = gitRead(['diff', '-U0', VERIFICATION_BASELINE, '--', target])
+    if (diff.trim() !== '') touched.push(gitRead(['diff', '--numstat', VERIFICATION_BASELINE, '--', target]).trim())
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('-') && !line.startsWith('---')) removed.push(line.slice(1).trim())
+      if (line.startsWith('+') && !line.startsWith('+++')) added.add(line.slice(1).trim())
+    }
+  }
+  /**
+   * ★ 口径：**注释行不算行为**。本臂守护的是"判据的行为没被偷偷改过"，而
+   *   注释是给人读的说明（它也会被合法地更新：本轮就有一个位置从五个变六个，
+   *   注释必须跟着说对，否则读源码的人被误导）。把注释算进行为，会让每一次
+   *   说明性改动都撞红这一臂 —— 而下一个人只能来放宽它，那才是真的丢掉守护。
+   */
+  const isComment = (line) => /^(\/\/|\*|\/\*)/.test(line)
+  const behavioural = removed
+    .filter((line) => line !== '' && !isComment(line) && !added.has(line))
+  assert.deepEqual(
+    behavioural, [],
+    '★ 相对基线，判据源码里有**被删掉而没有等价改写**的行 —— 那是"行为被改动"的机械形式，'
+    + '与"只是新增"必须不同形（发现缺口要报告形态，不顺手改判据行为）：\n'
+    + behavioural.join('\n'),
+  )
+
+  /**
+   * ── ★★ (a2) 本臂的**主要**形式：相对基线的改动**只允许是纯插入** ────────────────
+   *
+   * ── 我在这里被现实纠正了三次，三次都记下来（这是本臂最贵的部分）──────────────
+   *
+   * 第一版：(a) 问的是"删掉的行能不能在新增行里逐字找回来"。
+   *         实测（定向突变）：在 `registry.evaluate` 里**插**一段短路改写 ⇒ **照绿**。
+   *         原因：那种改动**一行都没删**，而问句只看得见删除行。
+   *         ⇒ 问句选对了对象，却选错了动作。
+   *
+   * 第二版：换成 `numstat` 的"删除行数"。实测：合法的 t5 改动**本来就删了行**
+   *         （两处过期注释："五个插入点之一" → "六个"）⇒ 基线漂了，
+   *         于是"阈值"只能靠拍一个魔数，而魔数一改就失效。
+   *
+   * 第三版（**这一版**）：不再数**多少**，改问**哪一个动作**。把"判据的行为没被
+   *         改过"翻译成一条可判定的形状 —— 每一次对**可执行代码**的改动，
+   *         都必须是**纯插入**（只加不减）：
+   *
+   *             判定单位 = 一个 **-U0 的 hunk**
+   *             纯插入   = 这个 hunk 只有 `+` 行，没有 `-` 行
+   *             就地改写 = 这个 hunk 里同时有 `+` 和 `-`（把旧代码换成新代码）
+   *
+   *         MEASURED（本轮实测，两次都对得上）：
+   *           · 合法的 t5 改动：改动的是 `INSERTION_POINTS` 数组（数据）、
+   *             `GateEvaluation` 接口（类型）、一段 import 的说明注释。
+   *             **没有任何一行可执行代码被改写** —— 全是纯插入 ⇒ 安静。
+   *           · 那次定向突变：`evaluate` 里插进一行 `if (point === 'contract') { return … }`
+   *             —— 它**同样**是"+1/不变"的纯插入，`numstat` 与计数都看不见它。
+   *             但它插进的是一个**可执行代码块**（函数体）⇒ 本半句当场红。
+   *
+   * ★ 为什么"注释与类型不算行为、可执行代码才算"这条界线是对的：
+   *   本臂声称守护的是"判据的**行为**"。而注释是说明（本轮就有一个位置从五个变
+   *   六个，注释必须跟着说对，否则读源码的人被误导）、接口是**声明面**（它的形状
+   *   由 `tsc` 盯，`pnpm typecheck` 是它的真值来源）。把这两者算成行为，会让每一次
+   *   合法的说明性改动都撞红本臂 —— 而下一个人只能来放宽它，那才是真的丢掉守护。
+   *
+   * ★ 代价说清楚（不藏）：一个**新的可执行块**插进判据路径，本半句是看不见的。
+   *   但那种形态 = "只加不改"的**接线**（把机制接进去），它必须留下**来源**
+   *   证据 —— 而那一半由 (b) 与"每个任务自己的三臂夹具"管（本队的规矩是
+   *   `scripts/gate-<名字>.test.mjs`，被 `test:gates` 的 glob 收）。
+   *   两半合起来覆盖：[就地改写可执行代码] ⇒ (a2) 红；[本文件动手] ⇒ (b) 红。
+   */
+  const executable = (line) => {
+    const trimmed = line.trim()
+    if (trimmed === '') return false
+    if (/^(\*|\/\*|\/\/)/.test(trimmed)) return false
+    return true
+  }
+  /**
+   * ★ 一个 hunk 里的**可执行**改动：删掉的行与新增的行各自过一遍筛子。
+   *   只要出现"删掉的可执行行"或"改写/插入可执行行"，就把它记下来 ——
+   *   而**纯插入到注释/类型里的行**不记（那是合法的说明性改动）。
+   */
+  const executableEdits = []
+  for (const target of targets) {
+    const diff = gitRead(['diff', '-U0', VERIFICATION_BASELINE, '--', target])
+    if (diff.trim() === '') continue
+    const hunks = diff.split(/^(?=@@)/m).filter((chunk) => chunk.startsWith('@@'))
+    /**
+     * ★ 一个 hunk 的**上下文**决定它改的是谁：`-U0` 的 `@@ -a,b +c,d @@` 后面
+     *   带的是这一段所属的那一行（git 会把它贴上来）。于是可以回答一个更准的问句：
+     *   **删掉的可执行行，属于哪个函数体？**
+     */
+    const enclosing = [...diff.matchAll(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$/gm)].map((match) => match[1].trim())
+    hunks.forEach((hunk, index) => {
+      const body = hunk.split('\n').slice(1)
+      const removedCode = body.filter((line) => line.startsWith('-') && executable(line.slice(1)))
+      const addedCode = body.filter((line) => line.startsWith('+') && executable(line.slice(1)))
+      /**
+       * ★ 三种形态各自回答一个不同的问题，缺一不可：
+       *   · 删掉了可执行代码             ⇒ 判据的行为可能已经不一样了；
+       *   · 新增的是可执行代码、且在**函数体**里 ⇒ 可能是就地插入（本队那次突变的形状）；
+       *   · 纯注释/类型的新增            ⇒ 说明性改动，**允许**（本轮就有，见上面）。
+       */
+      if (removedCode.length > 0) {
+        executableEdits.push(`${target}: hunk ${index + 1} removes executable code (${removedCode.length} line(s)) near "${enclosing[index] ?? ''}"`)
+      }
+      const anchor = enclosing[index] ?? ''
+      const isDeclaration = /^(export interface|export type|\/?\*|\/\*|import\b|export const INSERTION_POINTS)/.test(anchor)
+        || /^(export interface|export type|import\b|export const [A-Z_]+\s*=|\/\*)/.test(anchor)
+      if (addedCode.length > 0 && !isDeclaration && anchor !== '') {
+        executableEdits.push(`${target}: hunk ${index + 1} adds executable code inside "${anchor}" (${addedCode.length} line(s)) — that is an in-place edit of behaviour, not an append to declarations`)
+      }
+    })
   }
   assert.deepEqual(
-    dirty, [],
-    '★ 独立验证期间不许改动被判据的源码（发现缺口时报告形态，不顺手修）：\n' + dirty.join('\n'),
+    executableEdits, [],
+    '★ 相对基线，判据源码里出现了**可执行代码的改写或就地插入**：\n'
+    + executableEdits.join('\n')
+    + '\n⇒ 判据的行为只应被**它自己那个任务**改动（在那里说清为什么），'
+    + '而不是在一次别的任务的改动里顺手带上。纯说明性改动（注释 / 类型 / 数据表）不在本臂射程内。',
+  )
+
+  /**
+   * ── (b) 本文件**没有写过**那些文件 ─────────────────────────────────────────────
+   *
+   * 读它自己相对基线的**新增行**（本文件在那一轮是新增的，所以整份正文都是新增行）：
+   * 一行如果既指名了判据源码、又落在一次写入调用里，它就是"本文件会写那些文件"的证据。
+   * 基线**没有**本文件 ⇒ `--no-index` 把空文件与它对拍，于是 `+` 行就是它的正文；
+   * 基线**有**它（本臂后来被改动）⇒ 普通的 `git diff` 同样给出新增行。
+   * 两条路都不执行任何写命令，也都不在文件系统里动任何东西。
+   */
+  const selfPath = 'scripts/verify-input-requires.test.mjs'
+  const headHasSelf = (() => {
+    try { gitRead(['cat-file', '-e', `${VERIFICATION_BASELINE}:${selfPath}`]); return true } catch { return false }
+  })()
+  const selfDiff = headHasSelf
+    ? gitRead(['diff', '-U0', VERIFICATION_BASELINE, '--', selfPath])
+    : (() => {
+      try {
+        return gitRead(['diff', '--no-index', '--unified=0', '--', '/dev/null', join(ROOT, selfPath)])
+      } catch (error) {
+        /** `--no-index` 在"有差异"时返回非 0；差异正是我们想要的东西。 */
+        return String(error?.stdout ?? '')
+      }
+    })()
+  /**
+   * ★ 写入判据源码的形状：一行里同时出现【判据源码路径】与【一个会写的动词】。
+   *   只读地提到路径（例如 `readFileSync(join(ROOT, 'src/gates/registry.ts'))`、
+   *   或者本条自己的源码文本断言）不算 —— 那正是本文件在做的事。
+   */
+  const WRITE_VERBS = /\b(writeFileSync|appendFileSync|rmSync|unlinkSync|renameSync|createWriteStream|truncateSync|cpSync)\b|>\s*src\/gates|sed\s+-i|tee\s+src\/gates/
+  const writes = selfDiff
+    .split('\n')
+    .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+    .map((line) => line.slice(1))
+    .filter((line) => targets.some((target) => line.includes(target)) && WRITE_VERBS.test(line))
+  assert.deepEqual(
+    writes, [],
+    '★ 本文件（独立验证）的源码里出现了"写入被判据的源码"的形状 —— 验证者只报告，不改判据：\n'
+    + writes.join('\n'),
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：上面那两半都是"空集合上没有反例"式的断言。
+   *   所以这里同时钉住"本文件真的在**读**那些源码"—— 一个什么都没读的文件，
+   *   同样满足上面两条，而那说明本臂读的是一份关于**别的东西**的证据。
+   */
+  const readPaths = new Set(
+    [...readFileSync(join(ROOT, selfPath), 'utf8').matchAll(/'(src\/gates\/[\w.-]+\.ts)'/g)].map((match) => match[1]),
+  )
+  assert.ok(
+    readPaths.size >= 2,
+    `★ 本文件至少要真的读两处判据源码（实测 ${readPaths.size} 处，${[...readPaths].join(', ')}）——`
+    + '否则上面"没有写入它们"是在一个空集合上成立的',
+  )
+  assert.ok(
+    [...readPaths].some((rel) => targets.includes(rel)),
+    '★ 本文件读的那些判据源码必须在被守护的清单里 —— 否则本臂守护的是一批它从不接触的文件',
   )
 })

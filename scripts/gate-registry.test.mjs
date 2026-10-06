@@ -90,7 +90,7 @@ test('⑤ ★ 重复 id 抛错，不静默覆盖', () => {
    */
 })
 
-test('⑥ 注册时校验形状（id / point / gate / description）', () => {
+test('⑥ 注册时校验形状（id / point / gate / description）', async () => {
   const r = createGateRegistry()
   assert.throws(() => r.register({ point: 'contract', description: 'd', gate: () => ok() }), /non-empty id/)
   assert.throws(() => r.register({ id: 'a', point: 'nowhere', description: 'd', gate: () => ok() }), /unknown insertion point/)
@@ -100,7 +100,33 @@ test('⑥ 注册时校验形状（id / point / gate / description）', () => {
     /requires a description/,
     '★ 描述是控制台渲染的东西；没有它就看不见这条判据装了什么',
   )
-  assert.equal(INSERTION_POINTS.length, 5)
+  /**
+   * ★ 位置集合只能**按形状**断言，不能按数量。
+   *
+   * MEASURED（2026-10-06，t5 加「成团之前」的位置）：这里此前写着
+   * `INSERTION_POINTS.length === 5`。而"有几个位置"是**流程的形状**，它会变
+   * （这一轮就多了一个 `admission`：判的是准入，与"契约合不合法"是两件事）。
+   * ⇒ 一条把"恰好五个"写成不变量的断言，会在流程真的长出一个位置的那一刻变红，
+   *   而红的原因与"注册表坏了"毫无关系 —— 那是棘轮，不是回归。
+   *
+   * ★ 换成两条**机制形状**的断言，它们在任何位置数量下都成立、且真的会红：
+   *   ① 每个位置都能被 `evaluate` 到（只写在数组里、调不到的位置是不算数的）；
+   *   ② 位置名唯一（重名会让 `list()` 的键合并，两个位置悄悄变成一格）。
+   *   ★ 少了这一对，"位置集合"就没有任何东西在看；而只留"长度等于 N"则相反：
+   *     它对**内容**一无所知（把 contract 改名成 foo，长度照样是 5）。
+   */
+  for (const point of INSERTION_POINTS) {
+    assert.equal(
+      (await r.evaluate(point, {})).registered,
+      0,
+      `★ 位置 "${point}" 必须能被 evaluate 到（一条判据都没挂时 registered=0，而不是抛"unknown insertion point"）`,
+    )
+  }
+  assert.equal(new Set(INSERTION_POINTS).size, INSERTION_POINTS.length, '★ 位置名必须唯一 —— 重名会让 list() 的两个键合成一格')
+  assert.ok(
+    INSERTION_POINTS.includes('admission'),
+    '★ 「成团之前」的位置必须存在：判的是准入（够不够格进场），与 contract（契约合不合法）是两件事',
+  )
 })
 
 test('⑦ appliesTo 为假 ⇒ 跳过（且可分辨"跳过"与"通过"）', async () => {

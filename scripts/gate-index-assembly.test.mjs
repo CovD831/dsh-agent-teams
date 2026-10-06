@@ -395,7 +395,7 @@ test('臂 2 ★ 未测量臂：已接的槽位形状对、未接的槽位确实�
    *     于是「空位置如实为空」与「接上了就得被看见」两件事同时成立，而**夹具不再
    *     需要有人去改它**：接一条，期望就 +1。
    */
-  for (const point of ['contract', 'delivery', 'runtime']) {
+  for (const point of ['admission', 'contract', 'delivery', 'runtime']) {
     const entries = Object.entries(list).find(([name]) => name === point)?.[1] ?? []
     const expected = newPositionGateIds(point)
     assert.equal(
@@ -471,9 +471,24 @@ test('臂 3 ★ 对照臂：登记表里每一条判据都用【同一条装配�
     )
   }
 
+  /**
+   * ★ 断言**集合**，不是**顺序**，也不是**数量**。
+   *
+   * MEASURED（2026-10-06，t5 加「成团之前」的位置 `admission`）：这一条此前是
+   * `deepEqual(Object.keys(list), ['contract', …])` —— 它同时钉住了"恰好这五个"
+   * 与"它们按这个顺序排"。而"有几个位置"是**流程的形状**（这一轮真的多了一个），
+   * 位置数组的**书写顺序**更是零语义（`list()` 的键序只是实现细节：一个空的
+   * `admission` 位置插在最前面，让 `Object.keys` 把空键排到了别处 ⇒ 按键序断言
+   * 会红，而"控制台看不看得见空位置"这件事其实完全没坏）。
+   *
+   * ⇒ 改成 `deepEqual([...keys].sort(), [...POINTS].sort())`：少一个位置、多一个
+   *   未登记的位置、或某个位置没有如实出现（`list()` 漏建键），三种都仍然会红。
+   *   ★ 反向半边：位置数组必须非空，否则"集合相等"在空集合上恒真。
+   */
+  assert.ok(INSERTION_POINTS.length > 0, '★ 位置集合为空时"集合相等"恒真 —— 至少要有位置')
   assert.deepEqual(
-    Object.keys(list),
-    ['contract', 'dispatch', 'completion', 'delivery', 'runtime'],
+    [...Object.keys(list)].sort(),
+    [...INSERTION_POINTS].sort(),
     '★ 五个位置都要出现（空位置也是），否则控制台看不出哪个位置还没接',
   )
   for (const entry of entries) {
@@ -892,16 +907,25 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
   /**
    * ★ 六位置的可读读数：每个位置各有几条、其中几条声明了。这是给 t9 报告的**同一个数字**，
    *   所以它必须由机器算出来，而不是报告里手写一遍（手写的那份会过期）。
+   *
+   * ★ t5（加「成团之前」的 `admission` 位置）：`admission` 这一轮**一条判据都没有**，
+   *   于是它的期望值是 **0**。这里把 0 如实写出来，而不是把它从普查表里删掉 ——
+   *   "这个位置还没有判据"是一条**要看得见的读数**（空位置与"有人把判据接丢了"
+   *   必须分得开），而删掉它会让控制台/报告上少一整行。
+   *
+   * ★ 这条断言是**当前分布的动态快照**（每个位置的条数本来就该随接线变动），
+   *   它存在的意义是：分布变了必须有人说得出为什么。真正的不变量在上面那两条
+   *   （没有未声明的、也没有空壳声明）。
    */
   const census = Object.fromEntries(
-    ['contract', 'dispatch', 'completion', 'delivery', 'runtime'].map((point) => [
+    [...INSERTION_POINTS].map((point) => [
       point,
       declarations.filter((entry) => entry.point === point).length,
     ]),
   )
   assert.deepEqual(
     census,
-    { contract: 2, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
+    { admission: 0, contract: 2, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
     '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })

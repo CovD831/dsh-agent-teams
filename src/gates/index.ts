@@ -17,7 +17,7 @@
  *      装配循环读的就是这四个名字（见 `GateModuleParts`）：
  *
  *          export const id          // 稳定标识，与 point 一起唯一
- *          export const point       // 五个插入点之一
+ *          export const point       // 六个插入点之一（`INSERTION_POINTS` 是真值）
  *          export const description // 控制台渲染用
  *          export function gate(ctx)  // 三态裁决（async 也行）
  *                                  // 可选第五个：appliesTo(ctx)
@@ -61,6 +61,23 @@
  */
 
 import { createGateRegistry, INSERTION_POINTS } from './registry.ts'
+/**
+ * ── ⓪ `admission` ——— 成团【之前】的位置（t5 只加位置，不加判据）────────────────
+ *
+ * 它是 `INSERTION_POINTS` 的第一个元素，也是流程上的第一个位置：在"决定要不要做"
+ * 之前问"够不够格进场"。与 `contract` 的分工见 `registry.ts` 上那段注释 ——
+ * **一个位置一个判据来源**，两类缺陷不许同形。
+ *
+ * ★ 本任务（t5）**只加位置，一条判据都不加**，所以这个位置现在是空的。
+ *   空位置是**正常情形**（契约 §9.1：`registered === 0` ⇒ `ok`），
+ *   而"它现在为空"这句话**不是不变量** —— t6/t7/t8 会往里挂判据（审查检查点 /
+ *   吸收痕迹 / 成团闸门）。⇒ 任何夹具都不许把"admission 现在没有判据"写成断言：
+ *   接上第一条判据的那一刻它就会按设计变红，而不是发现有东西坏了。
+ *
+ * ★ 往这个位置接判据的人改的是**自己那一行**（`ALL_GATES` 里加一个 import 与
+ *   一个条目），与本文件其余部分无关；而"这个位置有判据"的读取口径是
+ *   `registered > 0`，不是"它的名字是什么"。
+ */
 import * as verifyRerun from './completion/verify-rerun.ts'
 import * as changedPaths from './dispatch/changed-paths.ts'
 import * as backtest from './completion/backtest.ts'
