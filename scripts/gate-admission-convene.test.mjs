@@ -266,16 +266,73 @@ test('★ 臂 2d：上游裁决【形状坏了】⇒ unmeasured（不许挑一�
   }
 })
 
-test('★ 臂 2e：提问表【缺席】⇒ unmeasured（不是"没有未回答问题"）', () => {
-  const reason = expectUnmeasured(gate(ctx({ openQuestions: undefined })))
-  assert.match(reason, /condition ③/)
-  assert.match(reason, /could not be observed/)
+test('★★ 臂 2e（t13 的真缺陷）：提问表【缺席】⇒ unmeasured，与 `[]`（ok）【返回不同的 JSON】', () => {
   /**
-   * ★ 与臂 1c 是一对：`undefined`（没读到）与 `[]`（读到、空的）**不同形**。
-   *   合成一个 `?? []` 会让"没人接 open-questions.json"读成"问题都答完了"。
+   * ── 这一臂钉的是什么 ────────────────────────────────────────────────────────
+   *
+   * MEASURED（t13 修复前，基线逐字复现）：`openQuestions` **缺席**与 `[]` 返回
+   * **完全相同的 JSON** —— 两者都 `ok`、都 `conditions.noPendingQuestion: true`。
+   * 也就是说：
+   *
+   *     调用方根本没接 `open-questions.json` ⇒ 判据说"问题都答完了" ⇒ 自动成团
+   *
+   * ★ 这正是本队那条纪律（"绝不把没测到并进通过"）要防的事，只是被并进去的
+   *   不是整条判据，而是**第 ③ 条**。
+   *
+   * ⇒ 本臂的第一条断言就是那次缺陷的**字面落点**：两者的 JSON 必须不同。
+   *   它比"逐字段比较"更强 —— 它把"同形"这件事本身判成红，而不是列举字段
+   *   （逐字段列举会在判据将来多交一个字段时静默地漏掉那个字段）。
    */
+  const absent = gate(ctx({ openQuestions: undefined }))
   const empty = expectOk(gate(ctx({ openQuestions: [] })))
-  assert.equal(empty.conveneReport.conditions.noPendingQuestion, true)
+  assert.notEqual(
+    JSON.stringify(absent), JSON.stringify(empty),
+    '★ 缺席与空数组必须【不同形】—— 修复前它们逐字相同（都 ok、都 noPendingQuestion:true），'
+    + '"没人接这张表"于是被读成了"问题都答完了"',
+  )
+  const reason = expectUnmeasured(absent)
+  assert.match(reason, /condition ③/)
+  /**
+   * ★ 而这句话必须说清**是哪种没测到**：缺席的补救是"去接线"，不是"去回答问题"。
+   */
+  assert.match(reason, /could not be observed at all/, '★ 必须说清是"压根没人接"，而不是"读到了但读不懂"')
+  assert.match(
+    reason,
+    /not the same as "the questions are all answered"/,
+    '★ 界线必须写在理由里 —— 读日志的人要能直接看出这条不是"问题都答完了"',
+  )
+  assert.equal(empty.conveneReport.conditions.noPendingQuestion, true, '★ 而 `[]` 仍然表示"问题都答完了"（不误伤）')
+})
+
+test('★★ 臂 2e′：缺席 与 形状坏 —— 两种"没能测量"必须【不同形】（补救动作不同）', () => {
+  /**
+   * ── 为什么这一条与臂 2e 分开 ─────────────────────────────────────────────────
+   *
+   * 条件 ③ 有两种"没能测量"，而它们的**补救动作完全不同**：
+   *
+   *     缺席（`undefined` / `null`）⇒ **去接线**（编排层还没把这格交进来）
+   *     形状坏（非数组 / 含非法条目）⇒ **去修调用方**（交了，但交错了）
+   *
+   * ★ 修复前两者共用**同一句话** ⇒ 按前者去修一个其实是后者的问题会白跑一轮。
+   *   这与本队反复记账的"两种东西同名"同族，只是这里被合成的是**两种没测到**。
+   */
+  const absent = expectUnmeasured(gate(ctx({ openQuestions: undefined })))
+  const nullish = expectUnmeasured(gate(ctx({ openQuestions: null })))
+  const malformed = expectUnmeasured(gate(ctx({ openQuestions: 'not-a-list' })))
+  assert.equal(
+    new Set([absent, nullish, malformed]).size, 2,
+    '★ `undefined` 与 `null` 是同一种（缺席），而"非数组"是另一种（形状坏）—— 必须恰好两句不同的话',
+  )
+  assert.match(absent, /could not be observed at all/)
+  assert.match(malformed, /injected in a shape that is not a list/, '★ 形状坏那一句必须说清"交错了"')
+  assert.notEqual(absent, malformed)
+  /**
+   * ★ 而形状坏那一句要**说清是哪一格坏了** —— 一个笼统的"形状不对"要人自己去猜
+   *   （文件里第 3 条？还是整个顶层？），那等于把排查工作退还给读日志的人。
+   */
+  const badEntry = expectUnmeasured(gate(ctx({ openQuestions: ['q1', 42] })))
+  assert.match(badEntry, /entry 1/, '★ 必须指到**哪一个条目**坏了（0 基下标 = 1 指第二项）')
+  assert.match(badEntry, /not a non-empty question string/)
 })
 
 test('★ 臂 2f：提问表的形状坏了（含非字符串条目）⇒ unmeasured，不许"忽略它、看剩下的"', () => {
@@ -284,10 +341,17 @@ test('★ 臂 2f：提问表的形状坏了（含非字符串条目）⇒ unmeas
    *   静默丢掉它 ⇒ "有一条读不懂的问题"被读成"问题都答完了"（本任务要消灭的方向）。
    *   反过来"看不懂就拒绝"也不对：那会在一次**错的接线**上开火。
    *   ⇒ 正确落点是第三态。
+   *
+   * ★ 每一种坏形状都**不许**与 `[]`（读到、空的 ⇒ ok）同形 —— 这是这一族的共同判据。
    */
-  for (const broken of [['q1', 42], ['q1', ''], ['q1', '   '], 'not-a-list', { questions: [] }]) {
-    const reason = expectUnmeasured(gate(ctx({ openQuestions: broken })))
+  for (const broken of [['q1', 42], ['q1', ''], ['q1', '   '], [''], [null], 'not-a-list', { questions: [] }, 42]) {
+    const verdict = gate(ctx({ openQuestions: broken }))
+    const reason = expectUnmeasured(verdict)
     assert.match(reason, /condition ③/, `★ 形状 ${JSON.stringify(broken)} 必须落 unmeasured`)
+    assert.notEqual(
+      JSON.stringify(verdict), JSON.stringify(gate(ctx({ openQuestions: [] }))),
+      `★ 形状 ${JSON.stringify(broken)} 不许与"读到、空的"同形 —— 否则"读不懂"被读成"问题都答完了"`,
+    )
   }
 })
 
@@ -475,9 +539,10 @@ test('★ 漂移检查：本判据对上游三态的读数与 checkpoint 自己�
  *
  *     ① 备份 `src/gates/admission/convene.ts`
  *     ② 把某一条条件的判定去掉（改成"这条永远成立"）
- *     ③ 重新 build 出 `lib/`（整个仓库的夹具读的都是 lib/，必须真的重建）
+ *     ③ 重新编译出 `lib/gates/admission/convene.js`（夹具读的是 lib/，必须真的重建；
+ *        口径见下面 `serverBuild()` —— 只建服务端那一份）
  *     ④ 用对应那条臂的输入再问一次 ⇒ **必须红**
- *     ⑤ 还原源码、重新 build，并断言还原之后的裁决与突变前**逐字相等**
+ *     ⑤ 还原源码、重新编译，并断言还原之后的裁决与突变前**逐字相等**
  *
  * ★★ 第 ⑤ 步不是礼节 —— 而且本文件在写法上比 t7 更保守，因为 t7 在这里踩过坑：
  *   「还原写在 `finally` 里且带断言 ⇒ 断言一失败，变异体永久留在盘上」。
@@ -487,8 +552,12 @@ test('★ 漂移检查：本判据对上游三态的读数与 checkpoint 自己�
  *     · `process.on('exit')` **兜底**：即使进程被测试框架半路终止（或某处
  *       `process.exit` 被调），源码也一定被写回。
  *
- * ★ 顺序是【串行】的，而且必须：`pnpm build` 会先 `rm -rf lib/`（clean-build），
- *   并行跑两个 build 会让另一个进程读到半个 lib/。本文件因此不做任何并行突变。
+ * ★★ 而 t13 的事故证明这三条**还不够**：会话被中断时 `exit` 钩子没有机会跑，
+ *   于是变异体被提交进了仓库。⇒ 本文件另加一条**总是运行**的污染检查
+ *   （见文件末尾那条臂：它只读盘上的字节，不依赖任何突变是否还原成功）。
+ *
+ * ★ 顺序是【串行】的，而且必须：编译会先 `rm -rf lib/`（clean-build），
+ *   并行跑两个编译会让另一个进程读到半个 lib/。本文件因此不做任何并行突变。
  */
 
 /** 三次突变的针脚（★ 逐字，且末尾有专门一条断言它们在源码里真的存在）。 */
@@ -508,9 +577,70 @@ const NEEDLES = {
    */
   pending: `  } else if (questions.pending.length > 0) {`,
   questionsUnmeasured: `  if (questions.state === 'unmeasured') {`,
+  /**
+   * ★ 突变 E 的针脚：条件 ③ 读那一格的那一行本身。
+   *   在**收窄之前**改写它，才能单独打中"缺席"这一支（见突变 E 的实测记录）。
+   */
+  questionsRead: `  const questions = pendingQuestions(ctx?.openQuestions)`,
 }
 
 let restoreError = null
+
+/**
+ * ── ★★ 突变臂只需要【服务端】那一份构建（本任务 t13 实测出来的）─────────────────
+ *
+ * `pnpm build` = clean-build → `tsc -p tsconfig.json` → `tsc -p tsconfig.client.json`
+ * → tsdown → git-artifacts。而本夹具读的只有 `lib/gates/admission/convene.js`，
+ * 那是**第一个 tsc** 的产物 —— client 那一份与本判据毫无关系。
+ *
+ * MEASURED（t13）：突变臂原先跑整套 `pnpm build`，它会在**两次不同的场合**红，
+ * 而两次都与本判据无关：
+ *
+ *   ① `tsconfig.client.json` 在 worktree 里会因为客户端 peer 依赖
+ *      （`@deepseek-ai/dsh-client-ui-conversation/client` 一类）解析不到而报十几条
+ *      `TS2307` —— 那些错**没有一条**在 `convene.ts` 里。
+ *   ② ★★ 更隐蔽的一次：本任务与**兄弟 worktree**（`task-t14`）都在跑构建，
+ *      而两者的 `node_modules` 是**同一个目录的两个符号链接**（worktree 不带
+ *      node_modules，只能链回主工作区）。⇒ 一次 `tsc` 可能在另一个进程刚写坏
+ *      中间态时读到它，报出一堆**在别的文件里**的错。
+ *
+ * ★ 两次红的形状**完全一样**（"突变体必须编译得过"），而它们要说的事完全不同：
+ *   前者是环境，后者是并发。★ 而最坏的一种误读是：把它当成"判据的突变体有问题"
+ *   —— 于是下一个人去改一个本来正确的判据（本队记账的"方向相反"）。
+ *
+ * ⇒ 口径：只重建它**真正需要**的那一份（clean-build + 服务端 tsc），
+ *   并且**只把 `convene.ts` 自己的编译错误当成本次突变的结果**；别的文件报错
+ *   ⇒ 重试（最多 3 次，串行），仍失败才如实报出"这一次没能测"（而不是报成
+ *   "突变没打红"）。★ 与本队那条纪律一致：**没能测量 ≠ 测到了问题**。
+ */
+function serverBuild() {
+  const clean = spawnSync('node', ['scripts/clean-build.mjs'], { cwd: ROOT, encoding: 'utf8' })
+  if (clean.status !== 0) return clean
+  return spawnSync('npx', ['tsc', '-p', 'tsconfig.json'], { cwd: ROOT, encoding: 'utf8', shell: true })
+}
+
+/** 编译输出里，**属于被判据突变的那一份**的错误（其余是环境 / 并发噪声）。 */
+function errorsInGate(result) {
+  const text = `${result.stdout ?? ''}${result.stderr ?? ''}`
+  return text.split('\n').filter((line) => /error TS\d+/.test(line))
+}
+
+/**
+ * 跑一次服务端构建，**并确认它真的编译过了 `convene.ts`**。
+ *
+ * 返回 `{ result, ownErrors, foreignErrors }`：
+ *   · `ownErrors`     —— 落在 `convene.ts` 上的错误 ⇒ 这次突变真的编译不过，**是发现**
+ *   · `foreignErrors` —— 落在别的文件上的错误 ⇒ 环境 / 兄弟 worktree 的并发噪声
+ *
+ * ★ "别的文件报错"不许被当成"突变体有问题"：它对本次突变**什么都没测到**。
+ */
+function buildForMutation() {
+  const result = serverBuild()
+  const all = errorsInGate(result)
+  const own = all.filter((line) => line.includes('src/gates/admission/convene.ts'))
+  const foreign = all.filter((line) => !line.includes('src/gates/admission/convene.ts'))
+  return { result, ownErrors: own, foreignErrors: foreign }
+}
 
 /**
  * 把源码与 lib 还原到突变前的状态。★ **永不抛**（见上面第 ⑤ 步的三条纪律）。
@@ -523,9 +653,16 @@ function restore(source, original) {
     return
   }
   try {
-    const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+    const built = serverBuild()
+    /**
+     * ★ 还原的验收标准是"那份产物回到了突变前的字节" —— 而不是"tsc 退出码为 0"：
+     *   并发噪声会让退出码非 0，而产物其实是对的。
+     */
     if (built.status !== 0) {
-      restoreError = `★ 还原之后 build 失败（盘上的 lib/ 与被还原的 src 不同步）：\n${built.stdout}\n${built.stderr}`
+      const now = existsSync(BUILT_GATE) ? readFileSync(BUILT_GATE, 'utf8') : ''
+      if (now.includes('MUTANT')) {
+        restoreError = `★ 还原之后 build 失败、且盘上仍是变异体：\n${built.stdout}\n${built.stderr}`
+      }
     }
   } catch (error) {
     restoreError = `★ 还原之后 build 抛出：${String(error)}`
@@ -542,10 +679,34 @@ async function withBuiltGate(mutatedSource, body) {
   process.on('exit', onExit)
   try {
     writeFileSync(GATE_SOURCE, mutatedSource)
-    const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+    /**
+     * ★ 重试只为**别的文件**的报错（环境 / 并发）—— `convene.ts` 自己的错立即判定，
+     *   否则重试会把一条真实的编译发现拖成"最终报成没能测量"。
+     */
+    let built = buildForMutation()
+    for (let attempt = 0; attempt < 2 && built.ownErrors.length === 0 && built.result.status !== 0; attempt += 1) {
+      built = buildForMutation()
+    }
     assert.equal(
-      built.status, 0,
-      `★ 突变体必须编译得过（否则这次突变测的是 tsc，不是判据的裁决）:\n${built.stdout}\n${built.stderr}`,
+      built.ownErrors.length, 0,
+      `★ 突变体必须编译得过（否则这次突变测的是 tsc，不是判据的裁决）:\n${built.ownErrors.join('\n')}`,
+    )
+    assert.equal(
+      built.result.status, 0,
+      '★ 这一次突变没能测量：服务端构建连续失败，而报错**不在** convene.ts 里（环境 / 兄弟 worktree 的并发）。'
+      + '★ 这不是"突变没打红对应臂" —— 是**什么都没测到**，两者的补救动作相反：\n'
+      + `${built.result.stdout}\n${built.result.stderr}`,
+    )
+    /**
+     * ★ 编译过了还不算数：**断言那份产物真的被重建了**。一次"tsc 说没问题、
+     *   而 lib/ 里还是旧字节"（增量缓存 / 时间戳同秒）会让下面每一次
+     *   突变读数都测到基线 —— 而报告会读作"突变没打红对应臂 ⇒ 那条臂可能是恒真的"，
+     *   一个**方向相反**的结论。
+     */
+    const builtNow = readFileSync(BUILT_GATE, 'utf8')
+    assert.equal(
+      builtNow.includes('MUTANT'), true,
+      '★ 突变体必须真的落到 lib/ 里 —— 否则下面的读数测的是基线，而报告会说"突变没生效"',
     )
     const result = body()
     if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
@@ -624,17 +785,33 @@ test('★ 定向突变：三条条件【各自】单独去掉 ⇒ 对应臂必�
     pending: fn(ctx({ openQuestions: ['still open?'] })).ok,
     /** ★ 臂 2a：上游自己没能测量 —— 这一格是"跟着 unmeasured"的探针。 */
     upstreamUnmeasured: fn(ctx({ upstream: { 'admission.checkpoint': CHECKPOINT_UNMEASURED } })).ok,
+    /**
+     * ★★ 臂 2e 的探针（t13 新增）：提问表**缺席**。
+     *   它是本次修复的**字面落点** —— 修复前这一格与"`[]`（读到、空的）"同形，
+     *   于是它返回 `true`；修复后它必须返回 `false`。
+     */
+    questionsAbsent: fn(ctx({ openQuestions: undefined })).ok,
+    /** ★ 臂 2e′ 的探针：提问表的形状坏掉（非数组）。 */
+    questionsMalformed: fn(ctx({ openQuestions: 'not-a-list' })).ok,
   })
 
   const baseline = probe(await freshGate('mutation=baseline'))
   /**
-   * ★ 基线本身必须是对的（否则下面三次突变测的不是突变，是别的东西）：
-   *   三条都过要放行；三条各自缺一次都要拒。
+   * ★ 基线本身必须是对的（否则下面几次突变测的不是突变，是别的东西）：
+   *   三条都过要放行；三条各自缺一次都要拒；上游与提问表的"没能测量"也要拒。
    */
   assert.deepEqual(
     baseline,
-    { allPass: true, noArtefact: false, unreviewed: false, pending: false, upstreamUnmeasured: false },
-    '★ 突变之前：三条都过要放行、每条缺失都要拒、上游没能测量也要拒 —— 否则下面测的不是突变',
+    {
+      allPass: true,
+      noArtefact: false,
+      unreviewed: false,
+      pending: false,
+      upstreamUnmeasured: false,
+      questionsAbsent: false,
+      questionsMalformed: false,
+    },
+    '★ 突变之前：三条都过要放行、每条缺失都要拒、两种"没能测量"也要拒 —— 否则下面测的不是突变',
   )
 
   const original = readFileSync(GATE_SOURCE, 'utf8')
@@ -796,9 +973,87 @@ test('★ 定向突变：三条条件【各自】单独去掉 ⇒ 对应臂必�
       const mutated = probe(await freshGate('mutation=no-pending-condition'))
       /** ★ 臂 1c 的红：还有没回答的问题【不再被拒】。 */
       assert.equal(mutated.pending, true, '★ 突变体必须放行"还有未回答的问题" —— 臂 1c 就是靠这一条变红的')
+      /**
+       * ★ 而**三种"没能测量"**也必须跟着红（它们同属条件 ③ 的门口）——
+       *   若某一格仍然被拒，说明那一格其实挂在别处（读错位置的出口）。
+       */
+      assert.equal(mutated.questionsAbsent, true, '★ 提问表缺席也必须跟着放行（同属条件 ③ 的这一格）')
+      assert.equal(mutated.questionsMalformed, true, '★ 提问表形状坏也必须跟着放行')
       assert.notDeepEqual(mutated, baseline)
       assert.equal(mutated.noArtefact, false, '★ 条件 ① 不受影响')
       assert.equal(mutated.unreviewed, false, '★ 条件 ② 不受影响')
+      assert.equal(mutated.upstreamUnmeasured, false, '★ 条件 ② 的"没能测量"不受影响（另一条条件的另一格）')
+    },
+  )
+
+  /**
+   * ── ★★ 突变 E（t13 验收单列的那一条）：把【缺席分支】改回 ok ⇒ 对应臂必须红 ──────
+   *
+   * 契约的验收逐字写的是：「定向突变能打红：**把缺席分支改回 ok** ⇒ 对应臂必须红」。
+   * ⇒ 这一支就是那一句话的字面执行：把条件 ③ 里"缺席 ⇒ 没能测量"那一支**单独**
+   *   改成"当它是空的、放行"，然后确认臂 2e（以及探针 `questionsAbsent`）**红**。
+   *
+   * ★ 它**必须是一条独立的突变**，不能靠突变 C 代替：C 砍的是整个条件 ③ 的门口
+   *   （连"还有未回答的问题"一起放行），那种红证明不了"缺席这一支**单独**
+   *   被夹具钉住了"。而本任务要修的是一个**只在缺席这一支上**的缺陷 ——
+   *   一次"砍掉整条条件"的突变会在修复前**也**变红（因为 `[]` 与"有问题"都变了），
+   *   于是它区分不出"修好了"与"没修好"。
+   *
+   * ★★ 而且这一支的形态正是**修复前盘上那个变异体**的形态（`!MUTATED` 恒假短路
+   *   ⇒ 缺席与其他 `[]` 一样走放行）：它是这次事故的**回归测试**。
+   *
+   * ★★ MEASURED（这一支的前两版，都自己抓出来了，而它们的坏法**不一样**）：
+   *
+   *   第一版：把两支一起改成
+   *     `if (false) {…} else if (questions.state === 'read' && pending > 0)`
+   *   ⇒ 形状坏**也一起被放行**了（`pendingQuestions` 对形状坏返回的 `state` 也是
+   *     `'unmeasured'`，第一支一死它就掉进最后的 `else`）⇒ 断言"形状坏不受影响"红。
+   *   ★ 那条红不是判据的缺陷，是这次突变**没有单独打中缺席那一支**。
+   *
+   *   第二版：改成 `if (questions.state === 'unmeasured' && questions.reason !== 'absent')`
+   *   ⇒ **编译不过**（TS2367）：在 `state === 'unmeasured'` 的收窄里，`reason`
+   *     只可能是 `'malformed'`，那个比较被 TS 判为恒真。
+   *   ★ 这条编译错误本身是**有用的读数**：它说明"按 reason 区分"必须发生在
+   *     **收窄之前**，否则那个判断在类型上就是多余的 —— 而那正是"守卫检查了
+   *     另一个同名的东西"的形状（守卫看着一个已经不可能的值）。
+   *
+   *   ⇒ 第三版（正确）：在**进入条件 ③ 之前**就把"缺席"那一格改写成
+   *     "读到、空的"，其余形状原样不动。★ 这才是"把缺席分支改回 ok"的最小形态：
+   *     它只动**缺席**，"形状坏"与"还有问题"都照原样走自己的支。
+   */
+  await withBuiltGate(
+    mutate([
+      [
+        NEEDLES.questionsRead,
+        `  const questions = ctx?.openQuestions === undefined || ctx?.openQuestions === null\n`
+        + `    ? { state: 'read' as const, pending: [] as string[], reason: 'absent' as const, detail: '' } // MUTANT E: the "absent" branch is read as "no pending question" (the t13 defect)\n`
+        + `    : pendingQuestions(ctx?.openQuestions)`,
+        'absent branch only',
+      ],
+    ], 'the absent branch (t13)'),
+    async () => {
+      const mutated = probe(await freshGate('mutation=absent-read-as-ok'))
+      /**
+       * ★ 验收的字面落点：**缺席被放行了**（而它必须被拒）。
+       *   这正是修复前盘上的读数（`questionsAbsent === true`）。
+       */
+      assert.equal(
+        mutated.questionsAbsent, true,
+        '★ 突变体必须把"提问表缺席"读成"没有未回答的问题" —— 臂 2e 就是靠这一条变红的',
+      )
+      /**
+       * ★★ 而"形状坏"那一格**仍然被拒** —— 本次突变只动缺席那一支。
+       *   它同时钉住两件事：
+       *     ① 缺席与形状坏**真的是两支**（不是同一个守卫的两次现身）；
+       *     ② 突变 E 打红的确实是**缺席**那一条臂，而不是碰巧把整条条件放行了。
+       */
+      assert.equal(
+        mutated.questionsMalformed, false,
+        '★ 形状坏那一支必须【不受本次突变影响】—— 它证明打红的是"缺席"这一条臂，不是整条条件',
+      )
+      assert.notDeepEqual(mutated, baseline)
+      assert.equal(mutated.allPass, true, '★ 而"三条都过"仍然放行（这个突变体不是一个乱拒的实现）')
+      assert.equal(mutated.pending, false, '★ "还有未回答的问题"也必须仍然被拒（它不在本次突变的范围内）')
     },
   )
 
@@ -900,6 +1155,100 @@ test('★ 二次对照：三次突变的针脚在源码里【真的存在】（�
    * ★ 条件 ② ③ 的两根针脚也必须在**不同的分支**上（与条件 ① 同一条理由）。
    */
   assert.notEqual(NEEDLES.pending, NEEDLES.questionsUnmeasured, '★ 条件 ③ 的两支必须各有一根不同的针脚')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 污染检查：盘上【不许】留着变异体（t13 的事故就是这条缺失造成的）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 污染检查（总是运行）：src 与 lib 里都不许残留 `MUTANT` 标记 —— 交付的代码必须是判据本体', () => {
+  /**
+   * ── 这条臂是怎么来的（一次真实事故，t13 的根因）────────────────────────────────
+   *
+   * MEASURED（2026-10-06）：本文件的突变臂**原本已有**三重还原保护 ——
+   * 还原放最外层、还原函数永不抛、`process.on('exit')` 兜底。而它们**全都没能**
+   * 挡住这次事故，因为会话在突变进行中被**中断**了（不是测试失败、也不是正常退出：
+   * 进程被直接终止，`exit` 钩子没有机会跑）。
+   *
+   * 后果：`QUESTIONS_MUTATED = true` 这个**变异体**被提交进了 `ad6a5b6`/`ad7a3ed`，
+   * 于是交付的 `convene.ts` 里，条件 ③ 的两支被一个恒假短路挡住：
+   *
+   *     调用方根本没接 `open-questions.json` ⇒ 判据说"问题都答完了"
+   *
+   * ★ 而这件事**已经越过了一道防线**：本文件里有一条对应的臂（臂 2e，
+   *   在修复时被加强为"缺席与空数组的 JSON 必须不同"），它在污染状态下**确实红了**。
+   *   只是那次红被当成"突变臂失败"而没有回头查盘上的源码 ——
+   *   ★ 这正是本队记账过的那种误读：**一次红的原因可能是变异体还在盘上，
+   *     而不是臂本身有问题。**
+   *
+   * ── 这条臂为什么能挡住它 ────────────────────────────────────────────────────
+   *
+   * 它**不依赖任何突变是否跑过、是否还原成功**：它只读**磁盘上的字节**，
+   * 而且**总是运行**（不需要 `AGENT_TEAMS_CONVENE_MUTATION=1`）。
+   * ⇒ 任何残留的变异体都会让这条臂在下一次测试运行的第一时间变红，
+   *   并**在红里说出"是变异体没还原"**，而不是让人去怀疑判据的语义。
+   *
+   * ★ 它同时检查 `lib/`：夹具读的是 `lib/`（真正会被装配层装上的那一份），
+   *   所以一个"src 干净、lib 还脏"的中间态同样会骗过所有语义臂 ——
+   *   而它正是"改了源码忘了 build"的形态（本队记账多次）。
+   */
+  const sources = { 'src/gates/admission/convene.ts': GATE_SOURCE, 'lib/gates/admission/convene.js': BUILT_GATE }
+  for (const [label, path] of Object.entries(sources)) {
+    assert.equal(existsSync(path), true, `★ ${label} 必须存在（否则下面这条检查是恒真的）`)
+    const text = readFileSync(path, 'utf8')
+    /**
+     * ── ★★ 只扫【可执行代码】，不扫注释（本臂第一版就是在这里红的）───────────────
+     *
+     * MEASURED：第一版直接扫全文 ⇒ **当场红**，而红的位置是 `convene.ts` 文件头
+     * 那段注释 —— 它正在*描述*这次事故（"检查源码里没有 `MUTANT` 标记"）。
+     *
+     * ★ 一个检出器**把对坏形态的说明当成坏形态**，是本队已经记过的形态
+     *   （"读错位置的出口"）：它检查的位置（全文）不是它声称的位置（可执行代码）。
+     *   夹具自己写下的教训必须**逐字**避开它，否则这条臂会把每一个如实记录
+     *   这次事故的人都判成违规 —— 而那正是让一条好臂被人删掉的方式。
+     *
+     * ⇒ 口径：去掉行注释与块注释之后**再**找标记。
+     *   ★ 而 `lib/` 是 tsc 编译产物：它的块注释会被保留，同样要去掉。
+     */
+    const code = text
+      .replace(/\/\*[\s\S]*?\*\//g, '')   // 块注释（含文件头）
+      .replace(/^\s*\/\/.*$/gm, '')       // 整行行注释
+    /**
+     * ★ 只找**变异体的标记**（`MUTANT` 是全部突变臂统一使用的记号），
+     *   不扫别的词。★ 而去注释之后必须**仍有可执行代码** —— 一个把所有东西都剥掉的
+     *   检出器在"一行代码都不剩"时恒绿（那正是恒真）。
+     */
+    assert.ok(
+      code.length > text.length * 0.3,
+      `★ ${label} 去注释吃掉了 ${(100 - code.length / text.length * 100).toFixed(0)}% 的文本 —— 去注释不该把可执行部分也带走`,
+    )
+    const marks = code.split('\n')
+      .map((line, index) => ({ line, number: index + 1 }))
+      .filter((entry) => entry.line.includes('MUTANT'))
+    assert.deepEqual(
+      marks.map((entry) => `${label}:${entry.number}`), [],
+      `★ ${label} 里残留着变异体（定向突变没有还原）—— 交付的代码必须是判据本体，不是突变体。\n`
+      + marks.map((entry) => `  ${entry.number}: ${entry.line.trim()}`).join('\n')
+      + '\n⇒ 还原源码并重新 `pnpm build`。'
+      /**
+       * ★ 而且这条红必须指出**这不是判据的语义缺陷** —— 一次被误读的红会让人
+       *   去改一个本来正确的判据（本队记账的"方向相反"）。
+       */
+      + '\n   ★ 注意：这条红说的是"盘上留着突变体"，不是"判据的语义写错了"。',
+    )
+  }
+  /**
+   * ── ★ 反向自证（缺了它，上面那条检出器可能是**恒真**的）────────────────────────
+   *
+   * 拿一段真的坏形态喂给它，必须命中；拿一段**只在注释里提到改动标记**的喂给它，
+   * 必须放过。★ 坏形态样本用**拼接**构造，于是本文件源码里不存在那串字面量
+   * —— 否则上面那条 `deepEqual` 会把样本自己当成违规（自指，本队记过同形的坑）。
+   */
+  const offending = `const ${'MUT'}ANT_FLAG = true`
+  const explanatory = `// this comment explains the ${'MUT'}ANT_FLAG marker`
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.equal(strip(offending).includes('MUTANT'), true, '★ 检出器对一段真的变异体没有命中 —— 它是恒真的')
+  assert.equal(strip(explanatory).includes('MUTANT'), false, '★ 检出器误伤了注释里对变异体的说明 —— 那是本队记过的"读错位置的出口"')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

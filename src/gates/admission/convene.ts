@@ -80,6 +80,27 @@
  *      `openQuestions` 缺席与"空数组"**不同形**；`upstream` 里**没有**
  *      `admission.checkpoint` 这个键与"它在那儿、且是 ok"**不同形**。
  *      ★ 尤其：一个 `?? {}` 兜底会把"没人接线"读成"上游都说没问题" ⇒ 恒真。
+ *
+ * ── ★★ MEASURED（t13，本文件真的犯过一次第 ④ 种）──────────────────────────────
+ *
+ * 上面那句"`openQuestions` 缺席与空数组不同形"**写在这里**，而盘上的代码有一段时间
+ * 违反它：`openQuestions` 缺席与 `[]` 返回**完全相同的 JSON**（都 `ok`、
+ * 都 `noPendingQuestion: true`）——
+ *
+ *     调用方根本没接 `open-questions.json` ⇒ 判据说"问题都答完了" ⇒ 自动成团
+ *
+ * 成因不是条件 ③ 的逻辑写错了（`pendingQuestions` 一直正确地对缺席返回
+ * `unmeasured`），而是**交付的源码里留着一个突变体**：定向突变臂的还原没有跑完，
+ * 于是 `if (questions.state === 'unmeasured')` 被一条 `!MUTATED` 短路常量挡住。
+ * ⇒ 两件事都记在这里，因为它们是同一个教训的两半：
+ *
+ *   ① 一条写在**注释里**的不变量不等于一条**被夹具钉住的**不变量 ——
+ *      本文件头这段话当时一个字都没改，而代码已经违反它了。
+ *   ② 突变臂的还原必须**在进程被任何方式终止时**都发生（`process.on('exit')`
+ *      兜底 + 还原永不抛）。★ 而这次事故证明兜底**还不够**：会话中断（而非
+ *      测试失败）也会把变异体留在盘上 —— 所以夹具里另有一条**总是运行**的
+ *      二次对照，检查源码里**没有** `MUTANT` 标记（见
+ *      `scripts/gate-admission-convene.test.mjs` 的"污染检查"）。
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
@@ -183,11 +204,20 @@ export interface ConveneContext {
   /**
    * ── ★ `open-questions.json` 的观察（条件 ③ 的证据）────────────────────────────
    *
-   * ★ 判据**不做 I/O**（性质 ①），所以"读到了什么"由调用方注入。三态：
+   * ★ 判据**不做 I/O**（性质 ①），所以"读到了什么"由调用方注入。**四态**：
    *
-   *     缺席   ⇒ 没能观察（没人接线 / 没读到盘）⇒ unmeasured
-   *     `[]`   ⇒ 观察了，一张提问表都没有 ⇒ 条件 ③ 过（没有未回答的问题）
-   *     非空   ⇒ 有还没回答的问题 ⇒ 条件 ③ 不过
+   *     缺席（`undefined` / `null`）⇒ ★ 没人接线 ⇒ **unmeasured**（不是"没有"）
+   *     非数组 / 含非法条目          ⇒ ★ 交了、但形状坏 ⇒ **unmeasured**（另一句话）
+   *     `[]`                        ⇒ 观察了，一个问题都没有 ⇒ 条件 ③ **过**
+   *     非空                        ⇒ 有还没回答的问题 ⇒ 条件 ③ **不过**
+   *
+   * ★★ 前两行是本任务（t13）修的：此前缺席与 `[]` 返回**完全相同的 JSON**
+   *   （都 `ok`、都 `noPendingQuestion: true`）—— 即"没人接这张表"被读成了
+   *   "问题都答完了"。★ 而缺席的真实含义是「**无法判断**」：
+   *   一张没人交进来的表与一张确认过是空的表，在任何"看着挺全"的检查下同形，
+   *   而它们的补救动作相反（去接线 vs 可以成团）。
+   *   ⇒ 缺席必须落**第三态**；且它与"形状坏"还要**再分开**（补救动作也不同，
+   *     见 `pendingQuestions`）。
    *
    * ★ 为什么让调用方交出**已经规整过的"未回答问题"**，而不是原始 JSON 文本：
    *
@@ -199,7 +229,7 @@ export interface ConveneContext {
    *   ★ 但这个选择有一个**代价**，必须在这里说清：把"什么算未回答"交给调用方，
    *     等于把一部分判断交到被判的一方手里。⇒ 所以判据对交进来的东西**仍然核对
    *     形状**（见 `pendingQuestions`）：它必须是一组**非空字符串**，其余一律
-   *     读作"没能观察"（unmeasured），**不是**读作"没有未回答的问题"。
+   *     读作"没能测量"（unmeasured），**不是**读作"没有未回答的问题"。
    */
   openQuestions?: unknown
   /**
@@ -290,8 +320,18 @@ function upstreamReason(verdict: unknown, state: UpstreamState): string {
  *
  * 形状（★ 与 `absorb` / `checkpoint` 的规整同构）：
  *
- *     `undefined` / 非数组 / 含非法条目 ⇒ 没能观察 ⇒ unmeasured（**不是**"没有"）
+ *     `undefined` / `null` / 非数组 / 含非法条目 ⇒ 没能测量 ⇒ unmeasured（**不是**"没有"）
  *     数组（可能为空）                  ⇒ 观察了；非空 ⇒ 条件 ③ 不过
+ *
+ * ★★ 而"没能测量"分**两种，且必须不同形**（本任务 t13 修的正是这里）：
+ *
+ *     缺席（`undefined` / `null`）⇒ 没人接线            ⇒ 去接线
+ *     形状坏（非数组 / 含非法条目）⇒ 接了、交错了东西    ⇒ 去修调用方
+ *
+ *   此前两者由同一次读返回同一个 `{state:'unmeasured'}` 且**共用一句话**，
+ *   而它们的补救动作完全不同。合成一句会让读日志的人按错的方向去修 ——
+ *   与"把没测到并进通过"同族，只是这次被并进去的是**另一种没测到**。
+ *   ⇒ 返回里多两格：`reason`（absent / malformed）与 `detail`（哪一格坏了）。
  *
  * ★★ 为什么"含非法条目"落 unmeasured 而不是"忽略它、看剩下的"：
  *   一个 `['q1', 42]` 的输入里，那个 `42` **可能**是一条真的未回答问题。
@@ -300,15 +340,45 @@ function upstreamReason(verdict: unknown, state: UpstreamState): string {
  *   上开火，而它的补救动作是去改调用方，不是回去回答问题。
  *   ⇒ 两难的正确落点是**第三态**：说清"我读不懂这一格，所以什么都没判"。
  */
-function pendingQuestions(value: unknown): { state: 'unmeasured' | 'read'; pending: string[] } {
-  if (value === undefined || value === null) return { state: 'unmeasured', pending: [] }
-  if (!Array.isArray(value)) return { state: 'unmeasured', pending: [] }
+function pendingQuestions(value: unknown): {
+  state: 'unmeasured' | 'read'
+  pending: string[]
+  /** ★ 只有 `state === 'unmeasured'` 时有意义：为什么没能测量（两种，必须不同形）。 */
+  reason: 'absent' | 'malformed'
+  /** ★ 形状坏时的一句话，说清**哪一格**坏了（进 blocker 的人话里）。 */
+  detail: string
+} {
+  if (value === undefined || value === null) {
+    return { state: 'unmeasured', pending: [], reason: 'absent', detail: 'nothing was injected' }
+  }
+  if (!Array.isArray(value)) {
+    return {
+      state: 'unmeasured',
+      pending: [],
+      reason: 'malformed',
+      detail: `a ${typeof value} was injected instead of a list`,
+    }
+  }
   const pending: string[] = []
-  for (const item of value) {
-    if (typeof item !== 'string' || item.trim() === '') return { state: 'unmeasured', pending: [] }
+  for (const [index, item] of value.entries()) {
+    /**
+     * ★ 一条读不懂的条目 ⇒ 整格落"没能测量"（**不是**忽略它、看剩下的）：
+     *   那个条目**可能**是一条真的未回答问题，静默丢掉它就是把"读不懂"
+     *   读成"问题都答完了"。★ 反过来"看不懂就拒绝"也不对 —— 那会在一次
+     *   **错的接线**上按"还有问题要问用户"开火，而补救动作是去改调用方。
+     *   ⇒ 第三态是唯一准确的落点，且它**说清是哪一格**。
+     */
+    if (typeof item !== 'string' || item.trim() === '') {
+      return {
+        state: 'unmeasured',
+        pending: [],
+        reason: 'malformed',
+        detail: `entry ${index} is ${typeof item === 'string' ? 'a blank string' : `a ${typeof item}`}, not a non-empty question string`,
+      }
+    }
     pending.push(item.trim())
   }
-  return { state: 'read', pending }
+  return { state: 'read', pending, reason: 'absent', detail: '' }
 }
 
 /**
@@ -357,7 +427,6 @@ export function appliesTo(_ctx: ConveneContext | undefined): boolean {
   return true
 }
 
-const QUESTIONS_MUTATED: boolean = true // MUTANT C: condition ③ removed (both exits)
 export function gate(ctx: ConveneContext): GateVerdict {
   /**
    * ── ★ 先问"这次能不能观察"，而不是先判三个条件（与 absorb / checkpoint 同序）──
@@ -485,11 +554,29 @@ export function gate(ctx: ConveneContext): GateVerdict {
    *   于是成团判据只能猜 —— 而"猜"就是这条判据要消灭的那个东西。
    */
   const questions = pendingQuestions(ctx?.openQuestions)
-  if (!QUESTIONS_MUTATED && questions.state === 'unmeasured') { // MUTANT C: an unreadable question list is no longer "not measured"
+  if (questions.state === 'unmeasured') {
+    /**
+     * ── ★★ 缺席 与 形状坏 —— 两种"没能测量"必须**不同形** ────────────────────────
+     *
+     * MEASURED（本任务的修复，t13）：此前这一支是一句话，把"没人接
+     * `open-questions.json`"与"接了、但读出来的形状不是一组非空字符串"合成同一句。
+     * 而两者的**补救动作完全不同**：
+     *
+     *     缺席   ⇒ 去接线（编排层还没把这格交进来）
+     *     形状坏 ⇒ 去修调用方（它交了东西，但交错了）
+     *
+     * 合成一句会让读日志的人按错误的方向去修。★ 这与本队那条跨层纪律同源：
+     * "我不知道"与"我看了、看不懂"不是同一件事。
+     *
+     * ★ 而两半**都与 `[]`（读到、空的 ⇒ 条件 ③ 过）不同形** —— 后者才是
+     * "问题都答完了"，它走的是下面那个 `else` 支。
+     */
     unmeasuredReasons.push(
-      'condition ③: the pending questions for this run could not be observed (open-questions.json was not read, or was read into a shape that is not a list of non-empty question strings), so "no unanswered question is waiting on the user" could not be measured',
+      questions.reason === 'absent'
+        ? 'condition ③: the pending questions for this run could not be observed at all (no open-questions.json observation was injected), so "no unanswered question is waiting on the user" could not be measured — nobody wired this grid up, which is not the same as "the questions are all answered"'
+        : `condition ③: the pending questions were injected in a shape that is not a list of non-empty question strings (${questions.detail}), so whether a question is still waiting on the user could not be measured — a malformed observation is "not measured", not "nothing is pending"`,
     )
-  } else if (!QUESTIONS_MUTATED && questions.pending.length > 0) { // MUTANT C: pending questions are no longer refused
+  } else if (questions.pending.length > 0) {
     blockers.push(
       `condition ③: ${questions.pending.length} question(s) are still waiting for the user — ${questions.pending.map((q) => `"${q}"`).join(', ')} — and a team that convenes with an open question has decided that question by default`,
     )
