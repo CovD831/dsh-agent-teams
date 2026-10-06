@@ -96,6 +96,40 @@ export interface AgentTeamsRuntime {
 }
 /** 派发时登记基准；判据层在完成时读它。 */
 export declare function rememberWorktreeBase(taskId: string, base: string): void;
+/**
+ * ── ★★ 父版本的解析：内存 → 落盘 → 明确说"没有"（t18）─────────────────────────────
+ *
+ * MEASURED（point-dev 定位；无 worktree 的任务恒不可收口）：`baseline` 原本只由
+ * {@link worktreeBaseOf} 推 —— 一个**内存 Map**，只在派发建出 worktree 时写入。
+ * ⇒ 两类任务恒拿不到父版本，而它们是**不同的两件事**：
+ *
+ *   (i)  **没有 worktree**（在主树干活的、captain 接管的）⇒ 从未登记过；
+ *   (ii) **进程重启** ⇒ 内存 Map 清空（★ 与"旧模块"同族）。
+ *
+ * ── 解析顺序（captain 裁定 C+D）────────────────────────────────────────────────
+ *
+ *   ① 内存里有 ⇒ 用它（派发那一刻亲眼拿到的，最新鲜）；
+ *   ② 内存里没有、但任务记录里有 `baseRevision` ⇒ 用它（C：**记下来的事实**）；
+ *   ③ 两者都没有 ⇒ 返回 `absent`，且**带上成因**（D：明确说"没有"，不猜一个）。
+ *
+ * ★ 为什么 ③ 必须带成因、且两种成因不同形：
+ *   本队纪律「unmeasured 的不同成因不应同形」。`no-worktree` 是"**这类任务本就
+ *   没有父版本可归因**"（无隔离 ⇒ 无从比较）；`not-recorded` 是"**我本该有却丢了**"
+ *   （进程重启 / 内存态丢失）。前者接近"不适用"，后者是一条**要去看一眼的信号** ——
+ *   合成一个 undefined，读日志的人分不出"设计如此"与"我们丢了一个事实"。
+ *
+ * ★ 绝不回退成 HEAD：HEAD 可能**已经含了本次改动** ⇒ "改动前"与"改动后"同版本
+ *   ⇒ 回测恒绿（本队记账的恒真写法）。伪造的基准会让"在错误的基础上比较"
+ *   读成"比较过了"。
+ */
+export type BaseRevisionResolution = {
+    kind: 'resolved';
+    revision: string;
+    from: 'memory' | 'record';
+} | {
+    kind: 'absent';
+    reason: 'no-worktree' | 'not-recorded';
+};
 export declare function haltTeamWork(input: {
     ctx: Context;
     stateRoot: string;

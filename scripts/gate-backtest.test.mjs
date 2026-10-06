@@ -389,3 +389,159 @@ test('⑩ appliesTo：只有声明了改动文件的任务才生效', () => {
   assert.equal(appliesTo({}), false)
   assert.equal(appliesTo(undefined), false)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t18：无 worktree 的任务为什么恒不可满足 —— 以及「两种没有」必须不同形
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 这三臂防的是什么失效（MEASURED，point-dev 定位）───────────────────────────
+ *
+ * `baseline` 原本只由 `taskWorktreeBase`（**内存 Map**）推，而那东西只在派发
+ * 建出 worktree 时写入 ⇒ 两类任务恒拿不到父版本：
+ *
+ *   (i)  **没有 worktree** 的任务（在主树干活的、captain 接管的）⇒ 从未登记过；
+ *   (ii) **进程重启** ⇒ 内存 Map 清空（★ 与"旧模块"同族）。
+ *
+ * ⇒ 两类都让 `baseline` 恒 `undefined` ⇒ 本判据恒 `unmeasured` ⇒
+ *   **这类任务永远无法收口**。而判据口径是对的（诚实报"没能测量"），
+ *   所以修法**不是改判据**，是把父版本变成一个**可追溯的事实**。
+ *
+ * ── ★ 本文件的射程 ─────────────────────────────────────────────────────────────
+ *
+ * 上面所有臂测的是**判据本身**（给它什么输入，它怎么裁）。本节测的是**注入侧**：
+ * 父版本从哪来、以及"没有父版本"的两种成因在读数上是否分得开。
+ * ★ 两者刻意不互相替代：判据全绿而注入侧恒缺，正是本缺陷的形状
+ *   （每一臂都通过，而生产路径上永远做不到）。
+ */
+
+test('★ t18 臂 1（对照臂）：本判据仍然【诚实】—— 没有 baseline 就说"没能测量"', async () => {
+  /**
+   * ★ 本臂钉的是"修注入侧不得改判据口径"：一个为了"让它可满足"而把
+   *   `baseline` 缺失读成 ok 的实现，会在这里红。
+   */
+  const v = await gate(ctx({ baseline: undefined }))
+  const reason = expectUnmeasured(v)
+  assert.match(reason, /baseline state is unavailable/, '★ 没有父版本 ⇒ 必须明说"没能测量"，不是 ok')
+  assert.match(reason, /could not be told apart/, '★ 而且要说清后果：归因做不了')
+})
+
+test('★ t18 臂 2（★ 行为臂）：两种"没有父版本"必须【真的】不同形 —— 用返回值证明', async () => {
+  /**
+   * ── ★★ 本臂是 t18 的核心验收，而它第一版**被定向突变证明是假的**───────────────
+   *
+   * 第一版用正则去源码里找 `'no-worktree'` / `'not-recorded'` 两个字面量。
+   * 定向突变（把返回表达式合并成一个 `reason: 'no-worktree'`）实测 ⇒ **照绿**：
+   * 因为那两个字面量**仍然出现在类型声明与注释里**。
+   * ⇒ 一条只看得见"字符串存在"的断言，测的不是"两种成因真的分得开"。
+   *   这是本队记账的「字面量在场 ≠ 行为在场」。
+   *
+   * ⇒ 改成**驱动真实代码**：用真实的 `registerAgentTeamsTools` 注册工具，
+   *   造两类任务（无记录 / 有记录），走真实 `update_task` 入口，读回裁决。
+   *
+   * ★ 而这里**只断言两种情形的读数不同形**，不手抄它们各自叫什么 ——
+   *   字面量由 `src/tools.ts` 决定；本文件重复它会让改一处要动两处，而两处会分叉。
+   */
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { execFileSync } = await import('node:child_process')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'backtest-t18-'))
+  const git = (args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  writeFileSync(join(workspace, 'a.ts'), 'a\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  const head = git(['rev-parse', 'HEAD']).trim()
+
+  const stateRoot = join(workspace, '.agent-teams')
+  await createTeamDir(stateRoot, {
+    id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 2,
+    members: [{ id: 'm1', name: 'worker', status: 'working', joinedAt: 1 }],
+    tasks: [
+      /** (i) 有派发痕迹（attempt>0）却没有记录过的父版本 ⇒ "本该有而丢了"。 */
+      { id: 't1', subject: 'A', status: 'in_progress', assignee: 'worker', dependencies: [], attempt: 2, attemptId: 'a1',
+        kind: 'repair', objective: 'o', inScope: ['a.ts'], acceptance: ['x'], verify: ['true'], createdAt: 1, updatedAt: 1, changedPaths: ['a.ts'] },
+      /** (ii) 任务记录里带着父版本 ⇒ 有得可用（这一格证明"有"与"没有"也不同形）。 */
+      { id: 't2', subject: 'B', status: 'in_progress', assignee: 'worker', dependencies: [], attempt: 1, attemptId: 'a2',
+        kind: 'repair', objective: 'o', inScope: ['a.ts'], acceptance: ['x'], verify: ['true'], createdAt: 1, updatedAt: 1, changedPaths: ['a.ts'], baseRevision: head },
+    ],
+  })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0' },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+
+  const diffs = [{ path: 'a.ts', oldText: 'a', newText: 'b' }]
+  const member = {
+    id: 'm1', status: 'working', steer() {},
+    session: { header: { cwd: workspace }, events: [{ type: 'tool/result', meta: { diffs } }], ownEvents() { return [{ type: 'tool/result', meta: { diffs } }] } },
+  }
+  const outcomeFor = async (taskId, attemptId) => tools.get('agent_teams_update_task').execute(
+    { task_id: taskId, attempt_id: attemptId, status: 'in_progress', changedPaths: ['a.ts'] },
+    { agent: member, signal: new AbortController().signal },
+  ).then(() => 'ACCEPTED').catch((error) => String(error.message))
+
+  const withoutRecord = await outcomeFor('t1', 'a1')
+  const withRecord = await outcomeFor('t2', 'a2')
+
+  /**
+   * ★ t2（有记录）必须**越过 baseline** —— 那正是本任务修好的那一步。
+   *   它后面可能仍因别的输入缺席而失败（coverage 不在本任务射程内），
+   *   所以这里断言的是"baseline 不再是它的拦路理由"，而不是"它整体通过"。
+   */
+  assert.doesNotMatch(
+    withRecord, /baseline state is unavailable/,
+    '★ 有 `baseRevision` 记录的任务不得再报"父版本不可得" —— 这正是 t18 要修的那一格。'
+    + ` 实测：${withRecord.slice(0, 200)}`,
+  )
+  assert.match(
+    withoutRecord, /baseline state is unavailable/,
+    '★ 而没有记录的任务仍须诚实报"父版本不可得"（不得为了让它可满足而伪造一个版本）',
+  )
+  /**
+   * ★ 三态不同形：这三条读数是**三种不同的情形**，两两不许相等。
+   */
+  assert.notEqual(withRecord, withoutRecord, '★ "有父版本"与"没有父版本"必须不同形')
+})
+
+test('★ t18 臂 3（★ 落盘臂）：父版本必须【落进耐久态】，不能只在内存里', async () => {
+  /**
+   * ── 为什么这一臂必须检查**落盘**而不是只检查"解析顺序" ──────────────────────────
+   *
+   * 内存 Map 在进程重启后清空 —— 而那正是成因 (ii)。一个只加了解析顺序、
+   * 却没有把值**写下去**的实现，在夹具里能过（同进程内内存还在），
+   * 而在生产上重启之后照样恒缺。
+   * ⇒ 断言必须落在**写入耐久态**这个动作上。
+   */
+  const { readFileSync } = await import('node:fs')
+  const { join, dirname } = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'tools.ts'), 'utf8')
+
+  assert.match(
+    source, /persistTaskBaseRevision/,
+    '★ 必须有一个把父版本写进耐久态的入口 —— 只记内存 ⇒ 重启后成因 (ii) 原样存在',
+  )
+  assert.match(
+    source, /record\['baseRevision'\] = base/,
+    '★ 而它必须真的把值写进任务记录（不是只算一个变量就丢掉）',
+  )
+  /**
+   * ★ 反向半边：`baseRevision` 必须被**读**过 —— 一个只写不读的实现会让
+   *   上面两条全绿，而解析仍然只看内存（那正是缺陷本身）。
+   */
+  assert.match(
+    source, /resolveBaseRevision/,
+    '★ 而且必须有**读**它的地方（只写不读 = 缺陷原样）',
+  )
+})

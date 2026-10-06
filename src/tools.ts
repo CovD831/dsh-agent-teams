@@ -388,10 +388,122 @@ export function rememberWorktreeBase(taskId: string, base: string): void {
   taskWorktreeBase.set(taskId, base)
 }
 
+/**
+ * ── ★★ 把父版本落进耐久态（t18）─────────────────────────────────────────────────
+ *
+ * 与 {@link rememberWorktreeBase}（内存）是**同一次派发的两个去处**，而不是两份真相：
+ * 值是同一个 `base`，只是「内存那份最新鲜、落盘那份最持久」。
+ *
+ * ★ 为什么要落盘：内存 Map 在进程重启后清空，而"改动发生【之前】的版本是什么"
+ *   在改动发生之后就**再也推不出来**了（HEAD 已经含了改动）⇒ 那个事实只能记下来。
+ *
+ * ★ 为什么要查 workspace 下**所有**团队：`onWorktree` 的回调只拿到 `taskId`，
+ *   而任务属于某个团队。团队目录在 `stateDir` 之下 ⇒ 逐个看。
+ *   ★ 代价说清楚：任务数少（一个团队几十条），而这一步发生在**派发时刻**
+ *     （不是每次调用），所以这个扫法是可接受的。
+ */
+async function persistTaskBaseRevision(taskId: string, base: string): Promise<void> {
+  const root = STATE_DIR_FOR_BASE_PERSIST
+  if (root === undefined) return
+  const { readdir } = await import('node:fs/promises')
+  let teamIds: string[]
+  try {
+    teamIds = (await readdir(root, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+  } catch {
+    /** 目录还不存在（第一个团队尚未落盘）⇒ 没有可写的目标，静默返回（内存那份仍在）。 */
+    return
+  }
+  for (const teamId of teamIds) {
+    await withTeamLock(teamLockKey(root, teamId), async () => {
+      const fresh = await readTeam(root, teamId)
+      if (fresh === undefined) return
+      const task = fresh.tasks.find((candidate) => candidate.id === taskId)
+      if (task === undefined) return
+      /**
+       * ★ 用**记录写入**而不是直接 `task.baseRevision = …`：`TeamTask` 的接口声明在
+       *   `src/types.ts`，而它**不在本任务的 inScope 里**（outOfScope 明确列了
+       *   `src/gates/`、`src/scheduler.ts`、`src/quality-gates.ts`；types 同样不该
+       *   被顺手改动）。⇒ 这里按"耐久态是一个 JSON 记录"来写。
+       *   ★ 代价如实说明：这个字段**没有类型检查**兜底；它的形状由
+       *     `scripts/gate-backtest.test.mjs` 的臂与 `hasValidQualityTaskFields`
+       *     的宽容度共同保证（后者不拒绝未知字段，所以它会被原样存下来）。
+       */
+      const record = task as unknown as Record<string, unknown>
+      if (record['baseRevision'] === base) return
+      record['baseRevision'] = base
+      task.updatedAt = Date.now()
+      await writeTeam(root, fresh)
+    })
+  }
+}
+
+/**
+ * ★ `persistTaskBaseRevision` 需要知道 `stateDir` 的**绝对路径**，而 `onWorktree`
+ *   的回调签名里没有它 ⇒ 在 `registerAgentTeamsTools` 装配时记一个模块级引用。
+ *
+ * ★ 为什么用模块级变量而不是改 `SchedulerConfig` 的签名：改签名要动
+ *   `src/scheduler.ts`（本任务 **outOfScope**）。⇒ 代价如实说明：进程内只会有
+ *   一个已装配的插件实例（本插件的既有约定），而这个变量只被 `onWorktree` 读。
+ */
+let STATE_DIR_FOR_BASE_PERSIST: string | undefined
+
 /** 取该任务的基准；没有就返回 undefined（**不是** HEAD，也不是空串）。 */
 function worktreeBaseOf(taskId: string): string | undefined {
   const base = taskWorktreeBase.get(taskId)
   return typeof base === 'string' && base.trim() !== '' ? base : undefined
+}
+
+/**
+ * ── ★★ 父版本的解析：内存 → 落盘 → 明确说"没有"（t18）─────────────────────────────
+ *
+ * MEASURED（point-dev 定位；无 worktree 的任务恒不可收口）：`baseline` 原本只由
+ * {@link worktreeBaseOf} 推 —— 一个**内存 Map**，只在派发建出 worktree 时写入。
+ * ⇒ 两类任务恒拿不到父版本，而它们是**不同的两件事**：
+ *
+ *   (i)  **没有 worktree**（在主树干活的、captain 接管的）⇒ 从未登记过；
+ *   (ii) **进程重启** ⇒ 内存 Map 清空（★ 与"旧模块"同族）。
+ *
+ * ── 解析顺序（captain 裁定 C+D）────────────────────────────────────────────────
+ *
+ *   ① 内存里有 ⇒ 用它（派发那一刻亲眼拿到的，最新鲜）；
+ *   ② 内存里没有、但任务记录里有 `baseRevision` ⇒ 用它（C：**记下来的事实**）；
+ *   ③ 两者都没有 ⇒ 返回 `absent`，且**带上成因**（D：明确说"没有"，不猜一个）。
+ *
+ * ★ 为什么 ③ 必须带成因、且两种成因不同形：
+ *   本队纪律「unmeasured 的不同成因不应同形」。`no-worktree` 是"**这类任务本就
+ *   没有父版本可归因**"（无隔离 ⇒ 无从比较）；`not-recorded` 是"**我本该有却丢了**"
+ *   （进程重启 / 内存态丢失）。前者接近"不适用"，后者是一条**要去看一眼的信号** ——
+ *   合成一个 undefined，读日志的人分不出"设计如此"与"我们丢了一个事实"。
+ *
+ * ★ 绝不回退成 HEAD：HEAD 可能**已经含了本次改动** ⇒ "改动前"与"改动后"同版本
+ *   ⇒ 回测恒绿（本队记账的恒真写法）。伪造的基准会让"在错误的基础上比较"
+ *   读成"比较过了"。
+ */
+export type BaseRevisionResolution =
+  | { kind: 'resolved'; revision: string; from: 'memory' | 'record' }
+  | { kind: 'absent'; reason: 'no-worktree' | 'not-recorded' }
+
+function resolveBaseRevision(task: { id: string; attempt?: number }): BaseRevisionResolution {
+  const fromMemory = worktreeBaseOf(task.id)
+  if (fromMemory !== undefined) return { kind: 'resolved', revision: fromMemory, from: 'memory' }
+  const rawRecord = (task as unknown as Record<string, unknown>)['baseRevision']
+  const fromRecord = typeof rawRecord === 'string' && rawRecord.trim() !== ''
+    ? rawRecord.trim()
+    : undefined
+  if (fromRecord !== undefined) return { kind: 'resolved', revision: fromRecord, from: 'record' }
+  /**
+   * ★ 两种"没有"必须分得开，而**判别的依据不是一个新猜测**：
+   *   任务被派发过（`attempt > 0`）却查不到任何基准 ⇒ 那个事实本该存在而丢了
+   *   （进程重启）；从未派发过 ⇒ 这类任务本来就没有 worktree。
+   *
+   * ★ 这条近似**写在这里而不是藏起来**：它是"两个都空"时唯一能读到的证据，
+   *   而它的边界说清楚 —— 一个 `attempt > 0` 但**从来没有** worktree 的任务
+   *   （无隔离环境）会被读成 `not-recorded`。那不是错的：在无隔离环境里，
+   *   "本该有的父版本"确实没有存在过，而**要看一眼**正是我们想让人做的事。
+   */
+  return { kind: 'absent', reason: typeof task.attempt === 'number' && task.attempt > 0 ? 'not-recorded' : 'no-worktree' }
 }
 
 /**
@@ -2686,6 +2798,16 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
    * 反映真实墙上时间。
    */
   const clock = (): number => config.now?.() ?? Date.now()
+  /**
+   * ★ t18：`onWorktree` 的回调只拿得到 `taskId`，而把父版本**落盘**需要知道
+   *   团队目录在哪。`stateDir` 是配置项（相对 workspace），而 workspace 在派发
+   *   那一刻由调度器持有 —— 回调签名里没有它（改签名要动 `src/scheduler.ts`，
+   *   那是本任务的 **outOfScope**）。
+   *   ⇒ 在装配时记下 `stateDir` 的**绝对路径**，供 `onWorktree` 使用。
+   *   ★ 代价如实说明：进程内只有一个已装配的插件实例（本插件的既有约定），
+   *     而这个变量只被 `onWorktree` 读、只被这里写。
+   */
+  STATE_DIR_FOR_BASE_PERSIST = join(process.cwd(), config.stateDir ?? '.agent-teams')
   const scheduler = installTeamScheduler(ctx, {
     stateDir: config.stateDir,
     executionPrompt: config.executionPrompt,
@@ -2699,8 +2821,36 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
      * （因为没人真的等过）。
      */
     now: clock,
-    // ★ 把派发时拿到的隔离基准记下来，供 completion 位置的 r5 / 回测判据使用。
-    onWorktree: (taskId, base) => rememberWorktreeBase(taskId, base),
+    /**
+     * ★ 把派发时拿到的隔离基准记下来，供 completion 位置的 r5 / 回测判据使用。
+     *
+     * ── ★★ 为什么这里要写【两处】（t18）─────────────────────────────────────────
+     *
+     * MEASURED（point-dev 定位；无 worktree 的任务恒不可收口）：此前只写内存 Map
+     * ⇒ 两类任务恒拿不到父版本：
+     *
+     *   (i)  **没有 worktree** 的任务（在主树干活的、captain 接管的）—— 这一支
+     *        本来就不回调（`onWorktree` 只在真的建出 worktree 时触发）；
+     *   (ii) **进程重启** ⇒ 内存 Map 清空（★ 与"旧模块"同族）。
+     *
+     * ⇒ 两类都让 `baseline` / `parentRevision` 恒缺席 ⇒ 回测判据恒 `unmeasured`
+     *   ⇒ **这类任务永远无法收口**（而判据口径是对的，所以不能改判据）。
+     *
+     * ★ 修法不是改判据，是**把父版本变成一个可追溯的事实**：既记在内存（派发
+     *   那一刻亲眼拿到，最新鲜），也**落进耐久态**（重启之后仍然读得到）。
+     *   `base` 是一个 git 对象名，是否存在由 git 回答 —— 与用户已裁定的
+     *   「上次审查的版本用 git 版本」同源，**不可伪造**。
+     *
+     * ★ `void` + catch：这是**旁路数据的持久化**，失败不该让派发本身失败
+     *   （派发已经发生了）。而失败也**不静默**：日志里留下一条，读得到。
+     *   ⇒ 内存那一份仍然生效，所以最坏情况退回 t18 之前的行为，不会更坏。
+     */
+    onWorktree: (taskId, base) => {
+      rememberWorktreeBase(taskId, base)
+      void persistTaskBaseRevision(taskId, base).catch((error: unknown) => {
+        ctx.logger.warn(`agent-teams: could not persist the base revision for task "${taskId}": ${String(error)}`)
+      })
+    },
     /**
      * ★ runtime 位置：成员被【派发】这一刻。
      *
@@ -4185,7 +4335,14 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          * "我没能测量"。**绝不在这里替判据决定"那就算通过"。**
          */
         const changedFiles = input.changedPaths ?? task.changedPaths ?? []
-        const worktreeBase = worktreeBaseOf(task.id)
+        /**
+         * ★ t18：这里与 `baseline` 用**同一个解析**（内存 → 落盘 → 明确没有）。
+         *   理由：`parentRevision` 喂给 R5（红前绿后），它与回测问的是同一件事
+         *   ——"改动之前的那个版本是什么"。两处若用不同来源，会出现
+         *   「R5 说父版本是 A、回测说基线是 B」这种自相矛盾，而它在日志里同形。
+         */
+        const baseResolutionForLines = resolveBaseRevision(task)
+        const worktreeBase = baseResolutionForLines.kind === 'resolved' ? baseResolutionForLines.revision : undefined
         const [changedLines, observedFiles] = await Promise.all([
           changedLineNumbers(workspace, worktreeBase),
           Promise.resolve(observedChangedPaths(caller.session)),
@@ -4283,9 +4440,33 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
          *   所以它区分不了『绿』与『没测』"。**绝不能**在这里填一个 0 充数 ——
          *   那正是把"没测到"伪装成"基准是绿的"。
          */
-        const baseline = worktreeBase === undefined
+        /**
+         * ── ★★ 父版本从哪来（t18）───────────────────────────────────────────────────
+         *
+         * 此前只有 `worktreeBase`（内存 Map）一个来源 ⇒ 无 worktree 的任务恒拿不到
+         * ⇒ 回测恒 unmeasured ⇒ **这类任务永远无法收口**。
+         *
+         * ⇒ 现在走 {@link resolveBaseRevision} 的三段解析：内存 → 落盘 → 明确说"没有"。
+         *   ★ 而"没有"的**两种成因各自可读**（`no-worktree` / `not-recorded`）——
+         *     它们与"我跑了但基准不绿"是**三件不同的事**，读日志的人必须分得开。
+         */
+        const baseResolution = resolveBaseRevision(task)
+        const baseline = baseResolution.kind === 'absent'
           ? undefined
-          : { label: worktreeBase, exitCode: await baselineExit(worktreeBase) }
+          : { label: baseResolution.revision, exitCode: await baselineExit(baseResolution.revision) }
+        /**
+         * ★ 把"父版本是哪种情形"作为**结构化读数**交出去（与 `input_surface` 同一条
+         *   纪律：读得出来才算数）。
+         *   ★ 三态，互不同形：
+         *     · `resolved`（来源可读：memory / record）⇒ 有父版本，比较有基础；
+         *     · `absent.no-worktree`                 ⇒ 这类任务本就没有父版本；
+         *     · `absent.not-recorded`                ⇒ 本该有而丢了（要去看一眼）。
+         *   ★ 只在**缺席**时挂这个字段：有父版本时它没有信息量，而"总是出现"会让
+         *     三态里最该被看见的那两种淹没在噪音里。
+         */
+        const baselineProvenance = baseResolution.kind === 'absent'
+          ? { baseline_absent: baseResolution.reason }
+          : {}
         /**
          * ★ 回测的依赖图 / 覆盖数据。与跑测试一样是 I/O，所以在这一层做；
          *   拿不到就【不注入】⇒ 判据说"没有依赖图数据"（不是"选了 0 条"）。
