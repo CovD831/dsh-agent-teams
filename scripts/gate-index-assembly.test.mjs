@@ -1023,11 +1023,16 @@ test('臂 4c ★ 集成臂（读数出口）：核对结论的【可读出口】
 /**
  * 结构化出口（`input_surface`）所在的**位置名** —— 从源码里读出来，不手抄。
  *
+ * ★ 读的是 **`src/tools.ts`**，不是装配点：核对结论的出口长在**调用方**那一侧
+ *   （装配点只负责"谁需要哪些格"，交不交出去是编排层的事）。本文件其余部分读
+ *   `src/gates/index.ts`，所以这一处必须显式换文件 —— 用错文件会让下面的扫描
+ *   恒为空集合，而那正是本臂要防的"读了不存在的出口"。
+ *
  * 口径：`input_surface` 是 `evaluateRuntimeGates` 的返回字段，而那个函数**只**核对
  * `runtime`。所以判法是从每个 `input_surface:` 字面量**向前**找到最近的
  * `auditGateRequires('<point>'` —— 那一处就是它的产出者。
  *
- * ★ 必须先去掉注释：装配点里也**写着** `input_surface` 这个词（在解释它的那段
+ * ★ 必须先去掉注释：`tools.ts` 里也**写着** `input_surface` 这个词（在解释它的那段
  *   长注释里），而注释里的那一次出现会让"最近的 audit 调用"指向另一条位置。
  *   这与本文件 `observeCallsInAssembly` 的纪律同源 —— 注释是给人看的转述，
  *   夹具读的必须是真的代码。
@@ -1036,7 +1041,7 @@ test('臂 4c ★ 集成臂（读数出口）：核对结论的【可读出口】
  *   "名单过时了"在断言层面同形，而本臂要的正是让那个变化**可见**。
  */
 const STRUCTURED_OUTLET_POINTS = (() => {
-  const code = wiringState().source
+  const code = read('src/tools.ts')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
   const found = new Set()
@@ -1048,9 +1053,9 @@ const STRUCTURED_OUTLET_POINTS = (() => {
   return [...found].sort()
 })()
 
-/** 装配点里对 `auditGateRequires` 的每一次调用（变量名 / 位置 / 有没有写缺格日志）。 */
+/** 编排层里对 `auditGateRequires` 的每一次调用（变量名 / 位置 / 有没有写缺格日志）。 */
 const AUDIT_CALL_SITES = (() => {
-  const source = wiringState().source
+  const source = read('src/tools.ts')
   const lines = source.split('\n')
   const sites = []
   lines.forEach((line, index) => {
