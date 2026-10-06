@@ -2009,6 +2009,101 @@ function auditGateRequires(point: GatePoint, context: unknown) {
  * 返回 `undefined` 的唯一后果是"少挂一个诊断字段"，**不是**拒绝、不是跳过、
  * 也不改任何既有控制流 —— 于是"补出口"这件事对生产路径的裁决零影响。
  */
+/**
+ * ── ★★ 诊断字段的【声明面】（t14）──────────────────────────────────────────────
+ *
+ * MEASURED（2026-10-06，captain 实调 `create_task` 时复现；本队同族形态第 9 次）：
+ *
+ *   15 个工具的 `output.schema` 全是 `additionalProperties: false`，而 t3/t7 的
+ *   调用点接线往**返回值**里加了四个诊断字段（`input_surface` / `runtime_gates` /
+ *   `dispatch_input_surface` / `completion_input_surface`）——
+ *   **声明它们的地方（schema）没跟上**。⇒ 加了字段的返回值通不过自己的 schema，
+ *   宿主在 `createSuccessResult` 里抛 `ToolOutputError`：
+ *
+ *       "value.input_surface" is not a declared property (additionalProperties: false)
+ *
+ *   ★ 这个缺陷的形状与前八次一模一样：**加了字段的地方改了，声明它的地方没改**。
+ *     区别只在于这次的"声明它的地方"是 JSON Schema，而不是一个白名单数组。
+ *
+ * ── 修法：一个构造点，谁挂字段谁来取 ────────────────────────────────────────────
+ *
+ * 形状只有两族，且各自只有一个真值来源（下面这两个函数）。工具 schema 从这里
+ * **取**片段，而不是各写一份字面量 —— 后者会在下一次加字段时重新分叉，
+ * 而分叉之后"声明了的"与"实际返回的"在断言层面不再同形（那正是本任务的病根）。
+ *
+ * ★ 为什么是"按工具声明"而不是"给所有工具都加满四格"：那是一份**更大的**假声明 ——
+ *   它会让"这个工具永远不会返回这个字段"与"它可能返回"在 schema 上同形，
+ *   而本队的纪律是**空即空、不适用即不适用**（见 `INSERTION_POINTS` 的位置说明）。
+ *   于是声明面必须与**真实的产出面**逐一对上，那条臂（见
+ *   `scripts/gate-tool-output-schema.test.mjs`）逐工具核对的就是这件事。
+ *
+ * ★ 三态在这四个字段上同样成立，且 schema 必须容得下三态：
+ *   · 字段**在场**且 `incomplete: 0`  ⇒ 都齐；
+ *   · 字段**在场**且 `incomplete: N`  ⇒ 有缺格（`missing` 给出名单）；
+ *   · 字段**缺席**                    ⇒ 这个位置这一轮没有判据（**不是** `ok`）。
+ *   ⇒ `required` 一个字都不写：把"缺席"写成非法，就等于把第三种情形抹掉。
+ */
+function inputSurfaceSchema() {
+  return {
+    type: 'object' as const,
+    additionalProperties: false as const,
+    properties: {
+      checked: { type: 'number' as const },
+      incomplete: { type: 'number' as const },
+      skipped: { type: 'number' as const },
+      missing: { type: 'array' as const, items: { type: 'string' as const } },
+    },
+  }
+}
+
+/**
+ * `runtime_gates` 的形状 = `registry.evaluate('runtime', …)` 的裁决 + `outcome`。
+ *
+ * ★ 为什么它比 `input_surface` 宽（多一层嵌套）：runtime 的结论是**它自己的求值
+ *   记录**（`ok` / `blockers` / `unmeasured` / `ran` / `observed` / `counts` …），
+ *   由 {@link evaluateRuntimeGates} 原样展开，再补一个 `input_surface` 与 `outcome`。
+ *   ⇒ 它的字段集**不属于本文件**（判据注册表的裁决形状），所以这里声明它是一份
+ *   **开放对象**：闭合它会再造一次"注册表加了字段、schema 没跟上"的同族缺陷。
+ *   ★ 这是**刻意的**，不是偷懒：凡是形状属于另一层的嵌套对象，schema 用
+ *     `additionalProperties: true` 表达"这一格是别人家的",而**本文件自己产出的
+ *     字段**（四个诊断字段）一律**闭合声明**。
+ */
+function runtimeGatesSchema() {
+  /**
+   * ★★ 为什么是 `{ type: 'json' }` 而不是 `{ type: 'object', … }`（船长实测过，我复现了）──
+   *
+   * `evaluateRuntimeGates` 的返回类型是 `JsonValue | undefined` —— 那一格里的东西
+   * **不属于本文件**（它是判据注册表的裁决形状）。写成 `{ type: 'object',
+   * additionalProperties: true }` 会让 TS 在这里推出另一个不兼容的类型，
+   * 于是 33 条 TS2322 里又多一条 `TS2719: Two different types with this name exist`。
+   *
+   * ⇒ dsh-tools 为这种"这一格是任意 JSON"提供了一个专门的 spec：`{ type: 'json' }`
+   *   （见 `JsonValueSchemaSpec`）。它既表达了"这一格是别人家的"，
+   *   又与 `JsonValue` 的推断逐字一致。
+   */
+  return { type: 'json' as const }
+}
+
+/**
+ * 一个工具可能挂上的四个诊断字段 —— **按工具取用**（见上面那段"为什么不是加满"）。
+ *
+ * ★ 用法：`properties: { …自己的字段, ...diagnosticFields({ inputSurface: true, runtimeGates: true }) }`
+ *   ⇒ schema 里出现的就是它**真的会返回**的那几格。
+ */
+function diagnosticFields(which: {
+  inputSurface?: boolean
+  runtimeGates?: boolean
+  dispatchInputSurface?: boolean
+  completionInputSurface?: boolean
+}): Record<string, unknown> {
+  return {
+    ...which.inputSurface === true ? { input_surface: inputSurfaceSchema() } : {},
+    ...which.runtimeGates === true ? { runtime_gates: runtimeGatesSchema() } : {},
+    ...which.dispatchInputSurface === true ? { dispatch_input_surface: inputSurfaceSchema() } : {},
+    ...which.completionInputSurface === true ? { completion_input_surface: inputSurfaceSchema() } : {},
+  }
+}
+
 function inputSurfaceOf(point: GatePoint, context: unknown): {
   checked: number
   incomplete: number
@@ -3438,6 +3533,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         type: 'object',
         additionalProperties: false,
         properties: {
+          ...diagnosticFields({ inputSurface: true, runtimeGates: true }),
           task_id: { type: 'string', required: true },
           subject: { type: 'string', required: true },
           status: { type: 'string', required: true },
@@ -3911,6 +4007,19 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         type: 'object',
         additionalProperties: false,
         properties: {
+          /**
+           * ★★ t14：`update_task` 是**唯一**穿过两个位置的工具，所以它挂的是
+           *   两格**位置名**（`dispatch_input_surface` / `completion_input_surface`）
+           *   —— 那正是"哪一个位置缺哪一格"读得出来的依据（见
+           *   `withInputSurfaceOnError` 的 `field` 参数）。
+           *
+           * ★ 它**不挂**泛用的 `input_surface`：成功路径上这个工具从不产出它
+           *   （在 `execute` 的返回对象里可以逐个字段核）。⇒ schema 也不许声明它，
+           *   否则"这个工具会返回这个字段"与"它从来不返回"在声明面同形 ——
+           *   而那正是本任务要消灭的形状。拒绝路径上边界**会**补一个泛用名，
+           *   但那次调用已经失败了，走的是 `error` 而不是工具结果值。
+           */
+          ...diagnosticFields({ runtimeGates: true, dispatchInputSurface: true, completionInputSurface: true }),
           task_id: { type: 'string', required: true },
           status: { type: 'string', required: true },
           output: { type: 'string' },
@@ -4512,6 +4621,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         type: 'object',
         additionalProperties: false,
         properties: {
+          ...diagnosticFields({ inputSurface: true }),
           task_id: { type: 'string', required: true },
           status: { type: 'string', required: true },
           revised_fields: { type: 'string', required: true },
@@ -4741,7 +4851,116 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     description: 'Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbox; members see only their own inbox. Use after mailbox progress deliveries or for an explicit status request. After dispatch, end your turn while members work; do not repeatedly poll.',
     parameters: {},
     output: {
-      schema: { type: 'object', additionalProperties: true, properties: {} },
+      /**
+       * ── ★★ 这一格此前是 `additionalProperties: true, properties: {}`（t14 修）────
+       *
+       * MEASURED（2026-10-06，t14）：`agent_teams_status` 是**唯一**一个"看起来没坏"
+       * 的工具 —— 上面那条臂跑到它的时候是绿的。而它绿的原因不是"声明对了"，
+       * 是**它什么都没声明**：一个 `additionalProperties: true` 的空 schema
+       * 接受任何对象，于是"字段加进去了"与"字段被声明了"在这里**同形**。
+       *
+       * ⇒ 这是同族缺陷的**另一种极端**，而且比 `additionalProperties: false` 那种
+       *   更难发现：前者至少会当场炸（本任务就是被炸出来的），后者**永远安静**，
+       *   直到有人真的想用 schema 读这份快照为止。
+       *
+       * ★ 修成闭合声明：`status` 的快照字段全部列出，四个诊断字段里它真的会返回的
+       *   两格（`input_surface` / `runtime_gates`）由 `diagnosticFields` 取。
+       * ★ 修成闭合声明。★ 而**这一版不是第一版**：第一版我手写了十来个"看起来该有"
+       *   的属性，`scripts/capabilities.test.mjs` 当场在真实路径上炸了 ——
+       *
+       *     tool "agent_teams_status" returned invalid output:
+       *     "value.halted" / "value.escalated" / "value.loop_state" /
+       *     "value.loop_summary" / "value.deliverable" / "value.coverage" /
+       *     "value.delivery" / "value.member_inbox" / "value.member_inboxes" /
+       *     "value.mailbox_warnings" / "value.mailbox_warning_count"
+       *     — not a declared property (additionalProperties: false)
+       *
+       *   ⇒ **同一个缺陷、同一个方向、同一个下午**：手写一份声明面，它必然落后于
+       *     真实的产出面。把这一格改成 `additionalProperties: true` 会让我自己的
+       *     夹具全绿，而那等于把 `status` 退回原样（"没声明"与"声明对了"再次同形）。
+       *   ⇒ 所以下面这张属性表是**照着 `execute` 的返回对象逐个抄下来的**
+       *     （见 `const result = { … }`），并由
+       *     `scripts/gate-tool-output-schema.test.mjs` 的臂 4 逐工具核对。
+       */
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          team_id: { type: 'string' },
+          team_name: { type: 'string' },
+          description: { type: 'string' },
+          phase: { type: 'string' },
+          /**
+           * 质量循环的五个读数（`describeQualityLoop`）—— 第一版全漏了。
+           * ★ 类型逐条对着 `QualityLoopSnapshot` 抄：`deliverable` 是 **boolean**
+           *   （我第一版写成 string，TS2322 当场指出）—— 这正好说明"声明面必须与
+           *   真实的产出面逐字一致"不是一句口号：类型系统在这里就是第一道臂。
+           */
+          halted: { type: 'boolean' },
+          escalated: { type: 'boolean' },
+          loop_state: { type: 'string' },
+          loop_summary: { type: 'string' },
+          deliverable: { type: 'boolean' },
+          /**
+           * ★ `coverage` 是**数组**（每条目标一条 `{goal_item, task_ids, status, evidence?}`），
+           *   不是对象 —— 我第一版写成 object，TS2322 当场指出。逐条对着
+           *   `canDeclareDelivery` 的返回抄。
+           */
+          coverage: { type: 'array' as const, items: { type: 'json' as const } },
+          /**
+           * ★ `delivery` 是**这一格自己的**嵌套：它的字段集由本文件产出，
+           *   所以闭合声明。它的 `input_surface` 是 delivery 位置的核对结论
+           *   —— 挂在这里而不是顶层，与 `execute` 里的落点逐字一致。
+           */
+          delivery: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              ok: { type: 'boolean' },
+              blockers: { type: 'array', items: { type: 'string' } },
+              gates_evaluated: { type: 'number' },
+              input_surface: inputSurfaceSchema(),
+            },
+          },
+          /**
+           * ★ `runtime_gates` 是顶层那一格（`runtimeRecord`）；泛用名 `input_surface`
+           *   **不在顶层** —— delivery 的核对结论挂在 `delivery.input_surface` 里。
+           *   ⇒ 这里只取 `runtimeGates`，不取 `inputSurface`：
+           *     声明一个它从不返回的字段，与漏声明一个是同一条错误的两个方向。
+           */
+          ...diagnosticFields({ runtimeGates: true }),
+          profile: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              name: { type: 'string' },
+              protocol: { type: 'string' },
+              task_planning: { type: 'string' },
+            },
+          },
+          viewer: { type: 'string' },
+          members: {
+            type: 'array',
+            items: { type: 'object', additionalProperties: true, properties: {} },
+          },
+          tasks: {
+            type: 'array',
+            items: { type: 'object', additionalProperties: true, properties: {} },
+          },
+          captain_inbox: {
+            type: 'array',
+            items: { type: 'object', additionalProperties: true, properties: {} },
+          },
+          /** ★ 成员视角的两格收件箱 + 两格告警 —— 第一版也全漏了。 */
+          member_inbox: {
+            type: 'array',
+            items: { type: 'object', additionalProperties: true, properties: {} },
+          },
+          member_inboxes: { type: 'object', additionalProperties: true, properties: {} },
+          mailbox_warnings: { type: 'array', items: { type: 'string' } },
+          mailbox_warning_count: { type: 'number' },
+        },
+      },
       render: (_args, value) => [{ type: 'text', text: renderStatus(value) }],
     },
     async execute(_args, exec) {
@@ -4991,6 +5210,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         type: 'object',
         additionalProperties: false,
         properties: {
+          ...diagnosticFields({ inputSurface: true }),
           team_id: { type: 'string', required: true },
           declared: { type: 'boolean', required: true },
           blockers: { type: 'array', items: { type: 'string' }, required: true },
