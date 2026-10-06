@@ -44,6 +44,32 @@ export type GateVerdict = {
     unmeasured: string;
 };
 export type InsertionPoint = typeof INSERTION_POINTS[number];
+/**
+ * ── ★ 输入面：核对结果（旁路字段，t6）──────────────────────────────────────────
+ *
+ * 见 `requires.ts` 的文件头。要点只有一句：**它不参与裁决**。核对结果挂在这里，
+ * 与 `observed` 平级 —— 因为观察模式（决定"裁决算不算数"）与输入面核对（决定
+ * "这条判据要的那一格接没接上"）是**两个不同的问题**，合流会让"判据开火了"
+ * 与"判据根本没被喂饱"在日志里同形。
+ *
+ * ★ 恒在场（空即空），与 `observed` / `outputs` 同一纪律：调用方不必写
+ *   `?? { checked: 0 }`。而"一个位置一条判据都没核对到"与"核对过、都齐"不同形
+ *   —— 差别在 `checked` 与 `skipped` 两个可读的计数上。
+ */
+export interface RequiresAuditFieldView {
+    checked: number;
+    incomplete: number;
+    skipped: number;
+    missing: string[];
+    checks: ReadonlyArray<{
+        id: string;
+        status: 'ok' | 'incomplete' | 'skipped';
+        missing: string[];
+        present: string[];
+        skippedBecause?: string;
+        undeclared?: string;
+    }>;
+}
 export interface GateRunEntry {
     id: string;
     verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped';
@@ -145,6 +171,23 @@ export interface GateEvaluation {
         /** 被放过的"没能测量"，形状与原 unmeasured 一样。 */
         unmeasured: string[];
     };
+    /**
+     * ── ★ 输入面核对结果（t6）：这条判据要的 ctx 路径，真实 ctx 上接没接上 ──────────
+     *
+     * **恒在场**；**只增不改**：它不进 `ok` / `blockers` / `unmeasured`（除硬化时，
+     * 见 `RequiresAuditPolicy`），也不改 `evaluated` / `skipped` / `registered`
+     * 任何一个计数。`observed` 与它必须能分别读出来：
+     *
+     *   · 判据开火了、而它的输入面是齐的  ⇒ `observed.blockers` 非空，`requires.incomplete === 0`
+     *   · 判据开火了、而它要的一格没接上  ⇒ 两者都非空（**这一条才是本轮要抓的形态**：
+     *     "判据说它测不了"与"这一格没接线"在旧的输出里同形）
+     *   · 判据根本没跑（不适用）          ⇒ `requires.skipped` +1，**不报缺失**（不制造噪音）
+     *
+     * ★ 为什么不放进 `ran[]`：那会改一条既有数组的形状（`ran` 的读者在做等价断言），
+     *   而本轮的第一条硬约束是"不改任何现有判据的裁决行为"。旁路字段是唯一
+     *   零风险的位置，也是"先软后硬"的字面落点。
+     */
+    requires: RequiresAuditFieldView;
 }
 /** 五个【位置】，不是五个判据。一个位置可挂零到多条。 */
 export declare const INSERTION_POINTS: readonly string[];
@@ -175,6 +218,26 @@ export interface GateRegistration {
     description: string;
     appliesTo?: (context: any) => boolean;
     gate: (context: any) => GateVerdict | Promise<GateVerdict>;
+    /**
+     * ── ★ 输入面声明（t6）：这条判据需要 ctx 上的哪些路径 ───────────────────────────
+     *
+     * **类型的来源是判据自己的 ctx 类型**，不是手写字符串：
+     *
+     * ```ts
+     * export const requires: CtxPaths<RuntimeLivenessContext>[] = ['event', 'wait', 'waits', 'task']
+     * //                                                             ↑ 'event.typo' ⇒ TS2322
+     * ```
+     *
+     * ★ 缺席与空数组**不同形**（核对层分别给 `undeclared` 与 `ok`）：缺席是
+     *   "这条判据的输入面还没有被声明"（本轮要逐步消灭的东西），`[]` 是"它不需要
+     *   任何一格"。合成一个会让接线覆盖率的读数虚高。
+     *
+     * ★ 注册时**不做类型校验**（运行时不认识类型）：一份拼错的路径能不能过，
+     *   由 `tsc` 回答（`pnpm typecheck`）；这里只校验它是个字符串数组，
+     *   因为 `requires: 'wait.now'` 这种形状会让核对层去逐字符切路径，报出一堆
+     *   谁也没写过的格子。
+     */
+    requires?: readonly string[];
 }
 /**
  * ── ★ 观察模式（observe-only）：新判据先只记录、不拒绝 ─────────────────────────
@@ -227,6 +290,7 @@ export declare const OBSERVE_GATES_ENV = "AGENT_TEAMS_OBSERVE_GATES";
 export declare function observeIdsFromEnv(value: string | undefined): string[];
 export declare function createGateRegistry(options?: {
     readonly observeFromEnv?: string | undefined;
+    readonly enforceRequiresFromEnv?: string | undefined;
 }): {
     /**
      * 注册一条判据。
@@ -275,6 +339,8 @@ export declare function createGateRegistry(options?: {
         hasAppliesTo: boolean;
         observing: boolean;
         observeReason?: string;
+        requires?: readonly string[];
+        hasRequires: boolean;
     }>>;
     /** 该位置已注册的判据条数（控制台/测试用）。 */
     count(point: InsertionPoint): number;

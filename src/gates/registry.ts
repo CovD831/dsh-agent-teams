@@ -27,6 +27,8 @@
  *    串行发现花了三轮。 ⇒ 一次给全。
  */
 
+import { checkRequires, createRequiresAuditPolicy, type RequiresAuditMode, type RequiresCheck } from './requires.ts'
+
 /**
  * 一条判据的裁决。**三态，不是两态。**
  *
@@ -40,6 +42,26 @@ export type GateVerdict =
   | { ok: false; unmeasured: string }
 
 export type InsertionPoint = typeof INSERTION_POINTS[number]
+
+/**
+ * ── ★ 输入面：核对结果（旁路字段，t6）──────────────────────────────────────────
+ *
+ * 见 `requires.ts` 的文件头。要点只有一句：**它不参与裁决**。核对结果挂在这里，
+ * 与 `observed` 平级 —— 因为观察模式（决定"裁决算不算数"）与输入面核对（决定
+ * "这条判据要的那一格接没接上"）是**两个不同的问题**，合流会让"判据开火了"
+ * 与"判据根本没被喂饱"在日志里同形。
+ *
+ * ★ 恒在场（空即空），与 `observed` / `outputs` 同一纪律：调用方不必写
+ *   `?? { checked: 0 }`。而"一个位置一条判据都没核对到"与"核对过、都齐"不同形
+ *   —— 差别在 `checked` 与 `skipped` 两个可读的计数上。
+ */
+export interface RequiresAuditFieldView {
+  checked: number
+  incomplete: number
+  skipped: number
+  missing: string[]
+  checks: ReadonlyArray<{ id: string; status: 'ok' | 'incomplete' | 'skipped'; missing: string[]; present: string[]; skippedBecause?: string; undeclared?: string }>
+}
 
 export interface GateRunEntry {
   id: string
@@ -143,6 +165,23 @@ export interface GateEvaluation {
     /** 被放过的"没能测量"，形状与原 unmeasured 一样。 */
     unmeasured: string[]
   }
+  /**
+   * ── ★ 输入面核对结果（t6）：这条判据要的 ctx 路径，真实 ctx 上接没接上 ──────────
+   *
+   * **恒在场**；**只增不改**：它不进 `ok` / `blockers` / `unmeasured`（除硬化时，
+   * 见 `RequiresAuditPolicy`），也不改 `evaluated` / `skipped` / `registered`
+   * 任何一个计数。`observed` 与它必须能分别读出来：
+   *
+   *   · 判据开火了、而它的输入面是齐的  ⇒ `observed.blockers` 非空，`requires.incomplete === 0`
+   *   · 判据开火了、而它要的一格没接上  ⇒ 两者都非空（**这一条才是本轮要抓的形态**：
+   *     "判据说它测不了"与"这一格没接线"在旧的输出里同形）
+   *   · 判据根本没跑（不适用）          ⇒ `requires.skipped` +1，**不报缺失**（不制造噪音）
+   *
+   * ★ 为什么不放进 `ran[]`：那会改一条既有数组的形状（`ran` 的读者在做等价断言），
+   *   而本轮的第一条硬约束是"不改任何现有判据的裁决行为"。旁路字段是唯一
+   *   零风险的位置，也是"先软后硬"的字面落点。
+   */
+  requires: RequiresAuditFieldView
 }
 
 /** 五个【位置】，不是五个判据。一个位置可挂零到多条。 */
@@ -211,6 +250,26 @@ export interface GateRegistration {
   description: string
   appliesTo?: (context: any) => boolean
   gate: (context: any) => GateVerdict | Promise<GateVerdict>
+  /**
+   * ── ★ 输入面声明（t6）：这条判据需要 ctx 上的哪些路径 ───────────────────────────
+   *
+   * **类型的来源是判据自己的 ctx 类型**，不是手写字符串：
+   *
+   * ```ts
+   * export const requires: CtxPaths<RuntimeLivenessContext>[] = ['event', 'wait', 'waits', 'task']
+   * //                                                             ↑ 'event.typo' ⇒ TS2322
+   * ```
+   *
+   * ★ 缺席与空数组**不同形**（核对层分别给 `undeclared` 与 `ok`）：缺席是
+   *   "这条判据的输入面还没有被声明"（本轮要逐步消灭的东西），`[]` 是"它不需要
+   *   任何一格"。合成一个会让接线覆盖率的读数虚高。
+   *
+   * ★ 注册时**不做类型校验**（运行时不认识类型）：一份拼错的路径能不能过，
+   *   由 `tsc` 回答（`pnpm typecheck`）；这里只校验它是个字符串数组，
+   *   因为 `requires: 'wait.now'` 这种形状会让核对层去逐字符切路径，报出一堆
+   *   谁也没写过的格子。
+   */
+  requires?: readonly string[]
 }
 
 /**
@@ -268,7 +327,7 @@ export function observeIdsFromEnv(value: string | undefined): string[] {
   return [...new Set(value.split(',').map((id) => id.trim()).filter((id) => id !== ''))]
 }
 
-export function createGateRegistry(options: { readonly observeFromEnv?: string | undefined } = {}) {
+export function createGateRegistry(options: { readonly observeFromEnv?: string | undefined; readonly enforceRequiresFromEnv?: string | undefined } = {}) {
   /** @type {Map<string, object>} */
   const byId = new Map()
   /** id → 观察期说明（不在其中 ⇒ 该判据有否决权，即今天的行为）。 */
@@ -283,6 +342,11 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
   for (const id of observeIdsFromEnv(envValue)) {
     observing.set(id, `observed by ${OBSERVE_GATES_ENV}`)
   }
+  /**
+   * ★ 输入面核对策略（t6）：**缺省只观察、不拒绝**。构造时读一次环境变量，
+   *   与观察名单同一条纪律（见上面 `envValue` 的注释）。
+   */
+  const requiresPolicy = createRequiresAuditPolicy({ enforceFromEnv: options.enforceRequiresFromEnv })
 
   return {
     /**
@@ -291,7 +355,7 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
      *   与"两条判据都在、后一条赢了"在日志里同形。
      */
     register(registration: GateRegistration): GateRegistration {
-      const { id, point, description, gate, appliesTo } = registration ?? {}
+      const { id, point, description, gate, appliesTo, requires } = registration ?? {}
       if (typeof id !== 'string' || id.trim() === '') {
         throw new Error('a gate registration requires a non-empty id')
       }
@@ -304,10 +368,25 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
       if (typeof description !== 'string' || description.trim() === '') {
         throw new Error(`gate "${id}" requires a description (the console renders it)`)
       }
+      /**
+       * ★ `requires` 的形状校验（t6）：必须是字符串数组。
+       *
+       * MEASURED 的形态（本队见过很多次）：一个形状不对的**可选**字段会被静默丢掉
+       * —— 于是"这条判据声明了输入面"与"它没有声明"在日志里同形，而后者正是本轮
+       * 要消灭的东西。⇒ 写错就抛错，不静默降级。
+       *
+       * ★ 缺席是**合法**的（还没声明），空数组也是合法的（声明了"不需要任何一格"）；
+       *   `null` / 字符串 / 带非字符串项的数组一律抛错。
+       */
+      if (requires !== undefined) {
+        if (!Array.isArray(requires) || requires.some((entry) => typeof entry !== 'string')) {
+          throw new Error(`gate "${id}" declares "requires" but it is not an array of ctx paths (got ${JSON.stringify(requires)}); declare it as CtxPaths<ThatGateContext>[] so a mistyped path is a compile error instead of a runtime surprise`)
+        }
+      }
       if (byId.has(id)) {
         throw new Error(`gate "${id}" is already registered; unregister it first (silent replacement would make "swapped" and "both ran" look identical)`)
       }
-      byId.set(id, { id, point, description, gate, appliesTo })
+      byId.set(id, { id, point, description, gate, appliesTo, ...requires === undefined ? {} : { requires } })
       return registration
     },
 
@@ -360,8 +439,8 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
     },
 
     /** 控制台读它。按 point 分组，组内保持注册顺序。 */
-    list(): Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string }>> {
-      const out = {} as Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string }>>
+    list(): Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>> {
+      const out = {} as Record<InsertionPoint, Array<{ id: string; description: string; hasAppliesTo: boolean; observing: boolean; observeReason?: string; requires?: readonly string[]; hasRequires: boolean }>>
       for (const point of INSERTION_POINTS) out[point] = []
       for (const reg of byId.values()) {
         const observingGate = observing.has(reg.id)
@@ -376,6 +455,16 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
            */
           observing: observingGate,
           ...observingGate && reason !== '' ? { observeReason: reason } : {},
+          /**
+           * ── ★ 输入面声明（t6）也必须在清单里读得出来 ──────────────────────────
+           *
+           * `hasRequires` 与 `requires` 分两件事：前者回答"这条判据声明过输入面
+           * 没有"（本轮要逐步补全的覆盖率读数），后者是声明了哪几格。合成一个
+           * `requires?: string[]` 会让"没声明"与"声明了空数组"同形 —— 而这两件事
+           * 在"输入面接线覆盖率"这件事上恰好是相反的结论。
+           */
+          hasRequires: reg.requires !== undefined,
+          ...reg.requires === undefined ? {} : { requires: reg.requires },
         })
       }
       return out
@@ -428,6 +517,8 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
        */
       let registered = 0
       let skipped = 0
+      /** 输入面核对（t6）：逐条结论，按注册顺序；**旁路**，见 GateEvaluation.requires。 */
+      const requiresChecks: RequiresCheck[] = []
       /** 观察模式：被放过的 blocker / unmeasured 原文（见 GateEvaluation.observed）。 */
       const observedBlockers: string[] = []
       const observedUnmeasured: string[] = []
@@ -437,10 +528,30 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
         if (typeof reg.appliesTo === 'function' && reg.appliesTo(context) !== true) {
           skipped += 1
           ran.push({ id: reg.id, verdict: 'skipped' })
+          /**
+           * ★ 不适用 ⇒ **不核对、不报缺失**（t6 的核心闸门）。
+           *
+           * 11 条判据 × 8 个调用点 = 88 种组合，大部分本来就该"不适用"；在那些
+           * 组合上喊"缺这缺那"，正是"教人忽略门禁"的那条老路。⇒ 这一条只记
+           * `status:'skipped'`，它进 `requires.skipped` 计数，**不进** `missing`。
+           *
+           * ★ 为什么调用方要给 `applies`（而不是让核对层自己再调一次 appliesTo）：
+           *   跳过与否是**注册表的结论**。核对层自己调第二遍会造出两套口径
+           *   （判据的 appliesTo 若有副作用或读到时间，两次调用可能不同）。
+           */
+          requiresChecks.push(checkRequires(reg, context, false))
           continue
         }
         const produced = assertVerdict(await reg.gate(context), reg.id)
         const verdict = produced as Record<string, unknown>
+        /**
+         * ── ★ 输入面核对（t6）：在判据【已经说完话】之后核对一次 ────────────────
+         *
+         * ★ 顺序是刻意的：核对**不决定判据跑不跑**。它只描述"这条判据要的格子，
+         *   真实 ctx 上接没接上" —— 若让核对有权力拦下判据，那就不是"先软后硬"，
+         *   而是把新机制直接升成门禁（本轮明确不做）。
+         */
+        requiresChecks.push(checkRequires(reg, context, true))
         /**
          * ★ 这条判据这一轮是否【没有否决权】。
          *   逐条读快照，而不是循环外读一次 —— 前者与"每条判据各自的状态"同义，
@@ -506,16 +617,39 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
       const observed = { blockers: observedBlockers, unmeasured: observedUnmeasured }
       const observedCount = observedBlockers.length + observedUnmeasured.length
       const observedField = observedCount > 0 ? { observedBlockers: observedCount, observed } : { observed }
+      /**
+       * ── ★ 输入面核对结果（t6）：**旁路**，恒在场 ──────────────────────────────
+       *
+       * `checked` / `skipped` 两个计数必须分开数：11 条判据里大部分在这一轮
+       * **不适用**（`skipped`），把它并进 `checked` 会让"核对了 3 条、3 条都齐"
+       * 与"核对了 0 条、11 条都跳过了"在读数上同形 —— 那正是本队反复见过的合流。
+       *
+       * ★ 硬化（`mode==='enforce'`，**显式开关**）时才把缺格子的判据并进 `blockers`：
+       *   缺的每一格单独成条，措辞说清"是输入面没接线"，而不是让读日志的人
+       *   在一堆判据结论里找。`observe`（缺省）下 `requiresPolicy.blockers()` 恒空，
+       *   于是这段代码对裁决**零影响**。
+       */
+      const incompleteChecks = requiresChecks.filter((check) => check.status === 'incomplete')
+      const requiresField = {
+        checked: requiresChecks.filter((check) => check.status !== 'skipped').length,
+        incomplete: incompleteChecks.length,
+        skipped: requiresChecks.filter((check) => check.status === 'skipped').length,
+        missing: incompleteChecks.map(
+          (check) => `[${check.id}] declares ${check.missing.length} ctx path(s) that this context does not carry: ${check.missing.join(', ')}`,
+        ),
+        checks: requiresChecks,
+      }
+      for (const item of requiresPolicy.blockers(requiresField)) blockers.unshift(item)
       if (unmeasuredReasons.length > 0) {
         return {
           ok: false, unmeasured: unmeasuredReasons.join('; '), blockers, ran, outputs: collected,
-          ...counts, ...observedField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+          ...counts, ...observedField, requires: requiresField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
         }
       }
       if (blockers.length > 0) {
         return {
           ok: false, blockers, ran, outputs: collected,
-          ...counts, ...observedField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+          ...counts, ...observedField, requires: requiresField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
         }
       }
       /**
@@ -529,7 +663,7 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
        */
       return {
         ok: true, blockers, ran, outputs: collected,
-        ...counts, ...observedField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
+        ...counts, ...observedField, requires: requiresField, ...allSkipped === undefined ? {} : { skippedAll: allSkipped },
       }
     },
   }
