@@ -34,7 +34,13 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
-import type { TeamMember, TeamState, TeamTask } from './types.ts'
+import type { TaskStatus, TeamMember, TeamState, TeamTask } from './types.ts'
+/**
+ * ★ t28：终态判定用**唯一那份真值**（`types.ts`），不在本模块重写一遍列表。
+ *   「哪些状态是终态」是一条会变的规则；两份拷贝会漂移 —— 而漂移的那一天，
+ *   scheduler 与 state 会对同一个任务给出相反的答案，且两者读起来都很正常。
+ */
+import { TERMINAL_TASK_STATUSES } from './types.ts'
 
 /** Per-dependency output cap in the assignment prompt. */
 export const DEPENDENCY_OUTPUT_MAX_CHARS = 2_000
@@ -129,6 +135,35 @@ export interface DependencyOutput {
   readonly subject: string
   readonly profileSeedId?: string
   readonly output?: string
+  /**
+   * ── ★★ 上游最后落在哪个【终态】—— t28 加的第七格 ────────────────────────────
+   *
+   * 它修复的是 f-0018：t26 修好了「终态该不该放行下游」，但没修「放行之后下游
+   * 拿不拿得到上游的结论」。实测基线（本任务复现）：一条 failed 上游解锁了下游，
+   * 而下游拿到的派发文本是
+   *
+   *     Completed dependency results:
+   *     (none)
+   *
+   * —— 解锁了、却什么都没拿到。那与「这条依赖根本不存在」在文本里**同形**，
+   * 而它们的补救动作完全相反（一条是"上面出过事，先看看"，一条是"没有前置"）。
+   *
+   * ── 为什么这一格是 `status` 而不是分类后的 outcome ────────────────────────
+   *
+   * 分类（failed_delivery / failed_context / inconclusive）是 `src/state.ts` 的
+   * `dependencyOutcomeOf` 的职责（t26 已实现）。★ 本模块**不重算它**：
+   *
+   *   · 本模块在 t28 的契约里只能动 `src/scheduler.ts`，而 `src/state.ts` 的那套
+   *     分类在**本 worktree 的 HEAD 上还不存在**（t26 未提交）；
+   *   · 更要紧的是**口径**：调度器的职责是"把上游的结论交给下游"，
+   *     不是"替它下判断"。在这里再算一遍分类就是两份真相 —— 本队记账过三次。
+   *     真值只有一份（state.ts 的 `dependencyOutcomeOf`），下游按 id 去问它即可。
+   *
+   * ⇒ 这一格交出的是**终态本身**（`completed` / `failed` / `cancelled`），
+   *   它是下游能自己往下问的那个事实，而且它**不会腐烂**：
+   *   分类规则改了，这一格不用跟着改。
+   */
+  readonly status?: TaskStatus
 }
 
 export interface DispatchTicket {
@@ -193,8 +228,48 @@ function teamProfileProtocol(team: TeamState): string | undefined {
 }
 
 /**
- * Recursively collect `status=completed` ancestors of `taskId` in topological
- * order (dependencies before dependents). Cycles stop that branch only.
+ * ── ★★ 递归收集【已了结】的上游及其结论（t28 修 f-0018）─────────────────────────
+ *
+ * 按拓扑序（依赖在前、下游在后）收集 `taskId` 的祖先。环只截断那一条分支。
+ *
+ * ── MEASURED（2026-10-07，本任务复现的基线）────────────────────────────────────
+ *
+ * 这一行此前是：
+ *
+ *     return ordered
+ *       .filter(task => task.status === 'completed')
+ *
+ * ⇒ 它把 failed / cancelled 的上游**整个丢掉**。而 t26 刚把依赖口径改成
+ *   「终态即满足」⇒ 下游会因为一条 failed 上游而**开工**，然后拿到：
+ *
+ *     Completed dependency results:
+ *     (none)
+ *
+ * ★ 那是本队记账的"把没测到并进通过"在同一条链上的第二次发作，只是这次
+ *   并进去的是**整个上游**：
+ *
+ *     下游看不见的那件事（"上面失败了"）
+ *     在下游眼里与"没有前置依赖"长得一模一样
+ *
+ * ── 修法是换一个更准的问题 ────────────────────────────────────────────────────
+ *
+ *     「哪些上游【成功了】」        —— 旧口径（下游于是永远不知道别的终态存在）
+ *     「哪些上游【已经了结】」      —— 新口径（终态 = 不再欠工作 = 有结论可交）
+ *
+ * ── ★ 但"交出去"与"审核过"是两件事 ──────────────────────────────────────────
+ *
+ * 本函数**只负责把结论交出去**：它不判定那份 failed 要不要紧、不替下游决定
+ * 该不该继续。用户裁定的口径是乙 —— "不替下游做决定，而是把状态交出去"。
+ * 所以每一项都带 {@link DependencyOutput.status}，下游据此自己决定。
+ *
+ * ★ 而"还没了结"的上游**仍然不进来**：pending / claimed / in_progress 的任务
+ *   没有结论可交（它还在写）。把它们也塞进来会让下游读到半截输出，
+ *   而"上游还在做"与"上游做完了、结果是这样"必须不同形。
+ *
+ * ★ 函数的**名字**保留 `collectCompletedDependencyOutputs`：它在 `src/tools.ts`
+ *   与 `scripts/verify.mjs` 里各有一个已经存在的调用者，而两者都在本任务的
+ *   Out of scope 里。改名会让那两个文件立刻编译不过 —— 那是把一次口径修复
+ *   变成一次跨文件重构。口径的说明在这里，名字的历史包袱留一行注释交代。
  */
 export function collectCompletedDependencyOutputs(
   tasks: readonly TeamTask[],
@@ -224,29 +299,60 @@ export function collectCompletedDependencyOutputs(
 
   walk(taskId)
   return ordered
-    .filter(task => task.status === 'completed')
+    /**
+     * ★ 只放行【终态】：终态即"有结论可交"。非终态的上游还在写，
+     *   把它交出去等于把半截输出当成结论。
+     */
+    .filter(task => TERMINAL_TASK_STATUSES.includes(task.status))
     .map((task) => {
       const profileSeedId = taskProfileSeedId(task)
       return {
         id: task.id,
         subject: task.subject,
+        /**
+         * ★ 终态本身（`completed` / `failed` / `cancelled`）。它**必须**在场：
+         *   下游要能问出"上面是成功了还是出事了"，而那是它决定怎么往下走的
+         *   唯一输入。缺了它，failed 与 completed 在派发文本里又同形了 ——
+         *   那正是这次要修的东西。
+         */
+        status: task.status,
         ...profileSeedId === undefined ? {} : { profileSeedId },
         ...task.output === undefined ? {} : { output: task.output },
       }
     })
 }
 
-/** Format completed-dependency outputs with per-item and total truncation. */
+/**
+ * ── ★★ 把已了结的依赖渲染成下游读得懂的一段（t28）─────────────────────────────
+ *
+ * 每条带上它的**终态**。这一格不是装饰：t28 修的正是"下游解锁了却拿不到东西"，
+ * 而只把 output 印出来还不够 —— 一条 `failed` 上游与一条 `completed` 上游
+ * 如果都只印出一行文字，下游仍然读不出"上面出过事"。
+ *
+ * ★ 渲染成 `[failed]` 这样的标记，而不是把 status 塞在正文里：
+ *   下游（以及读日志的人）要能**一眼**扫出哪几条不是 completed，
+ *   而一行正文里的一个词做不到这件事。
+ *
+ * ★ 缺席 `status` 时**不印任何标记**（只印老的形状）：
+ *   一个伪造 `[completed]` 的兜底会让"这一项没带终态"与"它真的成功了"同形 ——
+ *   而那是本次修复要消灭的形态本身。
+ */
 export function formatDependencyOutputs(items: readonly DependencyOutput[]): string {
   if (items.length === 0) return '(none)'
   const formatted = items.map((item) => {
     const seed = item.profileSeedId === undefined ? '' : ` [${item.profileSeedId}]`
+    /**
+     * ★ 非 completed 的终态用大写标记，completed 用普通标记：
+     *   读的人要能**扫**出哪一条需要先看一眼，而不是逐字读完每一行。
+     *   两者都印（不是只印异常的），因为"全都印不出标记"与"全都没问题"同形。
+     */
+    const marker = item.status === undefined ? '' : ` [${item.status}]`
     const raw = item.output === undefined || item.output === ''
       ? '(no output recorded)'
       : item.output
     const truncated = raw.length > DEPENDENCY_OUTPUT_MAX_CHARS
     const body = truncated ? `${raw.slice(0, DEPENDENCY_OUTPUT_MAX_CHARS)} [truncated]` : raw
-    return `- ${item.id}${seed} ${item.subject}:\n  ${body}`
+    return `- ${item.id}${seed}${marker} ${item.subject}:\n  ${body}`
   })
   let selected = formatted
   while (selected.length > 1 && selected.join('\n').length > DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS) {

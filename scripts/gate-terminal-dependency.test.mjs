@@ -82,10 +82,27 @@ import {
   describeDependencyOutcomes,
   FAILURE_KINDS,
 } from '../lib/state.js'
+/**
+ * ★ t28：闸门面（state.ts）修好之后，**结论面**（scheduler.ts）也要修 ——
+ *   本文件因此同时钉住两半，因为它们修的是同一个失效的两段：
+ *
+ *     t26 / state.ts      ：终态上游 ⇒ 下游**能不能开工**
+ *     t28 / scheduler.ts  ：终态上游 ⇒ 下游**拿不拿得到结论**
+ *
+ * ★ 两半必须一起读：只修前者，下游会在**什么都没拿到**的情况下开工
+ *   （实测派发文本 `Completed dependency results:\n(none)`），
+ *   而那与"这条依赖根本不存在"在文本里同形。
+ */
+import {
+  collectCompletedDependencyOutputs,
+  formatDependencyOutputs,
+} from '../lib/scheduler.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const STATE_SOURCE = join(ROOT, 'src', 'state.ts')
 const BUILT_STATE = join(ROOT, 'lib', 'state.js')
+const SCHEDULER_SOURCE = join(ROOT, 'src', 'scheduler.ts')
+const BUILT_SCHEDULER = join(ROOT, 'lib', 'scheduler.js')
 
 /**
  * ── 夹具自造的团队（★ 不读盘上真实的 team.json）────────────────────────────────
@@ -667,4 +684,408 @@ test('★ 装配形状：四个出口都在 state.js 上，且不是装饰性的
   assert.ok(Array.isArray(FAILURE_KINDS) && FAILURE_KINDS.length === 3)
   /** ★ 两个面必须由**同一个** module 实例交出（不是两份平行实现）。 */
   assert.equal(dependencyOutcomeOf(roundTeam().find((task) => task.id === 't17')), 'inconclusive')
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ── t28：结论面（scheduler.ts）—— 终态上游的结论必须交到下游手里 ─────────────
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// 上面那一整块测的是【闸门面】：终态上游放不放行下游。
+// 这一块测的是它的**下一格**，也是 f-0018：
+//
+//     放行之后，下游**拿不拿得到**上游的结论？
+//
+// ── MEASURED（2026-10-07，本任务复现的基线）──────────────────────────────────
+//
+// 探针实测（真的跑 `lib/scheduler.js`）：
+//
+//     collectCompletedDependencyOutputs(tasks, 't2')  ⇒  []
+//     formatDependencyOutputs([])                     ⇒  "(none)"
+//
+// 而它依赖的 t1 是 `failed`、t26 之后**下游已经会开工**。
+// ⇒ 派发文本里的那一段是：
+//
+//     Completed dependency results:
+//     (none)
+//
+// ★ 即：下游解锁了，然后拿到一句"没有前置依赖" —— 而上面其实出过事。
+//   这与"上游还在做"（半截输出）和"上游根本不存在"都不同形，但现在三者同形。
+//
+// ── 两臂成对（缺任何一臂，一个 `return []` 的实现都能全绿）─────────────────────
+//
+//   臂 A（缺陷臂）：终态上游 ⇒ 结论**必须交出来**（含 failed / cancelled）
+//   臂 B（反向臂）：★ **非终态**上游 ⇒ 仍然**不许**交出去（它还在写，没有结论）
+//                   —— 只测臂 A 的话，"把 pending 也塞进去"会照绿，
+//                      而那会把半截输出当成结论交给下游。
+//   臂 C（区分臂）：下游拿到的必须能**区分**三种终态，而不是把 failed 当 completed
+//   臂 D（对照臂）：全 completed ⇒ 与以前一样（不误伤正常情形）
+
+/** 一个最小任务。★ 只填本模块读的那几格，多填一格就多一种"与口径无关的红"。 */
+function depTask(spec) {
+  return {
+    id: spec.id,
+    subject: spec.subject ?? `task ${spec.id}`,
+    status: spec.status,
+    dependencies: spec.dependencies ?? [],
+    createdAt: 1,
+    updatedAt: 1,
+    ...spec.output === undefined ? {} : { output: spec.output },
+    ...spec.profileSeedId === undefined ? {} : { profileSeedId: spec.profileSeedId },
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 A（缺陷臂）：终态上游的结论必须交到下游
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 A：failed 上游的结论【必须】交到下游（f-0018 的实测形状）', () => {
+  /**
+   * ★ 这一臂就是本任务的验收 ①②。把它断言在**渲染后的文本**上（而不只是
+   *   收集函数的返回值上）：真正会误导人的是那一段**文本**，
+   *   而 `(none)` 正是它此前的形状。
+   */
+  const tasks = [
+    depTask({ id: 't1', status: 'failed', output: 'Need a user decision before design.' }),
+    depTask({ id: 't2', status: 'pending', dependencies: ['t1'] }),
+  ]
+  const collected = collectCompletedDependencyOutputs(tasks, 't2')
+  assert.equal(collected.length, 1, '★ failed 上游必须被收集 —— 它已经了结、有结论可交')
+  assert.equal(collected[0].id, 't1')
+  assert.equal(collected[0].output, 'Need a user decision before design.')
+
+  /**
+   * ★★ 而这一条才是关键：**渲染出来的文本**里不许再是 `(none)`。
+   *   只断言 `collected.length === 1` 是不够的 —— 一个收集对了、渲染时
+   *   又把 failed 滤掉的实现会让下游拿到同一句"没有前置依赖"。
+   */
+  const rendered = formatDependencyOutputs(collected)
+  assert.notEqual(rendered, '(none)', '★ 派发文本不许再说"没有依赖" —— 上面明明出过事')
+  assert.match(rendered, /Need a user decision before design\./, '★ 上游的结论必须逐字出现在下游读到的那一段里')
+})
+
+test('★ 臂 A2：cancelled 上游的结论同样要交出去（cancelled 也是终态）', () => {
+  const tasks = [
+    depTask({ id: 't1', status: 'cancelled', output: 'user changed their mind' }),
+    depTask({ id: 't2', status: 'pending', dependencies: ['t1'] }),
+  ]
+  const coloured = formatDependencyOutputs(collectCompletedDependencyOutputs(tasks, 't2'))
+  assert.notEqual(coloured, '(none)')
+  assert.match(coloured, /user changed their mind/)
+})
+
+test('★ 臂 A3：真实形状 —— t18 ← t17(如实报告) 的下游必须读到 t17 的结论', () => {
+  /**
+   * ★ 用本轮真实的 id 与语义（t17 的 failed 是**如实报告**，它的交付物没问题）：
+   *   下游要读到的是"上面那份报告说了什么"，而不是一句 `(none)`。
+   */
+  const tasks = [
+    depTask({ id: 't17', status: 'failed', output: 'the census found 3 defects; that IS the deliverable' }),
+    depTask({ id: 't18', status: 'pending', dependencies: ['t17'] }),
+  ]
+  const rendered = formatDependencyOutputs(collectCompletedDependencyOutputs(tasks, 't18'))
+  assert.match(rendered, /the census found 3 defects/, '★ t18 必须读到 t17 那份如实报告的正文')
+  assert.match(rendered, /t17/, '★ 而且要能对上号（是哪个上游说的）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 B（反向臂）：非终态上游仍然不许交出去
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 B：非终态上游的结论【不许】交出去 —— 缺它则"把半截输出当结论"也全绿', () => {
+  /**
+   * ── 这一臂是这一块里最重要的 ─────────────────────────────────────────────────
+   *
+   * 本任务做的是**放开**一个过滤。而"放开"这个动作有一个很自然的过度写法：
+   * 把 `.filter(...)` 整个删掉（`return ordered.map(...)`）。
+   * 那个实现在臂 A 上**完全绿** —— 因为 t1 是 failed、确实该被收进来。
+   *
+   * ⇒ 而它会把 pending / claimed / in_progress 的上游也交出去，于是下游读到
+   *   一份**还在写**的输出的快照，并把它当成结论。那是本队记账的
+   *   「把没测到并进通过」的镜像：把**还没发生**的事当成**已经发生**。
+   *
+   * ★ 三种非终态各测一条，且**每一条都断言它的 output 没有出现在渲染文本里**
+   *   —— 只断言"收集结果为空"会漏掉一个"收集对了、渲染时全印出来"的实现。
+   */
+  for (const status of ['pending', 'claimed', 'in_progress']) {
+    const tasks = [
+      depTask({ id: 't1', status, output: `HALF-WRITTEN (${status}) — must not reach the downstream` }),
+      depTask({ id: 't2', status: 'pending', dependencies: ['t1'] }),
+    ]
+    const collected = collectCompletedDependencyOutputs(tasks, 't2')
+    assert.deepEqual(
+      collected, [],
+      `★ ${status} 上游【还在写】，没有结论可交 —— 把它交出去就是把半截输出当成结论`,
+    )
+    assert.doesNotMatch(
+      formatDependencyOutputs(collected), /HALF-WRITTEN/,
+      `★ 而渲染文本里更不许出现它（收集与渲染两处都要挡住）`,
+    )
+  }
+})
+
+test('★ 臂 B2：混合上游 —— 只有终态那几条交出去，顺序仍是拓扑序', () => {
+  const tasks = [
+    depTask({ id: 'a', status: 'completed', output: 'done' }),
+    depTask({ id: 'b', status: 'in_progress', output: 'still writing' }),
+    depTask({ id: 'c', status: 'failed', output: 'found a defect' }),
+    depTask({ id: 'z', status: 'pending', dependencies: ['a', 'b', 'c'] }),
+  ]
+  const collected = collectCompletedDependencyOutputs(tasks, 'z')
+  assert.deepEqual(collected.map((item) => item.id), ['a', 'c'], '★ 终态的全留下、非终态的全不留')
+  assert.doesNotMatch(formatDependencyOutputs(collected), /still writing/)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 C（区分臂）：下游必须能区分三种终态
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 C：三种终态在下游读到的文本里【必须可区分】—— 不许把 failed 当 completed', () => {
+  /**
+   * ── 这一臂是验收里那句"而不是把 failed 当 completed"的落点 ────────────────────
+   *
+   * 只做到"failed 的结论也交出去"是不够的：如果渲染时三种终态**都不带标记**，
+   * 那么下游读到的是三行长得一模一样的 "- tX task tX: <正文>"，
+   * 而它无法判断哪一条需要先看一眼。⇒ 三种终态在文本里必须不同形。
+   *
+   * ★ 断言的是**每一种自己的标记都在**，而不是"三者互不相等"：
+   *   后者在一个"只给 failed 加标记、completed 不加"的实现上也会绿，
+   *   而那会让"上游全成功了"与"上游类型信息丢了"同形。
+   */
+  const tasks = [
+    depTask({ id: 'a', status: 'completed', output: 'shipped' }),
+    depTask({ id: 'b', status: 'failed', output: 'found 3 defects' }),
+    depTask({ id: 'c', status: 'cancelled', output: 'no longer needed' }),
+    depTask({ id: 'z', status: 'pending', dependencies: ['a', 'b', 'c'] }),
+  ]
+  const rendered = formatDependencyOutputs(collectCompletedDependencyOutputs(tasks, 'z'))
+
+  for (const status of ['completed', 'failed', 'cancelled']) {
+    assert.match(rendered, new RegExp(`\\[${status}\\]`), `★ "${status}" 的标记必须出现在下游读到的文本里`)
+  }
+
+  /**
+   * ★ 反向半边：三条的标记必须**各自贴在自己的那一行上**，不许串行。
+   *   一个把所有项都印成 `[failed]`（或都印成 `[completed]`）的实现会让
+   *   上面三条正则**全部**通过 —— 而它把三种终态压成了一种。
+   */
+  const lineOf = (id) => rendered.split('\n').find((line) => line.startsWith(`- ${id} `)) ?? ''
+  assert.match(lineOf('a'), /\[completed\]/, '★ a 那一行必须是 completed')
+  assert.match(lineOf('b'), /\[failed\]/, '★ b 那一行必须是 failed')
+  assert.match(lineOf('c'), /\[cancelled\]/, '★ c 那一行必须是 cancelled')
+  assert.doesNotMatch(lineOf('b'), /\[completed\]/, '★ 而 b 那一行不许同时带着 completed')
+})
+
+test('★ 臂 C2：`status` 逐项可读（不是只印在文本里的一行装饰）', () => {
+  /**
+   * ★ 文本是给人读的，`status` 是给**下游代码**读的。两者都要在：
+   *   只修渲染、不改数据结构，会让"下游程序判断上游成败"这件事仍然不可能
+   *   （它只能去 grep 一段自然语言 —— 而那是本队记账过的最脆的耦合）。
+   */
+  const tasks = [
+    depTask({ id: 'a', status: 'completed', output: 'x' }),
+    depTask({ id: 'b', status: 'failed', output: 'y' }),
+    depTask({ id: 'c', status: 'cancelled', output: 'z' }),
+    depTask({ id: 'd', status: 'pending', output: 'w' }),
+    depTask({ id: 'z', status: 'pending', dependencies: ['a', 'b', 'c', 'd'] }),
+  ]
+  assert.deepEqual(
+    collectCompletedDependencyOutputs(tasks, 'z').map((item) => [item.id, item.status]),
+    [['a', 'completed'], ['b', 'failed'], ['c', 'cancelled']],
+    '★ 每一项都要带自己的终态，且只带终态的（d 是 pending，不进来）',
+  )
+})
+
+test('★ 臂 C3：与 state.ts 的细分口径【不冲突】—— 两处对同一个任务不打架', () => {
+  /**
+   * ── 两份真相的检查（本队记账过三次）──────────────────────────────────────────
+   *
+   * 本任务刻意**不**在 scheduler 里重算 failed 的细分（那是 state.ts 的
+   * `dependencyOutcomeOf` 的职责）。而这条臂钉住那个分工是**真的**成立：
+   *
+   *     scheduler 交出 status（`failed`）   —— 客观事实，不会因分类规则改变而改变
+   *     state     交出差分（`inconclusive`）—— 判断，随规则演进
+   *
+   * ⇒ 两者对同一个任务必须**互相蕴含**：scheduler 说它是终态 ⇔ state 说它有 outcome。
+   *   一个"state 认为是终态、而 scheduler 把它丢掉"的实现会让这条红 ——
+   *   而那正是 f-0018 本身。
+   */
+  const tasks = roundTeam().sort((a, b) => a.id.localeCompare(b.id))
+  for (const task of tasks) {
+    const passedThrough = collectCompletedDependencyOutputs(
+      [...tasks, depTask({ id: 'sink', status: 'pending', dependencies: [task.id] })],
+      'sink',
+    ).some((item) => item.id === task.id)
+    const satisfied = dependencyStatuses(tasks, [task.id])[0].satisfied
+    assert.equal(
+      passedThrough, satisfied,
+      `★ "${task.id}"（${task.status}）：闸门面说 satisfied=${satisfied}，`
+      + `而结论面 ${passedThrough ? '交出去了' : '丢掉了'} —— 两面必须对同一条依赖给出同一个答案`,
+    )
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 D（对照臂）：正常情形不被误伤
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 D：对照臂 —— 全 completed ⇒ 每项带 [completed]，内容与以前一样', () => {
+  /**
+   * ★ 缺了这一臂就无法区分"修复有效"与"修复在乱改"（START-HERE §4）。
+   *   一个把所有项都加上 `[failed]` 标记的实现会让臂 C 部分绿 ——
+   *   而这条要求正常情形读起来仍然是正常的。
+   */
+  const tasks = [
+    depTask({ id: 't1', status: 'completed', output: 'first', profileSeedId: 'req' }),
+    depTask({ id: 't2', status: 'completed', output: 'second' }),
+    depTask({ id: 't3', status: 'pending', dependencies: ['t1', 't2'] }),
+  ]
+  const rendered = formatDependencyOutputs(collectCompletedDependencyOutputs(tasks, 't3'))
+  assert.match(rendered, /first/); assert.match(rendered, /second/)
+  assert.match(rendered, /\[req\]/, '★ 既有的 seed id 渲染不许被这次改动弄丢')
+  assert.doesNotMatch(rendered, /\[failed\]/, '★ 正常情形一个 failed 标记都不该有')
+})
+
+test('★ 臂 D2：对照臂 —— 真的没有依赖时仍然说 (none)（沉默是这里正确的输出）', () => {
+  /**
+   * ★ 这一条挡住"为了让文本不出现 (none) 而伪造一行"的实现：
+   *   一条依赖都没有时，`(none)` **就是**正确答案。
+   *   把它换成一个空串或一行假话，会让下游失去"上面确实没有东西"这个读数。
+   */
+  const tasks = [depTask({ id: 't1', status: 'pending', dependencies: [] })]
+  assert.deepEqual(collectCompletedDependencyOutputs(tasks, 't1'), [])
+  assert.equal(formatDependencyOutputs([]), '(none)')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★ 定向突变（真的执行）：把 filter 改回只收 completed ⇒ 对应臂必须红
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 突变的针脚（★ 逐字，且下面有专门一条断言它在源码里真的存在）。 */
+const NEEDLE_FILTER = `    .filter(task => TERMINAL_TASK_STATUSES.includes(task.status))`
+
+/**
+ * ★ 与 t26 那两条突变同一个 harness（`withBuiltState`），但改的是 scheduler.ts。
+ *   ★ 突变体一律走 `freshScheduler()`（cache-busting re-import）：
+ *     用文件顶部那个 import 绑定会让突变**根本没被跑到**，
+ *     而报告会读成"突变没打红"（方向相反）—— t6 实测教训。
+ */
+async function freshScheduler(tag) {
+  return import(`${BUILT_SCHEDULER}?${tag}`)
+}
+
+function withBuiltScheduler(mutatedSource, body) {
+  const original = readFileSync(SCHEDULER_SOURCE, 'utf8')
+  const restore = () => {
+    writeFileSync(SCHEDULER_SOURCE, original)
+    const rebuilt = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+    assert.equal(rebuilt.status, 0, `★ 还原之后必须能重新 build 成功:\n${rebuilt.stdout}\n${rebuilt.stderr}`)
+  }
+  try {
+    writeFileSync(SCHEDULER_SOURCE, mutatedSource)
+    const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+    assert.equal(built.status, 0, `★ 突变体必须编译得过（否则这次突变测的是 tsc，不是行为）:\n${built.stdout}\n${built.stderr}`)
+    const result = body()
+    if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
+      return result.then(
+        (value) => { restore(); return value },
+        (error) => { restore(); throw error },
+      )
+    }
+    restore()
+    return result
+  } catch (error) {
+    restore()
+    throw error
+  }
+}
+
+const mutationTeam = () => [
+  depTask({ id: 'a', status: 'completed', output: 'shipped' }),
+  depTask({ id: 'b', status: 'failed', output: 'found 3 defects' }),
+  depTask({ id: 'c', status: 'cancelled', output: 'no longer needed' }),
+  depTask({ id: 'd', status: 'in_progress', output: 'still writing' }),
+  depTask({ id: 'z', status: 'pending', dependencies: ['a', 'b', 'c', 'd'] }),
+]
+
+test('★ 定向突变：把 filter 改回【只收 completed】⇒ 对应臂必须红', async (t) => {
+  /**
+   * ★ 本仓的收口纪律是**串行**（`rm -rf lib/` 的窗口会让并行读到假红），所以这一条
+   *   由环境变量显式开启，默认跳过，由本任务的验证读数那次单独运行。
+   */
+  if (process.env.AGENT_TEAMS_TERMINAL_DEP_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_TERMINAL_DEP_MUTATION=1 时运行（见任务 output 里的读数）')
+    return
+  }
+
+  const tasks = mutationTeam()
+  const baselineScheduler = await freshScheduler('mutation=baseline')
+  const baseline = {
+    ids: baselineScheduler.collectCompletedDependencyOutputs(tasks, 'z').map((item) => item.id),
+    rendered: baselineScheduler.formatDependencyOutputs(baselineScheduler.collectCompletedDependencyOutputs(tasks, 'z')),
+  }
+  assert.deepEqual(
+    baseline.ids, ['a', 'b', 'c'],
+    '★ 突变之前：三种终态全交出去、非终态（d）不交 —— 否则下面测的不是突变',
+  )
+  assert.match(baseline.rendered, /found 3 defects/, '★ 而 failed 的正文必须在文本里')
+
+  /**
+   * ── 突变体：回到 f-0018 的那一行（只收 completed）─────────────────────────────
+   *
+   * ★ `replaceAll` 之后**必须断言真的替换到了**：一次没匹配上的 `replace` 会让
+   *   突变体与基线逐字相同，于是"变了没有"这件事变成恒假 ——
+   *   而报告会说"突变没打红"（本队记账的恒红变体）。
+   */
+  const original = readFileSync(SCHEDULER_SOURCE, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_FILTER,
+    `    .filter(task => task.status === 'completed') // MUTANT: f-0018 restored`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行 —— 没匹配上的替换会让它恒不生效')
+
+  await withBuiltScheduler(mutated, async () => {
+    const mutant = await freshScheduler('mutation=completed-only')
+    const after = {
+      ids: mutant.collectCompletedDependencyOutputs(tasks, 'z').map((item) => item.id),
+      rendered: mutant.formatDependencyOutputs(mutant.collectCompletedDependencyOutputs(tasks, 'z')),
+    }
+    /** ★ 这一条断言就是**臂 A 的红**：failed / cancelled 的结论重新被丢掉。 */
+    assert.deepEqual(after.ids, ['a'], '★ 突变体必须只剩 completed —— 臂 A 就是靠这一条变红的')
+    assert.equal(after.rendered, '- a [completed] task a:\n  shipped', '★ 而下游读到的那一段里，failed 的结论没了')
+    assert.doesNotMatch(after.rendered, /found 3 defects/, '★ f-0018 的原始症状必须复现')
+    assert.notDeepEqual(after, baseline, '★ 突变体与基线的读数必须真的不同 —— 相同说明这次突变什么都没测到')
+  })
+
+  /** ★ 还原之后逐字相等：一次中途失败会把一份被突变的实现留在盘上。 */
+  const restored = await freshScheduler('mutation=restored')
+  assert.deepEqual(
+    {
+      ids: restored.collectCompletedDependencyOutputs(tasks, 'z').map((item) => item.id),
+      rendered: restored.formatDependencyOutputs(restored.collectCompletedDependencyOutputs(tasks, 'z')),
+    },
+    baseline,
+    '★ 还原之后必须与突变前逐字一致 —— 否则盘上留着一份没人认得的实现',
+  )
+})
+
+test('★ 二次对照：突变针脚在 scheduler.ts 里【真的存在】', () => {
+  /**
+   * ★ 这条不测行为，测的是上面那次突变**赖以成立的前提**。针脚错一个字符，
+   *   突变就会静默变成"什么都没改"，而报告会读成"突变没打红 ⇒ 臂是恒真的"
+   *   —— 一个**方向相反**的结论。
+   */
+  assert.equal(
+    readFileSync(SCHEDULER_SOURCE, 'utf8').includes(NEEDLE_FILTER),
+    true,
+    '★ 突变针脚必须逐字存在于 scheduler.ts —— 它不在了，"定向突变"就是在改一个不存在的字符串',
+  )
+})
+
+test('★★ 夹具自检：`freshScheduler` 读到的确实是【当前磁盘上】的 lib', async () => {
+  const a = await freshScheduler('selfcheck=a')
+  const b = await freshScheduler('selfcheck=b')
+  assert.notEqual(a, b, '★ 不同的 query 必须拿到不同的模块实例 —— 否则突变臂会静默地测旧代码')
+  assert.equal(typeof a.collectCompletedDependencyOutputs, 'function')
+  assert.equal(typeof b.formatDependencyOutputs, 'function')
+  assert.equal(typeof collectCompletedDependencyOutputs, 'function')
 })
