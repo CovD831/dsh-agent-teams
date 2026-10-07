@@ -597,13 +597,46 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
   const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] })
   assert.equal(created.status, 'pending')
   /**
-   * ★ "没有判据适用"与"判据都通过了"必须不同形（registry 的 `evaluated` / `skippedAll`）。
-   *   把前者读成后者，正是三态裁决要防的那种合流。
+   * ── ★★★ t66：这条臂的【性质】对，措辞错（实测抓出来的）─────────────────────
+   *
+   * 它想保的性质是：「没有判据适用」必须**留在运行记录里**。
+   * 而它用的正则 `/nothing evaluated/` —— **在 t64 之前、t66 之前都不匹配**：
+   *
+   *   · t58/t64 之前：`ok === false` 不成立 ⇒ 走 `ok (nothing evaluated: …)` ⇒ 匹配 ✓
+   *   · t58/t64 之后：`ok === false` 成立、`blockers` 空 ⇒ 走 `"blocked: "` ⇒ **不匹配** ✗
+   *   · t66 之后：走 `notChecked: <skippedAll 原文>` ⇒ 原文含 `nothing WAS evaluated` ⇒ **仍不匹配** ✗
+   *
+   * ★ 也就是说：这条断言自 t58 起就**从未真正生效过** —— 它红着，而红的原因
+   *   与它声称的性质（"没检查必须留在记录里"）**只有一半相关**：记录确实丢了那个读数
+   *   （t64 报的），但它的正则也没对上 `nothing was evaluated` 这个措辞。
+   *
+   * ⇒ ★ 修法（t66）：断言**性质**，而不是某一句话的逐字措辞 ——
+   *   ① 记录里必须出现 `notChecked:`（那是 t66 建立的那个**出口名**）；
+   *   ② 并且它必须**带着注册表那句原文**（`skippedAll`），而不是一句自己编的话。
+   *   ★ 比对措辞更耐久的理由：出口名（`notChecked:`）是**契约**（三个出口名之一），
+   *     而 `skippedAll` 的措辞是**说明** —— 前者变了就是缺陷，后者可以改词。
    */
-  assert.equal(created.runtime_gates?.ok, true)
+  assert.equal(
+    created.runtime_gates?.ok, false,
+    '★ 全跳过的裁决必须是 ok:false（它是"没测到"，不是"通过了"）',
+  )
+  assert.match(
+    String(created.runtime_gates?.outcome), /notChecked:/,
+    '★ 运行记录必须用 `notChecked:` 这个**出口**说明"这一步没被检查" —— '
+    + '★ 而不是 `blocked: `（一个没有对象的指控）。那正是 t66 修的那件事。',
+  )
+  assert.match(
+    String(created.runtime_gates?.outcome), /nothing was evaluated/,
+    '★ 记录里必须带上注册表那句**原文**（skippedAll），而不是调用方自己编的一句话 —— '
+    + '否则"没检查"与"检查了没问题"在日志里可能因措辞而重新合流',
+  )
+  /**
+   * ★ 这两条与上面三条**各测各的**（缺一条就会漏掉一种读法）：
+   *   `evaluated` 保证"一条都没跑"可读；`registered` 保证"这个位置确实挂着判据"可读。
+   *   ★ 少了 `registered`，"没检查"与"这个位置本来就没判据"会同形。
+   */
   assert.equal(created.runtime_gates?.evaluated, 0, '★ 这一轮没有任何一条运行判据适用 ⇒ evaluated=0，不是"跑了一条什么都对的判据"')
   assert.equal(created.runtime_gates?.registered, 1, '★ runtime 位置必须真的挂着 t6 的探活判据')
-  assert.match(String(created.runtime_gates?.outcome), /nothing evaluated/, '★ "没有判据适用"必须留在运行记录里')
   assert.equal(
     (created.runtime_gates?.ran ?? []).filter((entry) => entry.verdict !== 'skipped').length,
     0,
