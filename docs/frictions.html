@@ -1,0 +1,1660 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>卡点台账 · 27 条</title>
+<style>
+  :root { --fg:#1a1a1a; --dim:#666; --line:#e3e3e3; --bg:#fafafa; --acc:#0b5fff;
+          --block:#c0392b; --sched:#b7791f; --fixed:#2f855a; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --dim:#9a9a9a; --line:#333;
+          --bg:#141414; --acc:#6ea8ff; --block:#ff6b5e; --sched:#e0b050; --fixed:#5fd39a; } }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2.5rem 2rem 6rem; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; }
+  h1 { font-size:1.6rem; margin:0 0 .3rem }
+  h2 { font-size:1.15rem; margin:3rem 0 .3rem; padding-bottom:.4rem; border-bottom:1px solid var(--line) }
+  h3 { font-size:1rem; margin:.2rem 0 .8rem }
+  .lede { color:var(--dim); margin:0 0 2rem }
+  .count { color:var(--dim); font-weight:400; font-size:.9rem }
+  .sub { color:var(--dim); font-size:.9rem; margin:.3rem 0 1rem }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(420px,1fr)); gap:1rem }
+  .card { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem }
+  .card.escalate { border-left:4px solid var(--block) }
+  .card header { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; margin-bottom:.3rem }
+  .id { font-family:ui-monospace,monospace; color:var(--dim); font-size:.85rem }
+  .pill { font-size:.72rem; padding:.15rem .5rem; border-radius:999px; border:1px solid var(--line); color:var(--dim) }
+  .pill.fixed { color:var(--fixed); border-color:var(--fixed) }
+  .pill.scheduled { color:var(--sched); border-color:var(--sched) }
+  .pill.block { color:var(--block); border-color:var(--block) }
+  dl { margin:0; display:grid; grid-template-columns:5.5rem 1fr; gap:.35rem .8rem; font-size:.92rem }
+  dt { color:var(--dim); font-size:.85rem; padding-top:.1rem }
+  dd { margin:0 }
+  ul { margin:0; padding-left:1.1rem } li { margin:.15rem 0 }
+  code { font-family:ui-monospace,monospace; font-size:.85em; background:rgba(127,127,127,.12);
+         padding:.05rem .3rem; border-radius:4px }
+  .quote { color:var(--dim); font-style:italic }
+  .why { color:var(--dim); font-size:.85rem; margin-top:.25rem }
+  .warn { border:1px solid var(--block); border-radius:10px; padding:1rem; margin:1.5rem 0 }
+  .toc { columns:2; font-size:.9rem } .toc a { color:var(--acc); text-decoration:none }
+</style></head><body>
+
+<h1>卡点台账</h1>
+<p class="lede">
+  27 条 · 生成于 2026/10/7 12:47:47
+  · 机器读的是 <code>.agent-teams/frictions/*.json</code>（唯一真源），本页是它的视图
+</p>
+
+
+
+<section>
+  <h2>三个维度</h2>
+  <p class="sub">同一批 27 条，按三种方式各看一遍。★ 一条卡点可能同时属于多个本质 —— 那正是「本质/表象」不可判定这件事的产物。</p>
+  <div class="toc">
+    <div><b>① 按池子</b>（谁做的决定）<br>
+      · <a href="#pool-escalate">需上报 2 条</a><br>
+      · <a href="#pool-self">可自解 25 条</a></div>
+    <div><b>② 按状态</b>（办到哪了）<br>
+      <a href="#st-fixed">已修 19</a> · <a href="#st-scheduled">已排任务 / 未修 6</a> · <a href="#st-open">开着 1</a> · <a href="#st-wontfix">★ 明确不修 1</a></div>
+    <div><b>③ 按本质</b>（同族的放一起）<br>
+      · <a href="#es-misclassified">把「没能测量」读成了「测出来了」 15</a><br>· <a href="#es-unwired">装了但调不到 / 建了但没接 6</a><br>· <a href="#es-unsatisfiable">某类任务在判据上恒不可满足 4</a><br>· <a href="#es-quantity-over-property">量大于性质 1</a><br>· <a href="#es-stale-source">读了过期的来源 1</a></div>
+  </div>
+</section>
+
+<section id="pool-escalate">
+  <h2>① 需上报 <span class="count">2 条</span></h2>
+  <p class="sub">这些是【要你做裁决】的 —— 不是因为难，而是因为没有一个不依赖判断主体的正确答案。
+     ★ 上报的是【本质问题】，不是表象。</p>
+  <div class="grid">
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0016</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 依赖判断只认 completed ⇒ failed/cancelled 作为终态永远卡死下游</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) unsatisfiedDependencies</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">整条链无法开工</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/state.ts:137  unsatisfiedDependencies 的实现是：</li><li>    dependencies.filter((id) =&gt; byId.get(id)?.status !== &#39;completed&#39;)</li><li>★ 它只认 completed ⇒ failed 与 cancelled 【都被当成未满足】</li><li>★ 而 failed/cancelled 是【终态】—— 它们不会再变 ⇒ 下游永远无法开工</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为阻断性缺陷并派修</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：★ 这条需要用户裁：终态是否等于满足？两种口径都说得通，而它们对『失败任务的下游该不该自动开工』给出相反答案</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 正确的口径是「终态即满足」还是「只有 completed 满足、failed 要人处理」—— 这是设计问题</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮【第一次】把 pool 标成 escalate 的卡点 —— 前面 15 条全部自解</li><li>★ 理由：口径有两种合理选择，而它们语义相反：</li><li>   甲：终态即满足 ⇒ failed 的下游可以开工（因为 failed 也是一个结论）</li><li>   乙：只有 completed 满足 ⇒ failed 必须由人处理后才放行</li><li>   ⇒ 甲的风险：上游失败而下游照跑，可能建立在坏的基础上</li><li>   ⇒ 乙的风险：正如本轮 —— 一条 failed 卡死整条链，而 failed 常常是【如实报告】而非交付失败</li><li>★ 本轮的具体情形更微妙：t17/t20 的 failed 都是【如实报告】——</li><li>   它们的交付物没有问题（t17 的修复已并入、t20 的普查正是它该红的），</li><li>   落 failed 是因为『pnpm verify exit=0』这条验收在『找出缺陷』这类任务上必然冲突。</li><li>   ⇒ 换句话说：这两个 failed 就是【合格的交付】，而机制把它们当成不合格。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0021</span>
+      <span class="pill open">开着</span>
+      <span class="pill ess">读了过期的来源</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 两个缺口互相锁死：旧模块 ⇒ 任务冻住 ⇒ t24 的重载闸门永不满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(重载闸门 + 旧模块) 互相锁死</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">证明性地无法自行解锁</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三层对齐：耐久态 t18=cancelled（终态）· 盘上 unsatisfiedDependencies ⇒ [] · claim 仍报 blocked</li><li>★★ point-dev 指出的闭环：</li><li>   旧模块 ⇒ 任务开不了工 ⇒ 任务做不完 ⇒ 一直有『进行中工作』</li><li>          ⇒ t24 的重载闸门（无进行中工作）永不满足 ⇒ 永远重载不了</li><li>          ⇒ 旧模块永远不会被换掉</li><li>★ 而 integrator6 从相反方向给了同一结论：</li><li>   三道完工门卡【收尾】、旧模块卡【开工】—— 两者合起来让 t24 不可达</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t24 的设计输入：闸门需要一个逃生口</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要写进 t24 的契约）<div class="why">为什么进这个池子：★ 这是本轮第二条标 escalate 的 —— 它需要用户裁定「逃生口」的边界：在什么条件下允许【明知有进行中工作】仍重载</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ t24 的闸门是否需要【逃生口】—— 在整条链都冻住时仍能重载</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ 这不是『两个独立的缺口相加』，是【互相锁死的一对】：</li><li>   旧模块  ──卡开工──▶  任务做不完  ──▶  一直有进行中工作  ──▶  重载闸门不满足</li><li>      ▲                                                              │</li><li>      └──────────────────  重载不了，旧模块永不换掉  ◀──────────────┘</li><li>★ point-dev 的原话：「这不是『两个独立的缺口相加』，是【互相锁死的一对】。」</li><li>★ 而它的推论我采纳：t24 的闸门需要一个【逃生口】——</li><li>   在『整条链都冻住』时仍能重载；否则那条链在【没有外部干预（用户手动重启）】时</li><li>   证明性地无法自行解锁。</li><li>★★ 这是本轮最精准的一条因果链，而且它是【两个成员从相反方向独立得出的】：</li><li>   integrator6：从『完工门卡收尾、旧模块卡开工』推出 t24 不可达</li><li>   point-dev  ：从『claim 被拦』推出闭环</li><li>★ 而它对本项目有直接含义：</li><li>   用户要的是【无人值守】。而这个闭环意味着 ——</li><li>   在最坏的情况下，无人值守会【证明性地卡死】，直到有人手动重启。</li><li>   ⇒ 所以 t24 不只是一个便利功能，它是无人值守的必要条件。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div>
+</section>
+
+<section id="pool-self">
+  <h2>① 可自解 <span class="count">25 条</span></h2>
+  <p class="sub">leader 已裁的 —— <b>也列给你看</b>：让你知道我自己做了什么裁决。</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0001</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>inScope 声明了 src 却没声明对应的 lib 产物</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.build-artifact-scope</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope declares source path(s) &quot;src/gates/runtime/liveness.ts&quot; but declares no build artifact under &quot;lib/&quot;…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据能判（它读的就是 inScope），问题在【契约写的时候没人提醒】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 当场 amend 契约，补上 lib/ 路径</dd>
+      <dt>后来怎么处理的</dt><dd>amend 契约（多次）；后来 admission/requires 机制让「判据要什么」变成声明式的<div class="why">为什么进这个池子：补救动作明确（补声明），不需要用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时是否有人意识到「这是第几次」—— 没有计数机制</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 本轮出现 4 次（t8/t11/t6/t9 各一次）—— 频率信号明确</li><li>★ 而它促成了 requires 机制：让「判据要的输入面」变成可机械核对的东西</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0002</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>契约里声明的 verify 命令不可判（空命令 / 写死的真 / 写死的假）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">…verify command cannot be judged…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 「可判」这个性质本身要能被机械核对 —— 判据做到了，但它需要读命令的语义</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按可判性拒绝</dd>
+      <dt>后来怎么处理的</dt><dd>contract.verify-command 判据（584 行）<div class="why">为什么进这个池子：判据自己能判，且有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时没有意识到：verify 缺席与 verify 不可判是两件事</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 实测过 `grep -qx N` 在 /bin/sh 下永远不绿 —— 那是「写死的假」</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0003</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>执行器缺席 ⇒ 判据 unmeasured ⇒ 普通任务全都建不出来</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">the executor was not injected</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据把「执行器没注入」报成 unmeasured，而它被读成拒绝 ⇒ 任务建不出来</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：缺席 ⇒ ok（不适用），不是 unmeasured</dd>
+      <dt>后来怎么处理的</dt><dd>改判据的缺省方向（absent ⇒ not applicable）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ quality-gates.ts:510 对 kind=work 返回 ok —— 那条分支当时没人看过</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是「同一张验收表上的第三格」—— inScope / verify / 执行器三格，逐个暴露</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0004</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>判据的 appliesTo 认的 event 名与调用点传的不匹配 ⇒ 判据从不被求值</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · mismatched / uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 六个调用点传的 event 是 task-status / member-dispatched / …</li><li>★ 而判据 appliesTo 只认 &#39;runtime-liveness&#39; ⇒ 没有一个匹配</li><li>★ 判据装了但从未被求值 —— 而返回值看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按导出白名单（LIVENESS_EVENTS）发言</dd>
+      <dt>后来怎么处理的</dt><dd>appliesTo 改为按导出白名单；端到端 evaluated=1<div class="why">为什么进这个池子：修复方向明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ verifier3 独立发现前，没有任何机制能看出「这条判据从未跑过」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是本队「装了但调不到」第 4 次</li><li>★ 它促成了一条纪律：判据的调用点与它的 appliesTo 必须能机械对上</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0005</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>waitWindows 表建好了但没有任何地方读它 ⇒ 判据永远 unmeasured</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · unwired / unread</dd>
+      <dt>机制当时说的</dt><dd class="quote">the wait window was not observed</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ waitWindows（任务作用域、有界、有陈旧界限、注释完整）从未被任何构造函数读取</li><li>★ waitObservationFor 读的仍是 waitRecords.get(attemptId)（attempt 作用域）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 纠正成员的诊断：不是设计缺口，是接线缺口</dd>
+      <dt>后来怎么处理的</dt><dd>waitObservationFor 改从 waitWindows 读三个跨代概念；另修「换代冲掉产出指纹」<div class="why">为什么进这个池子：设计已完成，只差一个读取点</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 建数据结构的人与接输入面的人常是同一个 —— 而「建好了」被当成了「接通了」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 成员原以为「需要一次设计改动」，而 captain 读源码后发现设计已做完</li><li>★ 这是「装了但调不到」第 5 次，且发生在【新写的代码】里</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0006</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>admission 位置建好了却 0 个调用点（其余五个各有 1-3 个）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(位置级) admission</code> · uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 磁盘上有两个判据文件（checkpoint.ts / absorb.ts），注册表 registered=0</li><li>★ 「磁盘有 / 注册表无」的差集没人读</li><li>★ 而 evaluate 返回 ok:true —— 空位置看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为『装了但调不到』第 6 次，并明确它在【位置】这一层（比前五次更靠上）</dd>
+      <dt>后来怎么处理的</dt><dd>t11 派任务补调用点；t10 装配进 ALL_GATES<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「位置为空」与「位置的判据都通过」当时同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ verifier6 用【差集】（磁盘有 vs 注册表无）抓到的，且它没有判 fail —— 因为那是队友开发中的状态</li><li>★ 它是唯一一个【位置级】而不是判据级的实例</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0007</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>absorb 的闸门问了不存在的 kind ⇒ 判据在真实运行中永不发言</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.absorb</code> · overreaching / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ kind === &#39;requirement&#39; || &#39;plan&#39; —— 而 TASK_KINDS 里是 &#39;requirements&#39;（复数），没有 &#39;plan&#39;</li><li>★ 七个真实 kind 全部 ⇒ false；两个不存在的 ⇒ true</li><li>★ 「本轮本来不适用」与「闸门永不为真」完全同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：改成不依赖 kind（闸门 = 调用方交出了产物清单）</dd>
+      <dt>后来怎么处理的</dt><dd>去掉 kind 条件；新增臂 0/0b，TASK_KINDS 从构建产物 import、零字面量，两半成对<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员自己的 27 条臂没有一条发现它 —— 因为臂里的 ctx 也是自己构造的 kind</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「装了但调不到」第 7 次，但形态不同：它装了、也被调到了，而【它自己选择不说话】</li><li>★ 而这被「不适用不报」那条纪律【庇护】了 —— 纪律是对的，但需要一条臂防止『永不适用的闸门』借用它</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0008</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>convene 把「提问表没被接上」读成了「没有未回答的问题」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ openQuestions 缺席与空数组返回【完全相同的 JSON】</li><li>★ 缺席的真实含义是「没人接 open-questions.json」⇒ 无法判断</li><li>★ 而它被读成了「问题都答完了」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按三态纪律修（缺席 ⇒ unmeasured）</dd>
+      <dt>后来怎么处理的</dt><dd>缺席与空数组不同形；另把「没能测量」拆成两种不同形（缺席=去接线 / 形状坏=去修调用方）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员报的『三重还原保护』为何全失效 —— 当时还不知道是会话中断</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ ★ 根因不是逻辑错，是【上一轮的变异体被提交进了仓库】（ad7a3ed 的 QUESTIONS_MUTATED = true）</li><li>★ 成因：突变进行中【会话被中断】，process.on(&#39;exit&#39;) 没机会跑 ⇒ 三重还原保护全部失效。会话被中断不是测试失败，exit 钩子救不了。</li><li>★ captain 是提交它的人，责任在 captain。而它是【被队友读代码发现的】，不是任何检查发现的。</li><li>★ 这次事故的直接产物：一条【总是运行】的污染检查（只扫可执行代码、同时查 src 与 lib、不依赖突变是否还原）</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0009</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>12 个工具的 output schema 不接受自己返回的字段（create_task 自锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(工具层) agent_teams_*</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">&quot;value.input_surface&quot; is not a declared property (additionalProperties: false)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 12 个工具的 output schema 全是 additionalProperties:false，而接线给返回值加了 4 个诊断字段</li><li>★ 最严重的是 create_task：每次调用都被自己的 schema 拒绝</li><li>★ ⇒ 修它的任务【正需要用 create_task 来建】—— 一个阻断性缺陷堵住了修它的手段</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 先尝试在主树直接修，发现与 t14 的 worktree 冲突后【回退让出】（隔离纪律）</dd>
+      <dt>后来怎么处理的</dt><dd>五处 schema 改闭合、逐工具取用；status 从 additionalProperties:true 的另一极端同时修掉；新增普查臂（5→15 工具覆盖）<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 没有人想到「调用点加了字段，声明它的地方要跟上」是一个会被漏的环节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「声明它的地方落在实现后面」这一族，本轮出现 4 次（schema / inScope / 白名单 / 臂 11 口径）</li><li>★ captain 亲身体验了自锁：create_task 建不出任务 ⇒ 连『派个任务去修它』都做不到</li><li>★ 另有一条：共享 const 会因 ValueSchemaSpec 是字面量类型而报 33 条 TS2322 ⇒ 用函数返回而非常量</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0010</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>changedPaths 把「没能观测」读成了「虚报」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>dispatch.changed-paths</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">[dispatch.changed-paths] &quot;src/tools.ts&quot; was reported as changed but no write to it was ever observed in this member&#39;s session</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据没能观测到任何写入 —— 因为它读的是【本 attempt 的会话事件】里的 meta.diffs，而这次写入发生在【captain 用 cp 并入主树】这个动作里</li><li>★ 而「没能观测」与「观测了、确实没写」在返回值上【完全同形】</li></ul></dd>
+      <dt>临时裁决</dt><dd>★ 保任务继续：captain 接管 t14，用 cancelled + output 记录落终态；不为了让判据过去而虚报或报空 changedPaths</dd>
+      <dt>后来怎么处理的</dt><dd>补第二个观察面 gitChangedPaths（工作区真的脏了的路径），每条 reported 必须被【至少一个面】证实 —— commit cc58b4c。穷举证明（非抽样）：reported × observed × gitObserved 全部组合，反例数 0 ⇒ 绝不比旧口径松。<div class="why">为什么进这个池子：有可机械验证的正确解（穷举证明），不需要用户做决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时那次 update_task 调用的完整 ctx 没有留档（只有 changedPaths 记录下来）</li><li>★ 判据内部 observed 的实际取值（空数组还是 undefined）没有在报错里区分 —— 而这两者本该不同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 三个人独立撞上同一个卡点（point-dev / admission-dev / captain 本人）—— 这是它被判为『结构性』而不是『操作失误』的依据</li><li>★ 修法路上发现的边界：工作区是仓库子目录时 git status 带前缀 ⇒ 两边永不相等 ⇒ 判据【恒红】。恒红比恒真更危险：它阻断所有诚实的工作。</li><li>★ 已知残余边界（已钉成断言）：零工作的成员报一条恰好被别的任务改脏的路径 ⇒ 会被工作区面证实。本判据只回答『这条改动真的存在吗』，不回答『是谁改的』。</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0011</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>无 worktree 的任务在 completion.backtest 上恒不可满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>completion.backtest</code> · unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">the baseline state is unavailable (no parent/HEAD test result was provided), so a regression could not be told apart from a pre-existing failure</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ baseline 由 worktreeBaseOf(task.id) 推导（src/tools.ts:4173 → :4273）</li><li>★ 无 worktree（主树干活的 / captain 接管的）⇒ 恒 undefined</li><li>★ ⇒ 该判据在这类任务上【恒不可满足】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 接管 t15 落终态（reassign → captain）；缺口单独记账为 t18</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t18 已建，依赖 t17 串行）<div class="why">为什么进这个池子：补救动作明确（captain 可落终态），本质修法已派任务</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「无 worktree 的任务」这个场景当时没被考虑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 它的【口径是对的】—— 诚实报『没能测量』，没并进通过也没并进拒绝</li><li>★ 与 f-0010 同族但成因不同：前者是【口径错】（把没观测读成虚报），后者是【输入面没覆盖某场景】</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0012</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">量大于性质</span>
+      
+    </header>
+    <h3>臂 11 抓的是「一切改动」，而不是它声称的「偷偷改」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>scripts/verify-input-requires.test.mjs 臂 11</code> · overreaching</dd>
+      <dt>机制当时说的</dt><dd class="quote">★ 相对基线，判据源码里有**被删掉而没有等价改写**的行</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 它声称守护「本文件没偷偷改判据源码」</li><li>★ 实际读的量是「判据源码相对钉死基线的【任何】改动」</li><li>★ 于是每一个合法修判据的任务都撞红它：t5（加 admission 位置）一次、t17（修 changed-paths）又一次</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定方向 (a)：把『是谁改的』换成『这次改动有没有被声明』；本文件对判据源码的改动仍必须为空</dd>
+      <dt>后来怎么处理的</dt><dd>未提交 ⇒ 红；提交但无 Verify: ⇒ 红；按任务修 + 带 Verify: ⇒ 绿（三条成对证据实测）<div class="why">为什么进这个池子：口径明确，且有成对证据</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「基线钉死」这个设计本身的问题当时没被识别</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是同一条臂【第三次】口径不匹配 —— 而前两次的教训写在它自己的注释里</li><li>★ 修它的成员自己也踩了两处同形的坑，都被实测抓出：</li><li>  错 A：「至少一个相关提交带 Verify:」可被历史稀释 ⇒ 改成「每一个都必须带」</li><li>  错 B：git log &lt;基线&gt;..HEAD -- path 会遍历基线【之前】的提交 ⇒ 改成 rev-list --ancestry-path</li><li>★ 两处共同形状：**量大于性质** —— 与这条臂原来的毛病同源</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0013</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 机械标签把两个不同的本质归成了一类（misclassified 组）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(分析)</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">这是分析结论，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 做本质探索时，只能拿 blocker 的那一行 + notes ⇒ 判据的完整输出、调用点怎么消费它、当时的注册表状态，全都拿不到</li><li>★ 所以那一步【不是复现，是回忆】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 用「猜测 + 逐条验证」做了第一次本质探索</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是分析结论）；但它产出了两条可机械执行的预测验证任务<div class="why">为什么进这个池子：分析结论，无需用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「判据自己合流」与「读者读错」这两类，是否还有第三类没被发现</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 试跑方法（用户四步的第③步）：提出本质猜测，逐条验证「它能否导致组里每个表象」</li><li>★ 结果：两个猜测都被【部分证伪】—— 这本身证明试跑有价值（若全成立，反而说明猜测太宽）</li><li>猜测 A「机制把『没能判断』与『判断了』合流」⇒ 4/5 成立</li><li>猜测 B「判据读的量 ≠ 它声称的性质」⇒ 3/5 成立</li><li>★ f-0002 与 f-0003 两个猜测都不服，而它们是【同一个判据】—— 这不是巧合</li><li>★ 真正的区分：</li><li>  本质 ①：判据【自己】把「没能判断」与「判断了」合流（f-0007 / f-0008 / f-0010）</li><li>          修法 = 改判据内部，让三态不同形</li><li>  本质 ②：判据判得【对】，而【读它的那一层】把输出读错了（f-0002 / f-0003）</li><li>          修法 = 改【读者】，不是改判据</li><li>★ 而这两个本质【在同一个机械标签里】—— 机械索引看不出来</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0014</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>★ 台账机制自己的缺口：记录不可重放（12/12 条 replayable=false）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账机制)</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">机制缺口，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ scene.ctx 全为 null ⇒ 重建不出当时的输入</li><li>★ context.eventRefs 指不到具体事件 ⇒ 原始观测存在但不可定位（会话事件未按任务索引）</li><li>★ observed.mechanismState 全为 null ⇒ 拿不到判据当时的完整输出与内部状态</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：把缺口如实标成 replayable:false，而不是假装记录完整</dd>
+      <dt>后来怎么处理的</dt><dd>未修。修法是【让卡点在发生时自动记录】，而不是事后补<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「足够的上下文」的完整清单 —— 本轮只发现了三样缺的（ctx / 事件定位 / 机制状态），可能还有</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 结论：记录必须在【卡点发生时】做，事后补是补不上的</li><li>   · ctx 没记 ⇒ 重建不出</li><li>   · 会话事件没按任务索引 ⇒ 定位不到</li><li>   · 注册表快照没留 ⇒ 不知道当时有哪些判据</li><li>★ 而 fix 的形状与本队纪律一致：判据拒绝/未测量时【自己】落一条记录</li><li>   （含 requires 核对结论 + ctx 快照）—— 这正是「判据自己报」的延伸</li><li>★ 标记 replayable 这一格本身就起作用了：它让『读得懂』与『能重放』不同形</li><li>   若没有这一格，这 12 条会被读成『完整的记录』</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0015</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 预测验证命中：成团闸门无视上游 absorb 的裁决，四态全同形</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">普查臂 1 命中，是真实缺陷</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ absorb = ok / blocked / unmeasured / 键缺席 ⇒ convene 全部返回 {ok:true, autoApprove:true}</li><li>★ UPSTREAM_ABSORB 只出现在 convene.ts:675 的 upstreamStates（纯报告，无判断分支），而 checkpoint 那侧有完整三态分流（534-559）</li><li>★ 代价：成团闸门拿着【未知的吸收状态】自动成团（用户已裁定成团不需要点头）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为 t13 的修复任务；臂 1 红着正是在报告缺陷，不许弱化它</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：照 checkpoint 那支补三态分流 —— blocked 带原文、unmeasured 进 unmeasuredReasons、键缺席 ⇒ unmeasured<div class="why">为什么进这个池子：修法明确（照同文件另一支写）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 是否还有其他「把上游结论当布尔用」的地方 —— t20 只扫了 admission 位置</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮第一个【预测到】的卡点，不是撞上的：</li><li>   卡点 f-0013 的本质猜测 ⇒ t20 预测『它还应导致尚未观测到的表象』⇒ 普查 ⇒ 命中 1 处</li><li>★ 而它同时【收窄】了本质①的适用范围（t20 最有价值的读数）：</li><li>   14 条判据在「测量手段缺席」上【全部】如实报 unmeasured，零例外</li><li>   ⇒ 本质① 的载体不是『忘了说 unmeasured』（那一层写得非常扎实）</li><li>   ⇒ 而是【裁决的传递】：判据对自己读的输入很小心，却把【别的判据给的结论】当布尔用</li><li>★ 与文件自身注释直接矛盾：644-651 写着『每一个 unmeasured 支都先于返回』，而 absorb 那侧没有 unmeasured 支</li><li>★ verifier6 的证据强度补正：源码级突变真跑了，但【不能证明『臂 1 因突变而变红』】——</li><li>   臂 1 突变前就已红，一个本来已经红的臂区分不了『测到了机制』与『恰好在报别的问题』</li><li>   ⇒ 改用【对照实现】归因（传播三态⇒拒绝 / 吞掉三态⇒ok / 断言产品落在 swallow 一侧）</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0017</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 同一份事实，两种读法：status 把 unmeasured 折进 blockers，declare_delivery 独立暴露</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调用层) delivery 的两个消费点</code> · misclassified / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">消费口径不一致，不是裁决错</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ status (tools.ts:5138-5141) 把 unmeasured 推进 blockers 数组：</li><li>    blockers: [..., ...deliveryEvaluation.unmeasured === undefined ? [] : [`could not measure: ${...}`]]</li><li>    ⇒ 返回对象里【没有】独立的 unmeasured 字段</li><li>★ declare_delivery (tools.ts:5269 一带) 保持三态不同形：有自己的 unmeasured 分支，措辞与 blockers 不同形</li><li>★ 实测：unmeasured 与 blocked 两种来源 ⇒ ok 都是 false，都没有独立 unmeasured 字段</li><li>  唯一差别是那句里的 &#39;could not measure: &#39; 前缀 ⇒ ★【靠措辞区分，不靠形状】</li><li>★★ schema 层证据（verifier6 钉死的，captain 核实于 src/tools.ts:4930）：</li><li>   status 返回的 delivery 对象 schema 是 additionalProperties:false，</li><li>   字段只有 { ok, blockers, gates_evaluated, input_surface }</li><li>   ⇒ ★ 结构上【没有】放 unmeasured 的地方 ⇒ 它只能挤进 blockers</li><li>★ 真实路径复现（不是构造）：</li><li>   registry.evaluate(&#39;delivery&#39;, { team, gate:{ok:true,blockers:[]} })</li><li>   ⇒ { ok:false, unmeasured:&#39;[delivery.coverage] the goal coverage matrix was not provided…&#39;,</li><li>       blockers:[], evaluated:2, registered:2 }</li><li>   ⇒ delivery 现在【真的会】产出 unmeasured ⇒ tools.ts:5127 那三行【每次 status 调用都执行】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t21 的第二条断言 + 建议单开 repair</dd>
+      <dt>后来怎么处理的</dt><dd>未修 —— ★ 已排定修复任务，但被写域串行链挡住：src/tools.ts 上同时有 t22/t23/t24 三个 open 任务（point-dev 的串行链），而任务图校验拒绝任何与它们重叠的 inScope ⇒ f-0017 的 repair 排在 t24 之后。★ captain 已确认修法（给 delivery 对象加独立 unmeasured 字段，让 status 不再拼进 blockers），并已写进一份待派任务的验收，等那条链收口即派。<div class="why">为什么进这个池子：修法明确（让 status 与 declare_delivery 同形地暴露 unmeasured）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有没有其他位置也在用『措辞前缀』区分三态 —— 它只扫了 delivery</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的评语准确：「这比『读错了』更麻烦：它让两个工具对同一份事实给出不同形状的答复」</li><li>★ 而它指出 t21 原计划的那条断言（两处 ctx 必须逐字段相同）【保护不了这一条】：</li><li>   ctx 相同、求值相同，【消费方式不同】—— 这是比 ctx 分叉更深一层的不一致</li><li>★ 严重性放大：delivery 是【唯一持续产生 unmeasured 的位置】（convergence 观察不到成员面）</li><li>   ⇒ 今天每次 status 调用都会往 blockers 里塞一条 &#39;could not measure: …&#39;</li><li>   ⇒ 任何读 blockers 的调用方都会把它当成一条『交付被拒的理由』</li><li>★ 定向突变现成：把 status 那句改成独立的 unmeasured 字段 ⇒ t21 的臂必须红</li><li>★ 另三条负结果（verifier6 逐一读过代码）：</li><li>   runtime(2241)/contract(2358)/dispatch(4160)/completion(4442) 四处都【正确地】</li><li>   把 unmeasured 与 blockers 分开处理 ⇒ f-0003 那个形态在这四处已修好</li><li>★★ verifier6 钉到 schema 层的结论：差异只落在【措辞】（那个 &#39;could not measure: &#39; 前缀），</li><li>   而契约 §3.4 的要求是【形状不同形】，不是措辞不同形。</li><li>★ 而它给出的严重性排序（我采纳）：</li><li>   「f-0003：执行器缺席 ⇒ 所有普通任务建不出来（已修）</li><li>     这一条：delivery 恒 unmeasured ⇒ 每次 status 都往 blockers 里加一条</li><li>     ⇒ 而今天它就是『恒真』的：不是某条特殊路径，是【每一次读状态】</li><li>     ⇒ 一个恒常出现的『假拒绝理由』，会教人学会忽略 blockers ——</li><li>        那正是本队记过的『判据被学会忽略』那条老路」</li><li>★★ t21 的普查臂 1/2/3 现在正红着报告这条缺陷（不是回归，是它的产出）。</li><li>★ 修好之后那三条臂应【自动转绿】—— 那是「修法生效」的机械证据。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0018</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>终态依赖放行了，但下游拿不到上游的结论（同一个缺陷的另一半）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) collectCompletedDependencyOutputs</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">解锁了但信息丢了</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/scheduler.ts:227  collectCompletedDependencyOutputs 末尾：</li><li>    .filter(task =&gt; task.status === &#39;completed&#39;)</li><li>★ 它把 failed/cancelled 上游【整个丢掉】</li><li>★ 探针实测下游派发文本：「Completed dependency results:\n(none)」</li><li>   ⇒ 下游解锁了，但什么都没拿到</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 追认实现者把缺口记成【如实记录的断言】而不是写成不变量</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务动 scheduler.ts）<div class="why">为什么进这个池子：修法明确（filter 改成终态即收；下游怎么用是下游的事）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 下游拿到 failed 上游的结论后【该怎么用】—— 那是下游的判断，不是调度层的</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是【同一个缺陷的另一半】，而且 t26 修的是它的前一半：</li><li>   前一半（state.ts）：终态该不该放行下游 ⇒ 已修（failed/cancelled 全部放行）</li><li>   后一半（scheduler.ts）：放行之后下游拿不拿得到上游的结论 ⇒ 未修</li><li>★ 而实现者对后一半的处置是对的：</li><li>   它【没有】把「下游看得见上游」写成不变量（那会把没做到的机制写成期望），</li><li>   而是写成一条【如实记录缺口的 KNOWN GAP 断言】并注明：scheduler.ts 口径改对之后，</li><li>   那条断言应当变红，那时翻过来。</li><li>★ 这条与本队最重要的那条纪律一致：</li><li>   「夹具不得把当前（错的）行为写成期望」—— 而它同时也没走到另一个极端</li><li>   （把没做到的说成做到了）。两个极端都是恒真。</li><li>★ t26 已为它准备好接口：state.ts 侧的 dependencyStatuses 已就绪。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0019</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ inScope 重叠检查只豁免一个方向 ⇒ 合法依赖链上的任务无法同时编辑</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(任务图校验) inScopeOverlap 的豁免方向</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope overlaps t22 at src/tools.ts, lib/tools.js, lib/types/tools.d.ts; serialize these tasks or split the paths</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/quality-gates.ts:395  的豁免规则是：</li><li>    if (dependencies.includes(other.id) || other.dependencies.includes(&#39;pending-new&#39;)) continue</li><li>★ 它判的是【我依赖它】⇒ 只豁免一个方向</li><li>★ 而实际关系是 t22 依赖 t18（别人依赖我）⇒ 那个方向【没有豁免】</li><li>★ 且我这次改的是【dependencies】而不是 inScope，检查却对既有任务的 inScope 无条件生效</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为判据缺口；本次用 captain 写域直接解锁并如实记账</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：豁免应当是【双向的】—— 两侧任一方依赖另一方 ⇒ 写域重叠是新接线的正常次序，不是冲突<div class="why">为什么进这个池子：修法明确（把单向豁免改成双向）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少「合法链上的任务」因为这个方向性缺口而无法同时编辑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 方向的实质：一条【已声明的依赖链】恰恰【证明】两个任务的写域会被串行执行</li><li>   ⇒ 那种重叠是【设计的一部分】，不是冲突</li><li>   ⇒ 而现在的检查把它当成冲突 ⇒ 让合法链上的任务无法同时被编辑</li><li>★ 而触发点也偏了：检查对【既有任务的 inScope】无条件生效，</li><li>   哪怕我改的是 dependencies 或 description，根本没碰 inScope</li><li>★ 与本队记账的形态同源：**量大于性质** ——</li><li>   它读的量是「两个任务的 inScope 是否重叠」，</li><li>   而它声称的性质是「这两个任务会不会真的冲突」。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0020</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 无人值守的硬阻断：worktree worker 交不出终态（5 次同形终止）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(完工门) worktree worker 的终态</code> · unsatisfiable / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">三道完工门连续拒绝，全部与改动无关</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三道拒绝的成因：</li><li>  ① dispatch.changed-paths：worker 编辑落在 worktree，判据只读 captain 工作区</li><li>  ② completion.r5 / mutation：r5 只看 update.newTestFiles，而 repair 改的是【已有】夹具</li><li>     ⇒ 净 +139/-19 全在既有文件上 ⇒ newTestFiles=0 ⇒ &#39;none of the 0 reported file(s)…&#39;</li><li>  ③ completion.backtest：基线 25a3320 是【worktree 的出身】，而 t26(672e044) 在它之后并入</li><li>     ⇒ 基线本身就红 ⇒ &#39;the baseline … is not green — it exited 1 before any of this change existed&#39;</li><li>★★ 而这【不是偶发】：本队已 5 次同形终止，全部由 captain 代落终态：</li><li>   t13 failed / t16 cancelled / t19 cancelled / t25 cancelled / t26 cancelled / t27 failed</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 verifier6 的三条建议并派任务</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务）<div class="why">为什么进这个池子：三条建议都明确，captain 已裁定</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ repair 类应有的完工门形状 —— r5/mutation 是否该看『既有夹具更新且仍能判别』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的原话：「repair 类任务与 TDD 完工门不匹配 —— r5/mutation 度量的是</li><li>   『为新工作写了新测试』，而 repair 的验收是『修改既有夹具后它仍能判别』，两者不是同一件事。」</li><li>★ 它的三条建议（captain 全部采纳）：</li><li>   ① repair 类的完工门应看「既有夹具是否更新且仍绿」，而不是 newTestFiles</li><li>   ② 或明确记入文档：「worktree worker 的终态一律由 captain 代落」</li><li>   ③ 或让判据同时看 worktree（连带修 ①）</li><li>★★ 为什么这是【无人值守的硬阻断】：</li><li>   如果每个 worktree worker 都交不出终态，那无人值守时【每一个任务】都要 captain 代落</li><li>   ⇒ 无人值守退化成「captain 逐个手收」，而那正是要消灭的形态</li><li>★ 而修复动作本身也受阻：captain 代落只能用 cancelled（completed 走不通），</li><li>   于是台账里出现【大量 cancelled 而实际合格】的交付 —— 而 cancelled 的语义是「被中止」，</li><li>   不是「做完了但记录不了」。★ 量与语义又不一致了。</li><li>★ verifier6 另报两个 worktree 环境缺格（都已解决，建议进任务模板）：</li><li>   ① 软链 node_modules ⇒ 相对链接 ../.pnpm/… 断裂 ⇒ ERR_MODULE_NOT_FOUND</li><li>      修法：worktree 内 pnpm install --offline（1.8s，复用 store），【不要软链】</li><li>   ② node_modules/.cache 缺失 ⇒ gate-readout-uniform 的 mkdtemp ENOENT ⇒ mkdir -p 即可</li><li>   ★ 两者修前都会被读成『测试失败』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0022</span>
+      <span class="pill wontfix">★ 明确不修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 夹具造出的缺陷与产品缺陷在返回值上同形（同一现象，三次不同成因）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(夹具构造) 与产品缺陷同形</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">三次现象相同、成因各不相同</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ verifier6 的原话：</li><li>   「三次现象完全一样：『这句调用没抛错』—— 而三次成因各不相同」</li><li>① kind:&#39;quality&#39; 不在 TASK_KINDS ⇒ 被参数 schema 拦（而 schema 的拒绝看起来像判据拒绝）</li><li>② verify:[&#39;grep -qx 7&#39;] ⇒ 静态面抓不到（『永远红』要跑一次才知道）</li><li>③ verify:[&#39;   &#39;] ⇒ 被 normalizeBlankOptionalTaskFields 【整个删掉】</li><li>   ⇒ 判据收到 undefined ⇒ 按『没提要求』判 ok（★ 而那是【对的】行为）</li><li>★ ③ 是它把 contract 位置真实收到的 ctx 抓下来（挂探针）才查明的</li><li>★ 它的结论：「夹具造出的缺陷与产品缺陷在返回值上同形 ——</li><li>   而我在这一轮里被它骗了三次，每次都差点报成『f-0003 复发了』。」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账；并采纳它给出的鉴别动作（挂探针抓判据真实收到的 ctx）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是构造纪律，不是产品缺陷）<div class="why">为什么进这个池子：鉴别动作明确（挂探针 + 两条防『拒绝来自参数校验』的断言）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少种『夹具构造错误』会伪装成『产品缺陷』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这条与本队那条一直没被完全命名的形态同源：</li><li>   「一个机制在它没想到的场景里，给出一个看起来正常的答案」</li><li>   而这次『场景』是：【夹具自己的构造错误】。</li><li>★ 它给出的鉴别动作（我采纳为纪律）：</li><li>   「把 contract 位置真实收到的 ctx 抓下来（挂探针）」</li><li>   ⇒ 不问『调用抛错了吗』，而问『判据实际收到了什么』</li><li>★ 而两次防呆（它最终采用的）：</li><li>   · 用 verify:[&#39;false&#39;]（非空、恒定非零、静态面能抓）</li><li>   · 加两条断言，排除『拒绝来自参数校验』</li><li>★ 附：它顺带查明 f-0003 的修法不是『放宽读取』而是【注入执行器】</li><li>   tools.ts:3811 传 execVerifyCommand ⇒ 判据跑得起来 ⇒ 不再恒 unmeasured</li><li>   实测：create_task(kind=work) ⇒ threw=false · task_id=t1 ✔</li><li>   反向半边：create_task(verify:[&#39;false&#39;]) ⇒ 被 [contract.verify-command] 拒且点名 id ✔</li><li>   ⇒ 修好且没有退化成『不把关』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0023</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ changedPaths 与 completion 门双向互斥 ⇒ worktree 任务无法诚实结算（第 3 次，死锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(派发层) worktree 写入 vs 队长工作区观察面</code> · mismatched / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">两侧互斥，无一合法输入</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 带 changedPaths ⇒ [dispatch.changed-paths] 拒：</li><li>   &#39;scripts/lifecycle-verify.mjs&#39; was reported as changed but no write to it was</li><li>   observed … and it is not a changed path in the working tree either</li><li>★ 不带 changedPaths ⇒ [completion.r5] + [completion.mutation] 拒：</li><li>   &#39;no scan directories were declared…&#39; / &#39;this task declared no changed files&#39;</li><li>★★ 判据说『你没改它』，完成门说『你没改任何东西』——【两句话不能同时满足】</li><li>★ 根因：写入按派工在隔离 worktree，而 gitChangedPaths(workspace) 读【队长工作区】</li><li>★ 实测对照：队长工作区的 git status 显示的是【别人】的文件，完全没有本任务的；</li><li>   worktree 里该文件是 M 且 lifecycle-verify exit=0</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为结构性冲突并派修（与 f-0020 同族但更靠前：f-0020 是完工门问错了问题，这一条是观察面读错了地方）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：三种修法都明确，captain 已裁定优先第一种</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 三种修法选哪个（见下）—— 那是一个设计裁定，不是实现细节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ checkpoint-dev 的原文：「第 3 次了，建议单独记一条」——</li><li>   t26 worktree → changedPaths 拒</li><li>   t28 worktree → changedPaths 拒</li><li>   t32 worktree → changedPaths 拒，且【不带它也被 completion 门拒】⇒ 死锁</li><li>★ 三种修法（它给出，captain 裁定）：</li><li>   ① 判据把该成员 worktree 的写入算进观察面  ← captain 选这个</li><li>   ② 此类任务不走 changedPaths / completion 门</li><li>   ③ 派工时明确『改完由谁合并』</li><li>★ 它的原话我采纳：「这不该由每个成员各踩一次、各报一次 failed。」</li><li>★★ 而这条与 f-0020 的关系（两个不同的缺口，别混）：</li><li>   f-0020：完工门问错了问题（r5 问『哪些文件是新的』，而 repair 不新增文件）</li><li>   f-0023：观察面读错了地方（读队长工作区，而写入在成员 worktree）</li><li>   ⇒ 修好 f-0020 之后，f-0023 仍然会拦（因为 changedPaths 那一侧没修）</li><li>   ⇒ 两者独立，都要修</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0024</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 台账被夹具污染：59/78 条是夹具产物，与真卡点混在同一目录且读取端分不出</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账落点) stateRoot 的作用域</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">记录被污染，而记录不可重算</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 按 scene.team 统计 78 条：</li><li>   team(占位) 39 · planning-loop(真) 18 · (unknown)占位 10 ·</li><li>   quality-loop 6 · gates-positions 3 · runtime-gate 2</li><li>★ ⇒ 59 条夹具产物与 18 条真卡点【混在同一目录】，读取端分不出</li><li>★ 根因：stateRoot 是【每个团队各自的】(workspaceOf(caller) + stateDir)，</li><li>   却被写成了【进程级单值】⇒ 夹具与成员各自临时工作区的卡点全写进主树那份真台账</li><li>★ point-dev 第一版就踩了：一次夹具跑动塞进 6 条假卡点，而它们在读取端与真卡点同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 point-dev 的两条建议：① 把隔离臂做成共享的 ② 清掉那 59 条</dd>
+      <dt>后来怎么处理的</dt><dd>point-dev 已修自己那部分（并清理了它造成的 7 条）；其余队友的夹具还没修<div class="why">为什么进这个池子：修法与清理动作都明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少别的机制也在用『进程级单值』当『每个团队各自的值』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话：「形态与 f-0022 同源：『夹具造出的与产品造出的在返回值上同形』</li><li>   —— 只是这里是【写进同一个文件】。而台账是『记录』，被污染后【不可重算】</li><li>   （README 第一条纪律：原始现象丢了就完了）。」</li><li>★ 它给出的修法（captain 采纳）：</li><li>   · stateRoot 由调用方显式传入；【没有它就不记】</li><li>   · 加【隔离臂】：不只断言『我这儿有』，还断言『主树那份没多东西』</li><li>★ 它没有动别人的条目（「删别人的记录不是我的写域」）—— 边界守持正确</li><li>★ 好消息：.agent-teams/ 被 gitignore ⇒ 不进提交，只污染运行时台账</li><li>★ 而这条同时是一份【成功证据】：自动记录真的在工作（78 条里 18 条是真卡点，</li><li>   而它们记录的正是成员真实撞上的事）。问题只在【落点】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0025</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ ESM 静态绑定：『每次调用时求值』不精确（★ 附一条被撤回的推断）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块加载) ESM 命名绑定</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">诊断标准不精确</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★★ 【已撤回】point-dev 原报的『同一进程里不同段落生效状态不同』—— 它自己做了检验，站不住：</li><li>   ① 那条『t17 已生效』的证据【无效】：它用的是『changedPaths 申报被接受』，</li><li>      而那次输入是两个观察面都对上的普通情形 —— 【新旧代码都放行】⇒ 证明不了任何事。</li><li>      要证明 t17 生效，必须看到【只有新代码才能产生】的读数（如 observed=[] 而 gitObserved 非空）。</li><li>   ② 『一个模块新、一个模块旧』在 ESM 下【不可能】：模块要么整张图新，要么整张旧。</li><li>      （captain 实测：两次 import 拿到同一个实例，模块缓存是进程级的。）</li><li>   ③ 连『t18 未生效』也没有证据 —— 『baseline 不可得』【也可能是新代码的正常行为】：</li><li>      t18 的修法是『有记录⇒用记录；没记录⇒明确 absent』，</li><li>      而它那条任务本来就没有 baseRevision 记录（在 t18 之前创建的）。</li><li>★ 而【仍然成立】的那个陈述（由实测支撑）：</li><li>   **当前没有任何读数能把『新代码的正常行为』与『旧代码的失效』分开。**</li><li>   ⇒ 那正是 t23 要解决的。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t23 的设计输入：fingerprint 必须能回答『哪一段是旧的』</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 在做）<div class="why">为什么进这个池子：t23 已有明确契约</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 指纹比较是否需要精确到【模块图】而不只是【文件】—— point-dev 的猜测</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 自己撤回了这条，理由比那条发现本身更有价值。它的原话：</li><li>   「我把【两个观察】拼成了一个【因果解释】，而那个解释是【最省事】的那一个。</li><li>    更糟的是：我把推断【当成实测】报给你，而你说『评为今晚第三重要』并写进了台账。</li><li>    ⇒ 一条未经验证的推断，因为被重复而获得了不该有的分量。」</li><li>★ 它带走的一条纪律（captain 采纳）：</li><li>   「下次我会先问：**这个读数，新旧代码会不会都产生同一个值？**</li><li>     若是 ⇒ 它证明不了任何事，不能当证据。」</li><li>★★ 而这条纪律与本队已有的形态同源：</li><li>   「读错位置的出口」—— 从一个证明不了任何事的读数里读出结论。</li><li>★ captain 的处置：</li><li>   · 台账里那条【降级】为『未验证的推断』（保留原文与撤回理由，不删除 —— 留痕优先）</li><li>   · t23 的设计输入改成上面那个由实测支撑的陈述</li><li>   · t23 的第一个素材也降级为『盘上与生产读数不同，成因未定』</li><li>★ 而我要单独记：**这是本轮第一次有成员撤回自己已被采纳的发现** ——</li><li>   而它撤回的动力来自它自己做的检验，不是来自被质疑。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0026</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器缺一维：current 不能证明「进程是新的」（而它被用来证明了两次）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块新鲜度检测) stamp 缺少构建时的提交</code> · misclassified / unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">读数被用于它答不了的问题</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 检测器读的两个值：</li><li>   loaded = 进程启动时读到的 stamp · onDisk = 此刻盘上的 stamp</li><li>   return loaded === onDisk ? &#39;current&#39; : &#39;stale&#39;</li><li>★ 它只回答：「盘上自本进程启动以来，有没有被重新 build 过」</li><li>★★ 它【不能】回答：「进程加载的是哪一个 commit 的代码」</li><li>   —— 因为若进程启动【之前】盘上就已经是当前这版，current 恒成立，</li><li>      而那时进程里的代码【仍然可能是更早 commit 的】。</li><li>★ point-dev 的实测：t24 的 claim 被拦，而同时 moduleFreshness() = current</li><li>   ⇒ 「current 同时出现在一次真实拦截里」—— 它的推论边界被实测击穿</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 finding 并派修：stamp 增加【构建时的 git 提交】一维</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要动 scripts/git-artifacts.mjs，不在任何当前 inScope 里）<div class="why">为什么进这个池子：补一维的实现明确：build 时写入 git 提交，进程启动时与当前 HEAD 比对</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 进程启动那一刻，盘上的构建对应哪个提交 —— 现在无从得知</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话（本队纪律级）：</li><li>   「我在同一个坑里踩了两次，而第二次是我用它去【纠正】第一次。</li><li>    这值得记：**一个读数一旦被当成『能分辨』，它就会在所有它分辨不了的地方被误用。**」</li><li>★ 而它把自己的第一次纠正也打了折：</li><li>   「我说：它第一次被使用就把我自己的一次错误归因挡了下来。</li><li>    ⇒ 那句话现在要打折：它挡下的是『【那个时刻】盘上有没有变』，</li><li>      而【没有】挡下『进程代码是否落后于当前提交』—— 而我当时断言的是后者。</li><li>      ⇒ 那次纠正本身，也是一个过强的推论。」</li><li>★★ 形态与它昨晚撤回的那条【一模一样】：</li><li>   「这个读数，新旧代码会不会都产生同一个值？」</li><li>   ⇒ current 在【进程是旧的但盘上没再 build 过】时也会产生 ⇒ 证明不了进程是新的</li><li>★ 修法（它给的，captain 采纳）：</li><li>   在 stamp 里加一个【构建时的 git 提交】（build 时由 git-artifacts.mjs 写入），</li><li>   进程启动时把它一并与当前 HEAD 比对 ⇒ 才能回答『我落后了没有』。</li><li>★★ 而 captain 也要记自己一笔：</li><li>   我昨晚把 t23 评为『让不可分辨本身消失』，并在台账里采纳了那个结论 ——</li><li>   而它只消失了【一部分】：盘上变动可辨，**落后于更早的 commit 不可辨**。</li><li>   ★ 而这条正是本队那条形态的又一实例：</li><li>      『一个机制在它没想到的场景里，给出一个看起来正常的答案』</li><li>      —— 而这次的场景是【进程启动前盘上就已经是当前这版】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0027</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器被用在【错误的进程】上：命令行读不到插件进程的内部状态</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(检测器的使用) 进程归属</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">测的是另一个进程</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ captain 用命令行 `node -e` 调 moduleFreshness ⇒ 每次都起一个新的 Node 进程</li><li>   ⇒ 加载的是【最新 lib】⇒ 当然报 current</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22：b2103754…</li><li>   今天 12:38：670b5c22…   ← 而盘上 stamp 现在是 670b5c22</li><li>   ⇒ 说明第二次读的是【captain 的临时进程，加载了最新 lib】</li><li>★ 结论：captain 从来没有测过插件进程的新鲜度。检测器也没测过。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账，并把「从工具出口读」作为 t23 的补充要求</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 的 WIRING GAP：moduleFreshness 还没接到任何工具出口）<div class="why">为什么进这个池子：修法明确：让某个 agent_teams_* 工具把 moduleFreshness 交出来</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 插件进程此刻到底持有哪个版本的 lib —— 需要一次【来自工具出口】的读数</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ captain 实测发现的元问题（比 f-0026 更根本）：</li><li>   我用 `node -e &quot;import(&#39;./lib/tools.js&#39;)...moduleFreshness()&quot;` 去问检测器。</li><li>   ★ 而那【每次都会起一个新的 Node 进程】⇒ 它加载的是【最新 lib】</li><li>   ⇒ 它当然报 current —— 【它问的是它自己，不是插件进程】。</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22 读：b2103754…</li><li>   今天 12:38 读：670b5c22…</li><li>   ⇒ 而盘上 stamp 现在是 670b5c22 ⇒ 说明第二次读的是【我的临时进程，加载了最新 lib】</li><li>★ 结论：**captain 从来没有测过插件进程的新鲜度。检测器也没测过。**</li><li></li><li>★★ 这意味着 f-0026 的修正还要再走一步：</li><li>   f-0026 说「检测器是钝的：current 不能证明进程是新的」</li><li>   ⇒ 而真相更基本：**那个读数根本不是从插件进程里读出来的**</li><li>   ⇒ 用命令行测一个【进程内部状态】，测到的是【命令行进程】的状态。</li><li></li><li>★ 而这个形态与本队那条一直在追的完全同源：</li><li>   「读错位置的出口」—— 从一个不属于那个位置的地方读了值。</li><li>   ⇒ 而我（captain）就在做这件事，而且我昨晚还把它写进了台账。</li><li></li><li>★★ 由此产生的一个正确问题：**怎么才能从插件进程内部读到它的状态？**</li><li>   · 检测器是【工具层】的 —— 只有它被一个工具调用求值时，才反映插件进程</li><li>   · 所以正确的读法是：让某个 agent_teams_* 工具把 moduleFreshness 交出来</li><li>   · 而那正是 t23 契约里说的「可上报」—— 它还没接到工具出口上</li><li>   ⇒ ★ 这是 t23 的一个 WIRING GAP（与 t31 那条同形）。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div>
+</section>
+
+
+<section id="st-fixed"><h2>② 已修 <span class="count">19</span></h2>
+  <p class="sub">已经修好并落地（有 commit / 有实测读数）。</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0001</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>inScope 声明了 src 却没声明对应的 lib 产物</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.build-artifact-scope</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope declares source path(s) &quot;src/gates/runtime/liveness.ts&quot; but declares no build artifact under &quot;lib/&quot;…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据能判（它读的就是 inScope），问题在【契约写的时候没人提醒】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 当场 amend 契约，补上 lib/ 路径</dd>
+      <dt>后来怎么处理的</dt><dd>amend 契约（多次）；后来 admission/requires 机制让「判据要什么」变成声明式的<div class="why">为什么进这个池子：补救动作明确（补声明），不需要用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时是否有人意识到「这是第几次」—— 没有计数机制</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 本轮出现 4 次（t8/t11/t6/t9 各一次）—— 频率信号明确</li><li>★ 而它促成了 requires 机制：让「判据要的输入面」变成可机械核对的东西</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0002</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>契约里声明的 verify 命令不可判（空命令 / 写死的真 / 写死的假）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">…verify command cannot be judged…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 「可判」这个性质本身要能被机械核对 —— 判据做到了，但它需要读命令的语义</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按可判性拒绝</dd>
+      <dt>后来怎么处理的</dt><dd>contract.verify-command 判据（584 行）<div class="why">为什么进这个池子：判据自己能判，且有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时没有意识到：verify 缺席与 verify 不可判是两件事</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 实测过 `grep -qx N` 在 /bin/sh 下永远不绿 —— 那是「写死的假」</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0003</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>执行器缺席 ⇒ 判据 unmeasured ⇒ 普通任务全都建不出来</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">the executor was not injected</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据把「执行器没注入」报成 unmeasured，而它被读成拒绝 ⇒ 任务建不出来</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：缺席 ⇒ ok（不适用），不是 unmeasured</dd>
+      <dt>后来怎么处理的</dt><dd>改判据的缺省方向（absent ⇒ not applicable）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ quality-gates.ts:510 对 kind=work 返回 ok —— 那条分支当时没人看过</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是「同一张验收表上的第三格」—— inScope / verify / 执行器三格，逐个暴露</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0004</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>判据的 appliesTo 认的 event 名与调用点传的不匹配 ⇒ 判据从不被求值</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · mismatched / uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 六个调用点传的 event 是 task-status / member-dispatched / …</li><li>★ 而判据 appliesTo 只认 &#39;runtime-liveness&#39; ⇒ 没有一个匹配</li><li>★ 判据装了但从未被求值 —— 而返回值看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按导出白名单（LIVENESS_EVENTS）发言</dd>
+      <dt>后来怎么处理的</dt><dd>appliesTo 改为按导出白名单；端到端 evaluated=1<div class="why">为什么进这个池子：修复方向明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ verifier3 独立发现前，没有任何机制能看出「这条判据从未跑过」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是本队「装了但调不到」第 4 次</li><li>★ 它促成了一条纪律：判据的调用点与它的 appliesTo 必须能机械对上</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0005</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>waitWindows 表建好了但没有任何地方读它 ⇒ 判据永远 unmeasured</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · unwired / unread</dd>
+      <dt>机制当时说的</dt><dd class="quote">the wait window was not observed</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ waitWindows（任务作用域、有界、有陈旧界限、注释完整）从未被任何构造函数读取</li><li>★ waitObservationFor 读的仍是 waitRecords.get(attemptId)（attempt 作用域）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 纠正成员的诊断：不是设计缺口，是接线缺口</dd>
+      <dt>后来怎么处理的</dt><dd>waitObservationFor 改从 waitWindows 读三个跨代概念；另修「换代冲掉产出指纹」<div class="why">为什么进这个池子：设计已完成，只差一个读取点</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 建数据结构的人与接输入面的人常是同一个 —— 而「建好了」被当成了「接通了」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 成员原以为「需要一次设计改动」，而 captain 读源码后发现设计已做完</li><li>★ 这是「装了但调不到」第 5 次，且发生在【新写的代码】里</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0006</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>admission 位置建好了却 0 个调用点（其余五个各有 1-3 个）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(位置级) admission</code> · uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 磁盘上有两个判据文件（checkpoint.ts / absorb.ts），注册表 registered=0</li><li>★ 「磁盘有 / 注册表无」的差集没人读</li><li>★ 而 evaluate 返回 ok:true —— 空位置看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为『装了但调不到』第 6 次，并明确它在【位置】这一层（比前五次更靠上）</dd>
+      <dt>后来怎么处理的</dt><dd>t11 派任务补调用点；t10 装配进 ALL_GATES<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「位置为空」与「位置的判据都通过」当时同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ verifier6 用【差集】（磁盘有 vs 注册表无）抓到的，且它没有判 fail —— 因为那是队友开发中的状态</li><li>★ 它是唯一一个【位置级】而不是判据级的实例</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0007</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>absorb 的闸门问了不存在的 kind ⇒ 判据在真实运行中永不发言</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.absorb</code> · overreaching / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ kind === &#39;requirement&#39; || &#39;plan&#39; —— 而 TASK_KINDS 里是 &#39;requirements&#39;（复数），没有 &#39;plan&#39;</li><li>★ 七个真实 kind 全部 ⇒ false；两个不存在的 ⇒ true</li><li>★ 「本轮本来不适用」与「闸门永不为真」完全同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：改成不依赖 kind（闸门 = 调用方交出了产物清单）</dd>
+      <dt>后来怎么处理的</dt><dd>去掉 kind 条件；新增臂 0/0b，TASK_KINDS 从构建产物 import、零字面量，两半成对<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员自己的 27 条臂没有一条发现它 —— 因为臂里的 ctx 也是自己构造的 kind</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「装了但调不到」第 7 次，但形态不同：它装了、也被调到了，而【它自己选择不说话】</li><li>★ 而这被「不适用不报」那条纪律【庇护】了 —— 纪律是对的，但需要一条臂防止『永不适用的闸门』借用它</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0008</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>convene 把「提问表没被接上」读成了「没有未回答的问题」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ openQuestions 缺席与空数组返回【完全相同的 JSON】</li><li>★ 缺席的真实含义是「没人接 open-questions.json」⇒ 无法判断</li><li>★ 而它被读成了「问题都答完了」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按三态纪律修（缺席 ⇒ unmeasured）</dd>
+      <dt>后来怎么处理的</dt><dd>缺席与空数组不同形；另把「没能测量」拆成两种不同形（缺席=去接线 / 形状坏=去修调用方）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员报的『三重还原保护』为何全失效 —— 当时还不知道是会话中断</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ ★ 根因不是逻辑错，是【上一轮的变异体被提交进了仓库】（ad7a3ed 的 QUESTIONS_MUTATED = true）</li><li>★ 成因：突变进行中【会话被中断】，process.on(&#39;exit&#39;) 没机会跑 ⇒ 三重还原保护全部失效。会话被中断不是测试失败，exit 钩子救不了。</li><li>★ captain 是提交它的人，责任在 captain。而它是【被队友读代码发现的】，不是任何检查发现的。</li><li>★ 这次事故的直接产物：一条【总是运行】的污染检查（只扫可执行代码、同时查 src 与 lib、不依赖突变是否还原）</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0009</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>12 个工具的 output schema 不接受自己返回的字段（create_task 自锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(工具层) agent_teams_*</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">&quot;value.input_surface&quot; is not a declared property (additionalProperties: false)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 12 个工具的 output schema 全是 additionalProperties:false，而接线给返回值加了 4 个诊断字段</li><li>★ 最严重的是 create_task：每次调用都被自己的 schema 拒绝</li><li>★ ⇒ 修它的任务【正需要用 create_task 来建】—— 一个阻断性缺陷堵住了修它的手段</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 先尝试在主树直接修，发现与 t14 的 worktree 冲突后【回退让出】（隔离纪律）</dd>
+      <dt>后来怎么处理的</dt><dd>五处 schema 改闭合、逐工具取用；status 从 additionalProperties:true 的另一极端同时修掉；新增普查臂（5→15 工具覆盖）<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 没有人想到「调用点加了字段，声明它的地方要跟上」是一个会被漏的环节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「声明它的地方落在实现后面」这一族，本轮出现 4 次（schema / inScope / 白名单 / 臂 11 口径）</li><li>★ captain 亲身体验了自锁：create_task 建不出任务 ⇒ 连『派个任务去修它』都做不到</li><li>★ 另有一条：共享 const 会因 ValueSchemaSpec 是字面量类型而报 33 条 TS2322 ⇒ 用函数返回而非常量</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0010</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>changedPaths 把「没能观测」读成了「虚报」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>dispatch.changed-paths</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">[dispatch.changed-paths] &quot;src/tools.ts&quot; was reported as changed but no write to it was ever observed in this member&#39;s session</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据没能观测到任何写入 —— 因为它读的是【本 attempt 的会话事件】里的 meta.diffs，而这次写入发生在【captain 用 cp 并入主树】这个动作里</li><li>★ 而「没能观测」与「观测了、确实没写」在返回值上【完全同形】</li></ul></dd>
+      <dt>临时裁决</dt><dd>★ 保任务继续：captain 接管 t14，用 cancelled + output 记录落终态；不为了让判据过去而虚报或报空 changedPaths</dd>
+      <dt>后来怎么处理的</dt><dd>补第二个观察面 gitChangedPaths（工作区真的脏了的路径），每条 reported 必须被【至少一个面】证实 —— commit cc58b4c。穷举证明（非抽样）：reported × observed × gitObserved 全部组合，反例数 0 ⇒ 绝不比旧口径松。<div class="why">为什么进这个池子：有可机械验证的正确解（穷举证明），不需要用户做决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时那次 update_task 调用的完整 ctx 没有留档（只有 changedPaths 记录下来）</li><li>★ 判据内部 observed 的实际取值（空数组还是 undefined）没有在报错里区分 —— 而这两者本该不同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 三个人独立撞上同一个卡点（point-dev / admission-dev / captain 本人）—— 这是它被判为『结构性』而不是『操作失误』的依据</li><li>★ 修法路上发现的边界：工作区是仓库子目录时 git status 带前缀 ⇒ 两边永不相等 ⇒ 判据【恒红】。恒红比恒真更危险：它阻断所有诚实的工作。</li><li>★ 已知残余边界（已钉成断言）：零工作的成员报一条恰好被别的任务改脏的路径 ⇒ 会被工作区面证实。本判据只回答『这条改动真的存在吗』，不回答『是谁改的』。</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0011</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>无 worktree 的任务在 completion.backtest 上恒不可满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>completion.backtest</code> · unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">the baseline state is unavailable (no parent/HEAD test result was provided), so a regression could not be told apart from a pre-existing failure</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ baseline 由 worktreeBaseOf(task.id) 推导（src/tools.ts:4173 → :4273）</li><li>★ 无 worktree（主树干活的 / captain 接管的）⇒ 恒 undefined</li><li>★ ⇒ 该判据在这类任务上【恒不可满足】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 接管 t15 落终态（reassign → captain）；缺口单独记账为 t18</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t18 已建，依赖 t17 串行）<div class="why">为什么进这个池子：补救动作明确（captain 可落终态），本质修法已派任务</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「无 worktree 的任务」这个场景当时没被考虑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 它的【口径是对的】—— 诚实报『没能测量』，没并进通过也没并进拒绝</li><li>★ 与 f-0010 同族但成因不同：前者是【口径错】（把没观测读成虚报），后者是【输入面没覆盖某场景】</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0012</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">量大于性质</span>
+      
+    </header>
+    <h3>臂 11 抓的是「一切改动」，而不是它声称的「偷偷改」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>scripts/verify-input-requires.test.mjs 臂 11</code> · overreaching</dd>
+      <dt>机制当时说的</dt><dd class="quote">★ 相对基线，判据源码里有**被删掉而没有等价改写**的行</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 它声称守护「本文件没偷偷改判据源码」</li><li>★ 实际读的量是「判据源码相对钉死基线的【任何】改动」</li><li>★ 于是每一个合法修判据的任务都撞红它：t5（加 admission 位置）一次、t17（修 changed-paths）又一次</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定方向 (a)：把『是谁改的』换成『这次改动有没有被声明』；本文件对判据源码的改动仍必须为空</dd>
+      <dt>后来怎么处理的</dt><dd>未提交 ⇒ 红；提交但无 Verify: ⇒ 红；按任务修 + 带 Verify: ⇒ 绿（三条成对证据实测）<div class="why">为什么进这个池子：口径明确，且有成对证据</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「基线钉死」这个设计本身的问题当时没被识别</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是同一条臂【第三次】口径不匹配 —— 而前两次的教训写在它自己的注释里</li><li>★ 修它的成员自己也踩了两处同形的坑，都被实测抓出：</li><li>  错 A：「至少一个相关提交带 Verify:」可被历史稀释 ⇒ 改成「每一个都必须带」</li><li>  错 B：git log &lt;基线&gt;..HEAD -- path 会遍历基线【之前】的提交 ⇒ 改成 rev-list --ancestry-path</li><li>★ 两处共同形状：**量大于性质** —— 与这条臂原来的毛病同源</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0013</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 机械标签把两个不同的本质归成了一类（misclassified 组）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(分析)</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">这是分析结论，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 做本质探索时，只能拿 blocker 的那一行 + notes ⇒ 判据的完整输出、调用点怎么消费它、当时的注册表状态，全都拿不到</li><li>★ 所以那一步【不是复现，是回忆】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 用「猜测 + 逐条验证」做了第一次本质探索</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是分析结论）；但它产出了两条可机械执行的预测验证任务<div class="why">为什么进这个池子：分析结论，无需用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「判据自己合流」与「读者读错」这两类，是否还有第三类没被发现</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 试跑方法（用户四步的第③步）：提出本质猜测，逐条验证「它能否导致组里每个表象」</li><li>★ 结果：两个猜测都被【部分证伪】—— 这本身证明试跑有价值（若全成立，反而说明猜测太宽）</li><li>猜测 A「机制把『没能判断』与『判断了』合流」⇒ 4/5 成立</li><li>猜测 B「判据读的量 ≠ 它声称的性质」⇒ 3/5 成立</li><li>★ f-0002 与 f-0003 两个猜测都不服，而它们是【同一个判据】—— 这不是巧合</li><li>★ 真正的区分：</li><li>  本质 ①：判据【自己】把「没能判断」与「判断了」合流（f-0007 / f-0008 / f-0010）</li><li>          修法 = 改判据内部，让三态不同形</li><li>  本质 ②：判据判得【对】，而【读它的那一层】把输出读错了（f-0002 / f-0003）</li><li>          修法 = 改【读者】，不是改判据</li><li>★ 而这两个本质【在同一个机械标签里】—— 机械索引看不出来</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0014</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>★ 台账机制自己的缺口：记录不可重放（12/12 条 replayable=false）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账机制)</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">机制缺口，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ scene.ctx 全为 null ⇒ 重建不出当时的输入</li><li>★ context.eventRefs 指不到具体事件 ⇒ 原始观测存在但不可定位（会话事件未按任务索引）</li><li>★ observed.mechanismState 全为 null ⇒ 拿不到判据当时的完整输出与内部状态</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：把缺口如实标成 replayable:false，而不是假装记录完整</dd>
+      <dt>后来怎么处理的</dt><dd>未修。修法是【让卡点在发生时自动记录】，而不是事后补<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「足够的上下文」的完整清单 —— 本轮只发现了三样缺的（ctx / 事件定位 / 机制状态），可能还有</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 结论：记录必须在【卡点发生时】做，事后补是补不上的</li><li>   · ctx 没记 ⇒ 重建不出</li><li>   · 会话事件没按任务索引 ⇒ 定位不到</li><li>   · 注册表快照没留 ⇒ 不知道当时有哪些判据</li><li>★ 而 fix 的形状与本队纪律一致：判据拒绝/未测量时【自己】落一条记录</li><li>   （含 requires 核对结论 + ctx 快照）—— 这正是「判据自己报」的延伸</li><li>★ 标记 replayable 这一格本身就起作用了：它让『读得懂』与『能重放』不同形</li><li>   若没有这一格，这 12 条会被读成『完整的记录』</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0015</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 预测验证命中：成团闸门无视上游 absorb 的裁决，四态全同形</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">普查臂 1 命中，是真实缺陷</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ absorb = ok / blocked / unmeasured / 键缺席 ⇒ convene 全部返回 {ok:true, autoApprove:true}</li><li>★ UPSTREAM_ABSORB 只出现在 convene.ts:675 的 upstreamStates（纯报告，无判断分支），而 checkpoint 那侧有完整三态分流（534-559）</li><li>★ 代价：成团闸门拿着【未知的吸收状态】自动成团（用户已裁定成团不需要点头）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为 t13 的修复任务；臂 1 红着正是在报告缺陷，不许弱化它</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：照 checkpoint 那支补三态分流 —— blocked 带原文、unmeasured 进 unmeasuredReasons、键缺席 ⇒ unmeasured<div class="why">为什么进这个池子：修法明确（照同文件另一支写）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 是否还有其他「把上游结论当布尔用」的地方 —— t20 只扫了 admission 位置</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮第一个【预测到】的卡点，不是撞上的：</li><li>   卡点 f-0013 的本质猜测 ⇒ t20 预测『它还应导致尚未观测到的表象』⇒ 普查 ⇒ 命中 1 处</li><li>★ 而它同时【收窄】了本质①的适用范围（t20 最有价值的读数）：</li><li>   14 条判据在「测量手段缺席」上【全部】如实报 unmeasured，零例外</li><li>   ⇒ 本质① 的载体不是『忘了说 unmeasured』（那一层写得非常扎实）</li><li>   ⇒ 而是【裁决的传递】：判据对自己读的输入很小心，却把【别的判据给的结论】当布尔用</li><li>★ 与文件自身注释直接矛盾：644-651 写着『每一个 unmeasured 支都先于返回』，而 absorb 那侧没有 unmeasured 支</li><li>★ verifier6 的证据强度补正：源码级突变真跑了，但【不能证明『臂 1 因突变而变红』】——</li><li>   臂 1 突变前就已红，一个本来已经红的臂区分不了『测到了机制』与『恰好在报别的问题』</li><li>   ⇒ 改用【对照实现】归因（传播三态⇒拒绝 / 吞掉三态⇒ok / 断言产品落在 swallow 一侧）</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0016</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 依赖判断只认 completed ⇒ failed/cancelled 作为终态永远卡死下游</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) unsatisfiedDependencies</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">整条链无法开工</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/state.ts:137  unsatisfiedDependencies 的实现是：</li><li>    dependencies.filter((id) =&gt; byId.get(id)?.status !== &#39;completed&#39;)</li><li>★ 它只认 completed ⇒ failed 与 cancelled 【都被当成未满足】</li><li>★ 而 failed/cancelled 是【终态】—— 它们不会再变 ⇒ 下游永远无法开工</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为阻断性缺陷并派修</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：★ 这条需要用户裁：终态是否等于满足？两种口径都说得通，而它们对『失败任务的下游该不该自动开工』给出相反答案</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 正确的口径是「终态即满足」还是「只有 completed 满足、failed 要人处理」—— 这是设计问题</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮【第一次】把 pool 标成 escalate 的卡点 —— 前面 15 条全部自解</li><li>★ 理由：口径有两种合理选择，而它们语义相反：</li><li>   甲：终态即满足 ⇒ failed 的下游可以开工（因为 failed 也是一个结论）</li><li>   乙：只有 completed 满足 ⇒ failed 必须由人处理后才放行</li><li>   ⇒ 甲的风险：上游失败而下游照跑，可能建立在坏的基础上</li><li>   ⇒ 乙的风险：正如本轮 —— 一条 failed 卡死整条链，而 failed 常常是【如实报告】而非交付失败</li><li>★ 本轮的具体情形更微妙：t17/t20 的 failed 都是【如实报告】——</li><li>   它们的交付物没有问题（t17 的修复已并入、t20 的普查正是它该红的），</li><li>   落 failed 是因为『pnpm verify exit=0』这条验收在『找出缺陷』这类任务上必然冲突。</li><li>   ⇒ 换句话说：这两个 failed 就是【合格的交付】，而机制把它们当成不合格。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0018</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>终态依赖放行了，但下游拿不到上游的结论（同一个缺陷的另一半）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) collectCompletedDependencyOutputs</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">解锁了但信息丢了</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/scheduler.ts:227  collectCompletedDependencyOutputs 末尾：</li><li>    .filter(task =&gt; task.status === &#39;completed&#39;)</li><li>★ 它把 failed/cancelled 上游【整个丢掉】</li><li>★ 探针实测下游派发文本：「Completed dependency results:\n(none)」</li><li>   ⇒ 下游解锁了，但什么都没拿到</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 追认实现者把缺口记成【如实记录的断言】而不是写成不变量</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务动 scheduler.ts）<div class="why">为什么进这个池子：修法明确（filter 改成终态即收；下游怎么用是下游的事）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 下游拿到 failed 上游的结论后【该怎么用】—— 那是下游的判断，不是调度层的</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是【同一个缺陷的另一半】，而且 t26 修的是它的前一半：</li><li>   前一半（state.ts）：终态该不该放行下游 ⇒ 已修（failed/cancelled 全部放行）</li><li>   后一半（scheduler.ts）：放行之后下游拿不拿得到上游的结论 ⇒ 未修</li><li>★ 而实现者对后一半的处置是对的：</li><li>   它【没有】把「下游看得见上游」写成不变量（那会把没做到的机制写成期望），</li><li>   而是写成一条【如实记录缺口的 KNOWN GAP 断言】并注明：scheduler.ts 口径改对之后，</li><li>   那条断言应当变红，那时翻过来。</li><li>★ 这条与本队最重要的那条纪律一致：</li><li>   「夹具不得把当前（错的）行为写成期望」—— 而它同时也没走到另一个极端</li><li>   （把没做到的说成做到了）。两个极端都是恒真。</li><li>★ t26 已为它准备好接口：state.ts 侧的 dependencyStatuses 已就绪。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0024</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 台账被夹具污染：59/78 条是夹具产物，与真卡点混在同一目录且读取端分不出</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账落点) stateRoot 的作用域</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">记录被污染，而记录不可重算</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 按 scene.team 统计 78 条：</li><li>   team(占位) 39 · planning-loop(真) 18 · (unknown)占位 10 ·</li><li>   quality-loop 6 · gates-positions 3 · runtime-gate 2</li><li>★ ⇒ 59 条夹具产物与 18 条真卡点【混在同一目录】，读取端分不出</li><li>★ 根因：stateRoot 是【每个团队各自的】(workspaceOf(caller) + stateDir)，</li><li>   却被写成了【进程级单值】⇒ 夹具与成员各自临时工作区的卡点全写进主树那份真台账</li><li>★ point-dev 第一版就踩了：一次夹具跑动塞进 6 条假卡点，而它们在读取端与真卡点同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 point-dev 的两条建议：① 把隔离臂做成共享的 ② 清掉那 59 条</dd>
+      <dt>后来怎么处理的</dt><dd>point-dev 已修自己那部分（并清理了它造成的 7 条）；其余队友的夹具还没修<div class="why">为什么进这个池子：修法与清理动作都明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少别的机制也在用『进程级单值』当『每个团队各自的值』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话：「形态与 f-0022 同源：『夹具造出的与产品造出的在返回值上同形』</li><li>   —— 只是这里是【写进同一个文件】。而台账是『记录』，被污染后【不可重算】</li><li>   （README 第一条纪律：原始现象丢了就完了）。」</li><li>★ 它给出的修法（captain 采纳）：</li><li>   · stateRoot 由调用方显式传入；【没有它就不记】</li><li>   · 加【隔离臂】：不只断言『我这儿有』，还断言『主树那份没多东西』</li><li>★ 它没有动别人的条目（「删别人的记录不是我的写域」）—— 边界守持正确</li><li>★ 好消息：.agent-teams/ 被 gitignore ⇒ 不进提交，只污染运行时台账</li><li>★ 而这条同时是一份【成功证据】：自动记录真的在工作（78 条里 18 条是真卡点，</li><li>   而它们记录的正是成员真实撞上的事）。问题只在【落点】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0025</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ ESM 静态绑定：『每次调用时求值』不精确（★ 附一条被撤回的推断）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块加载) ESM 命名绑定</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">诊断标准不精确</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★★ 【已撤回】point-dev 原报的『同一进程里不同段落生效状态不同』—— 它自己做了检验，站不住：</li><li>   ① 那条『t17 已生效』的证据【无效】：它用的是『changedPaths 申报被接受』，</li><li>      而那次输入是两个观察面都对上的普通情形 —— 【新旧代码都放行】⇒ 证明不了任何事。</li><li>      要证明 t17 生效，必须看到【只有新代码才能产生】的读数（如 observed=[] 而 gitObserved 非空）。</li><li>   ② 『一个模块新、一个模块旧』在 ESM 下【不可能】：模块要么整张图新，要么整张旧。</li><li>      （captain 实测：两次 import 拿到同一个实例，模块缓存是进程级的。）</li><li>   ③ 连『t18 未生效』也没有证据 —— 『baseline 不可得』【也可能是新代码的正常行为】：</li><li>      t18 的修法是『有记录⇒用记录；没记录⇒明确 absent』，</li><li>      而它那条任务本来就没有 baseRevision 记录（在 t18 之前创建的）。</li><li>★ 而【仍然成立】的那个陈述（由实测支撑）：</li><li>   **当前没有任何读数能把『新代码的正常行为』与『旧代码的失效』分开。**</li><li>   ⇒ 那正是 t23 要解决的。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t23 的设计输入：fingerprint 必须能回答『哪一段是旧的』</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 在做）<div class="why">为什么进这个池子：t23 已有明确契约</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 指纹比较是否需要精确到【模块图】而不只是【文件】—— point-dev 的猜测</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 自己撤回了这条，理由比那条发现本身更有价值。它的原话：</li><li>   「我把【两个观察】拼成了一个【因果解释】，而那个解释是【最省事】的那一个。</li><li>    更糟的是：我把推断【当成实测】报给你，而你说『评为今晚第三重要』并写进了台账。</li><li>    ⇒ 一条未经验证的推断，因为被重复而获得了不该有的分量。」</li><li>★ 它带走的一条纪律（captain 采纳）：</li><li>   「下次我会先问：**这个读数，新旧代码会不会都产生同一个值？**</li><li>     若是 ⇒ 它证明不了任何事，不能当证据。」</li><li>★★ 而这条纪律与本队已有的形态同源：</li><li>   「读错位置的出口」—— 从一个证明不了任何事的读数里读出结论。</li><li>★ captain 的处置：</li><li>   · 台账里那条【降级】为『未验证的推断』（保留原文与撤回理由，不删除 —— 留痕优先）</li><li>   · t23 的设计输入改成上面那个由实测支撑的陈述</li><li>   · t23 的第一个素材也降级为『盘上与生产读数不同，成因未定』</li><li>★ 而我要单独记：**这是本轮第一次有成员撤回自己已被采纳的发现** ——</li><li>   而它撤回的动力来自它自己做的检验，不是来自被质疑。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div></section>
+<section id="st-scheduled"><h2>② 已排任务 / 未修 <span class="count">6</span></h2>
+  <p class="sub">★ 修法与理由已定，但【还没落地】—— 典型情况是排在一条写域串行链的后面，或等一个前置任务。</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0017</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 同一份事实，两种读法：status 把 unmeasured 折进 blockers，declare_delivery 独立暴露</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调用层) delivery 的两个消费点</code> · misclassified / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">消费口径不一致，不是裁决错</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ status (tools.ts:5138-5141) 把 unmeasured 推进 blockers 数组：</li><li>    blockers: [..., ...deliveryEvaluation.unmeasured === undefined ? [] : [`could not measure: ${...}`]]</li><li>    ⇒ 返回对象里【没有】独立的 unmeasured 字段</li><li>★ declare_delivery (tools.ts:5269 一带) 保持三态不同形：有自己的 unmeasured 分支，措辞与 blockers 不同形</li><li>★ 实测：unmeasured 与 blocked 两种来源 ⇒ ok 都是 false，都没有独立 unmeasured 字段</li><li>  唯一差别是那句里的 &#39;could not measure: &#39; 前缀 ⇒ ★【靠措辞区分，不靠形状】</li><li>★★ schema 层证据（verifier6 钉死的，captain 核实于 src/tools.ts:4930）：</li><li>   status 返回的 delivery 对象 schema 是 additionalProperties:false，</li><li>   字段只有 { ok, blockers, gates_evaluated, input_surface }</li><li>   ⇒ ★ 结构上【没有】放 unmeasured 的地方 ⇒ 它只能挤进 blockers</li><li>★ 真实路径复现（不是构造）：</li><li>   registry.evaluate(&#39;delivery&#39;, { team, gate:{ok:true,blockers:[]} })</li><li>   ⇒ { ok:false, unmeasured:&#39;[delivery.coverage] the goal coverage matrix was not provided…&#39;,</li><li>       blockers:[], evaluated:2, registered:2 }</li><li>   ⇒ delivery 现在【真的会】产出 unmeasured ⇒ tools.ts:5127 那三行【每次 status 调用都执行】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t21 的第二条断言 + 建议单开 repair</dd>
+      <dt>后来怎么处理的</dt><dd>未修 —— ★ 已排定修复任务，但被写域串行链挡住：src/tools.ts 上同时有 t22/t23/t24 三个 open 任务（point-dev 的串行链），而任务图校验拒绝任何与它们重叠的 inScope ⇒ f-0017 的 repair 排在 t24 之后。★ captain 已确认修法（给 delivery 对象加独立 unmeasured 字段，让 status 不再拼进 blockers），并已写进一份待派任务的验收，等那条链收口即派。<div class="why">为什么进这个池子：修法明确（让 status 与 declare_delivery 同形地暴露 unmeasured）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有没有其他位置也在用『措辞前缀』区分三态 —— 它只扫了 delivery</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的评语准确：「这比『读错了』更麻烦：它让两个工具对同一份事实给出不同形状的答复」</li><li>★ 而它指出 t21 原计划的那条断言（两处 ctx 必须逐字段相同）【保护不了这一条】：</li><li>   ctx 相同、求值相同，【消费方式不同】—— 这是比 ctx 分叉更深一层的不一致</li><li>★ 严重性放大：delivery 是【唯一持续产生 unmeasured 的位置】（convergence 观察不到成员面）</li><li>   ⇒ 今天每次 status 调用都会往 blockers 里塞一条 &#39;could not measure: …&#39;</li><li>   ⇒ 任何读 blockers 的调用方都会把它当成一条『交付被拒的理由』</li><li>★ 定向突变现成：把 status 那句改成独立的 unmeasured 字段 ⇒ t21 的臂必须红</li><li>★ 另三条负结果（verifier6 逐一读过代码）：</li><li>   runtime(2241)/contract(2358)/dispatch(4160)/completion(4442) 四处都【正确地】</li><li>   把 unmeasured 与 blockers 分开处理 ⇒ f-0003 那个形态在这四处已修好</li><li>★★ verifier6 钉到 schema 层的结论：差异只落在【措辞】（那个 &#39;could not measure: &#39; 前缀），</li><li>   而契约 §3.4 的要求是【形状不同形】，不是措辞不同形。</li><li>★ 而它给出的严重性排序（我采纳）：</li><li>   「f-0003：执行器缺席 ⇒ 所有普通任务建不出来（已修）</li><li>     这一条：delivery 恒 unmeasured ⇒ 每次 status 都往 blockers 里加一条</li><li>     ⇒ 而今天它就是『恒真』的：不是某条特殊路径，是【每一次读状态】</li><li>     ⇒ 一个恒常出现的『假拒绝理由』，会教人学会忽略 blockers ——</li><li>        那正是本队记过的『判据被学会忽略』那条老路」</li><li>★★ t21 的普查臂 1/2/3 现在正红着报告这条缺陷（不是回归，是它的产出）。</li><li>★ 修好之后那三条臂应【自动转绿】—— 那是「修法生效」的机械证据。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0019</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ inScope 重叠检查只豁免一个方向 ⇒ 合法依赖链上的任务无法同时编辑</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(任务图校验) inScopeOverlap 的豁免方向</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope overlaps t22 at src/tools.ts, lib/tools.js, lib/types/tools.d.ts; serialize these tasks or split the paths</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/quality-gates.ts:395  的豁免规则是：</li><li>    if (dependencies.includes(other.id) || other.dependencies.includes(&#39;pending-new&#39;)) continue</li><li>★ 它判的是【我依赖它】⇒ 只豁免一个方向</li><li>★ 而实际关系是 t22 依赖 t18（别人依赖我）⇒ 那个方向【没有豁免】</li><li>★ 且我这次改的是【dependencies】而不是 inScope，检查却对既有任务的 inScope 无条件生效</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为判据缺口；本次用 captain 写域直接解锁并如实记账</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：豁免应当是【双向的】—— 两侧任一方依赖另一方 ⇒ 写域重叠是新接线的正常次序，不是冲突<div class="why">为什么进这个池子：修法明确（把单向豁免改成双向）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少「合法链上的任务」因为这个方向性缺口而无法同时编辑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 方向的实质：一条【已声明的依赖链】恰恰【证明】两个任务的写域会被串行执行</li><li>   ⇒ 那种重叠是【设计的一部分】，不是冲突</li><li>   ⇒ 而现在的检查把它当成冲突 ⇒ 让合法链上的任务无法同时被编辑</li><li>★ 而触发点也偏了：检查对【既有任务的 inScope】无条件生效，</li><li>   哪怕我改的是 dependencies 或 description，根本没碰 inScope</li><li>★ 与本队记账的形态同源：**量大于性质** ——</li><li>   它读的量是「两个任务的 inScope 是否重叠」，</li><li>   而它声称的性质是「这两个任务会不会真的冲突」。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0020</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 无人值守的硬阻断：worktree worker 交不出终态（5 次同形终止）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(完工门) worktree worker 的终态</code> · unsatisfiable / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">三道完工门连续拒绝，全部与改动无关</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三道拒绝的成因：</li><li>  ① dispatch.changed-paths：worker 编辑落在 worktree，判据只读 captain 工作区</li><li>  ② completion.r5 / mutation：r5 只看 update.newTestFiles，而 repair 改的是【已有】夹具</li><li>     ⇒ 净 +139/-19 全在既有文件上 ⇒ newTestFiles=0 ⇒ &#39;none of the 0 reported file(s)…&#39;</li><li>  ③ completion.backtest：基线 25a3320 是【worktree 的出身】，而 t26(672e044) 在它之后并入</li><li>     ⇒ 基线本身就红 ⇒ &#39;the baseline … is not green — it exited 1 before any of this change existed&#39;</li><li>★★ 而这【不是偶发】：本队已 5 次同形终止，全部由 captain 代落终态：</li><li>   t13 failed / t16 cancelled / t19 cancelled / t25 cancelled / t26 cancelled / t27 failed</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 verifier6 的三条建议并派任务</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务）<div class="why">为什么进这个池子：三条建议都明确，captain 已裁定</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ repair 类应有的完工门形状 —— r5/mutation 是否该看『既有夹具更新且仍能判别』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的原话：「repair 类任务与 TDD 完工门不匹配 —— r5/mutation 度量的是</li><li>   『为新工作写了新测试』，而 repair 的验收是『修改既有夹具后它仍能判别』，两者不是同一件事。」</li><li>★ 它的三条建议（captain 全部采纳）：</li><li>   ① repair 类的完工门应看「既有夹具是否更新且仍绿」，而不是 newTestFiles</li><li>   ② 或明确记入文档：「worktree worker 的终态一律由 captain 代落」</li><li>   ③ 或让判据同时看 worktree（连带修 ①）</li><li>★★ 为什么这是【无人值守的硬阻断】：</li><li>   如果每个 worktree worker 都交不出终态，那无人值守时【每一个任务】都要 captain 代落</li><li>   ⇒ 无人值守退化成「captain 逐个手收」，而那正是要消灭的形态</li><li>★ 而修复动作本身也受阻：captain 代落只能用 cancelled（completed 走不通），</li><li>   于是台账里出现【大量 cancelled 而实际合格】的交付 —— 而 cancelled 的语义是「被中止」，</li><li>   不是「做完了但记录不了」。★ 量与语义又不一致了。</li><li>★ verifier6 另报两个 worktree 环境缺格（都已解决，建议进任务模板）：</li><li>   ① 软链 node_modules ⇒ 相对链接 ../.pnpm/… 断裂 ⇒ ERR_MODULE_NOT_FOUND</li><li>      修法：worktree 内 pnpm install --offline（1.8s，复用 store），【不要软链】</li><li>   ② node_modules/.cache 缺失 ⇒ gate-readout-uniform 的 mkdtemp ENOENT ⇒ mkdir -p 即可</li><li>   ★ 两者修前都会被读成『测试失败』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0023</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ changedPaths 与 completion 门双向互斥 ⇒ worktree 任务无法诚实结算（第 3 次，死锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(派发层) worktree 写入 vs 队长工作区观察面</code> · mismatched / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">两侧互斥，无一合法输入</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 带 changedPaths ⇒ [dispatch.changed-paths] 拒：</li><li>   &#39;scripts/lifecycle-verify.mjs&#39; was reported as changed but no write to it was</li><li>   observed … and it is not a changed path in the working tree either</li><li>★ 不带 changedPaths ⇒ [completion.r5] + [completion.mutation] 拒：</li><li>   &#39;no scan directories were declared…&#39; / &#39;this task declared no changed files&#39;</li><li>★★ 判据说『你没改它』，完成门说『你没改任何东西』——【两句话不能同时满足】</li><li>★ 根因：写入按派工在隔离 worktree，而 gitChangedPaths(workspace) 读【队长工作区】</li><li>★ 实测对照：队长工作区的 git status 显示的是【别人】的文件，完全没有本任务的；</li><li>   worktree 里该文件是 M 且 lifecycle-verify exit=0</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为结构性冲突并派修（与 f-0020 同族但更靠前：f-0020 是完工门问错了问题，这一条是观察面读错了地方）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：三种修法都明确，captain 已裁定优先第一种</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 三种修法选哪个（见下）—— 那是一个设计裁定，不是实现细节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ checkpoint-dev 的原文：「第 3 次了，建议单独记一条」——</li><li>   t26 worktree → changedPaths 拒</li><li>   t28 worktree → changedPaths 拒</li><li>   t32 worktree → changedPaths 拒，且【不带它也被 completion 门拒】⇒ 死锁</li><li>★ 三种修法（它给出，captain 裁定）：</li><li>   ① 判据把该成员 worktree 的写入算进观察面  ← captain 选这个</li><li>   ② 此类任务不走 changedPaths / completion 门</li><li>   ③ 派工时明确『改完由谁合并』</li><li>★ 它的原话我采纳：「这不该由每个成员各踩一次、各报一次 failed。」</li><li>★★ 而这条与 f-0020 的关系（两个不同的缺口，别混）：</li><li>   f-0020：完工门问错了问题（r5 问『哪些文件是新的』，而 repair 不新增文件）</li><li>   f-0023：观察面读错了地方（读队长工作区，而写入在成员 worktree）</li><li>   ⇒ 修好 f-0020 之后，f-0023 仍然会拦（因为 changedPaths 那一侧没修）</li><li>   ⇒ 两者独立，都要修</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0026</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器缺一维：current 不能证明「进程是新的」（而它被用来证明了两次）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块新鲜度检测) stamp 缺少构建时的提交</code> · misclassified / unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">读数被用于它答不了的问题</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 检测器读的两个值：</li><li>   loaded = 进程启动时读到的 stamp · onDisk = 此刻盘上的 stamp</li><li>   return loaded === onDisk ? &#39;current&#39; : &#39;stale&#39;</li><li>★ 它只回答：「盘上自本进程启动以来，有没有被重新 build 过」</li><li>★★ 它【不能】回答：「进程加载的是哪一个 commit 的代码」</li><li>   —— 因为若进程启动【之前】盘上就已经是当前这版，current 恒成立，</li><li>      而那时进程里的代码【仍然可能是更早 commit 的】。</li><li>★ point-dev 的实测：t24 的 claim 被拦，而同时 moduleFreshness() = current</li><li>   ⇒ 「current 同时出现在一次真实拦截里」—— 它的推论边界被实测击穿</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 finding 并派修：stamp 增加【构建时的 git 提交】一维</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要动 scripts/git-artifacts.mjs，不在任何当前 inScope 里）<div class="why">为什么进这个池子：补一维的实现明确：build 时写入 git 提交，进程启动时与当前 HEAD 比对</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 进程启动那一刻，盘上的构建对应哪个提交 —— 现在无从得知</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话（本队纪律级）：</li><li>   「我在同一个坑里踩了两次，而第二次是我用它去【纠正】第一次。</li><li>    这值得记：**一个读数一旦被当成『能分辨』，它就会在所有它分辨不了的地方被误用。**」</li><li>★ 而它把自己的第一次纠正也打了折：</li><li>   「我说：它第一次被使用就把我自己的一次错误归因挡了下来。</li><li>    ⇒ 那句话现在要打折：它挡下的是『【那个时刻】盘上有没有变』，</li><li>      而【没有】挡下『进程代码是否落后于当前提交』—— 而我当时断言的是后者。</li><li>      ⇒ 那次纠正本身，也是一个过强的推论。」</li><li>★★ 形态与它昨晚撤回的那条【一模一样】：</li><li>   「这个读数，新旧代码会不会都产生同一个值？」</li><li>   ⇒ current 在【进程是旧的但盘上没再 build 过】时也会产生 ⇒ 证明不了进程是新的</li><li>★ 修法（它给的，captain 采纳）：</li><li>   在 stamp 里加一个【构建时的 git 提交】（build 时由 git-artifacts.mjs 写入），</li><li>   进程启动时把它一并与当前 HEAD 比对 ⇒ 才能回答『我落后了没有』。</li><li>★★ 而 captain 也要记自己一笔：</li><li>   我昨晚把 t23 评为『让不可分辨本身消失』，并在台账里采纳了那个结论 ——</li><li>   而它只消失了【一部分】：盘上变动可辨，**落后于更早的 commit 不可辨**。</li><li>   ★ 而这条正是本队那条形态的又一实例：</li><li>      『一个机制在它没想到的场景里，给出一个看起来正常的答案』</li><li>      —— 而这次的场景是【进程启动前盘上就已经是当前这版】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0027</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器被用在【错误的进程】上：命令行读不到插件进程的内部状态</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(检测器的使用) 进程归属</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">测的是另一个进程</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ captain 用命令行 `node -e` 调 moduleFreshness ⇒ 每次都起一个新的 Node 进程</li><li>   ⇒ 加载的是【最新 lib】⇒ 当然报 current</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22：b2103754…</li><li>   今天 12:38：670b5c22…   ← 而盘上 stamp 现在是 670b5c22</li><li>   ⇒ 说明第二次读的是【captain 的临时进程，加载了最新 lib】</li><li>★ 结论：captain 从来没有测过插件进程的新鲜度。检测器也没测过。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账，并把「从工具出口读」作为 t23 的补充要求</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 的 WIRING GAP：moduleFreshness 还没接到任何工具出口）<div class="why">为什么进这个池子：修法明确：让某个 agent_teams_* 工具把 moduleFreshness 交出来</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 插件进程此刻到底持有哪个版本的 lib —— 需要一次【来自工具出口】的读数</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ captain 实测发现的元问题（比 f-0026 更根本）：</li><li>   我用 `node -e &quot;import(&#39;./lib/tools.js&#39;)...moduleFreshness()&quot;` 去问检测器。</li><li>   ★ 而那【每次都会起一个新的 Node 进程】⇒ 它加载的是【最新 lib】</li><li>   ⇒ 它当然报 current —— 【它问的是它自己，不是插件进程】。</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22 读：b2103754…</li><li>   今天 12:38 读：670b5c22…</li><li>   ⇒ 而盘上 stamp 现在是 670b5c22 ⇒ 说明第二次读的是【我的临时进程，加载了最新 lib】</li><li>★ 结论：**captain 从来没有测过插件进程的新鲜度。检测器也没测过。**</li><li></li><li>★★ 这意味着 f-0026 的修正还要再走一步：</li><li>   f-0026 说「检测器是钝的：current 不能证明进程是新的」</li><li>   ⇒ 而真相更基本：**那个读数根本不是从插件进程里读出来的**</li><li>   ⇒ 用命令行测一个【进程内部状态】，测到的是【命令行进程】的状态。</li><li></li><li>★ 而这个形态与本队那条一直在追的完全同源：</li><li>   「读错位置的出口」—— 从一个不属于那个位置的地方读了值。</li><li>   ⇒ 而我（captain）就在做这件事，而且我昨晚还把它写进了台账。</li><li></li><li>★★ 由此产生的一个正确问题：**怎么才能从插件进程内部读到它的状态？**</li><li>   · 检测器是【工具层】的 —— 只有它被一个工具调用求值时，才反映插件进程</li><li>   · 所以正确的读法是：让某个 agent_teams_* 工具把 moduleFreshness 交出来</li><li>   · 而那正是 t23 契约里说的「可上报」—— 它还没接到工具出口上</li><li>   ⇒ ★ 这是 t23 的一个 WIRING GAP（与 t31 那条同形）。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div></section>
+<section id="st-open"><h2>② 开着 <span class="count">1</span></h2>
+  <p class="sub">还没定修法，或修法未定。</p>
+  <div class="grid">
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0021</span>
+      <span class="pill open">开着</span>
+      <span class="pill ess">读了过期的来源</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 两个缺口互相锁死：旧模块 ⇒ 任务冻住 ⇒ t24 的重载闸门永不满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(重载闸门 + 旧模块) 互相锁死</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">证明性地无法自行解锁</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三层对齐：耐久态 t18=cancelled（终态）· 盘上 unsatisfiedDependencies ⇒ [] · claim 仍报 blocked</li><li>★★ point-dev 指出的闭环：</li><li>   旧模块 ⇒ 任务开不了工 ⇒ 任务做不完 ⇒ 一直有『进行中工作』</li><li>          ⇒ t24 的重载闸门（无进行中工作）永不满足 ⇒ 永远重载不了</li><li>          ⇒ 旧模块永远不会被换掉</li><li>★ 而 integrator6 从相反方向给了同一结论：</li><li>   三道完工门卡【收尾】、旧模块卡【开工】—— 两者合起来让 t24 不可达</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t24 的设计输入：闸门需要一个逃生口</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要写进 t24 的契约）<div class="why">为什么进这个池子：★ 这是本轮第二条标 escalate 的 —— 它需要用户裁定「逃生口」的边界：在什么条件下允许【明知有进行中工作】仍重载</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ t24 的闸门是否需要【逃生口】—— 在整条链都冻住时仍能重载</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ 这不是『两个独立的缺口相加』，是【互相锁死的一对】：</li><li>   旧模块  ──卡开工──▶  任务做不完  ──▶  一直有进行中工作  ──▶  重载闸门不满足</li><li>      ▲                                                              │</li><li>      └──────────────────  重载不了，旧模块永不换掉  ◀──────────────┘</li><li>★ point-dev 的原话：「这不是『两个独立的缺口相加』，是【互相锁死的一对】。」</li><li>★ 而它的推论我采纳：t24 的闸门需要一个【逃生口】——</li><li>   在『整条链都冻住』时仍能重载；否则那条链在【没有外部干预（用户手动重启）】时</li><li>   证明性地无法自行解锁。</li><li>★★ 这是本轮最精准的一条因果链，而且它是【两个成员从相反方向独立得出的】：</li><li>   integrator6：从『完工门卡收尾、旧模块卡开工』推出 t24 不可达</li><li>   point-dev  ：从『claim 被拦』推出闭环</li><li>★ 而它对本项目有直接含义：</li><li>   用户要的是【无人值守】。而这个闭环意味着 ——</li><li>   在最坏的情况下，无人值守会【证明性地卡死】，直到有人手动重启。</li><li>   ⇒ 所以 t24 不只是一个便利功能，它是无人值守的必要条件。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div></section>
+<section id="st-wontfix"><h2>② ★ 明确不修 <span class="count">1</span></h2>
+  <p class="sub">★ 明确不修 + 理由 —— 这一格存在的理由是：「不修」是一个决定，不是遗忘。</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0022</span>
+      <span class="pill wontfix">★ 明确不修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 夹具造出的缺陷与产品缺陷在返回值上同形（同一现象，三次不同成因）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(夹具构造) 与产品缺陷同形</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">三次现象相同、成因各不相同</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ verifier6 的原话：</li><li>   「三次现象完全一样：『这句调用没抛错』—— 而三次成因各不相同」</li><li>① kind:&#39;quality&#39; 不在 TASK_KINDS ⇒ 被参数 schema 拦（而 schema 的拒绝看起来像判据拒绝）</li><li>② verify:[&#39;grep -qx 7&#39;] ⇒ 静态面抓不到（『永远红』要跑一次才知道）</li><li>③ verify:[&#39;   &#39;] ⇒ 被 normalizeBlankOptionalTaskFields 【整个删掉】</li><li>   ⇒ 判据收到 undefined ⇒ 按『没提要求』判 ok（★ 而那是【对的】行为）</li><li>★ ③ 是它把 contract 位置真实收到的 ctx 抓下来（挂探针）才查明的</li><li>★ 它的结论：「夹具造出的缺陷与产品缺陷在返回值上同形 ——</li><li>   而我在这一轮里被它骗了三次，每次都差点报成『f-0003 复发了』。」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账；并采纳它给出的鉴别动作（挂探针抓判据真实收到的 ctx）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是构造纪律，不是产品缺陷）<div class="why">为什么进这个池子：鉴别动作明确（挂探针 + 两条防『拒绝来自参数校验』的断言）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少种『夹具构造错误』会伪装成『产品缺陷』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这条与本队那条一直没被完全命名的形态同源：</li><li>   「一个机制在它没想到的场景里，给出一个看起来正常的答案」</li><li>   而这次『场景』是：【夹具自己的构造错误】。</li><li>★ 它给出的鉴别动作（我采纳为纪律）：</li><li>   「把 contract 位置真实收到的 ctx 抓下来（挂探针）」</li><li>   ⇒ 不问『调用抛错了吗』，而问『判据实际收到了什么』</li><li>★ 而两次防呆（它最终采用的）：</li><li>   · 用 verify:[&#39;false&#39;]（非空、恒定非零、静态面能抓）</li><li>   · 加两条断言，排除『拒绝来自参数校验』</li><li>★ 附：它顺带查明 f-0003 的修法不是『放宽读取』而是【注入执行器】</li><li>   tools.ts:3811 传 execVerifyCommand ⇒ 判据跑得起来 ⇒ 不再恒 unmeasured</li><li>   实测：create_task(kind=work) ⇒ threw=false · task_id=t1 ✔</li><li>   反向半边：create_task(verify:[&#39;false&#39;]) ⇒ 被 [contract.verify-command] 拒且点名 id ✔</li><li>   ⇒ 修好且没有退化成『不把关』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div></section>
+
+
+<section id="es-misclassified">
+  <h2>③ 把「没能测量」读成了「测出来了」 <span class="count">15</span></h2>
+  <p class="sub">三态合流：unmeasured 被当成 ok 或 blocked ⇒ 症状与「这一轮本来不适用」同形</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0002</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>契约里声明的 verify 命令不可判（空命令 / 写死的真 / 写死的假）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">…verify command cannot be judged…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 「可判」这个性质本身要能被机械核对 —— 判据做到了，但它需要读命令的语义</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按可判性拒绝</dd>
+      <dt>后来怎么处理的</dt><dd>contract.verify-command 判据（584 行）<div class="why">为什么进这个池子：判据自己能判，且有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时没有意识到：verify 缺席与 verify 不可判是两件事</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 实测过 `grep -qx N` 在 /bin/sh 下永远不绿 —— 那是「写死的假」</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0003</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>执行器缺席 ⇒ 判据 unmeasured ⇒ 普通任务全都建不出来</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.verify-command</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">the executor was not injected</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据把「执行器没注入」报成 unmeasured，而它被读成拒绝 ⇒ 任务建不出来</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：缺席 ⇒ ok（不适用），不是 unmeasured</dd>
+      <dt>后来怎么处理的</dt><dd>改判据的缺省方向（absent ⇒ not applicable）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ quality-gates.ts:510 对 kind=work 返回 ok —— 那条分支当时没人看过</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是「同一张验收表上的第三格」—— inScope / verify / 执行器三格，逐个暴露</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0007</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>absorb 的闸门问了不存在的 kind ⇒ 判据在真实运行中永不发言</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.absorb</code> · overreaching / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ kind === &#39;requirement&#39; || &#39;plan&#39; —— 而 TASK_KINDS 里是 &#39;requirements&#39;（复数），没有 &#39;plan&#39;</li><li>★ 七个真实 kind 全部 ⇒ false；两个不存在的 ⇒ true</li><li>★ 「本轮本来不适用」与「闸门永不为真」完全同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：改成不依赖 kind（闸门 = 调用方交出了产物清单）</dd>
+      <dt>后来怎么处理的</dt><dd>去掉 kind 条件；新增臂 0/0b，TASK_KINDS 从构建产物 import、零字面量，两半成对<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员自己的 27 条臂没有一条发现它 —— 因为臂里的 ctx 也是自己构造的 kind</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「装了但调不到」第 7 次，但形态不同：它装了、也被调到了，而【它自己选择不说话】</li><li>★ 而这被「不适用不报」那条纪律【庇护】了 —— 纪律是对的，但需要一条臂防止『永不适用的闸门』借用它</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0008</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>convene 把「提问表没被接上」读成了「没有未回答的问题」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ openQuestions 缺席与空数组返回【完全相同的 JSON】</li><li>★ 缺席的真实含义是「没人接 open-questions.json」⇒ 无法判断</li><li>★ 而它被读成了「问题都答完了」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按三态纪律修（缺席 ⇒ unmeasured）</dd>
+      <dt>后来怎么处理的</dt><dd>缺席与空数组不同形；另把「没能测量」拆成两种不同形（缺席=去接线 / 形状坏=去修调用方）<div class="why">为什么进这个池子：有明确口径</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 成员报的『三重还原保护』为何全失效 —— 当时还不知道是会话中断</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ ★ 根因不是逻辑错，是【上一轮的变异体被提交进了仓库】（ad7a3ed 的 QUESTIONS_MUTATED = true）</li><li>★ 成因：突变进行中【会话被中断】，process.on(&#39;exit&#39;) 没机会跑 ⇒ 三重还原保护全部失效。会话被中断不是测试失败，exit 钩子救不了。</li><li>★ captain 是提交它的人，责任在 captain。而它是【被队友读代码发现的】，不是任何检查发现的。</li><li>★ 这次事故的直接产物：一条【总是运行】的污染检查（只扫可执行代码、同时查 src 与 lib、不依赖突变是否还原）</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0013</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 机械标签把两个不同的本质归成了一类（misclassified 组）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(分析)</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">这是分析结论，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 做本质探索时，只能拿 blocker 的那一行 + notes ⇒ 判据的完整输出、调用点怎么消费它、当时的注册表状态，全都拿不到</li><li>★ 所以那一步【不是复现，是回忆】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 用「猜测 + 逐条验证」做了第一次本质探索</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是分析结论）；但它产出了两条可机械执行的预测验证任务<div class="why">为什么进这个池子：分析结论，无需用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「判据自己合流」与「读者读错」这两类，是否还有第三类没被发现</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 试跑方法（用户四步的第③步）：提出本质猜测，逐条验证「它能否导致组里每个表象」</li><li>★ 结果：两个猜测都被【部分证伪】—— 这本身证明试跑有价值（若全成立，反而说明猜测太宽）</li><li>猜测 A「机制把『没能判断』与『判断了』合流」⇒ 4/5 成立</li><li>猜测 B「判据读的量 ≠ 它声称的性质」⇒ 3/5 成立</li><li>★ f-0002 与 f-0003 两个猜测都不服，而它们是【同一个判据】—— 这不是巧合</li><li>★ 真正的区分：</li><li>  本质 ①：判据【自己】把「没能判断」与「判断了」合流（f-0007 / f-0008 / f-0010）</li><li>          修法 = 改判据内部，让三态不同形</li><li>  本质 ②：判据判得【对】，而【读它的那一层】把输出读错了（f-0002 / f-0003）</li><li>          修法 = 改【读者】，不是改判据</li><li>★ 而这两个本质【在同一个机械标签里】—— 机械索引看不出来</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0015</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 预测验证命中：成团闸门无视上游 absorb 的裁决，四态全同形</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>admission.convene</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">普查臂 1 命中，是真实缺陷</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ absorb = ok / blocked / unmeasured / 键缺席 ⇒ convene 全部返回 {ok:true, autoApprove:true}</li><li>★ UPSTREAM_ABSORB 只出现在 convene.ts:675 的 upstreamStates（纯报告，无判断分支），而 checkpoint 那侧有完整三态分流（534-559）</li><li>★ 代价：成团闸门拿着【未知的吸收状态】自动成团（用户已裁定成团不需要点头）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为 t13 的修复任务；臂 1 红着正是在报告缺陷，不许弱化它</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：照 checkpoint 那支补三态分流 —— blocked 带原文、unmeasured 进 unmeasuredReasons、键缺席 ⇒ unmeasured<div class="why">为什么进这个池子：修法明确（照同文件另一支写）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 是否还有其他「把上游结论当布尔用」的地方 —— t20 只扫了 admission 位置</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮第一个【预测到】的卡点，不是撞上的：</li><li>   卡点 f-0013 的本质猜测 ⇒ t20 预测『它还应导致尚未观测到的表象』⇒ 普查 ⇒ 命中 1 处</li><li>★ 而它同时【收窄】了本质①的适用范围（t20 最有价值的读数）：</li><li>   14 条判据在「测量手段缺席」上【全部】如实报 unmeasured，零例外</li><li>   ⇒ 本质① 的载体不是『忘了说 unmeasured』（那一层写得非常扎实）</li><li>   ⇒ 而是【裁决的传递】：判据对自己读的输入很小心，却把【别的判据给的结论】当布尔用</li><li>★ 与文件自身注释直接矛盾：644-651 写着『每一个 unmeasured 支都先于返回』，而 absorb 那侧没有 unmeasured 支</li><li>★ verifier6 的证据强度补正：源码级突变真跑了，但【不能证明『臂 1 因突变而变红』】——</li><li>   臂 1 突变前就已红，一个本来已经红的臂区分不了『测到了机制』与『恰好在报别的问题』</li><li>   ⇒ 改用【对照实现】归因（传播三态⇒拒绝 / 吞掉三态⇒ok / 断言产品落在 swallow 一侧）</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0016</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ 依赖判断只认 completed ⇒ failed/cancelled 作为终态永远卡死下游</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) unsatisfiedDependencies</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">整条链无法开工</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/state.ts:137  unsatisfiedDependencies 的实现是：</li><li>    dependencies.filter((id) =&gt; byId.get(id)?.status !== &#39;completed&#39;)</li><li>★ 它只认 completed ⇒ failed 与 cancelled 【都被当成未满足】</li><li>★ 而 failed/cancelled 是【终态】—— 它们不会再变 ⇒ 下游永远无法开工</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为阻断性缺陷并派修</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：★ 这条需要用户裁：终态是否等于满足？两种口径都说得通，而它们对『失败任务的下游该不该自动开工』给出相反答案</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 正确的口径是「终态即满足」还是「只有 completed 满足、failed 要人处理」—— 这是设计问题</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是本轮【第一次】把 pool 标成 escalate 的卡点 —— 前面 15 条全部自解</li><li>★ 理由：口径有两种合理选择，而它们语义相反：</li><li>   甲：终态即满足 ⇒ failed 的下游可以开工（因为 failed 也是一个结论）</li><li>   乙：只有 completed 满足 ⇒ failed 必须由人处理后才放行</li><li>   ⇒ 甲的风险：上游失败而下游照跑，可能建立在坏的基础上</li><li>   ⇒ 乙的风险：正如本轮 —— 一条 failed 卡死整条链，而 failed 常常是【如实报告】而非交付失败</li><li>★ 本轮的具体情形更微妙：t17/t20 的 failed 都是【如实报告】——</li><li>   它们的交付物没有问题（t17 的修复已并入、t20 的普查正是它该红的），</li><li>   落 failed 是因为『pnpm verify exit=0』这条验收在『找出缺陷』这类任务上必然冲突。</li><li>   ⇒ 换句话说：这两个 failed 就是【合格的交付】，而机制把它们当成不合格。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0017</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 同一份事实，两种读法：status 把 unmeasured 折进 blockers，declare_delivery 独立暴露</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调用层) delivery 的两个消费点</code> · misclassified / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">消费口径不一致，不是裁决错</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ status (tools.ts:5138-5141) 把 unmeasured 推进 blockers 数组：</li><li>    blockers: [..., ...deliveryEvaluation.unmeasured === undefined ? [] : [`could not measure: ${...}`]]</li><li>    ⇒ 返回对象里【没有】独立的 unmeasured 字段</li><li>★ declare_delivery (tools.ts:5269 一带) 保持三态不同形：有自己的 unmeasured 分支，措辞与 blockers 不同形</li><li>★ 实测：unmeasured 与 blocked 两种来源 ⇒ ok 都是 false，都没有独立 unmeasured 字段</li><li>  唯一差别是那句里的 &#39;could not measure: &#39; 前缀 ⇒ ★【靠措辞区分，不靠形状】</li><li>★★ schema 层证据（verifier6 钉死的，captain 核实于 src/tools.ts:4930）：</li><li>   status 返回的 delivery 对象 schema 是 additionalProperties:false，</li><li>   字段只有 { ok, blockers, gates_evaluated, input_surface }</li><li>   ⇒ ★ 结构上【没有】放 unmeasured 的地方 ⇒ 它只能挤进 blockers</li><li>★ 真实路径复现（不是构造）：</li><li>   registry.evaluate(&#39;delivery&#39;, { team, gate:{ok:true,blockers:[]} })</li><li>   ⇒ { ok:false, unmeasured:&#39;[delivery.coverage] the goal coverage matrix was not provided…&#39;,</li><li>       blockers:[], evaluated:2, registered:2 }</li><li>   ⇒ delivery 现在【真的会】产出 unmeasured ⇒ tools.ts:5127 那三行【每次 status 调用都执行】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t21 的第二条断言 + 建议单开 repair</dd>
+      <dt>后来怎么处理的</dt><dd>未修 —— ★ 已排定修复任务，但被写域串行链挡住：src/tools.ts 上同时有 t22/t23/t24 三个 open 任务（point-dev 的串行链），而任务图校验拒绝任何与它们重叠的 inScope ⇒ f-0017 的 repair 排在 t24 之后。★ captain 已确认修法（给 delivery 对象加独立 unmeasured 字段，让 status 不再拼进 blockers），并已写进一份待派任务的验收，等那条链收口即派。<div class="why">为什么进这个池子：修法明确（让 status 与 declare_delivery 同形地暴露 unmeasured）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有没有其他位置也在用『措辞前缀』区分三态 —— 它只扫了 delivery</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的评语准确：「这比『读错了』更麻烦：它让两个工具对同一份事实给出不同形状的答复」</li><li>★ 而它指出 t21 原计划的那条断言（两处 ctx 必须逐字段相同）【保护不了这一条】：</li><li>   ctx 相同、求值相同，【消费方式不同】—— 这是比 ctx 分叉更深一层的不一致</li><li>★ 严重性放大：delivery 是【唯一持续产生 unmeasured 的位置】（convergence 观察不到成员面）</li><li>   ⇒ 今天每次 status 调用都会往 blockers 里塞一条 &#39;could not measure: …&#39;</li><li>   ⇒ 任何读 blockers 的调用方都会把它当成一条『交付被拒的理由』</li><li>★ 定向突变现成：把 status 那句改成独立的 unmeasured 字段 ⇒ t21 的臂必须红</li><li>★ 另三条负结果（verifier6 逐一读过代码）：</li><li>   runtime(2241)/contract(2358)/dispatch(4160)/completion(4442) 四处都【正确地】</li><li>   把 unmeasured 与 blockers 分开处理 ⇒ f-0003 那个形态在这四处已修好</li><li>★★ verifier6 钉到 schema 层的结论：差异只落在【措辞】（那个 &#39;could not measure: &#39; 前缀），</li><li>   而契约 §3.4 的要求是【形状不同形】，不是措辞不同形。</li><li>★ 而它给出的严重性排序（我采纳）：</li><li>   「f-0003：执行器缺席 ⇒ 所有普通任务建不出来（已修）</li><li>     这一条：delivery 恒 unmeasured ⇒ 每次 status 都往 blockers 里加一条</li><li>     ⇒ 而今天它就是『恒真』的：不是某条特殊路径，是【每一次读状态】</li><li>     ⇒ 一个恒常出现的『假拒绝理由』，会教人学会忽略 blockers ——</li><li>        那正是本队记过的『判据被学会忽略』那条老路」</li><li>★★ t21 的普查臂 1/2/3 现在正红着报告这条缺陷（不是回归，是它的产出）。</li><li>★ 修好之后那三条臂应【自动转绿】—— 那是「修法生效」的机械证据。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0018</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>终态依赖放行了，但下游拿不到上游的结论（同一个缺陷的另一半）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(调度层) collectCompletedDependencyOutputs</code> · unwired / misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">解锁了但信息丢了</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/scheduler.ts:227  collectCompletedDependencyOutputs 末尾：</li><li>    .filter(task =&gt; task.status === &#39;completed&#39;)</li><li>★ 它把 failed/cancelled 上游【整个丢掉】</li><li>★ 探针实测下游派发文本：「Completed dependency results:\n(none)」</li><li>   ⇒ 下游解锁了，但什么都没拿到</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 追认实现者把缺口记成【如实记录的断言】而不是写成不变量</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务动 scheduler.ts）<div class="why">为什么进这个池子：修法明确（filter 改成终态即收；下游怎么用是下游的事）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 下游拿到 failed 上游的结论后【该怎么用】—— 那是下游的判断，不是调度层的</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这是【同一个缺陷的另一半】，而且 t26 修的是它的前一半：</li><li>   前一半（state.ts）：终态该不该放行下游 ⇒ 已修（failed/cancelled 全部放行）</li><li>   后一半（scheduler.ts）：放行之后下游拿不拿得到上游的结论 ⇒ 未修</li><li>★ 而实现者对后一半的处置是对的：</li><li>   它【没有】把「下游看得见上游」写成不变量（那会把没做到的机制写成期望），</li><li>   而是写成一条【如实记录缺口的 KNOWN GAP 断言】并注明：scheduler.ts 口径改对之后，</li><li>   那条断言应当变红，那时翻过来。</li><li>★ 这条与本队最重要的那条纪律一致：</li><li>   「夹具不得把当前（错的）行为写成期望」—— 而它同时也没走到另一个极端</li><li>   （把没做到的说成做到了）。两个极端都是恒真。</li><li>★ t26 已为它准备好接口：state.ts 侧的 dependencyStatuses 已就绪。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0019</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★ inScope 重叠检查只豁免一个方向 ⇒ 合法依赖链上的任务无法同时编辑</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(任务图校验) inScopeOverlap 的豁免方向</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope overlaps t22 at src/tools.ts, lib/tools.js, lib/types/tools.d.ts; serialize these tasks or split the paths</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ src/quality-gates.ts:395  的豁免规则是：</li><li>    if (dependencies.includes(other.id) || other.dependencies.includes(&#39;pending-new&#39;)) continue</li><li>★ 它判的是【我依赖它】⇒ 只豁免一个方向</li><li>★ 而实际关系是 t22 依赖 t18（别人依赖我）⇒ 那个方向【没有豁免】</li><li>★ 且我这次改的是【dependencies】而不是 inScope，检查却对既有任务的 inScope 无条件生效</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为判据缺口；本次用 captain 写域直接解锁并如实记账</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）。修法：豁免应当是【双向的】—— 两侧任一方依赖另一方 ⇒ 写域重叠是新接线的正常次序，不是冲突<div class="why">为什么进这个池子：修法明确（把单向豁免改成双向）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少「合法链上的任务」因为这个方向性缺口而无法同时编辑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 方向的实质：一条【已声明的依赖链】恰恰【证明】两个任务的写域会被串行执行</li><li>   ⇒ 那种重叠是【设计的一部分】，不是冲突</li><li>   ⇒ 而现在的检查把它当成冲突 ⇒ 让合法链上的任务无法同时被编辑</li><li>★ 而触发点也偏了：检查对【既有任务的 inScope】无条件生效，</li><li>   哪怕我改的是 dependencies 或 description，根本没碰 inScope</li><li>★ 与本队记账的形态同源：**量大于性质** ——</li><li>   它读的量是「两个任务的 inScope 是否重叠」，</li><li>   而它声称的性质是「这两个任务会不会真的冲突」。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0022</span>
+      <span class="pill wontfix">★ 明确不修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      
+    </header>
+    <h3>★ 夹具造出的缺陷与产品缺陷在返回值上同形（同一现象，三次不同成因）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(夹具构造) 与产品缺陷同形</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">三次现象相同、成因各不相同</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ verifier6 的原话：</li><li>   「三次现象完全一样：『这句调用没抛错』—— 而三次成因各不相同」</li><li>① kind:&#39;quality&#39; 不在 TASK_KINDS ⇒ 被参数 schema 拦（而 schema 的拒绝看起来像判据拒绝）</li><li>② verify:[&#39;grep -qx 7&#39;] ⇒ 静态面抓不到（『永远红』要跑一次才知道）</li><li>③ verify:[&#39;   &#39;] ⇒ 被 normalizeBlankOptionalTaskFields 【整个删掉】</li><li>   ⇒ 判据收到 undefined ⇒ 按『没提要求』判 ok（★ 而那是【对的】行为）</li><li>★ ③ 是它把 contract 位置真实收到的 ctx 抓下来（挂探针）才查明的</li><li>★ 它的结论：「夹具造出的缺陷与产品缺陷在返回值上同形 ——</li><li>   而我在这一轮里被它骗了三次，每次都差点报成『f-0003 复发了』。」</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账；并采纳它给出的鉴别动作（挂探针抓判据真实收到的 ctx）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（这是构造纪律，不是产品缺陷）<div class="why">为什么进这个池子：鉴别动作明确（挂探针 + 两条防『拒绝来自参数校验』的断言）</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少种『夹具构造错误』会伪装成『产品缺陷』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ 这条与本队那条一直没被完全命名的形态同源：</li><li>   「一个机制在它没想到的场景里，给出一个看起来正常的答案」</li><li>   而这次『场景』是：【夹具自己的构造错误】。</li><li>★ 它给出的鉴别动作（我采纳为纪律）：</li><li>   「把 contract 位置真实收到的 ctx 抓下来（挂探针）」</li><li>   ⇒ 不问『调用抛错了吗』，而问『判据实际收到了什么』</li><li>★ 而两次防呆（它最终采用的）：</li><li>   · 用 verify:[&#39;false&#39;]（非空、恒定非零、静态面能抓）</li><li>   · 加两条断言，排除『拒绝来自参数校验』</li><li>★ 附：它顺带查明 f-0003 的修法不是『放宽读取』而是【注入执行器】</li><li>   tools.ts:3811 传 execVerifyCommand ⇒ 判据跑得起来 ⇒ 不再恒 unmeasured</li><li>   实测：create_task(kind=work) ⇒ threw=false · task_id=t1 ✔</li><li>   反向半边：create_task(verify:[&#39;false&#39;]) ⇒ 被 [contract.verify-command] 拒且点名 id ✔</li><li>   ⇒ 修好且没有退化成『不把关』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0024</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 台账被夹具污染：59/78 条是夹具产物，与真卡点混在同一目录且读取端分不出</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账落点) stateRoot 的作用域</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">记录被污染，而记录不可重算</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 按 scene.team 统计 78 条：</li><li>   team(占位) 39 · planning-loop(真) 18 · (unknown)占位 10 ·</li><li>   quality-loop 6 · gates-positions 3 · runtime-gate 2</li><li>★ ⇒ 59 条夹具产物与 18 条真卡点【混在同一目录】，读取端分不出</li><li>★ 根因：stateRoot 是【每个团队各自的】(workspaceOf(caller) + stateDir)，</li><li>   却被写成了【进程级单值】⇒ 夹具与成员各自临时工作区的卡点全写进主树那份真台账</li><li>★ point-dev 第一版就踩了：一次夹具跑动塞进 6 条假卡点，而它们在读取端与真卡点同形</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 point-dev 的两条建议：① 把隔离臂做成共享的 ② 清掉那 59 条</dd>
+      <dt>后来怎么处理的</dt><dd>point-dev 已修自己那部分（并清理了它造成的 7 条）；其余队友的夹具还没修<div class="why">为什么进这个池子：修法与清理动作都明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 还有多少别的机制也在用『进程级单值』当『每个团队各自的值』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话：「形态与 f-0022 同源：『夹具造出的与产品造出的在返回值上同形』</li><li>   —— 只是这里是【写进同一个文件】。而台账是『记录』，被污染后【不可重算】</li><li>   （README 第一条纪律：原始现象丢了就完了）。」</li><li>★ 它给出的修法（captain 采纳）：</li><li>   · stateRoot 由调用方显式传入；【没有它就不记】</li><li>   · 加【隔离臂】：不只断言『我这儿有』，还断言『主树那份没多东西』</li><li>★ 它没有动别人的条目（「删别人的记录不是我的写域」）—— 边界守持正确</li><li>★ 好消息：.agent-teams/ 被 gitignore ⇒ 不进提交，只污染运行时台账</li><li>★ 而这条同时是一份【成功证据】：自动记录真的在工作（78 条里 18 条是真卡点，</li><li>   而它们记录的正是成员真实撞上的事）。问题只在【落点】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0025</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ ESM 静态绑定：『每次调用时求值』不精确（★ 附一条被撤回的推断）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块加载) ESM 命名绑定</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">诊断标准不精确</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★★ 【已撤回】point-dev 原报的『同一进程里不同段落生效状态不同』—— 它自己做了检验，站不住：</li><li>   ① 那条『t17 已生效』的证据【无效】：它用的是『changedPaths 申报被接受』，</li><li>      而那次输入是两个观察面都对上的普通情形 —— 【新旧代码都放行】⇒ 证明不了任何事。</li><li>      要证明 t17 生效，必须看到【只有新代码才能产生】的读数（如 observed=[] 而 gitObserved 非空）。</li><li>   ② 『一个模块新、一个模块旧』在 ESM 下【不可能】：模块要么整张图新，要么整张旧。</li><li>      （captain 实测：两次 import 拿到同一个实例，模块缓存是进程级的。）</li><li>   ③ 连『t18 未生效』也没有证据 —— 『baseline 不可得』【也可能是新代码的正常行为】：</li><li>      t18 的修法是『有记录⇒用记录；没记录⇒明确 absent』，</li><li>      而它那条任务本来就没有 baseRevision 记录（在 t18 之前创建的）。</li><li>★ 而【仍然成立】的那个陈述（由实测支撑）：</li><li>   **当前没有任何读数能把『新代码的正常行为』与『旧代码的失效』分开。**</li><li>   ⇒ 那正是 t23 要解决的。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t23 的设计输入：fingerprint 必须能回答『哪一段是旧的』</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 在做）<div class="why">为什么进这个池子：t23 已有明确契约</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 指纹比较是否需要精确到【模块图】而不只是【文件】—— point-dev 的猜测</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 自己撤回了这条，理由比那条发现本身更有价值。它的原话：</li><li>   「我把【两个观察】拼成了一个【因果解释】，而那个解释是【最省事】的那一个。</li><li>    更糟的是：我把推断【当成实测】报给你，而你说『评为今晚第三重要』并写进了台账。</li><li>    ⇒ 一条未经验证的推断，因为被重复而获得了不该有的分量。」</li><li>★ 它带走的一条纪律（captain 采纳）：</li><li>   「下次我会先问：**这个读数，新旧代码会不会都产生同一个值？**</li><li>     若是 ⇒ 它证明不了任何事，不能当证据。」</li><li>★★ 而这条纪律与本队已有的形态同源：</li><li>   「读错位置的出口」—— 从一个证明不了任何事的读数里读出结论。</li><li>★ captain 的处置：</li><li>   · 台账里那条【降级】为『未验证的推断』（保留原文与撤回理由，不删除 —— 留痕优先）</li><li>   · t23 的设计输入改成上面那个由实测支撑的陈述</li><li>   · t23 的第一个素材也降级为『盘上与生产读数不同，成因未定』</li><li>★ 而我要单独记：**这是本轮第一次有成员撤回自己已被采纳的发现** ——</li><li>   而它撤回的动力来自它自己做的检验，不是来自被质疑。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0026</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器缺一维：current 不能证明「进程是新的」（而它被用来证明了两次）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(模块新鲜度检测) stamp 缺少构建时的提交</code> · misclassified / unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">读数被用于它答不了的问题</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 检测器读的两个值：</li><li>   loaded = 进程启动时读到的 stamp · onDisk = 此刻盘上的 stamp</li><li>   return loaded === onDisk ? &#39;current&#39; : &#39;stale&#39;</li><li>★ 它只回答：「盘上自本进程启动以来，有没有被重新 build 过」</li><li>★★ 它【不能】回答：「进程加载的是哪一个 commit 的代码」</li><li>   —— 因为若进程启动【之前】盘上就已经是当前这版，current 恒成立，</li><li>      而那时进程里的代码【仍然可能是更早 commit 的】。</li><li>★ point-dev 的实测：t24 的 claim 被拦，而同时 moduleFreshness() = current</li><li>   ⇒ 「current 同时出现在一次真实拦截里」—— 它的推论边界被实测击穿</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 finding 并派修：stamp 增加【构建时的 git 提交】一维</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要动 scripts/git-artifacts.mjs，不在任何当前 inScope 里）<div class="why">为什么进这个池子：补一维的实现明确：build 时写入 git 提交，进程启动时与当前 HEAD 比对</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 进程启动那一刻，盘上的构建对应哪个提交 —— 现在无从得知</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ point-dev 的原话（本队纪律级）：</li><li>   「我在同一个坑里踩了两次，而第二次是我用它去【纠正】第一次。</li><li>    这值得记：**一个读数一旦被当成『能分辨』，它就会在所有它分辨不了的地方被误用。**」</li><li>★ 而它把自己的第一次纠正也打了折：</li><li>   「我说：它第一次被使用就把我自己的一次错误归因挡了下来。</li><li>    ⇒ 那句话现在要打折：它挡下的是『【那个时刻】盘上有没有变』，</li><li>      而【没有】挡下『进程代码是否落后于当前提交』—— 而我当时断言的是后者。</li><li>      ⇒ 那次纠正本身，也是一个过强的推论。」</li><li>★★ 形态与它昨晚撤回的那条【一模一样】：</li><li>   「这个读数，新旧代码会不会都产生同一个值？」</li><li>   ⇒ current 在【进程是旧的但盘上没再 build 过】时也会产生 ⇒ 证明不了进程是新的</li><li>★ 修法（它给的，captain 采纳）：</li><li>   在 stamp 里加一个【构建时的 git 提交】（build 时由 git-artifacts.mjs 写入），</li><li>   进程启动时把它一并与当前 HEAD 比对 ⇒ 才能回答『我落后了没有』。</li><li>★★ 而 captain 也要记自己一笔：</li><li>   我昨晚把 t23 评为『让不可分辨本身消失』，并在台账里采纳了那个结论 ——</li><li>   而它只消失了【一部分】：盘上变动可辨，**落后于更早的 commit 不可辨**。</li><li>   ★ 而这条正是本队那条形态的又一实例：</li><li>      『一个机制在它没想到的场景里，给出一个看起来正常的答案』</li><li>      —— 而这次的场景是【进程启动前盘上就已经是当前这版】。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0027</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">把「没能测量」读成了「测出来了」</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 检测器被用在【错误的进程】上：命令行读不到插件进程的内部状态</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(检测器的使用) 进程归属</code> · misclassified</dd>
+      <dt>机制当时说的</dt><dd class="quote">测的是另一个进程</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ captain 用命令行 `node -e` 调 moduleFreshness ⇒ 每次都起一个新的 Node 进程</li><li>   ⇒ 加载的是【最新 lib】⇒ 当然报 current</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22：b2103754…</li><li>   今天 12:38：670b5c22…   ← 而盘上 stamp 现在是 670b5c22</li><li>   ⇒ 说明第二次读的是【captain 的临时进程，加载了最新 lib】</li><li>★ 结论：captain 从来没有测过插件进程的新鲜度。检测器也没测过。</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记账，并把「从工具出口读」作为 t23 的补充要求</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t23 的 WIRING GAP：moduleFreshness 还没接到任何工具出口）<div class="why">为什么进这个池子：修法明确：让某个 agent_teams_* 工具把 moduleFreshness 交出来</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 插件进程此刻到底持有哪个版本的 lib —— 需要一次【来自工具出口】的读数</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ captain 实测发现的元问题（比 f-0026 更根本）：</li><li>   我用 `node -e &quot;import(&#39;./lib/tools.js&#39;)...moduleFreshness()&quot;` 去问检测器。</li><li>   ★ 而那【每次都会起一个新的 Node 进程】⇒ 它加载的是【最新 lib】</li><li>   ⇒ 它当然报 current —— 【它问的是它自己，不是插件进程】。</li><li>★ 证据：两次读数的 loaded 不同</li><li>   今早 12:22 读：b2103754…</li><li>   今天 12:38 读：670b5c22…</li><li>   ⇒ 而盘上 stamp 现在是 670b5c22 ⇒ 说明第二次读的是【我的临时进程，加载了最新 lib】</li><li>★ 结论：**captain 从来没有测过插件进程的新鲜度。检测器也没测过。**</li><li></li><li>★★ 这意味着 f-0026 的修正还要再走一步：</li><li>   f-0026 说「检测器是钝的：current 不能证明进程是新的」</li><li>   ⇒ 而真相更基本：**那个读数根本不是从插件进程里读出来的**</li><li>   ⇒ 用命令行测一个【进程内部状态】，测到的是【命令行进程】的状态。</li><li></li><li>★ 而这个形态与本队那条一直在追的完全同源：</li><li>   「读错位置的出口」—— 从一个不属于那个位置的地方读了值。</li><li>   ⇒ 而我（captain）就在做这件事，而且我昨晚还把它写进了台账。</li><li></li><li>★★ 由此产生的一个正确问题：**怎么才能从插件进程内部读到它的状态？**</li><li>   · 检测器是【工具层】的 —— 只有它被一个工具调用求值时，才反映插件进程</li><li>   · 所以正确的读法是：让某个 agent_teams_* 工具把 moduleFreshness 交出来</li><li>   · 而那正是 t23 契约里说的「可上报」—— 它还没接到工具出口上</li><li>   ⇒ ★ 这是 t23 的一个 WIRING GAP（与 t31 那条同形）。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div>
+</section>
+<section id="es-unwired">
+  <h2>③ 装了但调不到 / 建了但没接 <span class="count">6</span></h2>
+  <p class="sub">声明写对了、机制也建好了，而中间那一格没接线 ⇒ 静默不生效</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0001</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>inScope 声明了 src 却没声明对应的 lib 产物</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>contract.build-artifact-scope</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">inScope declares source path(s) &quot;src/gates/runtime/liveness.ts&quot; but declares no build artifact under &quot;lib/&quot;…</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据能判（它读的就是 inScope），问题在【契约写的时候没人提醒】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 当场 amend 契约，补上 lib/ 路径</dd>
+      <dt>后来怎么处理的</dt><dd>amend 契约（多次）；后来 admission/requires 机制让「判据要什么」变成声明式的<div class="why">为什么进这个池子：补救动作明确（补声明），不需要用户决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时是否有人意识到「这是第几次」—— 没有计数机制</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 本轮出现 4 次（t8/t11/t6/t9 各一次）—— 频率信号明确</li><li>★ 而它促成了 requires 机制：让「判据要的输入面」变成可机械核对的东西</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0004</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>判据的 appliesTo 认的 event 名与调用点传的不匹配 ⇒ 判据从不被求值</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · mismatched / uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 六个调用点传的 event 是 task-status / member-dispatched / …</li><li>★ 而判据 appliesTo 只认 &#39;runtime-liveness&#39; ⇒ 没有一个匹配</li><li>★ 判据装了但从未被求值 —— 而返回值看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定按导出白名单（LIVENESS_EVENTS）发言</dd>
+      <dt>后来怎么处理的</dt><dd>appliesTo 改为按导出白名单；端到端 evaluated=1<div class="why">为什么进这个池子：修复方向明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ verifier3 独立发现前，没有任何机制能看出「这条判据从未跑过」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是本队「装了但调不到」第 4 次</li><li>★ 它促成了一条纪律：判据的调用点与它的 appliesTo 必须能机械对上</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0005</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>waitWindows 表建好了但没有任何地方读它 ⇒ 判据永远 unmeasured</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>runtime.liveness</code> · unwired / unread</dd>
+      <dt>机制当时说的</dt><dd class="quote">the wait window was not observed</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ waitWindows（任务作用域、有界、有陈旧界限、注释完整）从未被任何构造函数读取</li><li>★ waitObservationFor 读的仍是 waitRecords.get(attemptId)（attempt 作用域）</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 纠正成员的诊断：不是设计缺口，是接线缺口</dd>
+      <dt>后来怎么处理的</dt><dd>waitObservationFor 改从 waitWindows 读三个跨代概念；另修「换代冲掉产出指纹」<div class="why">为什么进这个池子：设计已完成，只差一个读取点</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 建数据结构的人与接输入面的人常是同一个 —— 而「建好了」被当成了「接通了」</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 成员原以为「需要一次设计改动」，而 captain 读源码后发现设计已做完</li><li>★ 这是「装了但调不到」第 5 次，且发生在【新写的代码】里</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0006</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>admission 位置建好了却 0 个调用点（其余五个各有 1-3 个）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(位置级) admission</code> · uncalled</dd>
+      <dt>机制当时说的</dt><dd class="quote">(无)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 磁盘上有两个判据文件（checkpoint.ts / absorb.ts），注册表 registered=0</li><li>★ 「磁盘有 / 注册表无」的差集没人读</li><li>★ 而 evaluate 返回 ok:true —— 空位置看起来一切正常</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为『装了但调不到』第 6 次，并明确它在【位置】这一层（比前五次更靠上）</dd>
+      <dt>后来怎么处理的</dt><dd>t11 派任务补调用点；t10 装配进 ALL_GATES<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「位置为空」与「位置的判据都通过」当时同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ verifier6 用【差集】（磁盘有 vs 注册表无）抓到的，且它没有判 fail —— 因为那是队友开发中的状态</li><li>★ 它是唯一一个【位置级】而不是判据级的实例</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0009</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>12 个工具的 output schema 不接受自己返回的字段（create_task 自锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(工具层) agent_teams_*</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">&quot;value.input_surface&quot; is not a declared property (additionalProperties: false)</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 12 个工具的 output schema 全是 additionalProperties:false，而接线给返回值加了 4 个诊断字段</li><li>★ 最严重的是 create_task：每次调用都被自己的 schema 拒绝</li><li>★ ⇒ 修它的任务【正需要用 create_task 来建】—— 一个阻断性缺陷堵住了修它的手段</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 先尝试在主树直接修，发现与 t14 的 worktree 冲突后【回退让出】（隔离纪律）</dd>
+      <dt>后来怎么处理的</dt><dd>五处 schema 改闭合、逐工具取用；status 从 additionalProperties:true 的另一极端同时修掉；新增普查臂（5→15 工具覆盖）<div class="why">为什么进这个池子：修法明确</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 没有人想到「调用点加了字段，声明它的地方要跟上」是一个会被漏的环节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 「声明它的地方落在实现后面」这一族，本轮出现 4 次（schema / inScope / 白名单 / 臂 11 口径）</li><li>★ captain 亲身体验了自锁：create_task 建不出任务 ⇒ 连『派个任务去修它』都做不到</li><li>★ 另有一条：共享 const 会因 ValueSchemaSpec 是字面量类型而报 33 条 TS2322 ⇒ 用函数返回而非常量</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0014</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">装了但调不到 / 建了但没接</span>
+      
+    </header>
+    <h3>★ 台账机制自己的缺口：记录不可重放（12/12 条 replayable=false）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(台账机制)</code> · unwired</dd>
+      <dt>机制当时说的</dt><dd class="quote">机制缺口，不是判据裁决</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ scene.ctx 全为 null ⇒ 重建不出当时的输入</li><li>★ context.eventRefs 指不到具体事件 ⇒ 原始观测存在但不可定位（会话事件未按任务索引）</li><li>★ observed.mechanismState 全为 null ⇒ 拿不到判据当时的完整输出与内部状态</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定：把缺口如实标成 replayable:false，而不是假装记录完整</dd>
+      <dt>后来怎么处理的</dt><dd>未修。修法是【让卡点在发生时自动记录】，而不是事后补<div class="why">为什么进这个池子：有明确修法</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「足够的上下文」的完整清单 —— 本轮只发现了三样缺的（ctx / 事件定位 / 机制状态），可能还有</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 结论：记录必须在【卡点发生时】做，事后补是补不上的</li><li>   · ctx 没记 ⇒ 重建不出</li><li>   · 会话事件没按任务索引 ⇒ 定位不到</li><li>   · 注册表快照没留 ⇒ 不知道当时有哪些判据</li><li>★ 而 fix 的形状与本队纪律一致：判据拒绝/未测量时【自己】落一条记录</li><li>   （含 requires 核对结论 + ctx 快照）—— 这正是「判据自己报」的延伸</li><li>★ 标记 replayable 这一格本身就起作用了：它让『读得懂』与『能重放』不同形</li><li>   若没有这一格，这 12 条会被读成『完整的记录』</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article></div>
+</section>
+<section id="es-unsatisfiable">
+  <h2>③ 某类任务在判据上恒不可满足 <span class="count">4</span></h2>
+  <p class="sub">判据本身诚实（报「没能测量」），但它的输入面在某类任务上永远接不上 ⇒ 那类任务永远无法收口</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0010</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>changedPaths 把「没能观测」读成了「虚报」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>dispatch.changed-paths</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">[dispatch.changed-paths] &quot;src/tools.ts&quot; was reported as changed but no write to it was ever observed in this member&#39;s session</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 判据没能观测到任何写入 —— 因为它读的是【本 attempt 的会话事件】里的 meta.diffs，而这次写入发生在【captain 用 cp 并入主树】这个动作里</li><li>★ 而「没能观测」与「观测了、确实没写」在返回值上【完全同形】</li></ul></dd>
+      <dt>临时裁决</dt><dd>★ 保任务继续：captain 接管 t14，用 cancelled + output 记录落终态；不为了让判据过去而虚报或报空 changedPaths</dd>
+      <dt>后来怎么处理的</dt><dd>补第二个观察面 gitChangedPaths（工作区真的脏了的路径），每条 reported 必须被【至少一个面】证实 —— commit cc58b4c。穷举证明（非抽样）：reported × observed × gitObserved 全部组合，反例数 0 ⇒ 绝不比旧口径松。<div class="why">为什么进这个池子：有可机械验证的正确解（穷举证明），不需要用户做决断</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 当时那次 update_task 调用的完整 ctx 没有留档（只有 changedPaths 记录下来）</li><li>★ 判据内部 observed 的实际取值（空数组还是 undefined）没有在报错里区分 —— 而这两者本该不同形</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 三个人独立撞上同一个卡点（point-dev / admission-dev / captain 本人）—— 这是它被判为『结构性』而不是『操作失误』的依据</li><li>★ 修法路上发现的边界：工作区是仓库子目录时 git status 带前缀 ⇒ 两边永不相等 ⇒ 判据【恒红】。恒红比恒真更危险：它阻断所有诚实的工作。</li><li>★ 已知残余边界（已钉成断言）：零工作的成员报一条恰好被别的任务改脏的路径 ⇒ 会被工作区面证实。本判据只回答『这条改动真的存在吗』，不回答『是谁改的』。</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0011</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>无 worktree 的任务在 completion.backtest 上恒不可满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>completion.backtest</code> · unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">the baseline state is unavailable (no parent/HEAD test result was provided), so a regression could not be told apart from a pre-existing failure</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ baseline 由 worktreeBaseOf(task.id) 推导（src/tools.ts:4173 → :4273）</li><li>★ 无 worktree（主树干活的 / captain 接管的）⇒ 恒 undefined</li><li>★ ⇒ 该判据在这类任务上【恒不可满足】</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 接管 t15 落终态（reassign → captain）；缺口单独记账为 t18</dd>
+      <dt>后来怎么处理的</dt><dd>未修（t18 已建，依赖 t17 串行）<div class="why">为什么进这个池子：补救动作明确（captain 可落终态），本质修法已派任务</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「无 worktree 的任务」这个场景当时没被考虑</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 它的【口径是对的】—— 诚实报『没能测量』，没并进通过也没并进拒绝</li><li>★ 与 f-0010 同族但成因不同：前者是【口径错】（把没观测读成虚报），后者是【输入面没覆盖某场景】</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0020</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★ 无人值守的硬阻断：worktree worker 交不出终态（5 次同形终止）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(完工门) worktree worker 的终态</code> · unsatisfiable / mismatched</dd>
+      <dt>机制当时说的</dt><dd class="quote">三道完工门连续拒绝，全部与改动无关</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三道拒绝的成因：</li><li>  ① dispatch.changed-paths：worker 编辑落在 worktree，判据只读 captain 工作区</li><li>  ② completion.r5 / mutation：r5 只看 update.newTestFiles，而 repair 改的是【已有】夹具</li><li>     ⇒ 净 +139/-19 全在既有文件上 ⇒ newTestFiles=0 ⇒ &#39;none of the 0 reported file(s)…&#39;</li><li>  ③ completion.backtest：基线 25a3320 是【worktree 的出身】，而 t26(672e044) 在它之后并入</li><li>     ⇒ 基线本身就红 ⇒ &#39;the baseline … is not green — it exited 1 before any of this change existed&#39;</li><li>★★ 而这【不是偶发】：本队已 5 次同形终止，全部由 captain 代落终态：</li><li>   t13 failed / t16 cancelled / t19 cancelled / t25 cancelled / t26 cancelled / t27 failed</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳 verifier6 的三条建议并派任务</dd>
+      <dt>后来怎么处理的</dt><dd>未修（captain 已单开任务）<div class="why">为什么进这个池子：三条建议都明确，captain 已裁定</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ repair 类应有的完工门形状 —— r5/mutation 是否该看『既有夹具更新且仍能判别』</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★ verifier6 的原话：「repair 类任务与 TDD 完工门不匹配 —— r5/mutation 度量的是</li><li>   『为新工作写了新测试』，而 repair 的验收是『修改既有夹具后它仍能判别』，两者不是同一件事。」</li><li>★ 它的三条建议（captain 全部采纳）：</li><li>   ① repair 类的完工门应看「既有夹具是否更新且仍绿」，而不是 newTestFiles</li><li>   ② 或明确记入文档：「worktree worker 的终态一律由 captain 代落」</li><li>   ③ 或让判据同时看 worktree（连带修 ①）</li><li>★★ 为什么这是【无人值守的硬阻断】：</li><li>   如果每个 worktree worker 都交不出终态，那无人值守时【每一个任务】都要 captain 代落</li><li>   ⇒ 无人值守退化成「captain 逐个手收」，而那正是要消灭的形态</li><li>★ 而修复动作本身也受阻：captain 代落只能用 cancelled（completed 走不通），</li><li>   于是台账里出现【大量 cancelled 而实际合格】的交付 —— 而 cancelled 的语义是「被中止」，</li><li>   不是「做完了但记录不了」。★ 量与语义又不一致了。</li><li>★ verifier6 另报两个 worktree 环境缺格（都已解决，建议进任务模板）：</li><li>   ① 软链 node_modules ⇒ 相对链接 ../.pnpm/… 断裂 ⇒ ERR_MODULE_NOT_FOUND</li><li>      修法：worktree 内 pnpm install --offline（1.8s，复用 store），【不要软链】</li><li>   ② node_modules/.cache 缺失 ⇒ gate-readout-uniform 的 mkdtemp ENOENT ⇒ mkdir -p 即可</li><li>   ★ 两者修前都会被读成『测试失败』</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article>
+  <article class="card self">
+    <header>
+      <span class="id">f-0023</span>
+      <span class="pill scheduled">已排任务 / 未修</span>
+      <span class="pill ess">某类任务在判据上恒不可满足</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ changedPaths 与 completion 门双向互斥 ⇒ worktree 任务无法诚实结算（第 3 次，死锁）</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(派发层) worktree 写入 vs 队长工作区观察面</code> · mismatched / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">两侧互斥，无一合法输入</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 带 changedPaths ⇒ [dispatch.changed-paths] 拒：</li><li>   &#39;scripts/lifecycle-verify.mjs&#39; was reported as changed but no write to it was</li><li>   observed … and it is not a changed path in the working tree either</li><li>★ 不带 changedPaths ⇒ [completion.r5] + [completion.mutation] 拒：</li><li>   &#39;no scan directories were declared…&#39; / &#39;this task declared no changed files&#39;</li><li>★★ 判据说『你没改它』，完成门说『你没改任何东西』——【两句话不能同时满足】</li><li>★ 根因：写入按派工在隔离 worktree，而 gitChangedPaths(workspace) 读【队长工作区】</li><li>★ 实测对照：队长工作区的 git status 显示的是【别人】的文件，完全没有本任务的；</li><li>   worktree 里该文件是 M 且 lifecycle-verify exit=0</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 记为结构性冲突并派修（与 f-0020 同族但更靠前：f-0020 是完工门问错了问题，这一条是观察面读错了地方）</dd>
+      <dt>后来怎么处理的</dt><dd>未修（待派）<div class="why">为什么进这个池子：三种修法都明确，captain 已裁定优先第一种</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 三种修法选哪个（见下）—— 那是一个设计裁定，不是实现细节</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ checkpoint-dev 的原文：「第 3 次了，建议单独记一条」——</li><li>   t26 worktree → changedPaths 拒</li><li>   t28 worktree → changedPaths 拒</li><li>   t32 worktree → changedPaths 拒，且【不带它也被 completion 门拒】⇒ 死锁</li><li>★ 三种修法（它给出，captain 裁定）：</li><li>   ① 判据把该成员 worktree 的写入算进观察面  ← captain 选这个</li><li>   ② 此类任务不走 changedPaths / completion 门</li><li>   ③ 派工时明确『改完由谁合并』</li><li>★ 它的原话我采纳：「这不该由每个成员各踩一次、各报一次 failed。」</li><li>★★ 而这条与 f-0020 的关系（两个不同的缺口，别混）：</li><li>   f-0020：完工门问错了问题（r5 问『哪些文件是新的』，而 repair 不新增文件）</li><li>   f-0023：观察面读错了地方（读队长工作区，而写入在成员 worktree）</li><li>   ⇒ 修好 f-0020 之后，f-0023 仍然会拦（因为 changedPaths 那一侧没修）</li><li>   ⇒ 两者独立，都要修</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div>
+</section>
+<section id="es-quantity-over-property">
+  <h2>③ 量大于性质 <span class="count">1</span></h2>
+  <p class="sub">它读的量超过了它声称的性质 ⇒ 在一个它没想到的输入上给出错误的裁决</p>
+  <div class="grid">
+  <article class="card self">
+    <header>
+      <span class="id">f-0012</span>
+      <span class="pill fixed">已修</span>
+      <span class="pill ess">量大于性质</span>
+      
+    </header>
+    <h3>臂 11 抓的是「一切改动」，而不是它声称的「偷偷改」</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>scripts/verify-input-requires.test.mjs 臂 11</code> · overreaching</dd>
+      <dt>机制当时说的</dt><dd class="quote">★ 相对基线，判据源码里有**被删掉而没有等价改写**的行</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 它声称守护「本文件没偷偷改判据源码」</li><li>★ 实际读的量是「判据源码相对钉死基线的【任何】改动」</li><li>★ 于是每一个合法修判据的任务都撞红它：t5（加 admission 位置）一次、t17（修 changed-paths）又一次</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 裁定方向 (a)：把『是谁改的』换成『这次改动有没有被声明』；本文件对判据源码的改动仍必须为空</dd>
+      <dt>后来怎么处理的</dt><dd>未提交 ⇒ 红；提交但无 Verify: ⇒ 红；按任务修 + 带 Verify: ⇒ 绿（三条成对证据实测）<div class="why">为什么进这个池子：口径明确，且有成对证据</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ 「基线钉死」这个设计本身的问题当时没被识别</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★ 这是同一条臂【第三次】口径不匹配 —— 而前两次的教训写在它自己的注释里</li><li>★ 修它的成员自己也踩了两处同形的坑，都被实测抓出：</li><li>  错 A：「至少一个相关提交带 Verify:」可被历史稀释 ⇒ 改成「每一个都必须带」</li><li>  错 B：git log &lt;基线&gt;..HEAD -- path 会遍历基线【之前】的提交 ⇒ 改成 rev-list --ancestry-path</li><li>★ 两处共同形状：**量大于性质** —— 与这条臂原来的毛病同源</li></ul></dd>
+      <dt>能不能重放</dt><dd><b>不能</b> —— 这条记录缺复现所需的上下文</dd>
+    </dl>
+  </article></div>
+</section>
+<section id="es-stale-source">
+  <h2>③ 读了过期的来源 <span class="count">1</span></h2>
+  <p class="sub">机制读了一个来源，而那个来源不是它声称的那个 —— 于是它给出一个看起来正常的答案</p>
+  <div class="grid">
+  <article class="card escalate">
+    <header>
+      <span class="id">f-0021</span>
+      <span class="pill open">开着</span>
+      <span class="pill ess">读了过期的来源</span>
+      <span class="pill block">阻塞任务</span>
+    </header>
+    <h3>★★★ 两个缺口互相锁死：旧模块 ⇒ 任务冻住 ⇒ t24 的重载闸门永不满足</h3>
+    <dl>
+      <dt>在哪</dt><dd><code>(重载闸门 + 旧模块) 互相锁死</code> · misclassified / unsatisfiable</dd>
+      <dt>机制当时说的</dt><dd class="quote">证明性地无法自行解锁</dd>
+      <dt>没能观测到的</dt><dd><ul><li>★ 三层对齐：耐久态 t18=cancelled（终态）· 盘上 unsatisfiedDependencies ⇒ [] · claim 仍报 blocked</li><li>★★ point-dev 指出的闭环：</li><li>   旧模块 ⇒ 任务开不了工 ⇒ 任务做不完 ⇒ 一直有『进行中工作』</li><li>          ⇒ t24 的重载闸门（无进行中工作）永不满足 ⇒ 永远重载不了</li><li>          ⇒ 旧模块永远不会被换掉</li><li>★ 而 integrator6 从相反方向给了同一结论：</li><li>   三道完工门卡【收尾】、旧模块卡【开工】—— 两者合起来让 t24 不可达</li></ul></dd>
+      <dt>临时裁决</dt><dd>captain 采纳为 t24 的设计输入：闸门需要一个逃生口</dd>
+      <dt>后来怎么处理的</dt><dd>未修（要写进 t24 的契约）<div class="why">为什么进这个池子：★ 这是本轮第二条标 escalate 的 —— 它需要用户裁定「逃生口」的边界：在什么条件下允许【明知有进行中工作】仍重载</div></dd>
+      <dt>还不知道的</dt><dd><ul><li>★ t24 的闸门是否需要【逃生口】—— 在整条链都冻住时仍能重载</li></ul></dd>
+      <dt>备注</dt><dd><ul><li>★★★ 这不是『两个独立的缺口相加』，是【互相锁死的一对】：</li><li>   旧模块  ──卡开工──▶  任务做不完  ──▶  一直有进行中工作  ──▶  重载闸门不满足</li><li>      ▲                                                              │</li><li>      └──────────────────  重载不了，旧模块永不换掉  ◀──────────────┘</li><li>★ point-dev 的原话：「这不是『两个独立的缺口相加』，是【互相锁死的一对】。」</li><li>★ 而它的推论我采纳：t24 的闸门需要一个【逃生口】——</li><li>   在『整条链都冻住』时仍能重载；否则那条链在【没有外部干预（用户手动重启）】时</li><li>   证明性地无法自行解锁。</li><li>★★ 这是本轮最精准的一条因果链，而且它是【两个成员从相反方向独立得出的】：</li><li>   integrator6：从『完工门卡收尾、旧模块卡开工』推出 t24 不可达</li><li>   point-dev  ：从『claim 被拦』推出闭环</li><li>★ 而它对本项目有直接含义：</li><li>   用户要的是【无人值守】。而这个闭环意味着 ——</li><li>   在最坏的情况下，无人值守会【证明性地卡死】，直到有人手动重启。</li><li>   ⇒ 所以 t24 不只是一个便利功能，它是无人值守的必要条件。</li></ul></dd>
+      <dt>能不能重放</dt><dd>能</dd>
+    </dl>
+  </article></div>
+</section>
+
+<footer style="margin-top:4rem;color:var(--dim);font-size:.85rem">
+  ★ 分组规则写在 <code>scripts/frictions-html.mjs</code> 的 <code>ESSENCES</code> 里 ——
+  它可复核、可争议，而<b>不是</b>一次「本质判定」。<br>
+  ★ 本页只读 JSON，不写回任何东西：台账是记录，记录不可重算。
+</footer>
+</body></html>

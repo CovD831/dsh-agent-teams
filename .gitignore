@@ -2,3 +2,6 @@ node_modules/
 *.tsbuildinfo
 .DS_Store
 .agent-teams/
+
+# pnpm 本地 store（构建缓存，不进版本控制）
+.pnpm-store/
