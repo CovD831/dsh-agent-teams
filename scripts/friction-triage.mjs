@@ -32,12 +32,20 @@
  *   去派一堆**不需要做的事**；把 `blocked` 并进 `to-dispatch` 会让它派出一批
  *   **必然冲突**的任务（而那正是用户裁定"写域冲突就先别派"要避免的）。
  *
- * ── ★ 它不 import 任何产品代码，也不 import t65 的工具 ─────────────────────────
+ * ── ★ t78：那份"明写的重复"已经消掉了 —— 而**到期条件**写在它旁边 ─────────────
  *
- * `judgement-triage.mjs`（t65）**没有落进本仓库**（那次交付报了 failed 且未提交）——
- * ⇒ 本文件把它那三条判断**自己实现一遍**，而不是 import 一个不存在的模块。
- *   ★ 而那个重复是**明写的**（见 {@link triageJudgement} 的注释），并且有一条臂
- *     断言"两边口径一致"—— 等 t65 落地之后，这里应当改成 import 它。
+ * 这里曾经逐字写着（t72）：
+ *
+ *     「`judgement-triage.mjs`（t65）**没有落进本仓库**（那次交付报了 failed 且未提交）
+ *       ⇒ 本文件把它那三条判断**自己实现一遍**，而不是 import 一个不存在的模块。
+ *       ★ 而那个重复是**明写的**，并且有一条臂断言"两边口径一致"——
+ *         等 t65 落地之后，这里应当改成 import 它。」
+ *
+ * ⇒ ★ 那个条件在 **5d91625** 满足了（captain 把 t65 的产物并入了主树）
+ *   ⇒ 于是这里现在是 **re-export**（见 §①）：**只有一份实现**，而不是两份。
+ *
+ * ★★ 而它**仍然不 import 产品代码** —— 它只读 JSON，只依赖 `judgement-triage` 那一个
+ *   同样只读文本的工具。
  *
  * ── ★ 输入从**参数**来，不写死路径 ──────────────────────────────────────────────
  *
@@ -55,118 +63,68 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ① 判决的可机械化判断（★ 与 t65 同口径 —— 而那是**明写的重复**，见文件头）
+// ① 判决的可机械化判断 —— ★★★ t78：**改成 import**（写在 t72 的到期条件已满足）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * 三态 + 第四态。★ 与 t65 的 `VERDICTS` 逐字一致。
+ * ── ★★★ 那份重复的**到期条件**，以及它为什么现在该消掉 ──────────────────────────
+ *
+ * t72 写下的原文（逐字保留在 §"曾经写在这里的"里）：
+ *
+ *     「`judgement-triage.mjs`（t65）**没有落进本仓库**（那次交付报了 failed 且未提交）
+ *       ⇒ 本文件把它那三条判断**自己实现一遍**，而不是 import 一个不存在的模块。
+ *       ★ 而那个重复是**明写的**，并且有一条臂断言"两边口径一致"——
+ *         等 t65 落地之后，这里应当改成 import 它。」
+ *
+ * ⇒ ★ 那个条件在 **5d91625** 满足了（captain 把 t65 的产物并入了主树）
+ *   ⇒ 于是这里**不再是两份实现**，而是一份。
+ *
+ * ── ★★ 而"同一份实现"这件事**仍然可测** —— 否则这次改动只是把证据删掉了 ────────
+ *
+ * 这里导出的**就是那个函数对象本身**（不是包装）：
+ *
+ *     import { triage as triageJudgement } from './judgement-triage.mjs'
+ *     export { triageJudgement, … }
+ *
+ * ★★ MEASURED（第一版当场抓出来的）：写成 `export { triage as triageJudgement } from '…'`
+ *   **只是转发**，它**不建立本地绑定** ⇒ 本文件内部引用 `triageJudgement` 会
+ *   `ReferenceError: triageJudgement is not defined`。
+ *   ★ 而那个错**能通过任何"文件能不能加载"的检查** —— 只有真的跑到那条路径才现形。
+ *
+ * ⇒ 夹具可以断言**同一性**（`===`），而那比"取值集合相同"强一级：
+ *   · 旧的那条臂测"两边的**取值**一致"—— 两份实现可以碰巧一致，也可以各自漂移
+ *   · 新的那条臂测"**就是同一个函数**"—— 漂移在**结构上**不可能
+ *
+ * ★★ 而 j-0003 那条分歧（t65 记为"判据边界上的分歧"）现在**变成了同一份实现的
+ *   内部一致性** —— 而那正是它该有的结果：**一个分歧只在有两份实现时才存在。**
+ *
+ * ── ★ 三态（import 成功 / 模块缺 / 无法判断）──────────────────────────────────
+ *
+ * ★ 这里刻意**用静态 import**，于是"模块缺"这一态由 **ESM 解析器**给出
+ *   （`ERR_MODULE_NOT_FOUND`，一条明确的、带文件名的错误）——
+ *   而不是由本文件**猜**出来。
+ *
+ * ★★ 为什么不写成"惰性 + try/catch 降级成 unmeasured"（我第一版就是那么写的，
+ *   而它**是错的**）：那会把"**这个模块还没落地**"（一次真实的安装/合并缺陷）
+ *   与"**这一条 claim 判不了**"（一个正常的第四态）**合成同一种读数**，
+ *   而两者的补救动作相反（一个去补模块，一个去改 claim）。
+ *   ⇒ 本队记账过这个形态：**把基础设施工况伪装成关于数据的结论。**
+ *
+ *   ★ 而"模块缺时不崩"这个诉求是**对的**，只是它该落在**调用方**：
+ *     见 `scripts/friction-triage.test.mjs` 里那条"模块缺 ⇒ 给出可读的失败"的臂 ——
+ *     它**真的把模块移走**再跑，而不是让产品代码预先降级。
  */
-export const JUDGEMENT_VERDICTS = Object.freeze(['gate', 'diagnosis', 'discipline', 'unmeasured'])
-
 /**
- * ── claim 能不能被写成一条【对某个输入返回真/假】的断言 ────────────────────────
+ * ★★ MEASURED（第一版当场抓出来的）：`export { x } from '…'` 只是**转发**，
+ *   它**不建立本地绑定** ⇒ 本文件里 `triage()` 引用 `triageJudgement` 会
+ *   `ReferenceError: triageJudgement is not defined`。
+ *   ★ 而它**能通过任何"文件能不能加载"的检查** —— 只有真的跑到那条路径才现形。
  *
- * ★★ 与 t65 的 `looksAssertive` **同一口径**（那一版被 9 条真实语料打回过两次）：
- *   判的是**可检查的联结结构**（条件⇒后果 / 二选一 / 依赖判定 / 可达性 / 对照分词），
- *   **不是**"有没有某个词"。
- *
- * ★ 为什么这里要重写一遍而不是 import：t65 那次交付**没有落进本仓库**
- *   （它报了 failed 且未提交）⇒ import 一个不存在的模块会让本工具**启动即炸**。
- *   ★ 而"重写一份"的代价是**两份真相会漂移** —— 所以本文件把两边口径**并排列在这里**，
- *     并由夹具的一条臂对拍（它同时断言 `JUDGEMENT_VERDICTS` 与 t65 的取值一致）。
- *     ⇒ 等 t65 落地，这里应当改成 import。
+ * ⇒ 所以这里**先 import 再 export**：本地有绑定（内部可调用），而导出的
+ *   仍然是**那个函数对象本身**（同一性可测）。
  */
-export function looksAssertive(text) {
-  if (typeof text !== 'string') return undefined
-  const claim = text.trim()
-  if (claim.length < 8) return undefined
-
-  const CHECKABLE = [
-    /(时|后|之后|之前)([^。；;]{0,40})?(才|就|也|全|都|会)/u,
-    /(只在|只有在|只有)[^。；;]{2,40}(才|就)/u,
-    /当[^。；;]{2,40}(时|后|了)[^。；;]{0,30}(就|便|则|是)/u,
-    /(下一次|下次|之后才|后来才)/u,
-    /取决于/u,
-    /(是不是|是否是)/u,
-    /与[^。；;]{2,30}(是|不是)(两件事|一回事|同一个)/u,
-    /(不是|并非)[^。；;]{2,30}(而是|，)/u,
-    /(要|必须|应当)[^。；;]{2,30}(，|,)?(不要|不得|不能)/u,
-    /(可以从未|从来没有|从未被|永不|永远不)/u,
-    /把[^。；;]{2,20}(与|和)[^。；;]{2,20}(分开|区别)/u,
-    /(也会变|会变|会分岔|会失效|会过时|会腐烂|不再一样)/u,
-  ]
-  if (CHECKABLE.some((pattern) => pattern.test(claim))) return claim
-  const REFERENT = /([\w.-]+\.[a-z]{1,4}\b|`[^`]+`|[A-Za-z_][A-Za-z0-9_]{3,}\(\)|:\d+)/u
-  const PREDICATE = /(必须|不得|应当|不能|会|不会|等于|属于|只在|是否|一定|永远|从不|全都)/u
-  if (REFERENT.test(claim) && PREDICATE.test(claim)) return claim
-  return undefined
-}
-
-/**
- * ── 那条断言读的东西是不是【现成可取】的 ──────────────────────────────────────
- *
- * ★ 顺序**从窄到宽**，且 ① 必须**最先**（一条 claim 可以同时提到文件和"理解"，
- *   而那时正确答案是后者）。
- * ★ 与 t65 的 `inputKindOf` 同一口径（同一张 `SHAPE_BY_INPUT` 表的输入侧）。
- */
-export function inputKindOf(text) {
-  if (typeof text !== 'string' || text.trim() === '') return undefined
-  const claim = text
-  if (/(理解.{0,8}(任务|意图|目的|在做什么)|需要.{0,6}(判断|理解|读懂)|靠人|人眼|感受|经验判断|语义上|看情况|视情况|编译器.{0,10}不会告诉你|不会告诉你|只有.{0,6}跑(到|过).{0,6}才|靠经验)/u.test(claim)) {
-    return { kind: 'semantic' }
-  }
-  if (/(夹具|针脚|突变|断言|测试怎么写|被测模块|import 缓存)/u.test(claim)) return { kind: 'runtime-ctx' }
-  if (/(loader|注入|接线|调用方|consumer|消费|送过来|送进来|有没有.{0,8}接上|没有.{0,8}接上|没接上|requires|输入面|谁给它赋|skipped)/u.test(claim)) {
-    return { kind: 'injected-by-another-mechanism' }
-  }
-  if (/\bgit\b|commit|HEAD|祖先|分支|merge-base|worktree|提交|搬运|底本/u.test(claim)) return { kind: 'git' }
-  if (/注册表|清单|roster|registry|工具定义/u.test(claim)) return { kind: 'registry' }
-  if (/(派生物|派生文件|生成器|重新生成|快照|golden|扫盘|存在性|目录结构|手改)/u.test(claim)) return { kind: 'filesystem' }
-  if (/(文件|目录|路径)/u.test(claim)) return { kind: 'filesystem' }
-  if (/(源码|文本|措辞|字符串|匹配|正则|写法|字段名|行号|距离|缩进|针脚|突变|夹具|断言|读数|拒绝|格式|数字|赋值|\?\?|兜底|一句.{0,10}话|说明|兑现|字面)/u.test(claim)) {
-    return { kind: 'source-text' }
-  }
-  return undefined
-}
-
-/** 输入的种类 ⇒ 建议形状。★ 与 t65 的 `SHAPE_BY_INPUT` 同一张表。 */
-export const SHAPE_BY_INPUT = Object.freeze({
-  'source-text': { shape: 'gate', where: '源码扫描的判据（scripts/gate-*.test.mjs）' },
-  filesystem: { shape: 'gate', where: '扫盘的判据（文件存在性 / 内容 / 目录结构）' },
-  git: { shape: 'gate', where: '建任务时（contract）或收口时（completion）的检查' },
-  registry: { shape: 'gate', where: '读判据注册表 / 工具清单这类结构化读数的判据' },
-  'injected-by-another-mechanism': { shape: 'gate', where: '判据的输入面（requires）：断言"那一格有没有被送过来"' },
-  'runtime-ctx': { shape: 'fixture-helper', where: '夹具辅助库（**不是判据**，不进注册表）' },
-  semantic: { shape: 'diagnosis', where: '诊断（标记给人看，不拦）' },
-})
-
-/**
- * 对一份判决候选给出裁决（★ 与 t65 的 `triage` 同形）。
- *
- * @param candidate - `{ id, claim }`
- */
-export function triageJudgement(candidate) {
-  const id = typeof candidate?.id === 'string' ? candidate.id : '(no id)'
-  const claim = candidate?.claim
-  if (typeof claim !== 'string' || claim.trim() === '') {
-    return { id, verdict: 'unmeasured', reason: 'no claim was given' }
-  }
-  if (looksAssertive(claim) === undefined) {
-    return { id, verdict: 'discipline', reason: 'the claim does not reduce to an assertion returning true/false on some input' }
-  }
-  const input = inputKindOf(claim)
-  if (input === undefined) {
-    return { id, verdict: 'unmeasured', reason: 'what the assertion would read could not be identified from the text' }
-  }
-  const mapping = SHAPE_BY_INPUT[input.kind]
-  return {
-    id,
-    verdict: mapping.shape === 'fixture-helper' ? 'gate' : mapping.shape,
-    shape: mapping.shape,
-    inputKind: input.kind,
-    where: mapping.where,
-  }
-}
+export { triage as triageJudgement, looksAssertive, inputKindOf, SHAPE_BY_INPUT, VERDICTS as JUDGEMENT_VERDICTS } from './judgement-triage.mjs'
+import { triage as triageJudgement } from './judgement-triage.mjs'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ② 判决 ⇒ 一条【待建任务的提案】

@@ -45,6 +45,10 @@ import {
   proposalForJudgement,
   proposalForFriction,
   JUDGEMENT_VERDICTS,
+  /** ★ t78：这三个现在从 t65 那边 re-export（臂 6 断言**同一性**）。 */
+  looksAssertive,
+  inputKindOf,
+  SHAPE_BY_INPUT,
 } from './friction-triage.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -393,34 +397,116 @@ test('★★★ 臂 5：它**不建任务**、**不写盘** —— 只产出提�
 // 臂 6：与 t65 的口径对齐（★ 那一份是**明写的重复**）
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('★★ 臂 6：本文件的判决判据 = t65 的取值集合（★ 重复是明写的，而对齐可测）', () => {
+test('★★★ 臂 6：判决判据**就是** judgement-triage 的那一个实现（★ 同一性，不是"取值碰巧相同"）', async () => {
   /**
-   * ── 为什么这里**重写**了一遍而不是 import ──────────────────────────────────────
+   * ── ★★★ t78：这条臂从"对拍两份实现"换成"证明**只有一份**" ──────────────────────
    *
-   * MEASURED（t72 开工时核实）：`scripts/judgement-triage.mjs`（t65 的交付）
-   * **不在本仓库里** —— 那次交付报了 failed 且未提交。
-   * ⇒ import 一个不存在的模块会让本工具**启动即炸**。
+   * t72 时它是这么写的（逐字保留）：
+   *   「MEASURED（t72 开工时核实）：`judgement-triage.mjs`（t65 的交付）**不在本仓库里**
+   *     ⇒ import 一个不存在的模块会让本工具**启动即炸**。
+   *     ★★ 而"重写一份"的代价是**两份真相会漂移** —— 所以把口径并排列出来并对齐。」
    *
-   * ★★ 而"重写一份"的代价是**两份真相会漂移** —— 所以把口径**并排列出来**并对齐：
-   *   这条臂断言取值集合逐字相同；等 t65 落地，`looksAssertive` / `inputKindOf`
-   *   应当改成从它那边 import（而这**不是**本任务能做的：写域不含它）。
+   * ⇒ ★ 那个前提在 5d91625 满足了 ⇒ 本文件现在是 **re-export**，而不是第二份实现。
+   *
+   * ── ★★ 为什么"同一性"比"取值一致"强一级 ──────────────────────────────────────
+   *
+   *   旧的那条臂：断言两边的**取值**一致 ⇒ 两份实现可以**碰巧**一致，也可以各自漂移
+   *              （而漂移只会在某天某条 claim 上现形）
+   *   新的那条臂：断言 `===` ⇒ **漂移在结构上不可能** —— 因为没有第二份
    */
-  assert.deepEqual(
-    [...JUDGEMENT_VERDICTS],
-    ['gate', 'diagnosis', 'discipline', 'unmeasured'],
-    '★ 四个取值必须与 t65 的一致 —— 否则同一个 claim 在两个工具里会得到不同的裁决',
+  const upstream = await import('./judgement-triage.mjs')
+  assert.equal(
+    triageJudgement, upstream.triage,
+    '★ 本文件导出的必须**就是** judgement-triage 的那个函数对象 —— '
+    + '一旦有人把它改回本地实现，这一条立刻红（那正是本臂要测的"出处"）',
   )
-  /** ★ 而三条判据在**具体样本**上也必须同向（取值集合相同不等于判得一样）。 */
-  assert.equal(triageJudgement({ id: 'x', claim: '「停在可恢复的中间态」让掉线无害 —— 而它的判据是「重做一遍的代价」' }).verdict, 'discipline',
-    '★ t65 的已知反例在这里也必须落 discipline（否则这一格与它分叉了）')
+  assert.equal(looksAssertive, upstream.looksAssertive, '★ looksAssertive 同理')
+  assert.equal(inputKindOf, upstream.inputKindOf, '★ inputKindOf 同理')
+  assert.equal(SHAPE_BY_INPUT, upstream.SHAPE_BY_INPUT, '★ 形状表同理（同一个对象，不是一份副本）')
+  /** ★ 取值集合也同一性对齐（而**不是**手抄一份去比 —— 那又会变成两份真相）。 */
+  assert.equal(JUDGEMENT_VERDICTS, upstream.VERDICTS, '★ 四个取值必须是**同一个**冻结数组')
+
   /**
-   * ★★ 而这里**不断言** j-0003 那条 —— 因为在它上面**两边本来就不同意**
-   *   （工具判 gate / t65 的表判 diagnosis），而那个分歧已被 t65 如实记为
-   *   "判据边界上的分歧，不是谁算错了"。⇒ 拿它当对齐样本会测到一条两边都不同意的。
-   *   ★ 用来对齐的是**两边都同意**的三类各一条。
+   * ★★ 而三条判据在**具体样本**上仍然要断言（同一性只保证"不漂移"，
+   *   不保证"这些样本的答案是我们要的"）。
    */
+  assert.equal(triageJudgement({ id: 'x', claim: '「停在可恢复的中间态」让掉线无害 —— 而它的判据是「重做一遍的代价」' }).verdict, 'discipline',
+    '★ t65 的已知反例必须落 discipline')
   assert.equal(triageJudgement({ id: 'x', claim: '改动之后需要理解任务在做什么才能判断它对不对，而那不是判据问得出来的问题' }).verdict, 'diagnosis')
   assert.equal(triageJudgement({ id: 'x', claim: '判据的输出格式被改动时，按旧格式给出的拒绝就会失效 —— 而两者必须不同形' }).verdict, 'gate')
+
+  /** ★★★ 而 j-0003 那条分歧现在**变成了同一份实现的内部一致性** —— 那正是它该有的结果。 */
+  assert.equal(
+    triageJudgement({ id: 'j-0003', claim: '「代理读数在它所代理的东西没变时也会变」' }).verdict,
+    upstream.triage({ id: 'j-0003', claim: '「代理读数在它所代理的东西没变时也会变」' }).verdict,
+    '★ 同一个 claim 不可能得到两个答案 —— 而那正是 t72 那条"刻意不对拍"的分歧的归宿',
+  )
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 臂 8（三态臂）：模块在 / 模块缺 / 判不了 —— ★ 三者不许合并
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('★★★ 臂 8：模块**移走**时给出可读的失败 —— ★ 而不是静默地降级成"判不了"', async () => {
+  /**
+   * ── 契约原文：「★ 三态不同形：import 成功 / import 失败（模块缺）时的行为 /
+   *              无法判断 ⇒ 三者不得合并（现在若 import 一个不存在的模块会直接崩）」
+   *
+   * ── ★★★ 而这里要做一个**判断**，它本身就是本任务的交付之一 ──────────────────────
+   *
+   * 一个"模块缺 ⇒ 静默降级成 `unmeasured`"的实现**看起来更稳**，而它是**错的**：
+   * 它会把"**这个模块还没落地**"（一次真实的安装/合并缺陷）与
+   * "**这一条 claim 判不了**"（一个正常的第四态）**合成同一种读数** ——
+   * 而两者的补救动作**相反**：一个去补模块，一个去改 claim。
+   *
+   * ★ 那正是本队记账的形态：**把基础设施工况伪装成关于数据的结论。**
+   *
+   * ⇒ 所以三态是这么分的，而三者各自**可读**：
+   *
+   *     loaded    —— 正常：照常判
+   *     absent    —— ★ **明确的失败**（ESM 解析器给的 `ERR_MODULE_NOT_FOUND`，带文件名）
+   *     （没有第三态）—— 为什么没有：本文件**不猜**模块在不在，所以
+   *                       "我判不了"这件事在**模块这一层**上不存在
+   *
+   * ★ 而这条臂**真的把模块移走**再跑（不是 mock）—— 否则它测的是"我 mock 得对不对"。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const { renameSync } = await import('node:fs')
+  const upstream = join(ROOT, 'scripts', 'judgement-triage.mjs')
+  const parked = join(ROOT, 'scripts', 'judgement-triage.mjs.t78-parked')
+  const l = ledger({ frictions: [], judgements: [] })
+  let moved = false
+  try {
+    renameSync(upstream, parked)
+    moved = true
+    const run = spawnSync('node', [TOOL, '--frictions', l.fdir, '--judgements', l.jdir], { encoding: 'utf8' })
+    assert.notEqual(run.status, 0, '★ 模块缺 ⇒ 必须**失败**，不许静默地出一个"都判不了"的清单')
+    assert.match(
+      `${run.stderr}${run.stdout}`,
+      /judgement-triage\.mjs|ERR_MODULE_NOT_FOUND/u,
+      '★ 而失败必须**指出是哪个模块** —— 否则读的人不知道去补什么',
+    )
+  } finally {
+    if (moved) renameSync(parked, upstream)
+    l.cleanup()
+  }
+})
+
+test('★★ 臂 8b：模块**在**的时候，三态里的 `loaded` 那一态是可读的（而不是靠"没崩"推出来）', async () => {
+  /**
+   * ★ 反向半边：上面那条臂只证明了"缺的时候会失败" ——
+   *   一个**恒失败**的实现（比如 import 写错路径）在那条臂上照样绿。
+   * ⇒ 所以这一条断言"在的时候它真的工作"：跑一次并拿到正常的四格计数。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const l = ledger({ frictions: [friction('f-open', 'open')], judgements: [] })
+  try {
+    const run = spawnSync('node', [TOOL, '--json', '--frictions', l.fdir, '--judgements', l.jdir], { encoding: 'utf8' })
+    assert.equal(run.status, 0, `★ 模块在 ⇒ 必须能跑：\n${run.stderr}`)
+    assert.equal(JSON.parse(run.stdout).counts.toDispatch, 1)
+  } finally {
+    l.cleanup()
+  }
 })
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -432,7 +518,21 @@ test('★★ 臂 6：本文件的判决判据 = t65 的取值集合（★ 重复
  *   ★ 而本工具是**单模块**（只 import node: 内置）—— 那一点由下面那条自检钉住。
  */
 async function freshTool(tag) {
-  return import(`${TOOL}?${tag}`)
+  /**
+   * ── ★★★ t78：bust 必须**跟着依赖走**（那条自检就是为这一刻写的）────────────────
+   *
+   * MEASURED（t78）：t72 时本工具只 import `node:` 内置 ⇒ `import(TOOL + '?tag')`
+   * 一层就够。而 t78 把三条判断改成了 `import './judgement-triage.mjs'` ——
+   * ★ 于是那个**裸路径**与夹具用 `?tag` 拿到的那一份是**两个模块实例**。
+   *
+   * ★ 而那正是本队记账过的坑（t55 同型：夹具只 bust 了 `state.js`，
+   *   而它静态 import 的 `types.js` 是裸路径 ⇒ 突变根本没被读到，
+   *   而报告会读作"突变没打红"——**方向恰好相反**）。
+   *
+   * ⇒ 修法：**带上那个依赖的 query**，让被 import 的那一份也是新的。
+   *   ★ 而这条自检（"本工具是单模块"）当时写下来就是为了在这一刻红 —— 它真的红了。
+   */
+  return import(`${TOOL}?${tag}&dep=judgement-triage`)
 }
 
 function withMutatedTool(mutatedSource, body) {
@@ -524,16 +624,39 @@ test('★ 二次对照：两条突变针脚在工具源码里【真的存在】'
   assert.equal(source.includes(NEEDLE_BLOCKED), true, '★ 突变 B 的针脚必须逐字存在')
 })
 
-test('★★ 夹具自检：本工具是**单模块**（`freshTool` 的 cache-busting 才够用）', () => {
+test('★★ 夹具自检：`freshTool` 的 bust 覆盖了工具的**全部本地依赖**', () => {
   /**
-   * ★★ 与 t55/t65 同一条教训：夹具 bust 一层，而它静态 import 的模块是**另一个实例**
-   *   ⇒ 突变根本没被读到，而报告会读作"突变没打红"（方向相反）。
-   * ⇒ 本工具只 import `node:` 内置 ⇒ 单个 bust 够用。★ 而那一刻会被下一个人改掉，
-   *   所以把它写成**可执行的断言**：一旦有人加本地 import，这里当场红。
+   * ── ★★★ t78：这条自检原来的口径是"本工具是单模块"，而它**当场红了** ────────────
+   *
+   * 原文（逐字保留）：
+   *   「本工具只 import `node:` 内置 ⇒ 单个 bust 够用。★ 而那一刻会被下一个人改掉，
+   *     所以把它写成**可执行的断言**：一旦有人加本地 import，这里当场红。」
+   *
+   * ⇒ ★ 它**按设计红了**（t78 加了 `import './judgement-triage.mjs'`），
+   *   而那正是它存在的意义：它在"突变静默地测旧代码"**之前**就响了。
+   *
+   * ── 而新的口径不是"没有本地依赖"（那已经假了），而是**bust 覆盖了它们** ────────
+   *
+   * ★ 断言两件事：
+   *   ① 工具**确实**有本地依赖了（否则这条自检会在有人把 import 删掉时静默地失去意义）
+   *   ② `freshTool` 的 query **提到了每一个**本地依赖的模块名
+   *      ⇒ 一个"加了 import 却忘了改 bust"的改动会让 ② 当场红
    */
-  const source = readFileSync(TOOL, 'utf8')
-  const local = [...source.matchAll(/^import .*? from '(\.[^']*)'/gmu)].map((m) => m[1])
-  assert.deepEqual(local, [], `★ 工具若开始 import 本地模块，freshTool 必须改成一起 bust。当前：${JSON.stringify(local)}`)
+  const toolSource = readFileSync(TOOL, 'utf8')
+  const deps = [...toolSource.matchAll(/^import .*? from '(\.\/[^']*)'/gmu)].map((m) => m[1])
+  assert.ok(deps.length > 0, '★ t78 之后本工具**有**本地依赖了 —— 若这里为空，说明有人把它删了（那本条自检要跟着改回去）')
+
+  const helperSource = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const bust = /import\(`\$\{TOOL\}\?\$\{tag\}([^`]*)`\)/u.exec(helperSource)
+  assert.ok(bust !== null, '★ `freshTool` 必须仍然用 `?tag` 的形式 bust（找不到说明它被重写了）')
+  for (const dep of deps) {
+    const name = dep.replace(/^\.\//u, '').replace(/\.mjs$/u, '')
+    assert.ok(
+      bust[1].includes(name),
+      `★ \`freshTool\` 的 bust query 里**没有提到**依赖 "${dep}" ⇒ 突变会静默地测旧代码（t55 的实测形态）。`
+      + `当前 query 尾部：${JSON.stringify(bust[1])}`,
+    )
+  }
 })
 
 test('★★ 夹具自检：`freshTool` 读到的确实是【当前磁盘上】的那一份', async () => {
