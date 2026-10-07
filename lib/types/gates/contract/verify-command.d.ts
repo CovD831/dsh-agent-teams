@@ -131,6 +131,94 @@ export declare const VERIFY_COMMAND_GATE_ID = "contract.verify-command";
  *   它由 gate 自己的分支持有，并有三条夹具臂钉住（不适用臂 / 未测量臂 / 三态不同形）。
  */
 export declare const requires: CtxPaths<VerifyCommandContext>[];
+/**
+ * ── ★★★ 规则表：从【代码】挪到【运行时可读的数据】（t53）─────────────────────────
+ *
+ * ── 它兑现的是"插件能不能自我迭代"这个问题的**唯一可行答案** ────────────────────
+ *
+ * 用户问：「无法自动重载的话，插件就不能做自我迭代了？」
+ * ⇒ 可判定的原则：**改【它读的东西】⇒ 不必重载；改【跑着的那段代码】⇒ 要换进程。**
+ *
+ * ★★ 而"数据"这个词本身骗人 —— 它有两个含义（我实测出来的三分类）：
+ *
+ *     改【跑着的代码】（.ts 的逻辑）        ⇒ 要 build + 重载
+ *     改【被内联进 lib 的数据】（静态 import）⇒ ★ 要 build + 重载（只省了"懂 TS"）
+ *     改【运行时读盘的数据】（调用方每次读）  ⇒ ★ 不 build、不重载 ← **只有这一条兑现**
+ *
+ *   MEASURED：静态 `import rules from './…json'` 在本仓库**连编译都过不去** ——
+ *     `error TS1543: Importing a JSON file into an ECMAScript module requires a
+ *     'type: "json"' import attribute when 'module' is set to 'NodeNext'`；
+ *     而即便打开 `resolveJsonModule`，JSON 也会被 `tsc` **内联进 `lib/`**
+ *     ⇒ 改数据仍要 build ⇒ 仍要重载。
+ *   ★ 所以中间那一类**看起来像数据**，而它在运行时与代码同命。
+ *
+ * ⇒ 因此规则表**不由本模块读**（判据不许 import I/O，`verify-gates-integration` ④
+ *   逐行检查 import 子句）—— 而是与 `execVerifyCommand` **同一条路：由调用方注入**，
+ *   且调用方**每次调用时读盘**。于是"改数据 ⇒ 立刻生效"成立。
+ *
+ * ── ★★★ 表与逻辑的边界（这是最容易做错的地方）────────────────────────────────────
+ *
+ *   ★ **表**（进数据）：哪些【命令名】是恒真的 / 恒红的、哪些命令【本可断言】、
+ *     哪一族命令的成败可能取决于另一个命令的输出。
+ *   ★ **逻辑**（留在本文件）：怎么用那张表判断、三态怎么分、tokenize、
+ *     "有算子就不算恒真"这条推理、措辞怎么生成。
+ *
+ *   ⇒ 我**没有**为了数据化而把逻辑搬进数据 —— 那会造出一个**不可测的解释器**
+ *     （本队记账的"过度设计"形态：一个能表达逻辑的数据文件无法被静态复核）。
+ *
+ * ── ★★ 而它必须【可校验】：三态不同形 ──────────────────────────────────────────
+ *
+ *     `loaded`   —— 读到了、且形状对
+ *     `absent`   —— 读不到（文件不在 / 读失败）
+ *     `malformed`—— 读到了但形状坏（不是对象 / 缺关键字段 / 字段类型不对）
+ *     `empty`    —— 读到了、形状对，但**一条规则都没有**
+ *
+ *   ★ 四者**互不同形**，且**绝不静默退化成"没有规则"** ——
+ *     那会把「没能测量」变成「测了，没问题」（本队记账最久的那条界线）。
+ *   ⇒ 读不到/坏/空 ⇒ 本判据的静态部分降级成 `unmeasured`（不是"没有恒真命令"）。
+ */
+export type RulesLoad = {
+    status: 'loaded';
+    rules: VerifyCommandRules;
+} | {
+    status: 'absent';
+    reason: string;
+} | {
+    status: 'malformed';
+    reason: string;
+} | {
+    status: 'empty';
+    reason: string;
+};
+/** 规则表的形状 —— **只放表，不放逻辑**。 */
+export interface VerifyCommandRules {
+    /** 以这些命令起头 ⇒ 恒绿（`true`）。 */
+    constantGreenCommands: readonly string[];
+    /** 以这些命令起头 ⇒ 恒红（`false`）。 */
+    constantRedCommands: readonly string[];
+    /** 恒绿的**别名**（`:` / `!false`）—— 与上面同一类事实，只是写法不同。 */
+    constantGreenAliases: readonly string[];
+    /** 本可断言、但在某些形状下断言不了的命令（`test` / `[`）。 */
+    assertionCommands: readonly string[];
+    /** 这一族命令的成败可能取决于另一个命令的输出（`grep` / `egrep` / `fgrep`）。 */
+    processSubstitutionReaders: readonly string[];
+    /** 整行匹配的长开关（`--line-regexp`）。 */
+    wholeLineSwitches: readonly string[];
+    /** 整行匹配的短选项形状（正则源码字符串）。 */
+    wholeLineShortPattern: string;
+}
+/**
+ * 把调用方交进来的**未校验数据**解析成规则表。
+ *
+ * ★ 它是**纯函数**（不读盘）："读"由调用方做，"信不信它"由本函数判。
+ *   ⇒ 于是"文件读不到"与"文件里写的是垃圾"在**判据层**是两个不同的读数
+ *     （前者调用方说 `absent`，后者这里说 `malformed`）。
+ *
+ * ★ 为什么严格校验**每一个**字段：一个缺了 `constantRedCommands` 的表会静默地
+ *   让 `false` 不再被识别为恒红 —— 而那**看起来像"这条命令没问题"**。
+ *   ⇒ 缺字段必须是 `malformed`，不能是"那个字段就当空数组"。
+ */
+export declare function parseRules(raw: unknown): RulesLoad;
 interface VerifyCommandContext {
     /**
      * 待建 / 待改的任务契约。取自 `create_task` 的任务草稿或 `amend_task` 修订后的任务。
@@ -153,6 +241,22 @@ interface VerifyCommandContext {
      * 执行器（`tools.ts` 的 `runVerifyCommand`）—— 两个位置注入同一个东西，不是两种东西。
      */
     execVerifyCommand?: (command: string) => Promise<number>;
+    /**
+     * ── ★★★ 规则表的**运行时**来源（t53）──────────────────────────────────────────
+     *
+     * ★ 由调用方注入，且调用方**每次调用时读盘** —— 那正是"改数据不必重载"成立的条件。
+     *   ★ 判据**不读盘**（不许 import I/O）⇒ 它只能拿到调用方交进来的这一份。
+     *
+     * ★ 三种"没得读"的情形由调用方区分（`absent` = 读不到；本文件自己判 `malformed`
+     *   与 `empty`）⇒ 四态不同形，且**绝不静默退化成"没有规则"**。
+     */
+    /**
+     * ★ 返回 `RulesLoad` **或它的 Promise**：读盘天然是异步的，而"读"这件事
+     *   由调用方做 ⇒ 判据必须接受一个异步的读取器，否则调用方只能同步读盘
+     *   （那会把它自己锁进 `readFileSync`，并在大文件上阻塞事件循环）。
+     *   ★ 而 `gate()` 已经是 `async` ⇒ 多 await 一步不改变任何既有语义。
+     */
+    loadRules?: () => RulesLoad | Promise<RulesLoad>;
 }
 export interface VerifyCommandProblem {
     /** 机器可读的原因分类（断言与日志都按它分组，不靠措辞）。 */
@@ -168,7 +272,7 @@ export declare function shellTokens(command: string): string[];
  * ★ `undefined` 说的是【静态可判性】，不是"它一定通过"。两者不能混：
  *   一条命令看起来可判，但它在当前工作区里到底跑成什么，只有真的跑一次才知道。
  */
-export declare function verifyCommandProblems(command: string): VerifyCommandProblem[];
+export declare function verifyCommandProblems(command: string, rules: VerifyCommandRules): VerifyCommandProblem[];
 /**
  * 只对【真的带着契约】的上下文生效。
  *

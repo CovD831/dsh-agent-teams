@@ -47,6 +47,12 @@ import { fileURLToPath } from 'node:url'
 import { gate, appliesTo, id, point, requires } from '../lib/gates/contract/build-artifact-scope.js'
 import { buildRegistry, registry } from '../lib/gates/index.js'
 import { checkRequires } from '../lib/gates/requires.js'
+/**
+ * ★ t53：`contract.verify-command` 现在还要**规则表**（它已从代码挪进数据）。
+ *   本文件的臂测的是 `execVerifyCommand` 那一格 ⇒ 表必须**注入**，
+ *   否则判据先报"表读不到"，而"没有执行器"这句话就永远不出现。
+ */
+import { loadVerifyCommandRules } from '../lib/tools/shared/entities.js'
 import { classifyChangedPath } from '../lib/quality-gates.js'
 
 /** 本仓库根（下面几条臂要读源码：`requires` 是**声明**，它没有运行时行为可测）。 */
@@ -486,6 +492,8 @@ test('★ 输入面臂（真品路径）：经注册表 + 工具层，缺 `execV
   const withoutExecutor = {
     task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
     creating: true,
+    /** ★ t53：表在场 ⇒ 缺的那一格**只能**是执行器（否则两句话不同源）。 */
+    loadRules: () => loadVerifyCommandRules(ROOT),
   }
 
   const full = await registry.evaluate('contract', withExecutor)
@@ -543,7 +551,13 @@ test('★ 输入面臂：`execVerifyCommand` 缺席与在场 ⇒ 判据裁决不
    *   `gate-contract-verify-command.test.mjs` 里既有臂的口径一致。
    */
   const { gate: verifyGate } = await import('../lib/gates/contract/verify-command.js')
-  const contract = (extra) => ({ task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] }, creating: true, ...extra })
+  const contract = (extra) => ({
+    task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] },
+    creating: true,
+    /** ★ t53：同上 —— 表在场，于是"缺执行器"是唯一缺的那一格。 */
+    loadRules: () => loadVerifyCommandRules(ROOT),
+    ...extra,
+  })
 
   const ok = await verifyGate(contract({ execVerifyCommand: async () => 0 }))
   const noExecutor = await verifyGate(contract({}))

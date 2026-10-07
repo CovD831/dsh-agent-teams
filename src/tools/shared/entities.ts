@@ -11,6 +11,15 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { dirname, join } from 'node:path'
+/**
+ * ★ t53：规则表的**校验器**从判据那边借来（它是纯函数，不读盘）。
+ *   ★ 方向不会成环：`verify-command.ts` 只 import `registry.ts` / `requires.ts`，
+ *     它不知道 tools 层存在。
+ *   ★ 而校验与读盘分开是刻意的：读不到是**调用方**的事实（`absent`），
+ *     形状坏是**数据本身**的事实（`malformed`）—— 两者不同形，由两个地方各自判。
+ */
+import { parseRules, type RulesLoad } from '../../gates/contract/verify-command.ts'
+
 import { readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -203,6 +212,65 @@ export function workspaceOf(agent: Agent): string {
   return agent.session.header.cwd ?? process.cwd()
 }
 export const VERIFY_COMMAND_TIMEOUT_MS = 120_000
+/**
+ * ── ★★★ 规则表的**运行时**读取（t53）────────────────────────────────────────────
+ *
+ * ★ 为什么读盘这一件事必须在这里（而不是判据里）：
+ *
+ *   判据**不许 import 任何 I/O**（`scripts/verify-gates-integration.test.mjs` ④
+ *   逐行检查 import 子句）⇒ 它只能拿到调用方交进去的东西。
+ *   ⇒ 于是"改数据 ⇒ 立刻生效"这件事的**成立条件**就是：**调用方每次调用时读**。
+ *
+ * ★★ 而这正是那个三分类里**唯一**兑现"不必重载"的一类：
+ *
+ *     改【跑着的代码】（.ts 的逻辑）        ⇒ 要 build + 重载
+ *     改【被内联进 lib 的数据】（静态 import）⇒ ★ 要 build + 重载（只省了"懂 TS"）
+ *     改【运行时读盘的数据】（这里）        ⇒ ★ 不 build、不重载
+ *
+ *   MEASURED（t53）：静态 `import rules from './….json'` 在本仓库连编译都过不去
+ *   （`TS1543 … requires a 'type: "json"' import attribute when 'module' is NodeNext`）；
+ *   即便打开 `resolveJsonModule`，JSON 也会被 `tsc` 内联进 `lib/` ⇒ 改数据仍要 build。
+ *   ★ 所以中间那一类**看起来像数据**，而它在运行时与代码同命。
+ *
+ * ★ 四态**互不同形**（`parseRules` 判后两者，这里判前两者）：
+ *     loaded / absent（读不到）/ malformed（形状坏）/ empty（空表）
+ *   ⇒ 后三者会让判据降级成 `unmeasured` —— **绝不静默退化成"没有规则"**。
+ */
+export async function loadVerifyCommandRules(workspace: string): Promise<RulesLoad> {
+  const { readFile } = await import('node:fs/promises')
+  const path = await import('node:path')
+  const { fileURLToPath } = await import('node:url')
+  /**
+   * ★ 数据文件**跟着源码走**（`src/gates/contract/verify-command-rules.json`），
+   *   而不是跟着工作区 —— 它是**插件自己的**规则表，不是被审对象的属性。
+   *   ★ 而它必须与 `verify-command.ts` 同一次构建一起被复制到 `lib/` 下
+   *     （见 `scripts/git-artifacts.mjs` 的 copy 清单）——
+   *     否则"读得到"在生产里会变成"读不到"，而那个失效是静默的。
+   */
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  /**
+   * ★ 两份候选：**先看产物旁边**（`lib/gates/contract/…`，生产路径），
+   *   再看源码旁边（`src/gates/contract/…`，夹具/开发路径）。
+   *   ★ 顺序无关正确性（两者是同一份文件的两个副本），而它让"哪个都不在"
+   *     与"读到了"分得开 —— 前者是 `absent`，后者是 `loaded`。
+   */
+  const candidates = [
+    path.resolve(here, '..', '..', 'gates', 'contract', 'verify-command-rules.json'),
+    path.resolve(here, '..', '..', '..', 'src', 'gates', 'contract', 'verify-command-rules.json'),
+  ]
+  let lastError = ''
+  for (const candidate of candidates) {
+    try {
+      const text = await readFile(candidate, 'utf8')
+      return parseRules(JSON.parse(text))
+    } catch (error) {
+      lastError = `${candidate}: ${String((error as { message?: unknown })?.message ?? error)}`
+    }
+  }
+  void workspace
+  return { status: 'absent', reason: `the rule table could not be read from any known location (${lastError})` }
+}
+
 export async function runVerifyCommand(workspace: string, command: string): Promise<number> {
   const { spawn } = await import('node:child_process')
   return await new Promise<number>((resolve) => {

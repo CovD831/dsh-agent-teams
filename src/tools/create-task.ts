@@ -7,7 +7,7 @@
 import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, memberOpenTask, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, stateRootOf, stopTeamMemberActivations, teamLockKey, withInputSurfaceOnError, workspaceOf } from './shared/entities.ts'
+import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, memberOpenTask, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, stateRootOf, stopTeamMemberActivations, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TaskKind, TeamTask } from '../types.ts'
 import { AgentTeamsRuntime } from './shared/entities.ts'
@@ -180,6 +180,14 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            */
           const contractGateSurface = await rejectOnContractGates(ctx, { team: fresh, task, creating: true }, 'create_task', stateRoot, {
             execVerifyCommand: (command: string): Promise<number> => runVerifyCommand(workspace, command),
+            /**
+             * ── ★★★ t53：规则表**每次调用时读**（"改数据 ⇒ 立刻生效"的成立条件）──
+             *
+             * ★ 不缓存：缓存会让"改数据"在下一次**进程重启**前不生效 ——
+             *   而那正是本任务要消灭的东西（改它读的东西不该需要换进程）。
+             * ★ 也不在构建时内联（静态 import 会被 tsc 嵌进 lib/ ⇒ 改数据仍要 build）。
+             */
+            loadRules: () => loadVerifyCommandRules(workspace),
           })
           await writeTeam(stateRoot, fresh)
           /**

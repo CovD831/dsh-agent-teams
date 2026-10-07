@@ -1,0 +1,42 @@
+{
+  "_comment": "── verify-command 判据的【规则表】（t53）────────────────────────────────【这里放的是表，不是逻辑】。判据每次调用时读它 ⇒ 改这个文件**不需要重载插件**（改 .ts 才需要）。★ 判据本身只保留「怎么用这些表」，所以这个文件里【不许】出现任何判定逻辑 —— 一个能表达逻辑的数据文件会变成不可测的解释器。",
+  "schema": 1,
+
+  "_constantExit": "── 事实一：以这些命令起头的命令，退出码【不取决于任务产出】──────",
+  "constantGreenCommands": [
+    { "name": "true", "why": "exits 0 no matter what the task produced" }
+  ],
+  "constantRedCommands": [
+    { "name": "false", "why": "exits non-zero no matter what the task produced" }
+  ],
+  "_aliases": "── `:` 是 POSIX 的空命令（恒绿）；`!false` 是 `false` 的取反（也恒绿）。它们与 true/false 是【同一类事实】的别名。",
+  "constantGreenAliases": [
+    { "name": ":", "why": "the POSIX no-op command" },
+    { "name": "!false", "why": "the negation of false" }
+  ],
+
+  "_assertionCommands": "── 事实二：这些命令【本可以断言】，但在某几个形状下断言不了 ──────────",
+  "assertionCommands": [
+    { "name": "test", "why": "a bare operand asserts the literal, not the work" },
+    { "name": "[", "why": "same as test, with the closing bracket as syntax" }
+  ],
+
+  "_negationExclusion": "── ★ 刻意【不是】恒真的一张表（它的存在就是这条规则的一部分）──────────",
+  "notConstantDespiteShape": [
+    {
+      "name": "!",
+      "why": "MEASURED: this repository really uses `! grep -qiE \"rollback\" file.md` (a check that a word must NOT appear). It is perfectly judgeable — red when the word is there, green when it is not. Treating it as constant-green would be a FALSE POSITIVE, and a gate that cries wolf gets ignored."
+    }
+  ],
+
+  "_processSubstitution": "── 事实三：这一族命令的成败可能取决于另一个命令的输出 ──────────────────",
+  "processSubstitutionReaders": [
+    { "name": "grep", "why": "may be comparing against the output of a nested command" },
+    { "name": "egrep", "why": "same family" },
+    { "name": "fgrep", "why": "same family" }
+  ],
+  "_wholeLineSwitch": "── 整行匹配的开关：只有它们会让「命令输出的空白」决定成败 ────────────",
+  "_wholeLineShortPatternNote": "── 短选项形状也在这里（一个正则源码字符串）⇒ 改它同样不必重载 ────",
+  "wholeLineSwitches": ["--line-regexp"],
+  "wholeLineShortPattern": "^-[a-zA-Z]*x[a-zA-Z]*$"
+}

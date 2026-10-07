@@ -56,6 +56,13 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+/**
+ * ★ t53：`contract.verify-command` 现在还要**规则表**（它已从代码挪进数据）。
+ *   本文件的臂要的是"判据在语料上跑出分布" ⇒ 表必须注入，
+ *   否则每一条都变成"表读不到"的 `unmeasured`，而那个分布没有信息量。
+ */
+const { loadVerifyCommandRules } = await import('../lib/tools/shared/entities.js')
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 装置：把一份语料喂给一条判据，读出它的【分布】
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,7 +174,7 @@ const TARGETS = [
   {
     id: 'contract.verify-command',
     gate: verifyCommand,
-    makeContext: (task) => ({ task, execVerifyCommand: executorThatAlwaysPasses }),
+    makeContext: (task) => ({ task, loadRules: () => loadVerifyCommandRules(ROOT), execVerifyCommand: executorThatAlwaysPasses }),
   },
 ]
 
@@ -370,6 +377,7 @@ test('臂 3 ★ verify-command：真实语料上恒不触发是【对的】；�
      */
     (item) => ({
       task: item,
+      loadRules: () => loadVerifyCommandRules(ROOT),
       execVerifyCommand: async (command) => (command.includes('no-such-command') ? 127 : 0),
     }),
   )
@@ -535,7 +543,7 @@ test('臂 5 ★ 范式可复制：contract 位置的每一条判据都能算出�
     const distribution = await distributionOf(
       module,
       CORPUS,
-      (task) => ({ task, execVerifyCommand: executorThatAlwaysPasses }),
+      (task) => ({ task, loadRules: () => loadVerifyCommandRules(ROOT), execVerifyCommand: executorThatAlwaysPasses }),
     )
     readings.push({ id: entry.id, counts: distribution.counts, total: distribution.total, threw: distribution.evidence.threw })
 

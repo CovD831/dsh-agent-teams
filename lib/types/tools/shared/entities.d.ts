@@ -2,6 +2,14 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { JsonValue } from '@deepseek-ai/dsh-util-values';
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
+/**
+ * ★ t53：规则表的**校验器**从判据那边借来（它是纯函数，不读盘）。
+ *   ★ 方向不会成环：`verify-command.ts` 只 import `registry.ts` / `requires.ts`，
+ *     它不知道 tools 层存在。
+ *   ★ 而校验与读盘分开是刻意的：读不到是**调用方**的事实（`absent`），
+ *     形状坏是**数据本身**的事实（`malformed`）—— 两者不同形，由两个地方各自判。
+ */
+import { type RulesLoad } from '../../gates/contract/verify-command.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
@@ -92,6 +100,31 @@ export interface AgentTeamsRuntime {
 export declare function requireCaptain(exec: ToolRunContext): Agent;
 export declare function workspaceOf(agent: Agent): string;
 export declare const VERIFY_COMMAND_TIMEOUT_MS = 120000;
+/**
+ * ── ★★★ 规则表的**运行时**读取（t53）────────────────────────────────────────────
+ *
+ * ★ 为什么读盘这一件事必须在这里（而不是判据里）：
+ *
+ *   判据**不许 import 任何 I/O**（`scripts/verify-gates-integration.test.mjs` ④
+ *   逐行检查 import 子句）⇒ 它只能拿到调用方交进去的东西。
+ *   ⇒ 于是"改数据 ⇒ 立刻生效"这件事的**成立条件**就是：**调用方每次调用时读**。
+ *
+ * ★★ 而这正是那个三分类里**唯一**兑现"不必重载"的一类：
+ *
+ *     改【跑着的代码】（.ts 的逻辑）        ⇒ 要 build + 重载
+ *     改【被内联进 lib 的数据】（静态 import）⇒ ★ 要 build + 重载（只省了"懂 TS"）
+ *     改【运行时读盘的数据】（这里）        ⇒ ★ 不 build、不重载
+ *
+ *   MEASURED（t53）：静态 `import rules from './….json'` 在本仓库连编译都过不去
+ *   （`TS1543 … requires a 'type: "json"' import attribute when 'module' is NodeNext`）；
+ *   即便打开 `resolveJsonModule`，JSON 也会被 `tsc` 内联进 `lib/` ⇒ 改数据仍要 build。
+ *   ★ 所以中间那一类**看起来像数据**，而它在运行时与代码同命。
+ *
+ * ★ 四态**互不同形**（`parseRules` 判后两者，这里判前两者）：
+ *     loaded / absent（读不到）/ malformed（形状坏）/ empty（空表）
+ *   ⇒ 后三者会让判据降级成 `unmeasured` —— **绝不静默退化成"没有规则"**。
+ */
+export declare function loadVerifyCommandRules(workspace: string): Promise<RulesLoad>;
 export declare function runVerifyCommand(workspace: string, command: string): Promise<number>;
 export declare const taskWorktreeBase: Map<string, string>;
 export declare function worktreeBaseOf(taskId: string): string | undefined;

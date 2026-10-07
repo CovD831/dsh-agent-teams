@@ -137,6 +137,153 @@ export const VERIFY_COMMAND_GATE_ID = id
  */
 export const requires: CtxPaths<VerifyCommandContext>[] = ['task', 'execVerifyCommand']
 
+/**
+ * ── ★★★ 规则表：从【代码】挪到【运行时可读的数据】（t53）─────────────────────────
+ *
+ * ── 它兑现的是"插件能不能自我迭代"这个问题的**唯一可行答案** ────────────────────
+ *
+ * 用户问：「无法自动重载的话，插件就不能做自我迭代了？」
+ * ⇒ 可判定的原则：**改【它读的东西】⇒ 不必重载；改【跑着的那段代码】⇒ 要换进程。**
+ *
+ * ★★ 而"数据"这个词本身骗人 —— 它有两个含义（我实测出来的三分类）：
+ *
+ *     改【跑着的代码】（.ts 的逻辑）        ⇒ 要 build + 重载
+ *     改【被内联进 lib 的数据】（静态 import）⇒ ★ 要 build + 重载（只省了"懂 TS"）
+ *     改【运行时读盘的数据】（调用方每次读）  ⇒ ★ 不 build、不重载 ← **只有这一条兑现**
+ *
+ *   MEASURED：静态 `import rules from './…json'` 在本仓库**连编译都过不去** ——
+ *     `error TS1543: Importing a JSON file into an ECMAScript module requires a
+ *     'type: "json"' import attribute when 'module' is set to 'NodeNext'`；
+ *     而即便打开 `resolveJsonModule`，JSON 也会被 `tsc` **内联进 `lib/`**
+ *     ⇒ 改数据仍要 build ⇒ 仍要重载。
+ *   ★ 所以中间那一类**看起来像数据**，而它在运行时与代码同命。
+ *
+ * ⇒ 因此规则表**不由本模块读**（判据不许 import I/O，`verify-gates-integration` ④
+ *   逐行检查 import 子句）—— 而是与 `execVerifyCommand` **同一条路：由调用方注入**，
+ *   且调用方**每次调用时读盘**。于是"改数据 ⇒ 立刻生效"成立。
+ *
+ * ── ★★★ 表与逻辑的边界（这是最容易做错的地方）────────────────────────────────────
+ *
+ *   ★ **表**（进数据）：哪些【命令名】是恒真的 / 恒红的、哪些命令【本可断言】、
+ *     哪一族命令的成败可能取决于另一个命令的输出。
+ *   ★ **逻辑**（留在本文件）：怎么用那张表判断、三态怎么分、tokenize、
+ *     "有算子就不算恒真"这条推理、措辞怎么生成。
+ *
+ *   ⇒ 我**没有**为了数据化而把逻辑搬进数据 —— 那会造出一个**不可测的解释器**
+ *     （本队记账的"过度设计"形态：一个能表达逻辑的数据文件无法被静态复核）。
+ *
+ * ── ★★ 而它必须【可校验】：三态不同形 ──────────────────────────────────────────
+ *
+ *     `loaded`   —— 读到了、且形状对
+ *     `absent`   —— 读不到（文件不在 / 读失败）
+ *     `malformed`—— 读到了但形状坏（不是对象 / 缺关键字段 / 字段类型不对）
+ *     `empty`    —— 读到了、形状对，但**一条规则都没有**
+ *
+ *   ★ 四者**互不同形**，且**绝不静默退化成"没有规则"** ——
+ *     那会把「没能测量」变成「测了，没问题」（本队记账最久的那条界线）。
+ *   ⇒ 读不到/坏/空 ⇒ 本判据的静态部分降级成 `unmeasured`（不是"没有恒真命令"）。
+ */
+export type RulesLoad =
+  | { status: 'loaded'; rules: VerifyCommandRules }
+  | { status: 'absent'; reason: string }
+  | { status: 'malformed'; reason: string }
+  | { status: 'empty'; reason: string }
+
+/** 规则表的形状 —— **只放表，不放逻辑**。 */
+export interface VerifyCommandRules {
+  /** 以这些命令起头 ⇒ 恒绿（`true`）。 */
+  constantGreenCommands: readonly string[]
+  /** 以这些命令起头 ⇒ 恒红（`false`）。 */
+  constantRedCommands: readonly string[]
+  /** 恒绿的**别名**（`:` / `!false`）—— 与上面同一类事实，只是写法不同。 */
+  constantGreenAliases: readonly string[]
+  /** 本可断言、但在某些形状下断言不了的命令（`test` / `[`）。 */
+  assertionCommands: readonly string[]
+  /** 这一族命令的成败可能取决于另一个命令的输出（`grep` / `egrep` / `fgrep`）。 */
+  processSubstitutionReaders: readonly string[]
+  /** 整行匹配的长开关（`--line-regexp`）。 */
+  wholeLineSwitches: readonly string[]
+  /** 整行匹配的短选项形状（正则源码字符串）。 */
+  wholeLineShortPattern: string
+}
+
+/**
+ * 把调用方交进来的**未校验数据**解析成规则表。
+ *
+ * ★ 它是**纯函数**（不读盘）："读"由调用方做，"信不信它"由本函数判。
+ *   ⇒ 于是"文件读不到"与"文件里写的是垃圾"在**判据层**是两个不同的读数
+ *     （前者调用方说 `absent`，后者这里说 `malformed`）。
+ *
+ * ★ 为什么严格校验**每一个**字段：一个缺了 `constantRedCommands` 的表会静默地
+ *   让 `false` 不再被识别为恒红 —— 而那**看起来像"这条命令没问题"**。
+ *   ⇒ 缺字段必须是 `malformed`，不能是"那个字段就当空数组"。
+ */
+export function parseRules(raw: unknown): RulesLoad {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { status: 'malformed', reason: `the rules data must be an object, got ${Array.isArray(raw) ? 'an array' : typeof raw}` }
+  }
+  const record = raw as Record<string, unknown>
+  /**
+   * ★★ 两种形状都接受：纯字符串，或 `{ name, why }`。
+   *
+   * MEASURED（我在同一轮里踩到的）：数据文件里我给每条规则配了 `why`
+   * —— 那是**给人读的理由**，而它是这张表最值钱的部分之一
+   * （它让"为什么这条算恒真"可复核）。
+   * ⇒ 而第一版校验器只认字符串 ⇒ 一份**完全正确**的数据被判成 `malformed`。
+   *   ★ 形态：**校验器比它校验的东西窄** —— 校验器会把合法输入报成坏的。
+   *
+   * ★ 而 `why` **不进判据**：判据只读名字（"哪些命令恒真"是**表**，
+   *   "为什么"是**注释**）。⇒ 于是数据可以为人类读者变厚，而不改变判定。
+   */
+  const strings = (key: string): string[] | undefined => {
+    const value = record[key]
+    if (!Array.isArray(value)) return undefined
+    const out: string[] = []
+    for (const item of value) {
+      if (typeof item === 'string') { out.push(item); continue }
+      if (item !== null && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string') {
+        out.push((item as { name: string }).name)
+        continue
+      }
+      return undefined
+    }
+    return out
+  }
+  const keys = [
+    'constantGreenCommands', 'constantRedCommands', 'constantGreenAliases',
+    'assertionCommands', 'processSubstitutionReaders', 'wholeLineSwitches',
+  ] as const
+  for (const key of keys) {
+    if (strings(key) === undefined) {
+      return { status: 'malformed', reason: `the rules data has no usable "${key}" (expected an array of strings)` }
+    }
+  }
+  if (typeof record.wholeLineShortPattern !== 'string' || record.wholeLineShortPattern === '') {
+    return { status: 'malformed', reason: 'the rules data has no usable "wholeLineShortPattern" (expected a non-empty string)' }
+  }
+  const rules: VerifyCommandRules = {
+    constantGreenCommands: strings('constantGreenCommands')!,
+    constantRedCommands: strings('constantRedCommands')!,
+    constantGreenAliases: strings('constantGreenAliases')!,
+    assertionCommands: strings('assertionCommands')!,
+    processSubstitutionReaders: strings('processSubstitutionReaders')!,
+    wholeLineSwitches: strings('wholeLineSwitches')!,
+    wholeLineShortPattern: record.wholeLineShortPattern,
+  }
+  /**
+   * ★★ `empty`：形状对、而**一条规则都没有**。
+   *   它与 `loaded` 不同形（后者至少有一条），也与 `malformed` 不同形（后者形状坏）。
+   *   ⇒ 它的含义是"这份表说得太少，少到判据不该假装自己判过了"。
+   */
+  const total = rules.constantGreenCommands.length + rules.constantRedCommands.length
+    + rules.constantGreenAliases.length + rules.assertionCommands.length
+    + rules.processSubstitutionReaders.length + rules.wholeLineSwitches.length
+  if (total === 0) {
+    return { status: 'empty', reason: 'the rules data parsed but declares no rules at all — "no rules loaded" is not "the commands are fine"' }
+  }
+  return { status: 'loaded', rules }
+}
+
 interface VerifyCommandContext {
   /**
    * 待建 / 待改的任务契约。取自 `create_task` 的任务草稿或 `amend_task` 修订后的任务。
@@ -155,6 +302,22 @@ interface VerifyCommandContext {
    * 执行器（`tools.ts` 的 `runVerifyCommand`）—— 两个位置注入同一个东西，不是两种东西。
    */
   execVerifyCommand?: (command: string) => Promise<number>
+  /**
+   * ── ★★★ 规则表的**运行时**来源（t53）──────────────────────────────────────────
+   *
+   * ★ 由调用方注入，且调用方**每次调用时读盘** —— 那正是"改数据不必重载"成立的条件。
+   *   ★ 判据**不读盘**（不许 import I/O）⇒ 它只能拿到调用方交进来的这一份。
+   *
+   * ★ 三种"没得读"的情形由调用方区分（`absent` = 读不到；本文件自己判 `malformed`
+   *   与 `empty`）⇒ 四态不同形，且**绝不静默退化成"没有规则"**。
+   */
+  /**
+   * ★ 返回 `RulesLoad` **或它的 Promise**：读盘天然是异步的，而"读"这件事
+   *   由调用方做 ⇒ 判据必须接受一个异步的读取器，否则调用方只能同步读盘
+   *   （那会把它自己锁进 `readFileSync`，并在大文件上阻塞事件循环）。
+   *   ★ 而 `gate()` 已经是 `async` ⇒ 多 await 一步不改变任何既有语义。
+   */
+  loadRules?: () => RulesLoad | Promise<RulesLoad>
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -255,19 +418,25 @@ function unquote(token: string): string {
  *   一条永远绿的 verify 给不出任何关于工作的信息，却会让"完成"看起来被验证过。
  *   它与"永远红"是同一个失效的两面：**没有可判性**。
  */
-function constantExitProblem(outer: string): VerifyCommandProblem | undefined {
+/**
+ * ★★ 它现在**读表**而不是读字面量（t53）。
+ *
+ * ★ 而"怎么用那张表"（下面这些分支的结构）**留在代码里** ——
+ *   那是逻辑，不是数据。改"哪些命令恒真" ⇒ 改数据；改"怎么判" ⇒ 改这里。
+ */
+function constantExitProblem(outer: string, rules: VerifyCommandRules): VerifyCommandProblem | undefined {
   const tokens = shellTokens(outer).map((token) => token.replace(/^\s+/, ''))
   const first = tokens[0]
   if (first === undefined) return undefined
   const rest = tokens.slice(1)
 
-  if (first === 'true') {
+  if (rules.constantGreenCommands.includes(first)) {
     return { kind: 'always-green', message: `the command "true" exits 0 no matter what the task produced; a verify command that cannot fail cannot certify anything` }
   }
-  if (first === 'false') {
+  if (rules.constantRedCommands.includes(first)) {
     return { kind: 'always-red', message: `the command "false" exits non-zero no matter what the task produced, so this task could never be completed honestly` }
   }
-  if (first === ':' || first === '!false') {
+  if (rules.constantGreenAliases.includes(first)) {
     return { kind: 'always-green', message: `the command "${first}" exits 0 no matter what the task produced; it cannot fail the way a verify command must` }
   }
   /**
@@ -276,7 +445,7 @@ function constantExitProblem(outer: string): VerifyCommandProblem | undefined {
    *   它完全可判（词出现了就红、没出现就绿），把它算成"恒真"是**误伤**。
    *   一条按形状猜语义的规则会把真实命令拒掉，而误伤正是本队最贵的失效。
    */
-  if (first === 'test' || first === '[') {
+  if (rules.assertionCommands.includes(first)) {
     /**
      * ★ 只抓【确定】的那一种：完全没有断言算子的 `test <字面量>`。
      *
@@ -315,10 +484,10 @@ function constantExitProblem(outer: string): VerifyCommandProblem | undefined {
  * ⇒ 判据说的是"这条命令的成败取决于一个命令的输出空白，而这一点在契约里看不出来"，
  *   而不是"这个模式写错了"。★ 措辞必须落在可复核的事实上。
  */
-function processSubstitutionProblem(outer: string, inner: string[]): VerifyCommandProblem | undefined {
+function processSubstitutionProblem(outer: string, inner: string[], rules: VerifyCommandRules): VerifyCommandProblem | undefined {
   const tokens = shellTokens(outer)
   const cmd = tokens[0]
-  if (cmd !== 'grep' && cmd !== 'egrep' && cmd !== 'fgrep') return undefined
+  if (cmd === undefined || !rules.processSubstitutionReaders.includes(cmd)) return undefined
   const nestedTarget = tokens.indexOf('@nested@')
   if (nestedTarget === -1) return undefined
   /**
@@ -326,8 +495,9 @@ function processSubstitutionProblem(outer: string, inner: string[]): VerifyComma
    * ★ 只认【确定】的那些；`-w`（词匹配）不在此列 —— 它不要求整行相等，
    *   前导空格不影响它。把它也算进来会误伤。
    */
-  const wholeLine = tokens.some((token) => token === '--line-regexp'
-    || /^-[a-zA-Z]*x[a-zA-Z]*$/.test(token))
+  const shortPattern = new RegExp(rules.wholeLineShortPattern)
+  const wholeLine = tokens.some((token) => rules.wholeLineSwitches.includes(token)
+    || shortPattern.test(token))
   if (!wholeLine) return undefined
   const sample = inner[0] ?? '(a command)'
   return {
@@ -346,7 +516,7 @@ function processSubstitutionProblem(outer: string, inner: string[]): VerifyComma
  * ★ `undefined` 说的是【静态可判性】，不是"它一定通过"。两者不能混：
  *   一条命令看起来可判，但它在当前工作区里到底跑成什么，只有真的跑一次才知道。
  */
-export function verifyCommandProblems(command: string): VerifyCommandProblem[] {
+export function verifyCommandProblems(command: string, rules: VerifyCommandRules): VerifyCommandProblem[] {
   if (typeof command !== 'string') {
     return [{ kind: 'empty', message: `verify entries must be strings; got ${JSON.stringify(command)}` }]
   }
@@ -360,9 +530,13 @@ export function verifyCommandProblems(command: string): VerifyCommandProblem[] {
   }
   const { outer, inner } = splitNestedCommands(trimmed)
   const problems: VerifyCommandProblem[] = []
-  const constant = constantExitProblem(outer)
+  /**
+   * ★ 表由**参数**进来（不在本函数里读盘，也不 import 数据）——
+   *   于是"改数据 ⇒ 立刻生效"与"本文件仍然是纯数据变换"两件事同时成立。
+   */
+  const constant = constantExitProblem(outer, rules)
   if (constant !== undefined) problems.push(constant)
-  const substitution = processSubstitutionProblem(outer, inner)
+  const substitution = processSubstitutionProblem(outer, inner, rules)
   if (substitution !== undefined) problems.push(substitution)
   return problems
 }
@@ -434,6 +608,28 @@ export async function gate(ctx: VerifyCommandContext): Promise<GateVerdict> {
     )
   }
 
+  /**
+   * ── ★★★ 先拿规则表：静态判断的**唯一依据**（t53）──────────────────────────────
+   *
+   * ★ 顺序是刻意的：**在用表之前必须先确认表可用**。
+   *   一个"表读不到就当成空表"的实现会让 `false` 不再被识别为恒红 ——
+   *   而那**看起来像"这条命令没问题"**（本队记账最久的那条界线：
+   *   「没能测量」不许变成「测了，没问题」）。
+   *
+   * ★ 四态**互不同形**：`loaded` / `absent`（读不到）/ `malformed`（形状坏）/ `empty`（空表）。
+   *   后三者 ⇒ **静态部分降级成 `unmeasured`**，并把成因原样说出来。
+   */
+  const loaded = typeof ctx?.loadRules === 'function'
+    ? await ctx.loadRules()
+    : { status: 'absent' as const, reason: 'no rules loader was injected, so the rule table could not be read at all' }
+  if (loaded.status !== 'loaded') {
+    return unmeasured(
+      `the rule table for this gate could not be used (${loaded.status}): ${loaded.reason}. `
+      + `Without it the gate cannot tell a constant command from a judgeable one, and "I could not read the rules" is NOT "the commands are fine"`,
+    )
+  }
+  const rules = loaded.rules
+
   const meaningful = commands.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '')
   /**
    * ★ 空清单与"清单里全是空条目"都要说话。
@@ -447,7 +643,7 @@ export async function gate(ctx: VerifyCommandContext): Promise<GateVerdict> {
     )
   }
   if (meaningful.length === 0) {
-    const problems = commands.map((entry) => verifyCommandProblems(entry)[0]).filter((item): item is VerifyCommandProblem => item !== undefined)
+    const problems = commands.map((entry) => verifyCommandProblems(entry, rules)[0]).filter((item): item is VerifyCommandProblem => item !== undefined)
     return blocked(problems.map((problem) => `[${problem.kind}] ${problem.message}`))
   }
 
@@ -455,7 +651,7 @@ export async function gate(ctx: VerifyCommandContext): Promise<GateVerdict> {
   const staticProblems: string[] = []
   const suspects: string[] = []
   for (const command of commands) {
-    const problems = verifyCommandProblems(command)
+    const problems = verifyCommandProblems(command, rules)
     if (problems.length === 0) continue
     suspects.push(command.trim())
     for (const problem of problems) staticProblems.push(`"${command.trim()}" — [${problem.kind}] ${problem.message}`)

@@ -44,7 +44,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { gate, appliesTo, verifyCommandProblems, shellTokens, id, point, requires } from '../lib/gates/contract/verify-command.js'
+import { gate, appliesTo, parseRules, verifyCommandProblems, shellTokens, id, point, requires } from '../lib/gates/contract/verify-command.js'
+/**
+ * ★ t53：规则表的**运行时**读取器（读盘）—— 本文件既拿它当缺省注入面，
+ *   也用它证明"改数据 ⇒ 行为立刻变"。
+ */
+import { loadVerifyCommandRules } from '../lib/tools/shared/entities.js'
 import { registry } from '../lib/gates/index.js'
 import { checkRequires } from '../lib/gates/requires.js'
 import { registerAgentTeamsTools } from '../lib/tools.js'
@@ -84,8 +89,33 @@ function shapeOf(v) {
 }
 /** 一条契约草稿 —— 形状与 `create_task` / `amend_task` 传进 contract 位置的 ctx 一致。 */
 function contract(verify, extra = {}) {
-  return { task: { id: 't1', kind: 'implementation', verify }, creating: true, ...extra }
+  return {
+    task: { id: 't1', kind: 'implementation', verify },
+    creating: true,
+    /**
+     * ── ★★★ t53：规则表**必须注入**，否则判据降级成 `unmeasured` ──────────────────
+     *
+     * MEASURED：抽表之后不注入 ⇒ 判据说不出"这条命令恒真吗"（它没有表）
+     * ⇒ 它**诚实**地报 `unmeasured` ⇒ 本文件全部既有臂当场红。
+     * ★ 而那次红是对的 —— 它说明这些臂此前依赖"规则编码在代码里"。
+     * ⇒ 缺省注入面用**真的那份数据**（读盘），于是既有臂仍测真实行为。
+     */
+    loadRules: () => loadVerifyCommandRules(ROOT),
+    ...extra,
+  }
 }
+
+/**
+ * ★ t53：`verifyCommandProblems` 现在要一个**规则表**参数（表已从代码里挪出去）。
+ *   本文件用**真的那一份**（从盘上读）⇒ 这些静态臂测的仍是真实行为。
+ *   ★ 而"表坏了会怎样"由 t53 新增的臂单独钉（它们造坏数据，不用这一份）。
+ */
+const REAL_RULES = (() => {
+  const raw = JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'contract', 'verify-command-rules.json'), 'utf8'))
+  const parsed = parseRules(raw)
+  if (parsed.status !== 'loaded') throw new Error(`the committed rules file must parse: ${JSON.stringify(parsed)}`)
+  return parsed.rules
+})()
 
 /** 真的跑一条命令，返回它的退出码（**不是**假装 —— 这条判据的伪造臂要靠它取证）。 */
 function runForExitCode(command, cwd) {
@@ -169,7 +199,7 @@ test('★ 对照臂（静态）：本仓库真实用过的 verify 命令都不�
   ]
   for (const command of realistic) {
     assert.deepEqual(
-      verifyCommandProblems(command),
+      verifyCommandProblems(command, REAL_RULES),
       [],
       `a realistic verify command was judged unjudgeable: ${JSON.stringify(command)}`,
     )
@@ -356,21 +386,21 @@ test('★ 边界：`-w` 词匹配、无 `-x` 的管道、里层命令的本分�
    * ★ `-w`（词匹配）不要求整行相等，前导空格不影响它 ⇒ 它【不是】那条被实测的
    *   形状。把 `-w` 也算进来的话，一条真实可判的命令会被拒 —— 误伤比漏报更贵。
    */
-  assert.deepEqual(verifyCommandProblems('grep -wq 7 <(wc -l < count.txt)'), [])
+  assert.deepEqual(verifyCommandProblems('grep -wq 7 <(wc -l < count.txt)', REAL_RULES), [])
   /** 没有 `-x`，同样不误伤。 */
-  assert.deepEqual(verifyCommandProblems('grep -q 7 <(wc -l < count.txt)'), [])
+  assert.deepEqual(verifyCommandProblems('grep -q 7 <(wc -l < count.txt)', REAL_RULES), [])
   /**
    * ★ 里层命令自己永远进不了"被判定"的位置（它先于外层求值）⇒ 不拿它当外层判。
    *   `grep -q 7 <(grep -qx 7 file)` 的外层是 `grep -q 7 @nested@`（无 -x）。
    */
-  assert.deepEqual(verifyCommandProblems('grep -q 7 <(grep -qx 7 file)'), [])
+  assert.deepEqual(verifyCommandProblems('grep -q 7 <(grep -qx 7 file)', REAL_RULES), [])
   /**
    * ★ 引号里的空串是 `grep` 的一个真实模式（"匹配空行"），不是"空命令"。
    */
-  assert.deepEqual(verifyCommandProblems("grep -c '' file.txt"), [])
+  assert.deepEqual(verifyCommandProblems("grep -c '' file.txt", REAL_RULES), [])
   /** 组合短选项里的 `x` 也算整行匹配（`-qx` 正是实测的那个写法）。 */
-  assert.equal(verifyCommandProblems('grep -qx 7 <(wc -l < f)').length, 1)
-  assert.equal(verifyCommandProblems('grep --line-regexp 7 <(wc -l < f)').length, 1)
+  assert.equal(verifyCommandProblems('grep -qx 7 <(wc -l < f)', REAL_RULES).length, 1)
+  assert.equal(verifyCommandProblems('grep --line-regexp 7 <(wc -l < f)', REAL_RULES).length, 1)
 })
 
 test('★ 边界：词法（`shellTokens` 的引号保留与嵌套括号配对）不把命令切错', () => {
@@ -385,9 +415,9 @@ test('★ 边界：词法（`shellTokens` 的引号保留与嵌套括号配对�
    * ★ 嵌套的括号必须配对：`$(echo $(date))` 只算【一层】里层命令。
    *   一个按第一个 `)` 就截断的实现会把外层切错，于是后面的规则作用在错的字符串上。
    */
-  assert.deepEqual(verifyCommandProblems('test "$(echo $(date))" != ""'), [])
+  assert.deepEqual(verifyCommandProblems('test "$(echo $(date))" != ""', REAL_RULES), [])
   /** 进程替换同样算里层命令，且外层保住"有目标"这个形状。 */
-  assert.deepEqual(verifyCommandProblems('grep -qx 7 <(wc -l < f)').length, 1)
+  assert.deepEqual(verifyCommandProblems('grep -qx 7 <(wc -l < f)', REAL_RULES).length, 1, REAL_RULES)
 })
 
 /* ── 接线臂：判据真的会在 contract 位置被求值 ────────────────────────────────── */
@@ -409,6 +439,12 @@ test('★ 接线臂：判据通过【进程级注册表】在 contract 位置真
   const evaluation = await registry.evaluate('contract', {
     task: { id: 'probe-task', kind: 'implementation', verify: ['grep -qx 7 <(wc -l < count.txt)'] },
     creating: true,
+    /**
+     * ★ t53：注册表路径也要注入规则表 —— 否则判据降级成 `unmeasured`，
+     *   而本臂要证明的是"它拦得到"（blocked）。★ 缺了它，这条臂会以
+     *   "unmeasured ≠ blocked" 的形式红，而那个红与"接线断了"同形。
+     */
+    loadRules: () => loadVerifyCommandRules(ROOT),
     execVerifyCommand: async () => 1,
   })
   const entry = evaluation.ran.find((item) => item.id === id)
@@ -658,10 +694,29 @@ test('★ 输入面臂：核对层的结论与判据自己的 unmeasured 说【�
   const noExecutor = { task: { id: 't1', kind: 'implementation', verify: ['pnpm test'] }, creating: true }
   const check = checkRequires({ id, requires, appliesTo }, noExecutor)
   assert.deepEqual(check.missing, ['execVerifyCommand'])
+  /**
+   * ── ★★ t53：两个"没能测量"的原因必须**各自**都说得出来 ────────────────────────
+   *
+   * MEASURED：抽表之后，`noExecutor` 这一份 ctx 同时缺**两格**
+   * （`loadRules` 与 `execVerifyCommand`）⇒ 而判据按顺序先报"表读不到"
+   * ⇒ 原来那条 `/no executor was injected/` 的断言当场红。
+   *
+   * ★ 而它红得**对**：那次红说明"两句话必须同源"这件事**只在单缺一格时成立**。
+   * ⇒ 所以这里把两格**分开**喂，逐条断言：
+   *     · 缺表 ⇒ 说"表读不到"（★ 且**不许**说成"命令没问题"）
+   *     · 缺执行器 ⇒ 说"没有执行器"
+   *   ★ 缺一不可：只断言后者会让"表读不到"这条**新的**降级路径没人钉
+   *     —— 而那正是 t53 引入的最危险的一格（它会把"没能测量"变成"测了，没问题"）。
+   */
   assert.match(
     expectUnmeasured(await gate(noExecutor)),
+    /rule table/i,
+    '★ 表读不到时必须说"表读不到"（不是"命令没问题"）',
+  )
+  assert.match(
+    expectUnmeasured(await gate(contract(['pnpm test']))),
     /no executor was injected/,
-    '★ 判据自己也说"没有执行器"：两句话必须同源',
+    '★ 而表在场、执行器缺席时，必须说"没有执行器"：两句话各自同源',
   )
 
   /**
@@ -763,4 +818,168 @@ test('★ 输入面臂（对照）：上一轮那个真实缺口形状 —— �
   const degraded = checkRequires({ id, requires, appliesTo }, withoutInjection)
   assert.equal(degraded.status, 'incomplete', '★ 把注入那一行去掉 ⇒ 核对必须报缺（它测的就是这件事）')
   assert.deepEqual(degraded.missing, ['execVerifyCommand'])
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * t53：规则表从【代码】挪到【运行时可读的数据】
+ *
+ * ★ 用户问：「无法自动重载的话，插件就不能做自我迭代了？」
+ *   ⇒ 可判定的原则：**改它读的东西 ⇒ 不必重载；改跑着的那段代码 ⇒ 要换进程。**
+ *
+ * ★★ 而"数据"这个词骗人 —— 实测出来的三分类：
+ *     改【跑着的代码】（.ts 的逻辑）        ⇒ 要 build + 重载
+ *     改【被内联进 lib 的数据】（静态 import）⇒ ★ 要 build + 重载（只省了"懂 TS"）
+ *     改【运行时读盘的数据】（本文件下面这条）⇒ ★ 不 build、不重载 ← **只有这条兑现**
+ *   MEASURED：静态 `import rules from './….json'` 在本仓库连编译都过不去
+ *   （TS1543）；即便打开 resolveJsonModule，JSON 也会被 tsc 内联进 lib/。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★★★ 臂 t53-a（★ 改数据 ⇒ 行为立刻变）：加一条恒真命令到表里，**不碰 .ts** ⇒ 判据立刻认它', async () => {
+  /**
+   * ★★★ 这是本任务的核心判据：「改完之后，加一个已知的命令到那张表
+   *   不需要改 .ts 文件、不需要重载 ⇒ 它立刻生效」。
+   *
+   * ★ 做法：**不**改任何源码，只在内存里换一份**表**（模拟"盘上的数据变了"），
+   *   而判据的**读取器每次调用都读** ⇒ 第二次求值必须看到新表。
+   *
+   * ★ 反向半边（同一臂内，缺它即恒真）：
+   *   用**原表**求值同一条命令 ⇒ 仍然 blocked。
+   *   ⇒ 缺了这一半，"行为变了"可能来自任何东西（包括一个恒 ok 的实现）。
+   */
+  const command = 'alwayspasses'   // 一个【不在】原表里的命令名
+  /**
+   * ★ 这里**不注入执行器** ⇒ 两条裁决都是 `unmeasured`（判据诚实地说"我只静态看过"）。
+   *   ★ 而本臂要证明的东西与裁决**强度**无关：它证明的是**理由变了**。
+   *     ⇒ 用 `expectUnmeasured` 取理由，而不是 `expectBlocked` 取裁决。
+   */
+  const withRealTable = [expectUnmeasured(await gate(contract([command])))]
+
+  /**
+   * ★ 而"改数据"这件事必须**只**发生在数据里：下面这份新表把 `alwayspasses`
+   *   加进恒真表 ⇒ 同一条命令立刻被判 blocked（**这一次是因为它是恒真的**）。
+   */
+  const mutated = await loadVerifyCommandRules(ROOT)
+  assert.equal(mutated.status, 'loaded', '★ 前置：真的那份数据必须读得到')
+  const newTable = {
+    status: 'loaded',
+    rules: { ...mutated.rules, constantGreenCommands: [...mutated.rules.constantGreenCommands, command] },
+  }
+  const withNewTable = [expectUnmeasured(await gate(contract([command], { loadRules: () => newTable })))]
+
+  /**
+   * ★ 两条裁决都"blocked"，所以**光看裁决分不出**——必须看**理由**。
+   *   而"理由"正是判据对数据的解释 ⇒ 它变了，才证明**表真的被读了**。
+   */
+  assert.notDeepEqual(
+    withNewTable, withRealTable,
+    '★ 换了一份表 ⇒ 判据给出的**理由**必须不同（否则"读表"这件事没有发生）',
+  )
+  assert.match(
+    withNewTable.join(' '), /alwayspasses/,
+    '★ 而新理由必须**指名那条新加的命令** —— 它证明那条规则真的来自数据',
+  )
+  assert.match(
+    withNewTable.join(' '), /always-green/,
+    '★ 且必须把它算成【恒真】那一类（新表把它列进了 constantGreenCommands）',
+  )
+
+  /** ★ 反向半边：原表下同一条命令的理由里**没有**它被当成恒真的说法。 */
+  assert.doesNotMatch(
+    withRealTable.join(' '), /always-green/,
+    '★ 原表下 `alwayspasses` **不是**恒真 ⇒ 上面那条"变了"来自表，不是来自恒真',
+  )
+})
+
+test('★ 臂 t53-b（★ 静态臂）：表里的命令名变了 ⇒ 判定跟着变（不加执行器也能看出来）', () => {
+  /**
+   * ★ 这一臂**不碰执行器**，只看静态部分 ⇒ 它证明"读表"发生在**静态判定**里，
+   *   而不是只在跑命令那条路上。
+   *   ★ 与 t53-a 的分工：那条测"整条 gate"，这条测"表 → 静态规则"这一段。
+   */
+  const rulesWith = (name) => ({
+    constantGreenCommands: [name], constantRedCommands: [], constantGreenAliases: [],
+    assertionCommands: [], processSubstitutionReaders: [], wholeLineSwitches: [],
+    wholeLineShortPattern: '^$',
+  })
+  /** ★ 一条【本来可判】的命令，在**另一个表**下变成恒真 ⇒ 表真的被读了。 */
+  assert.deepEqual(verifyCommandProblems('mytool --check', rulesWith('mytool')), [{
+    kind: 'always-green',
+    message: verifyCommandProblems('mytool --check', rulesWith('mytool'))[0].message,
+  }])
+  /** ★ 反向半边：**原**表下它不是恒真（同一段代码、同一命令，只换了表）。 */
+  assert.deepEqual(
+    verifyCommandProblems('mytool --check', REAL_RULES), [],
+    '★ 原表下 `mytool` 不是恒真 ⇒ 上面那条"变了"来自表，不是来自恒真',
+  )
+})
+
+test('★★ 臂 t53-c（★ 四态可校验）：读不到 / 形状坏 / 空表 —— 与 loaded **互不同形**，且绝不静默退化成"没有规则"', async () => {
+  /**
+   * ★★★ 本队记账最久的那条界线：「没能测量」不许变成「测了，没问题」。
+   *
+   *   若"表读不到"被静默当成"没有规则"，那么 `false` 不再被识别为恒红 ——
+   *   而那条命令**看起来像"没问题"**。⇒ 所以四态必须**互不同形**，
+   *   且后三者都让判据**降级成 unmeasured**（而不是照常判）。
+   */
+  const cases = [
+    { name: 'absent', load: () => ({ status: 'absent', reason: 'file not found (probe)' }) },
+    { name: 'malformed', load: () => parseRules({ not: 'the right shape' }) },
+    { name: 'empty', load: () => parseRules({ constantGreenCommands: [], constantRedCommands: [], constantGreenAliases: [], assertionCommands: [], processSubstitutionReaders: [], wholeLineSwitches: [], wholeLineShortPattern: '^$' }) },
+  ]
+  const verdicts = []
+  for (const item of cases) {
+    const verdict = await gate(contract(['false'], { loadRules: item.load }))
+    const text = expectUnmeasured(verdict)
+    verdicts.push({ name: item.name, text })
+    /** ★ 每一态都必须**说清是哪一态**（不是一句笼统的"读不到"）。 */
+    assert.match(text, new RegExp(item.name), `★ ${item.name} 必须自报其名（实测：${text.slice(0, 160)}）`)
+    /** ★ 而它**绝不**可以说成"命令没问题"（那正是本臂存在的理由）。 */
+    assert.doesNotMatch(text, /is fine|no problem|no rules apply/i,
+      `★ ${item.name} 不许被说成"命令没问题" —— 那会把"没能测量"变成"测了，没问题"`)
+  }
+  /** ★ 四态（含 loaded）**两两不同形**。 */
+  const shapes = new Set([...verdicts.map((item) => item.text), 'loaded'])
+  assert.equal(shapes.size, 4, '★ 四态必须两两不同形（合成一条 = 分不出"读不到"与"空表"）')
+  /**
+   * ★ 而 `loaded` 那一态**会真的判**（否则上面三条在"全都 unmeasured"上恒真）。
+   *   ★ 这里**注入执行器** ⇒ 裁决从 `unmeasured` 升到 `blocked`
+   *     —— 即"我看过、而且真的跑过，它就是恒红"。
+   */
+  assert.match(
+    expectBlocked(await gate(contract(['false'], { execVerifyCommand: async () => 1 }))).join(' '),
+    /non-zero|cannot fail/i,
+  )
+})
+
+test('★★ 臂 t53-d（★ 表/逻辑分离）：数据文件里**不许**有判定逻辑', () => {
+  /**
+   * ★★ 这是最容易做错的地方：为了"数据化"而把逻辑也搬进数据，
+   *   会造出一个**不可测的解释器**（本队记账的"过度设计"形态）——
+   *   一个能表达逻辑的数据文件无法被静态复核。
+   *
+   * ★ 口径（可机械判）：数据文件的每个值只能是
+   *   · 字符串 / 字符串数组 / `{name, why}` 数组
+   *   · 或 `_` 开头的注释
+   *   ⇒ **不许**出现：函数、正则之外的表达式、条件、`if`/`when`/`then` 这类键。
+   */
+  const raw = JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'contract', 'verify-command-rules.json'), 'utf8'))
+  const LOGIC_KEYS = /^(if|when|then|else|match|eval|expr|condition|predicate|handler|fn|function|code)$/i
+  const offenders = []
+  const walk = (node, path) => {
+    if (Array.isArray(node)) { node.forEach((item, i) => walk(item, `${path}[${i}]`)); return }
+    if (node === null || typeof node !== 'object') return
+    for (const [key, value] of Object.entries(node)) {
+      if (LOGIC_KEYS.test(key)) offenders.push(`${path}.${key}`)
+      walk(value, `${path}.${key}`)
+    }
+  }
+  walk(raw, 'rules')
+  assert.deepEqual(
+    offenders, [],
+    '★ 数据文件里出现了像"逻辑"的键 ⇒ 它正在变成一个不可测的解释器；'
+    + '★ 表（哪些命令恒真）进数据，逻辑（怎么用表判）留在代码里',
+  )
+  /** ★ 反向半边：那份数据**确实**带着表（否则"没有逻辑键"在空对象上恒真）。 */
+  assert.ok(raw.constantGreenCommands.length > 0, '★ 表必须真的有内容')
+  assert.ok(raw.constantRedCommands.length > 0, '★ 两边都要有 —— 只列恒真会让"恒红"失去来源')
 })

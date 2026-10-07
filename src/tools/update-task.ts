@@ -12,7 +12,7 @@ import { appendTaskEvidence, repairCompletionVerdict } from '../quality-gates.ts
 import { TERMINAL_TASK_STATUSES } from '../types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync } from './shared/entities.ts'
+import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
 import { steerCaptainReport } from '../tools.ts'
@@ -540,6 +540,14 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             wantsCompleted,
             taskNotTerminal: !TERMINAL_TASK_STATUSES.includes(task.status),
             execVerifyCommand: (command: string): Promise<number> => runVerifyCommand(workspace, command),
+            /**
+             * ── ★★★ t53：规则表**每次调用时读**（"改数据 ⇒ 立刻生效"的成立条件）──
+             *
+             * ★ 不缓存：缓存会让"改数据"在下一次**进程重启**前不生效 ——
+             *   而那正是本任务要消灭的东西（改它读的东西不该需要换进程）。
+             * ★ 也不在构建时内联（静态 import 会被 tsc 嵌进 lib/ ⇒ 改数据仍要 build）。
+             */
+            loadRules: () => loadVerifyCommandRules(workspace),
             // ── r5：父版本 + 扫描范围 + 在指定版本上跑一条测试的执行器
             ...worktreeBase === undefined ? {} : { parentRevision: worktreeBase },
             ...worktreeBase === undefined ? {} : { worktreePath: workspace },
