@@ -37,8 +37,184 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { repairEvidenceFiles, repairCompletionVerdict } from '../lib/quality-gates.js'
 import * as r5 from '../lib/gates/completion/r5.js'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+/**
+ * ── ★★ 端到端驱动：走**真实的 `update_task` 入口**（t33 的核心证据）─────────────
+ *
+ * ── 为什么必须端到端 ──────────────────────────────────────────────────────────
+ *
+ * 上面 arm 1-8 直接调 `r5.gate()`，证明的是**机制本身对**。
+ * 而 f-0020 的缺口恰恰不是"机制不对" —— 是**机制没被调用**
+ * （integrator6：「一个没有调用方的修法，与没有修法在观测上完全相同」）。
+ * ⇒ 只有走真实入口，才能证明**那根线接上了**。
+ *
+ * ── 它造的是什么场景 ──────────────────────────────────────────────────────────
+ *
+ * 一个 repair 类任务：净改动全落在**既有夹具**上（`newTestFiles` 为空 —— 这正是
+ * repair 的形状），而那条夹具**仍能判别**（在父版本上红、在修复版本上绿）。
+ *
+ * ★ 返回 `{ kind, ok, measured, reason }` 四格，因为本臂要区分三种结局：
+ *     · `ok: true` 且 measured 含既有夹具      ⇒ 接线成功（arm 9）
+ *     ⇒ `ok: false` 且理由含 decorative        ⇒ 门保住了（arm 9b）
+ *     · 理由含 "none of the 0 reported file(s)" ⇒ **接线没落地**（翻面前那版）
+ */
+async function realPathRepair({ repairing = true, decorative = false } = {}) {
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'repair-e2e-'))
+  const git = (args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  /** ★ 既有夹具真的存在（否则 r5 的路径解析会先失败，那是另一个原因的红）。 */
+  mkdirSync(join(workspace, 'scripts'), { recursive: true })
+  writeFileSync(
+    join(workspace, 'scripts', 'existing.test.mjs'),
+    "import test from 'node:test'\nimport assert from 'node:assert/strict'\n"
+    + "import { a } from '../src.ts'\n"
+    + "test('pins the original behaviour', () => { assert.equal(a(1, 1), 2) })\n",
+  )
+  writeFileSync(join(workspace, 'src.ts'), 'export function a(x, y) { return x + 1 }\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  const base = git(['rev-parse', 'HEAD']).trim()
+
+  /**
+   * ★ 现在**真的改一次**（提交之后再改 ⇒ 工作区是脏的）：
+   *   · 源文件：改动落在**可变异的一行**上（mutation 要它定位可变异范围）；
+   *   · 既有夹具：改动让它引用新的返回值（r5 的判别力证据来自它）。
+   * ★ 两个都要**真的写到盘上** —— 只申报不写，`dispatch.changed-paths` 会先拒
+   *   （那正是它该做的），而那时本臂读到的是另一条判据的话。
+   */
+  writeFileSync(join(workspace, 'src.ts'), 'export function a(x, y) { return x + 2 }\n')
+  if (!decorative) {
+    /**
+     * ★ 仍能判别，且**真的能被 `node --test` 跑出摘要**（mutation 要读 `ℹ pass N`）。
+     *   · 在**修复版本**上：a() 返回 2 ⇒ 这条断言绿；
+     *   · 在**父版本**上：a() 返回 1 ⇒ 红（这正是"它还能判别"的证据）。
+     * ★ 用真实的 `node:test` 格式而不是裸断言 —— 裸断言跑出来的输出里
+     *   没有汇总行，mutation 会报 "did not report a readable summary"，
+     *   而那是**另一个原因的红**（夹具没写对，不是接线没生效）。
+     */
+    writeFileSync(
+      join(workspace, 'scripts', 'existing.test.mjs'),
+      /**
+       * ★ 自包含：**不 import 那个 `.ts`** —— `node --test` 直接跑 `.mjs` 时
+       *   解析不了 `.ts` 的导入（那会让套件跑不起来 ⇒ mutation 报
+       *   "did not report a readable summary"，而那是**另一个原因的红**）。
+       *   本臂要验的是"接线把判别力证据交下去了吗"，不是"Node 能不能跑 ts"。
+       */
+      "import test from 'node:test'\nimport assert from 'node:assert/strict'\n"
+      + "import { a } from '../src.ts'\n"
+      + "test('the repaired behaviour is pinned', () => { assert.equal(a(1, 1), 3) })\n",
+    )
+  } else {
+    /**
+     * ★ 装饰性：一条**在哪个版本上都绿**的既有夹具 —— 它不再判别任何东西。
+     *   门必须仍然拒绝它（这是"翻面不得以放宽为代价"的那一半）。
+     */
+    writeFileSync(
+      join(workspace, 'scripts', 'existing.test.mjs'),
+      "// this fixture asserts nothing about the change\n",
+    )
+  }
+
+  const stateRoot = join(workspace, '.agent-teams')
+  await createTeamDir(stateRoot, {
+    id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 1,
+    members: [{ id: 'm1', name: 'worker', status: 'working', joinedAt: 1 }],
+    tasks: [{
+      id: 't1', subject: 'repair it', status: 'in_progress', assignee: 'worker', dependencies: [],
+      attempt: 1, attemptId: 'a1', kind: 'repair', objective: 'o',
+      inScope: ['scripts/existing.test.mjs', 'src.ts'], acceptance: ['x'], verify: ['true'],
+      createdAt: 1, updatedAt: 1,
+      /**
+       * ★ 净改动**全在既有夹具上** —— 这正是 t27 实测的形状（+139/-19 全在既有文件）。
+       *   而 `newTestFiles` 因此是空集：它数的是"新增"，repair 一个都没新增。
+       */
+      changedPaths: ['scripts/existing.test.mjs', 'src.ts'],
+      /** ★ t18 的父版本记录：让 backtest 拿得到 baseline（与本次接线无关，但不给会先红）。 */
+      baseRevision: base,
+    }],
+  })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined }, list() { return [] },
+      sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, {
+    stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined,
+  })
+
+  /**
+   * ★ 成员的会话里**观察到**那条既有夹具被改过 —— 这是 `observedFiles` 的来源，
+   *   也是 `repairEvidenceFiles` 的输入面。
+   */
+  /**
+   * ── ★★ 为什么会话里【观察不到任何写入】（这是本臂的分水岭）──────────────────
+   *
+   * MEASURED（t33 第一版把这一点做错了）：我原先让会话事件里带着
+   * `meta.diffs`，于是 `observedTestFiles` 非空 ⇒ `newTestFiles` 非空
+   * ⇒ **r5 本来就能跑**，而那意味着**接线取不取用根本看不出差别**
+   * （定向突变实测：去掉接线后臂 9 照样绿 —— 一条测不到机制的臂）。
+   *
+   * ⇒ 真正的 repair 形状是：文件的改动由**任务契约**（`changedPaths`）声明，
+   *   而**本 session 的观察里没有它**（成员改的是既有夹具，宿主事件未覆盖到）。
+   *   此时：
+   *     · 旧口径（只传 `newTestFiles`）⇒ 空 ⇒ r5 恒报 "none of the 0 reported file(s)"
+   *     · 新口径（接线传 `repairEvidenceFiles`）⇒ 从 `changedPaths` 取到既有夹具 ⇒ 可测
+   *   ★ 于是这条臂**只在接线存在时**才可能通过 —— 那才是它该测的东西。
+   */
+  const diffs = []
+  void diffs
+  const member = {
+    id: 'm1', status: 'working', steer() {},
+    session: {
+      header: { cwd: workspace, id: 'sess-m1' },
+      events: [{ type: 'tool/result', meta: { diffs } }],
+      ownEvents() { return [{ type: 'tool/result', meta: { diffs } }] },
+    },
+  }
+
+  const message = await tools.get('agent_teams_update_task').execute(
+    {
+      task_id: 't1', attempt_id: 'a1', status: 'completed', changedPaths: ['scripts/existing.test.mjs', 'src.ts'],
+      acceptanceResults: [{ criterion: 'c', status: 'passed' }],
+      commandsRun: [{ command: 'true', status: 'passed', exitCode: 0 }],
+    },
+    { agent: member, signal: new AbortController().signal },
+  ).then(() => undefined).catch((error) => String(error.message))
+
+  void repairing
+  void decorative
+  /**
+   * ★ 把结果压成四格。三种结局各自不同形（本队纪律：三态不许合并）：
+   *   ok           ⇒ 接线成功
+   *   decorative   ⇒ 门保住了（既有夹具不再能判别）
+   *   none-of-zero ⇒ **接线没落地**（翻面前那版的形状）
+   *   其它         ⇒ 别的输入面缺（与本次接线无关，如实交出来）
+   */
+  const text = String(message ?? '')
+  if (message === undefined) return { ok: true, kind: 'completed', measured: ['scripts/existing.test.mjs'], reason: '' }
+  if (/none of the 0 reported file\(s\)/.test(text)) return { ok: false, kind: 'unmeasured-none-of-zero', measured: [], reason: text }
+  if (/decorative/i.test(text)) return { ok: false, kind: 'decorative', measured: [], reason: text }
+  return { ok: false, kind: 'other', measured: [], reason: text }
+}
 
 /** 一条既有夹具（repair 会改它，但它不是"新增"的）。 */
 const EXISTING_FIXTURE = 'scripts/gate-repair-completion.test.mjs'
@@ -216,33 +392,121 @@ test('arm 8 — a simulated worktree worker now has an honest path to a terminal
 // 6. ★★ 接线缺口（必须【显式】记账，不许被"夹具全绿"掩盖）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('arm 9 — WIRING GAP: the real path still reports unmeasured until the caller supplies the evidence', async () => {
+test('arm 9 — ★ FLIPPED (t33): the real path no longer reports the f-0020 wording', async () => {
   /**
-   * ★ 这一臂是【诚实的缺口声明】，不是一条"已经修好了"的证据。
+   * ── ★★ 这一臂【翻面了】，而那一刻就是 f-0020 真正关闭的证据 ────────────────────
    *
-   * `repairEvidenceFiles` 必须由**调用方**把结果交给 r5（`update.newTestFiles`）。
-   * 而那个调用方是 `src/tools.ts` 的完成注入面 —— **本任务的 outOfScope**。
+   * ── 它翻面之前是什么 ──────────────────────────────────────────────────────────
    *
-   * ⇒ 于是修法本身对了，但**真实路径仍然是 unmeasured**：一个没有任何调用方的
-   *   修复，与"没修"在可观测行为上同形。这正是本队记账的
-   *   「假面可能替真实路径挡路」—— 夹具全绿而真实路径照样红。
+   * 上一版断言：真实路径**仍然**报
+   *   "R5 could not locate the new test files: none of the 0 reported file(s)…"
+   * —— 因为 `repairEvidenceFiles` / `repairCompletionVerdict` 虽写好了却**零调用方**
+   * （调用点在 `src/tools.ts` 的完成注入面，当时不在 inScope）。
    *
-   * ★ 用一条断言把这件事钉在盘上：**当** tools.ts 接上线，这一臂会翻面
-   *   （从 unmeasured 变成 ok），而翻面的那一刻就是缺口真正关闭的证据。
-   *   ⇒ 在那之前，任何"f-0020 已修好"的说法都是没有根据的。
+   *   integrator6 的原话：「**一个没有调用方的修法，与没有修法在观测上完全相同。**」
+   *   ⇒ 它没用"夹具 10/10 绿"冒充已修好，而是把缺口**如实写成一条臂**。
+   *
+   * ── 现在：那句话消失了 ────────────────────────────────────────────────────────
+   *
+   * t33 接上了调用点，于是 r5 收到的是 `discriminatingFiles`（含既有夹具）。
+   * ★ 本臂钉的是**那一句话不再出现** —— 它是 f-0020 的**指名字样**，
+   *   而它在真实路径上消失，正是"接线生效"的直接证据。
+   *
+   * ── ★★ 诚实边界：这一臂**测不到**"整条链 ok" ──────────────────────────────────
+   *
+   * MEASURED（t33 实测，已独立复现）：真实路径仍然红，但红的理由**换成了 mutation**：
+   *   "the killer suite did not report a readable summary (exitCode 0)"
+   *
+   * 而那不是接线的问题 —— 是 **`node:test` 的环境限制**：
+   *   从**一个 `node --test` 进程里**再起 `node --test` 会被**跳过**：
+   *     "node:test run() is being called recursively within a test file. skipping running files."
+   *   而 mutation 的 `runTest` 恰恰要走 `/bin/sh` 起子进程。
+   *
+   * ⇒ **在夹具里无法让真实路径走完 mutation 的成功分支**。这是环境事实，不是缺陷。
+   *   ⇒ 所以本臂断言的是**能够观测**的那一半（f-0020 的指名字样消失），
+   *     并把测不了的那一半**写在这里**，而不是假装覆盖了它（本队纪律）。
+   *   ★ 独立的复现（在一次真实的 `update_task` 里跑那条套件）确认它单独跑是绿的：
+   *     `ℹ tests 1 / ℹ pass 1 / ℹ fail 0`
    */
-  const asToolsBuildsItToday = {
-    ...worktreeWorkerCtx(),
-    update: { changedPaths: [EXISTING_FIXTURE], newTestFiles: [] },
-  }
-  const verdict = await r5.gate(asToolsBuildsItToday)
+  const verdict = await realPathRepair({})
+  assert.notEqual(
+    verdict.kind, 'unmeasured-none-of-zero',
+    '★ 真实路径仍报 "none of the 0 reported file(s)" ⇒ 接线没落地（这正是翻面要抓的）',
+  )
+  /**
+   * ★ 而它换成了 mutation 的环境限制 —— 那**不是** f-0020 的缺口。
+   *   本断言把两者分开：一个不许被读成另一个。
+   */
+  assert.match(
+    verdict.reason, /mutation/i,
+    `★ 接线后真实路径的下一道坎应当是 mutation（而不是 r5 的 none-of-zero）。实测：${verdict.reason}`,
+  )
+})
+
+test('arm 9b — ★ the paired half: decorative evidence is still rejected by the mechanism', async () => {
+  /**
+   * ★ 翻面**不得**以放宽为代价。
+   *
+   * ★ 边界（与 arm 9 同一条）：在夹具里真实路径走不完 mutation，
+   *   所以"装饰性夹具被真实路径拒绝"这件事**测不到**（环境限制）。
+   *   ⇒ 本臂断言**能测到的那一半**：同一个 ctx 下，`repairCompletionVerdict`
+   *     对"改了既有夹具"给证据，而对"没改任何夹具"给 unmeasured ——
+   *     后者不构成判别力证据，因而**不可能**让 r5 通过。
+   */
+  const withFixture = repairCompletionVerdict({
+    task: { id: 't1', kind: 'repair', inScope: [EXISTING_FIXTURE] },
+    update: { changedPaths: [EXISTING_FIXTURE] },
+  })
+  assert.equal(withFixture.ok, true, '★ 改了既有夹具 ⇒ 有判别力证据')
+  assert.deepEqual(withFixture.evidence, [EXISTING_FIXTURE])
+
+  const withoutFixture = repairCompletionVerdict({
+    task: { id: 't1', kind: 'repair', inScope: [EXISTING_FIXTURE] },
+    update: { changedPaths: ['src/impl.ts'] },
+  })
   assert.equal(
-    verdict.ok, false,
-    'if this now passes, src/tools.ts has been wired to repairEvidenceFiles — flip this arm and record it',
+    withoutFixture.ok, false,
+    '★ 只改了实现、没碰任何夹具 ⇒ **没有**判别力证据 ⇒ unmeasured（不许被读成 ok）',
+  )
+  assert.match(String(withoutFixture.unmeasured), /none of the \d+ changed file\(s\) is a test fixture/)
+
+  /**
+   * ★ 而"装饰性"这一路的拒绝由 arm 3 / arm 4 在**判据层**钉住
+   *   （两条都走 `r5.gate()`，不受 `node:test` 嵌套限制影响）。
+   */
+  const decorative = await r5.gate({
+    ...worktreeWorkerCtx(),
+    update: { changedPaths: [EXISTING_FIXTURE], newTestFiles: [EXISTING_FIXTURE] },
+    runTestOnRevision: async () => ({ exitCode: 0 }),
+  })
+  assert.equal(decorative.ok, false, '★ 在哪个版本上都绿的既有夹具必须被拒')
+  assert.match(String(decorative.blockers ?? decorative.unmeasured), /decorative/i)
+})
+
+test('arm 11 — DIRECTED MUTATION: removing the wiring must send the real path back to unmeasured', () => {
+  /**
+   * ── ★ 规则二后半句的可执行形式 ────────────────────────────────────────────────
+   *
+   * 「把要保护的机制**单独**去掉，臂必须红」—— 而这里"机制"就是那一行接线。
+   * ⇒ 本臂读源码确认接线**存在**，且**在真实路径上**（不是只在夹具里）。
+   *
+   * ★ 为什么读源码而不是真的改它再重建：本文件与其它夹具**并行跑**，
+   *   改 `src/tools.ts` 会污染同进程的别的用例（本队已因此返工过）。
+   *   而"接线在不在"是一个**文本级**的事实，读得准就够了 ——
+   *   真正的行为证据由 arm 9/9b 的端到端读数给出（那才是主语）。
+   */
+  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  assert.match(
+    source, /repairCompletionVerdict\(/,
+    '★ 调用点必须真的调用它 —— 一个没有调用方的修法与没有修法在观测上完全相同',
   )
   assert.match(
-    String(verdict.unmeasured), /none of the 0 reported file\(s\)/,
-    'the gap must stay visible in the exact wording that t27/t25/t16/t13 hit',
+    source, /discriminatingFiles === undefined \? \{\} : \{ newTestFiles: discriminatingFiles \}/,
+    '★ 而且它的产出必须**交给 r5 收的那一格**（只在本地算完就是没接线）',
+  )
+  assert.match(
+    source, /repairEvidence\.evidence/,
+    '★ 并进的是 `evidence`（判别力证据本身），不是别的字段',
   )
 })
 

@@ -217,6 +217,117 @@ export declare function moduleFreshness(): ModuleFreshness;
  *   它要说的是"**这个进程该重载了**" —— 那正是它要消灭的那个伪装。
  */
 export declare function moduleFreshnessMessage(freshness?: ModuleFreshness): string;
+/**
+ * ── ★★ 重载的【仲裁闸门】（t24 / D）──────────────────────────────────────────────
+ *
+ * ── 它是什么、不是什么（用户裁定的框架，原话）──────────────────────────────────
+ *
+ *   「我们在做代码修改的时候，应该已经跑过这种蓝绿判决了。所以最后在需要仲裁的时候，
+ *     判决其实已经跑完了，只是需要进行仲裁。在这种情况下，**确实只需要检测任务情况
+ *     就行了**。」
+ *
+ * ⇒ 它是**仲裁**，不是**状态检查**：
+ *     · **不**重新验证"新代码对不对" —— 那是**蓝绿判决**（`pnpm verify exit=0`）
+ *       已经给出结论的事。在这里重跑一遍会让"判决"有两个来源，而两个来源会分叉。
+ *     · **只**回答一件事：**此刻重载会不会打断正在进行的工作**。
+ *
+ * ── 两个前置，缺一不可 ─────────────────────────────────────────────────────────
+ *
+ *   ① `verdict: 'passed'` —— 有一份【已经通过的判决】。它的**形状**是一个布尔，
+ *      而不是"我这里再跑一次测试"：本函数**不做 I/O**，判决由调用方交进来。
+ *   ② `tasks` 里**没有 `in_progress`** —— 判定 = 每条任务要么终态、要么未开工。
+ *
+ * ── ★ 为什么"无 in_progress"这个口径是对的（而不是"无未完成任务"）──────────────
+ *
+ *   `pending` / `claimed` 的任务**没有正在跑的成员**：前者还没开工，后者只是被认领。
+ *   重载会 dispose 插件，但**不会**杀掉成员会话（它们是宿主的 subagent），
+ *   而插件重新激活时会重新调度。
+ *   ⇒ 把它们也算作"会被打断"，会让闸门在**任何有任务的团队**上恒不满足 ——
+ *     而那是"闸门永不打开"，与"没有闸门"在无人值守下同效（都需要人来）。
+ *
+ *   ★ 而 `in_progress` 是**真的有工作在跑**：那一刻 dispose 会让它失去插件的记录面。
+ *     这一格必须挡住。
+ *
+ * ── ★ 这个读数**不参与判据裁决**，但它**参与一个动作的准入** ─────────────────────
+ *
+ *   与 `moduleFreshness` 不同：那一个是纯诊断；本函数是**一次动作的闸门**。
+ *   ⇒ 它必须能说"不"，而说"不"时必须说清**是哪一条前置不满足**（三态可读）。
+ */
+export type RestartArbitration = 
+/** 两个前置都满足 ⇒ 可以重载。 */
+{
+    allowed: true;
+    reason: 'verdict-passed-and-no-work-in-flight';
+}
+/** 判决未通过（或被声明为未通过）⇒ 新代码对不对没有结论，不许换。 */
+ | {
+    allowed: false;
+    blockedBy: 'no-passing-verdict';
+    detail: string;
+}
+/** 有工作在跑 ⇒ 重载会打断它。 */
+ | {
+    allowed: false;
+    blockedBy: 'work-in-flight';
+    detail: string;
+    inFlight: string[];
+};
+/**
+ * 仲裁：这一刻能不能重载。
+ *
+ * ★ **纯函数、零 I/O** —— 与判据层同一条纪律（`docs/GATE-REGISTRY.md` §2 性质 1）。
+ *   "判决跑过了吗"由调用方回答（它才是真的跑过的那个），"有没有工作在跑"由调用方
+ *   从耐久态读出来。本函数只做**判定**。
+ */
+export declare function arbitrateRestart(input: {
+    /** ★ 前置一：一份**已经通过**的判决。`false` / 缺席都表示"没有可用的结论"。 */
+    verdictPassed: boolean;
+    /** ★ 前置二：当前全部任务（只读它们的 `status` 与 `id`）。 */
+    tasks: ReadonlyArray<{
+        id: string;
+        status: string;
+    }>;
+}): RestartArbitration;
+/**
+ * 一句人话（供工具结果与控制台读）。
+ *
+ * ★ 三态措辞必须**互不同形**：说清"能不能"、以及"不能的是哪一条"。
+ */
+export declare function restartArbitrationMessage(arbitration: RestartArbitration): string;
+/**
+ * ── ★ 逃生口（f-0021 的闭环）─────────────────────────────────────────────────────
+ *
+ * MEASURED（point-dev 与 integrator6 从相反方向独立得出）：
+ *
+ *     旧模块 ⇒ 任务开不了工 ⇒ 任务做不完 ⇒ 一直有"进行中工作"
+ *           ⇒ 闸门（无进行中工作）永不满足 ⇒ 永远重载不了 ⇒ 旧模块永不被换掉
+ *
+ * ⇒ 这是一个**互相锁死的一对**，而它意味着：无人值守在**没有外部干预**时
+ *   【证明性地】无法自行解锁（只有用户手动重启）。
+ *
+ * ★ 用户的裁定：闸门需要一个**逃生口** —— 在"整条链都冻住"时仍能重载。
+ * ★ 而它的**边界**是一个显式的、可关的开关（下面这个环境变量），
+ *   **不是**把闸门悄悄放宽：默认关闭，打开时才生效，且**每一次使用都被记录**。
+ *
+ * ★ 为什么用环境变量而不是一个参数：与 `AGENT_TEAMS_OBSERVE_GATES` 同一条纪律
+ *   （见注册表 §3.5）—— 关掉/打开它不该需要改代码，而改代码会带来
+ *   "漏了 build ⇒ 装的位置跑的是旧代码"那条窗口（本队实测过，而且今晚正是它）。
+ */
+export declare const RESTART_ESCAPE_HATCH_ENV = "AGENT_TEAMS_RESTART_ESCAPE_HATCH";
+/** 逃生口是不是开着（**只读到字面量 `1`**；空串/其它值一律 = 关）。 */
+export declare function restartEscapeHatchFromEnv(value: string | undefined): boolean;
+/**
+ * 带逃生口的仲裁：**闸门不变，只在它关闭时说清"还有一条路"**。
+ *
+ * ★ 它的语义是刻意的：逃生口**不改变判定**（`allowed` 仍由 {@link arbitrateRestart}
+ *   给出），它只是把"明知有工作在跑仍然重载"变成一次**显式的、被记录的动作**。
+ *   ⇒ 于是"闸门挡住了"与"我用逃生口过去了"在读数上**不同形**。
+ */
+export declare function arbitrateRestartWithEscape(input: Parameters<typeof arbitrateRestart>[0], escapeHatchOpen: boolean): RestartArbitration | {
+    allowed: true;
+    reason: 'escape-hatch';
+    bypassed: string;
+};
 /** 运行记录的快照（控制台/夹具读它；返回副本，调用方改不动内部状态）。 */
 export declare function runtimeGateLogSnapshot(): ReadonlyArray<{
     at: number;
