@@ -9,6 +9,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
+import { readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -236,6 +238,117 @@ export function gitChangedPaths(workspace: string): string[] | undefined {
     if (prefix !== '' && cleaned.startsWith(prefix)) paths.add(cleaned.slice(prefix.length))
   }
   return [...paths]
+}
+
+/**
+ * ── ★★ 成员的 worktree 也是一个工作区（t41 / f-0023）─────────────────────────────
+ *
+ * ── 它修的是什么（今天拦了成员 4 次，含本任务作者本人）──────────────────────────
+ *
+ * {@link gitChangedPaths} 的入参是**队长的**工作区（`workspaceOf(captain)`）。
+ * 而被派发了 worktree 的成员在**自己的检出目录**里干活 —— 那是另一棵树：
+ *
+ *     /repo                        ← 判据看的（队长的工作区）
+ *     /repo/.agent-teams/worktrees/task-t41   ← 成员真正改的地方
+ *
+ * ⇒ 成员改了 worktree 里的文件、如实申报，判据两个观察面**都**看不到它：
+ *
+ *     `observedChangedPaths`  只看得见本 session 的写入（换过会话就没有）
+ *     `gitChangedPaths`       问的是队长那棵树，那里确实没脏
+ *
+ * ⇒ 于是诚实的申报被判成虚报。原文（今天 4 次实例逐字相同）：
+ *   `… reported as changed but no write to it was observed … and it is not a
+ *    changed path in the working tree either`
+ *
+ * ── ★★ 为什么它比一般的缺陷更贵：成员**拿不到任何合法输入**──────────────────────
+ *
+ *     · 填真实路径（worktree 里真的改了）  ⇒ 被本条判据拒
+ *     · 填空数组                          ⇒ 被 completion 门拒（r5/mutation：
+ *                                            "no changed files, nothing to mutate"）
+ *
+ * ⇒ 两条判据**各自都对**，合起来**没有任何合法输入**（t32 上实测的双向死锁）。
+ *   而它的代价是：每一次都要人手工并入 —— 那正是"无人值守"要消灭的形态。
+ *
+ * ── ★ 修法的选择：让观察面**对上**，而不是放宽判定 ────────────────────────────
+ *
+ * 可能的三条路（任务书列的）：
+ *   ① 把该成员 worktree 的写入算进观察面   ② 观察面同时接受 worktree diff
+ *   ③ 把两种拒绝的成因分开说
+ *
+ * ★ 选了 **①+②**（它们是同一件事：判据要问**成员实际在哪个树里干活**），
+ *   并把 ③ 一起做了 —— 因为"没能观察"与"任何工作区里都没有"是两种事实，
+ *   而它们现在共用一句话。
+ *
+ * ★★ 而**不选**"放宽判定"（例如"只要 worktree 存在就放行"）：那会让
+ *   "零工作却自报改动"变得可接受，而那是本判据存在的**全部理由**。
+ *   本函数只做一件事：**把该看的那些树都看一遍**，判定规则一个字不改。
+ *
+ * ── 三态与 {@link gitChangedPaths} 逐条对齐（绝不合并）──────────────────────────
+ *
+ *   `undefined` —— 连主工作区都读不到（不是 git 仓库 / git 不可达）⇒ 不参与判定
+ *   `[...]`     —— 读了：主工作区 + 每一个能读到的 worktree 的脏路径**并集**
+ *
+ * ★ 为什么 worktree 读不到时**不**把整格置为 `undefined`：主工作区那一份仍然
+ *   是**有效的观察**（"这些路径在主树里脏了"这句话依然成立）。把它整格作废会让
+ *   一条本来能核实许多路径的证据变成"没有证据" —— 那是**把观察丢掉**，
+ *   与"把没测到并进通过"是同一个方向上的错。
+ *   ★ 而读不到的 worktree 不产生任何路径：它只意味着"那一棵树没被算进来"，
+ *     于是判定退回"主树 + 会话事件"。**不是放宽** —— 少一格证据只会让判定更严。
+ *
+ * ★★ 归属仍然不由 git 回答（与 `gitChangedPaths` 的诚实边界一致）：本函数说
+ *   「这些路径**在某一棵树里**确实脏了」，**不说**是谁改的。归属仍由会话事件回答。
+ *   两格合起来才完整 —— 而这里补的正是"另一棵树也可以作证"。
+ */
+export function workspaceAndWorktreeChangedPaths(workspace: string): string[] | undefined {
+  const main = gitChangedPaths(workspace)
+  /** ★ 主工作区读不到 ⇒ 整格没能观察（与 `gitChangedPaths` 同一三态，不另发明）。 */
+  if (main === undefined) return undefined
+
+  const paths = new Set(main)
+  for (const worktree of memberWorktreesOf(workspace)) {
+    const dirty = gitChangedPaths(worktree)
+    /** ★ 某一棵 worktree 读不到 ⇒ 它只是**没被算进来**（见上面注释），不是整格作废。 */
+    if (dirty === undefined) continue
+    for (const path of dirty) paths.add(path)
+  }
+  return [...paths]
+}
+
+/**
+ * 一个工作区底下**有哪些成员 worktree**（`.agent-teams/worktrees/<task-id>`）。
+ *
+ * ── ★ 为什么在**这里**发现它们，而不是让调用方传进来 ────────────────────────────
+ *
+ * 调用方（`src/tools.ts`）只有队长的 `workspace` 与一个 `taskId`。它**知道**
+ * 当前任务的 worktree 在哪（`worktreeBaseOf`），但判据要回答的问题比那更宽：
+ *
+ *     「这些路径在**任何**成员干过活的地方脏了吗」
+ *
+ * ★ 一个只问"**这个**任务的 worktree"的修法，会把"上周期的 worktree 里改过、
+ *   本周期并入前又申报一次"判成虚报 —— 而那与 f-0023 是**同一个形态**，
+ *   只是换了一个任务 id。⇒ 扫目录让观察面**统一**，与是哪个任务无关。
+ *
+ * ── ★ 为什么按目录扫而不是查询 git 的 worktree 列表 ──────────────────────────────
+ *
+ * 这些 worktree 是**独立的检出**（不是 `git worktree add` 的链接工作树）：
+ * 每一个都有自己的 `.git`，所以 `git worktree list` 在主库里**看不到**它们。
+ * ⇒ 只能按目录发现。目录不存在 ⇒ 返回空数组（**不是** `undefined`：
+ *   "这里没有成员 worktree"是一个**观察到的结论**，不是"没能观察"）。
+ *
+ * ★ 排序是刻意的：让并集在输入相同时逐字可复现（否则同一份事实两次运行
+ *   可能产出不同排列，而"排列不同"与"结论不同"在断言层面同形）。
+ */
+function memberWorktreesOf(workspace: string): string[] {
+  const root = join(workspace, '.agent-teams', 'worktrees')
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, entry.name))
+      .sort()
+  } catch {
+    /** 目录不存在 / 读不到 ⇒ **没有成员 worktree**（观察到了"这里没有"）。 */
+    return []
+  }
 }
 
 /** Install before the first request, including cold resume, with HMR cleanup. */

@@ -383,7 +383,37 @@ test('★ t17 臂 3（伪造臂，★ 门必须保住）：零工作却自报改
     gitObserved: [],
   })))
   assert.equal(bothEmpty.length, 2, '★ 两条虚构路径都要报出来（不短路）')
-  assert.match(bothEmpty[0], /not a changed path in the working tree either/, '★ 措辞要说清这次用了几格证据')
+  /**
+   * ── ★★ 断言的是【意图】，不是那句旧措辞（t41 改口径）────────────────────────────
+   *
+   * 本行原先断言 `/not a changed path in the working tree either/` —— 而那句话
+   * 在 t41 之后**必然要改**，理由是它当时是一句**假话**：
+   *
+   *   f-0023：成员在 worktree 里真的改了文件，而工作区面只看了**队长那棵树**，
+   *   却断言"工作区里也没有"。⇒ 它替一个**没查过**的地方作了证。
+   *
+   * ★ 所以现在钉的是那一格证据的**意图**：说清"看了**几棵**树、而路径不在其中任何一棵里"。
+   *   一个"看了 1 棵"与"看了 43 棵"都报同一句话的实现会在这里红
+   *   —— 因为"任何"必须由**真实计数**支撑，而不是由措辞假装。
+   */
+  assert.match(
+    bothEmpty[0],
+    /not observed anywhere it could have happened/,
+    '★ 措辞要说清：这条路径在【任何】它可能出现的地方都没被观察到',
+  )
+  assert.match(
+    bothEmpty[0],
+    /not in any of the \d+ workspace\(s\) that were checked/,
+    '★ 而且要说清【看了几棵树】—— "任何"必须有真实计数支撑（t41：从前那句是假话）',
+  )
+  /**
+   * ★ 反向半边：那句旧措辞**不许**再出现 —— 它是 f-0023 里被成员读到的**假话**。
+   */
+  assert.doesNotMatch(
+    bothEmpty[0],
+    /not a changed path in the working tree either/,
+    '★ 旧措辞断言了"工作区里也没有"，而它只查过一棵树 —— 那句话本身是 f-0023 的一部分',
+  )
 
   /**
    * ② 工作区面**读不到**（`undefined`）⇒ 退回原口径，**仍然判虚报**。
@@ -498,4 +528,208 @@ test('★ t17 臂 5（★ 诚实边界臂）：工作区面【不为归属作证
     observed: [],
     gitObserved: ['src/other-task.ts'],
   })))
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t41 / f-0023：观察面必须**看到成员真正干活的那棵树**
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 这一节修的是什么（今天拦了成员 4 次，含本任务作者本人）────────────────────
+ *
+ * `gitChangedPaths(workspace)` 的入参是**队长的**工作区。而被派发了 worktree 的成员
+ * 在**自己的检出目录**里干活 —— 那是另一棵树：
+ *
+ *     /repo                                    ← 判据看的
+ *     /repo/.agent-teams/worktrees/task-t41    ← 成员真正改的地方
+ *
+ * ⇒ 成员改了 worktree 里的文件、如实申报，两个观察面**都**看不到它：
+ *
+ *     observedChangedPaths  只看得见本 session 的写入（换过会话就没有）
+ *     gitChangedPaths       问的是队长那棵树，那里确实没脏
+ *
+ * ⇒ 诚实的申报被判成虚报，而成员**拿不到任何合法输入**：
+ *   填真实路径被本条拒、填空数组被 completion 门拒（r5/mutation 要范围）。
+ *   ★ 两条判据各自都对，合起来没有任何合法输入（t32 实测的双向死锁）。
+ *
+ * ── 本节的臂用**真的 git 仓库**构造，不用替身 ────────────────────────────────────
+ *
+ * ★ 这是刻意的：本缺陷的要害正是"判据问错了**哪一棵树**"，而那只有在一个真实的
+ *   目录布局上才可判定。用替身（手写一串路径喂给判据）会把"看哪棵树"这件事
+ *   变成**由夹具自己假设**的东西 —— 那就测不到这个缺陷了。
+ */
+
+/** 造一个"主工作区 + 其下的一个成员 worktree"的真实布局。 */
+async function realLayoutFixture() {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { execFileSync } = await import('node:child_process')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const main = mkdtempSync(join(tmpdir(), 'f0023-main-'))
+  const git = (cwd) => (args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+  /** 主工作区：一个提交、干净。 */
+  git(main)(['init', '-q', '.'])
+  mkdirSync(join(main, 'src'), { recursive: true })
+  writeFileSync(join(main, 'src', 'shared.ts'), 'base\n')
+  git(main)(['add', '-A'])
+  git(main)(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+
+  /**
+   * 成员 worktree：**独立的检出**（与真实布局一致 —— 它们不是 `git worktree add`
+   * 的链接工作树，各自有自己的 `.git`，所以主库里 `git worktree list` 看不到它们）。
+   */
+  const worktree = join(main, '.agent-teams', 'worktrees', 'task-t41')
+  mkdirSync(worktree, { recursive: true })
+  git(worktree)(['init', '-q', '.'])
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'member-only.ts'), 'base\n')
+  git(worktree)(['add', '-A'])
+  git(worktree)(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+
+  /** ★ 成员在**自己的**树里改一个文件 —— 而主工作区那一份**不动**。 */
+  writeFileSync(join(worktree, 'src', 'member-only.ts'), 'changed by the member\n')
+
+  return { main, worktree }
+}
+
+test('★★ t41 臂 6（★ 诱导复现，f-0023 的核心）：只在 worktree 里改的文件 ⇒ 申报它【通过】', async () => {
+  const { workspaceAndWorktreeChangedPaths } = await import('../lib/harness-compat.js')
+  const { main, worktree } = await realLayoutFixture()
+
+  /**
+   * ★ 前置：确认这**确实是** f-0023 的那个布局 —— 文件在 worktree 里改了，
+   *   而主工作区那一份没改。缺了这一句，下面的断言可能在一个别的布局上通过。
+   */
+  const mainDirty = (await import('../lib/harness-compat.js')).gitChangedPaths(main)
+  assert.equal(
+    mainDirty.includes('src/member-only.ts'), false,
+    '★ 前置：主工作区里那一份【必须】是干净的（否则这测的不是 f-0023 的布局）',
+  )
+
+  /**
+   * ★★ 关键断言：新的观察面**必须看得见** worktree 里的那一条。
+   *
+   * ★ 而在修之前它看不见 —— 于是判据把一次诚实的申报读成虚报。
+   */
+  const seen = workspaceAndWorktreeChangedPaths(main)
+  assert.notEqual(seen, undefined, '★ 前置：主工作区是真实仓库 ⇒ 这一格必须有观察')
+  assert.equal(
+    seen.includes('src/member-only.ts'), true,
+    `★ 观察面看不到 worktree 里的改动 —— 那正是 f-0023。实测看到的：${JSON.stringify(seen)}`,
+  )
+
+  /**
+   * ★★ 而它必须让**判据放行**：把这一格喂给真实的 `gate`，申报那条路径。
+   *   ★ 这一条是端到端的（不是"函数返回了对的东西"）—— 判据才是被修的那个东西。
+   */
+  const verdict = expectOk(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/member-only.ts'],
+    observed: [],
+    gitObserved: seen,
+  })))
+  /**
+   * ★★ 断言"那条路径**在**产出里"，而**不是**"产出恰好只有那一条"。
+   *
+   * MEASURED（本臂第一版，当场抓出来）：主工作区里那个装 worktree 的目录
+   * （`.agent-teams/`）是 **untracked** 的 ⇒ `git status --porcelain` 把它报出来
+   * ⇒ 并集里多一条 `.agent-teams/`，而 `verifiedChangedPaths` 是**两个观察面的并集**。
+   *
+   * ★ 那条多余路径**无害且正确**：它确实在主工作区里是脏的（一个新目录），
+   *   而判据的判定用不到它（`fabricated` 只问"reported 的每一条**是否在**观察面里"，
+   *   多出来的条目不影响任何一条 reported 的判定）。
+   *
+   * ★ 而把它断言成"恰好一条"会让这条臂**测一件与 f-0023 无关的事**：
+   *   它会在任何让主工作区多出 untracked 文件的改动上变红 —— 包括**合法**的改动。
+   *   ⇒ 那正是本队记过的"把当下快照写成不变量"。
+   *
+   * ★ 所以钉的是 f-0023 的**性质**：那条只在 worktree 里改过的路径，**必须**被核实。
+   */
+  assert.ok(
+    verdict.verifiedChangedPaths.includes('src/member-only.ts'),
+    `★ 在 worktree 里被核实的路径必须进 verifiedChangedPaths（一条**已核实**的改动）。实测：${JSON.stringify(verdict.verifiedChangedPaths)}`,
+  )
+  /** ★ 而那棵树确实还在原地（本臂没有把它挪走/删掉）。 */
+  assert.notEqual(worktree, undefined)
+})
+
+test('★★★ t41 臂 7（★ 反向半边）：任何工作区里都没有的路径 ⇒ 必须【仍被拒】', async () => {
+  const { workspaceAndWorktreeChangedPaths } = await import('../lib/harness-compat.js')
+  const { main } = await realLayoutFixture()
+
+  /**
+   * ── 这一臂是**硬约束**：修法不许把判据退化成"什么都放行" ────────────────────────
+   *
+   * 扩大观察面很容易顺手放宽判定（"worktree 存在 ⇒ 就信你"）。而那会让
+   * 「零真实工作 + 自报一组漂亮的路径」重新变得可接受 —— 本判据存在的**全部理由**。
+   *
+   * ★ 可执行形式：观察面**真的扩大了**（臂 6 已证它能看见 worktree），
+   *   而一条**哪个树里都没有**的路径仍然被拒。两臂合起来才排除了"放宽"。
+   */
+  const seen = workspaceAndWorktreeChangedPaths(main)
+  assert.notEqual(seen, undefined)
+
+  const blockers = expectBlocked(await gate(ctx({
+    inScope: ['src/'],
+    changedPaths: ['src/invented-nowhere.ts'],
+    observed: [],
+    gitObserved: seen,
+  })))
+  assert.equal(blockers.length, 1)
+  /**
+   * ★ 而那句话必须说清**看过了几棵树** —— 不是"工作区里也没有"（那是一句只查过
+   *   一棵树却断言一切的假话，f-0023 的原文）。
+   */
+  assert.match(blockers[0], /not observed anywhere it could have happened/)
+  assert.match(blockers[0], /not in any of the \d+ workspace\(s\) that were checked/)
+  assert.doesNotMatch(blockers[0], /not a changed path in the working tree either/)
+})
+
+test('★ t41 臂 8（三态不变）：主工作区读不到 ⇒ 整格 unmeasured，而不是"并集为空"', async () => {
+  const { workspaceAndWorktreeChangedPaths } = await import('../lib/harness-compat.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  /**
+   * ★ 与 `gitChangedPaths` 的**三态逐条对齐**（不另发明）：
+   *   主工作区不是 git 仓库 ⇒ 这一格**没能观察** ⇒ `undefined`（不是 `[]`）。
+   *
+   * ★ 为什么这条重要：一个"读不到就当作空并集"的实现会把**一次 git 故障**
+   *   读成"工作区是干净的" ⇒ 于是一个诚实的申报被判虚报。
+   *   那是"把没测到并进结论"，正是本队那一条跨层纪律要防的。
+   */
+  const notARepo = mkdtempSync(join(tmpdir(), 'f0023-norepo-'))
+  assert.equal(
+    workspaceAndWorktreeChangedPaths(notARepo), undefined,
+    '★ 不是 git 仓库 ⇒ 整格没能观察（`undefined`），绝不是空数组',
+  )
+})
+
+test('★ t41 臂 9（对照臂）：没有 worktree 目录时，并集【等于】主工作区那一份', async () => {
+  const { gitChangedPaths, workspaceAndWorktreeChangedPaths } = await import('../lib/harness-compat.js')
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { execFileSync } = await import('node:child_process')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  /**
+   * ★ 缺了这一半，"看见 worktree"可能顺手改变了**已有**的口径
+   *   （例如把主工作区的路径也换成别的拼法）。⇒ 无 worktree 时两者必须**逐字相同**。
+   */
+  const main = mkdtempSync(join(tmpdir(), 'f0023-nowt-'))
+  const git = (args) => execFileSync('git', args, { cwd: main, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  mkdirSync(join(main, 'src'), { recursive: true })
+  writeFileSync(join(main, 'src', 'a.ts'), 'x\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  writeFileSync(join(main, 'src', 'a.ts'), 'y\n')
+
+  assert.deepEqual(
+    workspaceAndWorktreeChangedPaths(main), gitChangedPaths(main),
+    '★ 没有成员 worktree 时，并集必须与原有的工作区面【逐字相同】—— 改动不许动到既有口径',
+  )
 })

@@ -126,6 +126,21 @@ interface ChangedPathsContext {
    *   所以有它在场时判定只会更准（见 `gate()` 里 `fabricated` 的判据）。
    */
   gitChangedPaths?: string[]
+  /**
+   * ── ★★ 这一格证据**看了几棵树**（t41 / f-0023）──────────────────────────────────
+   *
+   * `gitChangedPaths` 从前只回答"**队长那棵树**里脏了哪些路径"。而成员被派发
+   * worktree 之后在自己的检出里干活 ⇒ 那句断言在那些情形下是**假话**：
+   * 它没查过成员真正改的那棵树。
+   *
+   * ⇒ 现在那一格是**并集**（主工作区 + 其下的每一个成员 worktree）。本字段是
+   *   **读数**，只用来让拒绝信息说清"我到底看了几棵树" —— 它**不参与判定**。
+   *
+   * ★ 为什么它不进 `requires`：缺席只影响那句话的措辞（退化成 `1`），
+   *   不影响任何裁决。把一个"只影响措辞"的格声明进输入面，会让每一次调用都报
+   *   一份缺格清单 —— 而噪音会教人忽略门禁（requires.ts 的闸门那一节）。
+   */
+  observedWorkspaces?: number
 }
 
 /**
@@ -213,12 +228,31 @@ export function gate(ctx: ChangedPathsContext): GateVerdict {
   const blockers: string[] = []
   for (const path of fabricated) {
     /**
-     * ★ 措辞按"哪个观察面在场"分叉 —— 读日志的人要能一眼看出这次判定用了几格证据。
-     *   两个都在场时说"两个面都没有"，只有一个时不能说"工作区里也没有"（那是谎话）。
+     * ── ★★ 两种"虚报"必须**各自说清成因**（t41 / f-0023 的第三半）───────────────
+     *
+     * 此前这里按"哪个观察面在场"分叉**措辞**，但两种情况仍合流在同一句话的骨架里：
+     *
+     *     ① 没观察到写入        —— 这一格可能有，只是我没看见（换过会话 / 读不到事件）
+     *     ② 任何工作区里也没有  —— 这条路径**压根不存在**（真正的虚报）
+     *
+     * ★ 两句读起来都像"你虚报了"，而它们的补救动作完全不同：
+     *
+     *     ① ⇒ 去把观察面接上 / 换一条有资格的证据
+     *     ② ⇒ 去改申报（你报了没发生的事）
+     *
+     * ★★ 而 f-0023 的代价正出在这个合流上：成员在 worktree 里**真的改了文件**，
+     *   而判据说"it is not a changed path in the working tree either" ——
+     *   那句话在当时是**假话**：它只看了队长那一棵树，却断言了一个它没查过的结论。
+     *   ⇒ 措辞必须如实说出**它到底看了哪里**，而不是替没查过的地方作证。
+     *
+     * ★ 所以按"看了什么"分叉（不是按"信不信"）：
+     *   · 工作区面缺席 ⇒ 只说会话面那一句，并明说"没有第二个面可核对"
+     *   · 工作区面在场 ⇒ 说清看了**不止一棵树**，而路径不在其中任何一棵里
+     *     （"任何"是有分量的：它把"我看过的地方都没有"与"我没看过那里"分开）
      */
     blockers.push(gitObserved === undefined
-      ? `"${path}" was reported as changed but no write to it was ever observed in this member's session`
-      : `"${path}" was reported as changed but no write to it was observed in this member's session, and it is not a changed path in the working tree either`)
+      ? `"${path}" was reported as changed but no write to it was ever observed in this member's session, and no workspace could be read either — so there was no second surface to check it against. That is "not observed here", which is not the same as "this path does not exist"`
+      : `"${path}" was reported as changed but it was not observed anywhere it could have happened: not in this member's session, and not in any of the ${ctx?.observedWorkspaces ?? 1} workspace(s) that were checked (the main workspace and every member worktree under it)`)
   }
   for (const path of concealed) {
     blockers.push(`"${path}" was observed as changed in this member's session but was not reported (not reported)`)
