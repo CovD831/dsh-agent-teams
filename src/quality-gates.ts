@@ -66,6 +66,36 @@ export interface CreateTaskInput {
   coverageOf?: string[]
   resume?: boolean
   resumeReason?: string
+  /**
+   * ── ★★ 这次校验里，`inScope` 是不是【真的被改的那个字段】（t40 修 f-0019 的第二半）──
+   *
+   * ── 它修的是什么 ────────────────────────────────────────────────────────────
+   *
+   * MEASURED（2026-10-07，captain 实测）：他在清空 `t18` 的 **dependencies**
+   * （为一个合法依赖链重新接线），却被一条**关于 inScope 的**规则拦住 ——
+   * 而他一个字节的 inScope 都没碰。
+   *
+   * 根因是触发点偏了：`updatePlanBatch` 对每个 `update_task` 变更**整任务重校验**，
+   * 于是"改依赖/改描述"这类改动会连带把 inScope 的重叠检查再跑一遍。
+   * ⇒ 一条规则在**它没被触碰**的时候开火，而它的错误信息还在谈论 inScope ——
+   *   读的人会去翻 inScope，而问题根本不在那里。
+   *
+   * ── 三态：`undefined` 不是 `false`（这条与全库的纪律一致）────────────────────
+   *
+   *     `undefined` ⇒ 【没有声明】⇒ 保持**今天的行为**（照常检查）
+   *     `false`     ⇒ 调用方明确说"这次改的不是 inScope" ⇒ 跳过重叠判定
+   *     `true`      ⇒ 调用方明确说"inScope 在场且是被校验的字段" ⇒ 照常检查
+   *
+   * ★ 缺省方向是**照常检查**，不是跳过：`undefined` 落回今天的行为，
+   *   所以一个还没接线的调用方不会**静默地**失去这条护栏。
+   *   反过来（缺省跳过）会让"调用方忘了传"与"确实不该检查"同形 ——
+   *   而那正是本库记账最久的形态。
+   *
+   * ★ 为什么这个判定必须在**判据侧**而不是调用方侧：
+   *   调用方侧收口只挡住"那一次调用"，任何别的调用方仍会踩到同一个坑；
+   *   而"这条规则在它没被触碰时不该开火"是**规则自己的性质**。
+   */
+  inScopeTouched?: boolean
 }
 
 export interface ValidateCreateTaskResult {
@@ -539,12 +569,65 @@ export function validateCreateTask(team: TeamState, input: CreateTaskInput): Val
     }
   }
 
-  if (WRITE_KINDS.includes(kind) && nonemptyStringList(input.inScope)) {
+  /**
+   * ── ★★ 触发点收窄：只在 `inScope` 真的被校验时检查（t40 修 f-0019 的第二半）───
+   *
+   * `input.inScopeTouched === false` ⇒ 调用方明确说"这次改的不是 inScope" ⇒ 整块跳过。
+   * ★ `undefined` **不**跳（见 interface 里那段三态说明）：缺省 = 今天的行为，
+   *   于是一个还没接线的调用方不会静默地失去这条护栏。
+   */
+  if (WRITE_KINDS.includes(kind) && nonemptyStringList(input.inScope) && input.inScopeTouched !== false) {
     for (const other of team.tasks) {
       if (!WRITE_KINDS.includes(taskKindOf(other))) continue
       if (!OPEN_STATUSES.includes(other.status)) continue
-      if (dependencies.includes(other.id) || other.dependencies.includes('pending-new')) continue
-      if (dependencies.includes(other.id)) continue
+      /**
+       * ── ★★ 豁免必须是【双向的】（t40 修 f-0019）─────────────────────────────
+       *
+       * MEASURED（2026-10-07，captain 亲手撞上、本任务复现）：
+       *
+       *     图中 t22 依赖 t18，两者 inScope 都含 src/tools.ts
+       *     ⇒ 校验 t18 被拒：`inScope overlaps t22 at src/tools.ts; serialize
+       *       these tasks or split the paths`
+       *
+       * 而护栏此前只豁免**一个方向**：
+       *
+       *     if (dependencies.includes(other.id) || other.dependencies.includes('pending-new')) continue
+       *       ↑ "我依赖它"  ⇒ 当【别人依赖我】时这一句为假 ⇒ 拒绝
+       *
+       * ⇒ 一条**已声明的依赖链**恰恰**证明**这两个任务的写域会被串行执行
+       *   （上游不到终态，下游就不会被派发）。那种重叠是**设计的一部分**，不是冲突。
+       *   把它当成冲突，等于让合法链上的两个任务**无法同时被编辑** ——
+       *   而"改依赖"正是这条链最需要被改的时刻。
+       *
+       * ★★ 而 `other.dependencies.includes('pending-new')` 那半句是**死代码**：
+       *   任务 id 由调度器分配（`t1`/`t2`…），没有任何一条依赖会真的是那个字面量。
+       *   它看起来像"已经考虑过第二个方向"，而实际一个方向都没豁免到。
+       *   ⇒ 删掉，换成下面那条**真的**双向判定。
+       *
+       * ── 双向怎么判（两个方向各一条，缺一不可）───────────────────────────────
+       *
+       *   ① 我依赖它：`dependencies` 的闭包含 `other.id`
+       *   ② 它依赖我：`other` 的闭包里含**本候选任务自己的 id**
+       *
+       * ★ 用【闭包】而不是直接那一格：依赖可以是**间接**的（t24 → t22 → t18），
+       *   而间接关系同样保证串行。只查直接那一格，会让"隔一层的合法重叠"继续被
+       *   误伤 —— 而那种误伤更难归因（报错只提 the other task 的 id）。
+       *
+       * ★★ 而本候选任务的 id 从哪来：`CreateTaskInput` **没有 id 那一格**
+       *   （建任务时它还不存在）。但**更新路径**（`updatePlanBatch` / amend）
+       *   传进来的就是一个**完整的既有任务**（带 id），且调用方已经把它从
+       *   `team.tasks` 里滤掉。⇒ 取 `(input as { id?: unknown }).id`：
+       *     · 有 id（更新路径）⇒ 方向 ② 可判
+       *     · 无 id（建任务）  ⇒ 方向 ② 无从谈起（新任务不可能是别人的上游，
+       *       因为还没有任何任务能依赖一个不存在的 id）⇒ 跳过方向 ② 是对的
+       *   ★ 这**不是**放宽：建任务路径下方向 ② 在语义上**必然为假**，
+       *     跳过它与"判了、结果为假"同义。
+       */
+      const candidateId = (input as { id?: unknown }).id
+      const iDependOnOther = dependencyClosureContains(team.tasks, dependencies, other.id)
+      const otherDependsOnMe = typeof candidateId === 'string' && candidateId !== ''
+        && dependencyClosureContains(team.tasks, [other.id], candidateId)
+      if (iDependOnOther || otherDependsOnMe) continue
       const overlap = inScopeOverlap(input.inScope, other.inScope)
       if (overlap.length > 0) {
         return {
