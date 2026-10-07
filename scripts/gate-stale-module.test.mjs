@@ -352,3 +352,224 @@ test('★ 臂 8（先软后硬，出口层）：部署状态**不得**让 `statu
     writeFileSync(STAMP, original, 'utf8')
   }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t37：把新鲜度读数附到【拒绝】的错误信息里 —— 让"读错位置"那条路走不通
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 这一节修的是什么（f-0027 的预防形态，captain 裁定的）─────────────────────
+ *
+ * captain 今天两次**用命令行**读插件进程的状态，读到的都是命令行那个进程；
+ * 而**成员**连位置都没有。★ 读数不存在，与读数指向别处，是**同一格的两种表现**。
+ *
+ * 而预防的形态**不是**"提醒人小心"（那是一条靠人执行的规则，本项目已见它腐烂两次），
+ * 是**让错的那条路走不通**：任何成员撞上拦截的那一刻，错误信息当场告诉它
+ * "你正在依据的这个进程，持有的构建与盘上是否一致" —— 于是它不需要去别处读。
+ *
+ * ★ 这与 f-0028（t33 报的）是同一件事的正面版本：
+ *   那里是"一个读数在它分辨不了的地方被当成了结论"；
+ *   这里把**有资格的读数挪到结论旁边**。
+ *
+ * ── 三态在这句话里也必须分形 ─────────────────────────────────────────────────
+ *
+ *   current ⇒ 明说（省得读的人去猜"没说"是不是"没测"）
+ *   stale   ⇒ **必须说**，且指向动作（reload）
+ *   unknown ⇒ **不得**说成 current —— 它是"没能测量"
+ */
+
+/** 触发一次**真实**拒绝（走 `throwWithSurface`），返回那条 Error。 */
+async function rejectionFixture() {
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const ws = mkdtempSync(join(tmpdir(), 'freshness-reject-'))
+  const git = (args) => execFileSync('git', args, { cwd: ws, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  writeFileSync(join(ws, 'a.ts'), 'a\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+
+  const stateRoot = join(ws, '.agent-teams')
+  /**
+   * ★ 任务**直接种进状态里**（而不是走 `create_task`）：本臂要的不是"任务怎么建"，
+   *   是"一次拒绝长什么样"。种进去让本臂只依赖那条拒绝路径。
+   *   ★ `members` / `phase` 是状态校验要求的字段（缺一个 `readTeam` 会拒整份状态）。
+   */
+  await createTeamDir(stateRoot, {
+    phase: 'running',
+    id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 1,
+    members: [{ id: 'm1', name: 'worker', status: 'working', joinedAt: 1 }],
+    /**
+     * ★ `assignee` 必须是 **captain 自己**：成员拥有的任务在 captain 更新时会被
+     *   **ownership 检查**先拒（"owned by member …, reassign first"）——
+     *   而那一条拒绝**不经过** `throwWithSurface`，本臂会测到一条不是它的拒绝。
+     *   ⇒ 种一个 captain 自己的任务，让这一次调用**走到判据那一层**。
+     */
+    tasks: [{
+      id: 't1', subject: 'A', status: 'in_progress', assignee: 'captain', dependencies: [],
+      attempt: 1, attemptId: 'a1', kind: 'implementation', objective: 'o',
+      inScope: ['src/a.ts'], acceptance: ['x'], verify: ['true'],
+      createdAt: 1, updatedAt: 1,
+    }],
+  })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined }, list() { return [] },
+      sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+  const captain = { id: 'cap', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} }
+  const update = tools.get('agent_teams_update_task')
+
+  return {
+    /**
+     * ★ 一条**真实**拒绝：`changedPaths` 申报了一个**从未被观察过**的路径
+     *   ⇒ dispatch 位置的 `changed-paths` 判据拒绝（"虚报改动清单"）。
+     *   ★ 这是文档里就有的拒绝路径（不是为夹具造的），且它**走 `throwWithSurface`**。
+     */
+    async reject() {
+      try {
+        await update.execute(
+          { task_id: 't1', status: 'in_progress', changedPaths: ['src/never-written-by-anyone.ts'] },
+          { agent: captain, signal: new AbortController().signal },
+        )
+        return undefined
+      } catch (error) {
+        return error
+      }
+    },
+  }
+}
+
+test('★ 臂 9（★ t37 核心）：一次**真实拒绝**的错误信息里必须带着部署状态那一行', async () => {
+  const { reject } = await rejectionFixture()
+  const error = await reject()
+  assert.notEqual(error, undefined, '★ 前置：这一次调用确实被拒了（否则本臂测的不是拒绝路径）')
+  const message = String(error?.message ?? '')
+  /**
+   * ★★ 断言：拒绝的那句话里**必须**有 `[deployment]` 那一行。
+   *
+   * ★ 这一条是"让错的路走不通"的字面落点：成员撞上拦截的那一刻，
+   *   当场就能读到"我这个进程持有的构建是新的还是旧的"，**不需要去别处读**。
+   */
+  assert.match(
+    message,
+    /\[deployment\] /,
+    `★ 拒绝信息里没有部署状态那一行 —— 成员于是只能去\n`
+    + `  命令行读，而命令行读的是【另一个进程】（f-0027）。实测信息：\n${message}`,
+  )
+  /**
+   * ★ 而那一行必须说的就是 `moduleFreshnessMessage()` 的结论（**同一个来源**），
+   *   不是另一套措辞 —— 否则"同一件事有两句话"在下游同形。
+   */
+  const { moduleFreshnessMessage } = await import('../lib/tools.js')
+  assert.ok(
+    message.includes(moduleFreshnessMessage()),
+    `★ 拒绝里那一行必须与 \`moduleFreshnessMessage()\` 逐字相同（同一个来源）。实测：\n${message}`,
+  )
+})
+
+test('★ 臂 10（三态在拒绝里也分形）：unknown **不得**说成 current；stale 那一态必须指向 reload', async () => {
+  const { moduleFreshness, moduleFreshnessMessage } = await import('../lib/tools.js')
+  const { reject } = await rejectionFixture()
+
+  /**
+   * ── ① unknown（stamp 读不到）⇒ 拒绝里那一行必须说"没能确定" ─────────────────────
+   *
+   * ★ 这一态在**拒绝路径上**可以真的造出来：`loadedStampOutput()` 是**进程级缓存**，
+   *   而 `moduleFreshness()` 每次都**重读盘**。把盘上的 stamp 弄坏 ⇒ onDisk 读不到
+   *   ⇒ 落 unknown。★ 于是"读不到"这件事在真实拒绝信息里可观察。
+   */
+  const unknownError = await (async () => {
+    const stampOriginal = readFileSync(STAMP, 'utf8')
+    try {
+      writeFileSync(STAMP, 'not json at all', 'utf8')
+      return await reject()
+    } finally {
+      writeFileSync(STAMP, stampOriginal, 'utf8')
+    }
+  })()
+  const unknownMessage = String(unknownError?.message ?? '')
+  assert.match(unknownMessage, /\[deployment\] /, '★ 前置：unknown 下也有那一行')
+  assert.match(
+    unknownMessage,
+    /could NOT be determined/,
+    '★ unknown 必须如实说"没能确定"（三态里最容易被并进 current 的那一态）',
+  )
+  /**
+   * ★★ 反向半边（缺了它，本臂在"恒说 current"的实现上照样绿）：
+   *   unknown 那一行里**不许**出现 "holds the current build"。
+   */
+  assert.doesNotMatch(
+    unknownMessage,
+    /holds the current build/,
+    '★ unknown 被说成了 current —— 那就是"没能测量"并进"通过"，本队反复记账的那条',
+  )
+
+  /**
+   * ── ② current（对照臂）⇒ 那一行明说"本进程持有的就是盘上这一份" ─────────────────
+   *
+   * ★ 与 ① 并排，"unknown 与 current 不同形"才是**可判定**的（而不是靠一句断言）。
+   */
+  const currentError = await reject()
+  const currentMessage = String(currentError?.message ?? '')
+  assert.match(currentMessage, /holds the current build/, '★ 对照：current 下那一行说的是"持有的就是盘上这一份"')
+  assert.notEqual(currentMessage, unknownMessage, '★ unknown 与 current 在拒绝信息里必须不同形')
+
+  /**
+   * ── ③ stale ⇒ 那一行必须**明说自己旧**、且指向动作（reload）──────────────────────
+   *
+   * ★★ 这一态**不能在拒绝路径上造出来**，理由是结构性的、而且它本身是一条读数：
+   *   `loadedStampOutput()` 是**进程级、加载时读一次**的缓存 —— 那正是被检测的对象
+   *   （`moduleFreshness` 的注释逐字说明"重复读会让它恒为 current"）。
+   *   ⇒ 在一个**已经加载过**的进程里改盘上的 stamp，得到的仍是"加载时那一份"，
+   *     于是它**必然**报 current。★ 想在这里看到 stale，只能起一个新进程 ——
+   *     而那测的就是另一个进程了（f-0027 的形状本身）。
+   *   ⇒ 所以 stale 那一态在**纯函数层**钉（臂 2 已经钉住），这里只钉"措辞同源"：
+   *     拒绝里那一行必须**逐字**来自 `moduleFreshnessMessage()`。
+   */
+  const syntheticStale = { status: 'stale', loaded: 'aaa'.repeat(8), onDisk: 'bbb'.repeat(8) }
+  assert.match(moduleFreshnessMessage(syntheticStale), /OLDER than the one on disk/, '★ stale 必须明说自己旧')
+  assert.match(moduleFreshnessMessage(syntheticStale), /reload the plugin/, '★ 且指向动作：reload')
+  /**
+   * ★ 而"拒绝里那一行"与"纯函数那三句"是**同一个来源**（不许另写一份措辞）：
+   *   现场信息应当**包含**纯函数那句结论 —— 逐字包含，而不是"意思差不多"。
+   */
+  assert.ok(
+    currentMessage.includes(moduleFreshnessMessage()),
+    '★ 拒绝里那一行必须与 `moduleFreshnessMessage()` 逐字同源（两处各写一遍会分叉）',
+  )
+  assert.equal(typeof moduleFreshness().status, 'string', '★ 前置：三态读数本身仍然可读')
+})
+
+test('★ 臂 11（先软后硬）：那一行**不参与裁决** —— 去掉它，拒绝的理由与措辞语义一字不变', async () => {
+  const { reject } = await rejectionFixture()
+  const error = await reject()
+  const message = String(error?.message ?? '')
+  /**
+   * ★ 本臂钉住"只【追加】一行、不改任何拒绝的理由"。
+   *
+   * ★ 可执行形式：**去掉** `[deployment]` 那一行之后，剩下的必须**非空**，
+   *   且仍然是"一条拒绝理由"（而不是原来就只有那一行）。
+   *   ⇒ 一个把部署状态当**拒绝理由**用的实现（例如只在那一行里说事）会在这里红。
+   */
+  const withoutLine = message.split('\n').filter((line) => !line.startsWith('[deployment] ')).join('\n').trim()
+  assert.notEqual(withoutLine, '', '★ 去掉部署那一行之后，拒绝必须仍然说得清【为什么】—— 它不许是唯一的理由')
+  assert.match(
+    withoutLine,
+    /rejected|was reported|never been observed|could not measure/i,
+    `★ 剩下的必须仍是一条**可读的拒绝理由**。实测（去掉那一行后）：\n${withoutLine}`,
+  )
+  /**
+   * ★ 而且它是**一个 Error**（不是被换成了另一种抛出物）—— 包装层与 `instanceof` 语义不变。
+   */
+  assert.equal(error instanceof Error, true, '★ 仍是 Error（`instanceof` 语义不变）')
+  assert.match(message, /\[deployment\] /, '★ 前置：那一行确实在（否则上面那条"去掉之后"没有对象）')
+})
