@@ -61,7 +61,7 @@ import { appendTaskEvidence, repairCompletionVerdict } from './quality-gates.ts'
 import { gateModuleViews, registry } from './gates/index.ts'
 import { auditRequires } from './gates/requires.ts'
 import type { GatePoint } from './gates/index.ts'
-import { gitChangedPaths, observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
+import { observedChangedPaths, sessionOwnEvents, workspaceAndWorktreeChangedPaths } from './harness-compat.ts'
 import type { ContractAmendmentInput } from './state.ts'
 import type { AcceptanceResult, CommandResult, ReviewFinding, ReviewVerdict, TaskKind } from './types.ts'
 import {
@@ -4896,8 +4896,19 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
            *
            * ★ 三态与前一格逐条对齐：读不到 git ⇒ `undefined` ⇒ 这一格**不参与判定**
            *   （判定退回原口径，**不是**放宽）。
+           *
+           * ★★ 2026-10-07（t41 的接线）：从 `gitChangedPaths(workspace)` 换成
+           *   `workspaceAndWorktreeChangedPaths(workspace)` —— 前者只看【队长那棵树】，
+           *   而按派工在隔离 worktree 里干活的成员，其改动在主树里**看不见**。
+           *   MEASURED：今天有 5 次成员申报真实改动被这条判据拒（t26/t28/t30×3/t32/t35/t40/t41），
+           *   而每一次文件都【真的在】worktree 里 —— 于是判据把"我没看见"
+           *   读成了"你没改"。
+           *
+           * ★ 而它【不放宽判定】：只是把观察面从一棵树扩到"主树 ∪ 各成员 worktree"。
+           *   "零工作却自报"仍被拒（主树与所有 worktree 里都找不到那个路径 ⇒ 仍 blocked）。
+           *   ⇒ 扩大观察面 ≠ 降低门槛。
            */
-          gitChangedPaths: gitChangedPaths(workspace),
+          gitChangedPaths: workspaceAndWorktreeChangedPaths(workspace),
         }
         const dispatchInputSurface = inputSurfaceOf('dispatch', dispatchContext)
         const dispatchGates = await registry.evaluate('dispatch', dispatchContext)
