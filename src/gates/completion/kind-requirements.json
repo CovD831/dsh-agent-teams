@@ -21,12 +21,13 @@
       ],
       "because": "a repair's discriminating evidence is an EXISTING fixture that changes verdict (t31 established this); demanding new tests here would push members towards writing decorative ones. Mutation stays because it is what proves the discriminating fixture really discriminates; backtest stays because a repair is still a change."
     },
-    {
+{
       "kind": "verification",
       "requiredGates": [
-        "completion.r5"
+        "completion.backtest"
       ],
-      "because": "a verification task adds no behaviour, so there is nothing new for r5/mutation to discriminate — requiring them would be requiring a test of a test. But it DOES run the suite, and a verification whose claimed result disagrees with a backtest is exactly the failure this class must not have. Not required: r5 (no new behaviour to pin), mutation (its subject is code, not a verdict)."
+      "because": "a verification task adds no behaviour, so there is nothing new for r5/mutation to discriminate — requiring them would be requiring a test of a test. But it DOES run the suite, and a verification whose claimed result disagrees with a backtest is exactly the failure this class must not have. Not required: r5 (no new behaviour to pin), mutation (its subject is code, not a verdict).",
+      "_history": "★ t73 修的冲突（这份数据与它自己的 because 互相否，而两者从 f8fc671 起就在一起）：上面那句 because 一直写着 `Not required: r5`，而 requiredGates 里却放着 `completion.r5`。⇒ 数据错了，because 是对的。MEASURED（t73，真跑 r5 的 gate()）：verification 任务按定义不新增测试（newTestFiles: []）⇒ r5 开火后必然落 ③ 那条支路，报 'R5 could not locate the new test files: none of the 0 reported file(s) resolve to a test path inside [scripts]' ⇒ unmeasured；而完工位置对 unmeasured 的处置是拒绝（t69 那条出口）⇒ ★ 于是「要 r5」这一格的真实后果是：每一个 verification 任务都无法完工。★ 而那不是“严格”，是一条永远不能为真的门：r5 问的是「有没有一条新测试，红前绿后」，而 verification 类按定义不产出那个东西 ⇒ 它对这个 kind 只有那一个答案，且那个答案与它要问的事无关。★ 曾经写在这里、而被删掉的立场（完整保留，供下一个提出它的人读到）：「要 r5」—— 理由大约是「verification 会跑套件，而 r5 问的正是有没有东西被判别」。它错在三处：① r5 的判据是整个 update.newTestFiles 的红前绿后，不是“跑没跑套件”（跑套件是 backtest 的问法，而 backtest 留着）；② 于是它在本 kind 上恒落 unmeasured，而“恒不可测量”与“严格”在读数上相反；③ 那条理由本身也没能写出来 —— 它只是 requiredGates 里多出来的一格。⇒ 保留这一段是为了让下一个人先读到结论，而不是重新发现一次这个冲突。"
     },
     {
       "kind": "review",

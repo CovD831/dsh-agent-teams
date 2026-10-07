@@ -342,20 +342,25 @@ test('⑨ appliesTo：只有【表说它要 r5】且声明了新增测试的任�
    * ⇒ 数据（`requiredGates`）说"要 r5"，同一行的理由（`because`）说"不要 r5"。
    *   **两者必有一个错**，而"哪个错"需要人裁 —— 我不猜。
    *
-   * ★ 所以本行的立场是：**如实对齐当前的数据**（门读的是数据，不是 `because`），
+   * ★ 所以本行当时的立场是：**如实对齐当时的数据**（门读的是数据，不是 `because`），
    *   并把那个冲突写在这里与 `docs/BASELINE-RED.md` 里。
-   *   ★ 而 `src/gates/completion/` **不在本任务的写域里** ⇒ 我**不能**去改那张表，
+   *   ★ 而 `src/gates/completion/` **不在 t69 的写域里** ⇒ 那时**不能**去改那张表，
    *     也不该把这条断言改成"两边都行"（那会让冲突**消失**，而本队的纪律是：
    *     把缺陷写成不变量、与把它删掉，都不是修好它）。
+   *
+   * ── ★★★ t73：那个冲突**已经被裁了**，而本行随之回到它本来该有的读数 ──────────
+   *
+   * 裁定：**数据错了，`because` 是对的**。证据（t73 真跑 r5 的 `gate()`）：
+   *   verification 任务按定义**不新增测试** ⇒ 开着 r5 时它必然落
+   *   「none of the 0 reported file(s) resolve to a test path」⇒ `unmeasured`，
+   *   而完工位置对 `unmeasured` 的处置是**拒绝** ⇒ **每一个 verification 任务都无法完工**。
+   * ⇒ 所以它现在与 `work`/`review`/`requirements`/`integration` **同一组**：
+   *   r5 不管它。★ 而这不是"放宽"—— 它换回了 `backtest`（那条门问的是真问题），
+   *   理由与实测写在 `kind-requirements.json` 的 `_history` 里。
    */
-  for (const kind of ['work', 'review', 'requirements', 'integration']) {
+  for (const kind of ['work', 'review', 'requirements', 'integration', 'verification']) {
     assert.equal(appliesTo({ ...base, task: { kind } }), false, `${kind} 不该被 R5 管`)
   }
-  assert.equal(
-    appliesTo({ ...base, task: { kind: 'verification' } }), true,
-    '★ 对齐**当前的表**：verification 的 requiredGates 含 completion.r5 ⇒ 它被管。'
-    + '★ 而那张表的 because 说"Not required: r5" —— 两者冲突，见 docs/BASELINE-RED.md',
-  )
   // 没声明新测试 ⇒ 没有"新测试"这个对象
   assert.equal(appliesTo({ ...base, update: {} }), false)
   assert.equal(appliesTo({ ...base, update: undefined }), false)
