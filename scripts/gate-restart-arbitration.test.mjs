@@ -39,7 +39,7 @@ import { toolsSource } from './tools-source.mjs'
  *     （我第一版把它放在 `restart.ts`，那条臂当场红了 —— 而它红得对。）
  *   ★ 而 `arbitrateRestart*` 仍由 `lib/tools.js` 转出：两者**不在同一个模块**。
  */
-import { restartQueueMessage, restartQueueState } from '../lib/tools/shared/entities.js'
+import { clearRestartRequest, requestRestart, restartQueueFrom, restartQueueMessage, restartQueueState } from '../lib/tools/shared/entities.js'
 import {
   RESTART_ESCAPE_HATCH_ENV,
   arbitrateRestart,
@@ -562,4 +562,223 @@ test('★★ 臂 10（定向突变）：把"已申请"做成**恒真** ⇒ 臂�
     restartQueueState({ requestedAt: 1, waitingOn: ['t1'], knownTaskIds: ['t1'], inFlight: ['t1'] }).status,
     'waiting',
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t50：调度器**真的不派发**（持住 hold_dispatch 的那一半）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 它补的是 t49 缺的那一半 ──────────────────────────────────────────────────
+ *
+ * t49 让"被拒的重载"进入「已申请」，并把读数（`hold_dispatch`）交到 `status` 上。
+ * 而**强制点**在 `src/scheduler.ts` 的派发判定里 —— 那不在 t49 的 inScope。
+ *
+ * ⇒ 于是形状是：captain **看得到**「不要派发」，而调度器**还不会自己拒绝**。
+ *
+ * ★★ 而"看得到"是不够的 —— 那正是用户那句话要消灭的东西：
+ *
+ *   「凭经验决定何时触发」= 靠人执行的规则，而该项目文档已证明这类规则会腐烂。
+ *
+ *   ⇒ 一条"captain 看到 `hold_dispatch` 后应当克制"的规则，**就是**靠人执行的规则：
+ *     它今天成立，因为 captain 记得；而它会在某一次忙碌里失效，
+ *     而失效的那一次**不留痕迹**（没有任何读数会说"你本该不派发"）。
+ *
+ * ── ★ 为什么这一节驱动**真的调度器**，而不是调用那个判定函数 ────────────────────
+ *
+ *   直接调 `dispatchHeldByReload` 只证明"这个函数判得对"，**不证明**"派发那一刻
+ *   真的经过了它"。⇒ 本队记账的形态：**一个没有调用方的判定，与没有判定在观测上完全相同**。
+ *   ⇒ 所以下面从 `installTeamScheduler(...).kickTeam` 进 —— 那是生产路径本身。
+ */
+
+/** 一个够真实的调度器夹具：真的 `installTeamScheduler` + 真的团队目录。 */
+async function schedulerFixture(tasks) {
+  const { installTeamScheduler } = await import('../lib/scheduler.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+
+  const workspace = mkdtempSync(join(tmpdir(), 'sched-hold-'))
+  const stateRoot = join(workspace, '.agent-teams')
+  await createTeamDir(stateRoot, {
+    id: 'team', name: 'Hold', captainSessionId: 'captain-session',
+    createdAt: 1, taskSeq: tasks.length,
+    members: [{ id: 'member-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+    tasks,
+  })
+
+  /** ★ 投递记录：于是臂里能断言"派发真的发生过"，而不是只看"没报错"。 */
+  const dispatches = []
+  const agents = new Map([
+    ['captain-session', { id: 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} }],
+    ['member-1', { id: 'member-1', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} }],
+  ])
+  /**
+   * ★ t50：**收集调度器写出的那条日志** —— 它是"此刻为什么不派发"的唯一出口，
+   *   而臂 12 必须读**它**（不是状态机那一侧的同名字段）。
+   */
+  const logged = []
+  const ctx = {
+    logger: { debug() {}, info(message) { logged.push(String(message)) }, warn(message) { logged.push(String(message)) }, error(message) { logged.push(String(message)) } },
+    agents: { get(id) { return agents.get(id) } },
+    /**
+     * ★ 调度器在 install 时订阅 `agent/status`（成员从 working 回到 idle 时补投递）。
+     *   ★ 本夹具**不驱动那条路**（它测的是派发闸门），但接口必须在 ——
+     *     少一个它会在 install 那一刻抛错，而那与闸门坏了同形。
+     */
+    on() { return () => {} },
+    effect(setup) { return setup() },
+    inject() { return () => {} },
+  }
+  const scheduler = installTeamScheduler(ctx, {
+    stateDir: '.agent-teams',
+    dispatch: async (_captain, _teamId, memberName, text) => {
+      dispatches.push({ memberName, text: text.slice(0, 80) })
+      return true
+    },
+  })
+  return { workspace, stateRoot, scheduler, dispatches, logged }
+}
+
+const HOLD_TASK = {
+  id: 't1', seq: 1, subject: 'w', kind: 'work', status: 'pending',
+  inScope: ['src/a.ts'], createdAt: 1, updatedAt: 1, dependencies: [],
+}
+
+test('★★ 臂 11（★ 强制臂，t50）：排队 waiting 时，调度器**自己**不派发', async () => {
+  /**
+   * ★★ 这一臂是 t50 的全部内容：**机制自己拒绝**，不是 captain 看到读数后克制。
+   *
+   * ★ 反向半边（同一臂内）：**没有申请**时，同一个调度器**必须**派发 ——
+   *   缺了这一半，"不派发"可能来自一个恒不派发的实现，
+   *   而那会让团队永久停摆（★ 与"真的在排队"在读数上同形）。
+   */
+  const clean = await schedulerFixture([HOLD_TASK])
+  clearRestartRequest()
+  await clean.scheduler.kickTeam(clean.workspace, 'team')
+  assert.equal(
+    clean.dispatches.length, 1,
+    `★ 反向半边：**没有申请**时调度器必须照常派发 —— 否则"不派发"是恒真的。实测 ${clean.dispatches.length}`,
+  )
+
+  /** ★ 而现在申请一次重载（任务 t1 仍在跑 ⇒ waiting）⇒ 同一个调度器必须沉默。 */
+  const held = await schedulerFixture([{ ...HOLD_TASK, status: 'in_progress', assignee: 'worker', attempt: 1, attemptId: 'a1' }, {
+    ...HOLD_TASK, id: 't2', seq: 2, status: 'pending',
+  }])
+  requestRestart(['t1'], Date.now())
+  try {
+    await held.scheduler.kickTeam(held.workspace, 'team')
+    assert.equal(
+      held.dispatches.length, 0,
+      `★ 排队 waiting 期间调度器**不许派发** —— 每派发一个新任务就把闸门推得更远。实测派发 ${held.dispatches.length} 次`,
+    )
+  } finally {
+    clearRestartRequest()
+  }
+})
+
+test('★★ 臂 12（三态臂）：`stuck` 也必须不派发 —— 而它与 `waiting` **不同成因**', async () => {
+  /**
+   * ★ 两者都"不派发"，而只有 `stuck` 意味着**要人介入**。
+   *   把它们合成一条会让"再等一会儿"与"叫人来"同形 —— 本队记过的那条。
+   *
+   * ★ 可执行形式：把申请指向一个**不在任务表里**的任务 ⇒ `stuck` ⇒ 仍不派发。
+   */
+  const stuck = await schedulerFixture([{ ...HOLD_TASK, status: 'pending' }])
+  requestRestart(['t-does-not-exist'], Date.now())
+  try {
+    await stuck.scheduler.kickTeam(stuck.workspace, 'team')
+    assert.equal(
+      stuck.dispatches.length, 0,
+      '★ `stuck` 期间**也不派发** —— 那一等不会有结果，而派发只会让它更不可收拾',
+    )
+    /**
+     * ── ★★ 而它必须**可诊断** —— 而诊断的读数要从【调度器那一条】来 ──────────────
+     *
+     * ★ MEASURED（本臂第一版**没抓住**一次定向突变）：我原先断言的是
+     *   `restartQueueFrom(...).status === 'stuck'` —— 那是**状态机**的输出。
+     *   而"把 `stuck` 并入 `waiting`"这个突变改的是**调度器那一条**
+     *   （`dispatchHeldByReload` 的 `state` 字段）⇒ 状态机仍然报 `stuck`
+     *   ⇒ 本臂照绿，而调度器已经把"要人介入"说成了"再等一会儿"。
+     *
+     * ★ 形态（本队记账的那一条）：**守卫检查了另一个同名的东西** ——
+     *   两个字段都叫 `state`，而它们是**两条不同的出口**。
+     *
+     * ⇒ 改成读**调度器真的写出来的那一条日志**（`kickTeam` 里的 info），
+     *   因为那才是"此刻为什么不派发"这个问题的**唯一出口**。
+     */
+    const held = stuck.logged.join('\n')
+    assert.match(held, /stuck/, `★ 调度器必须把成因报成 \`stuck\`（不是 \`waiting\`）。实测日志：${held.slice(0, 200)}`)
+    assert.doesNotMatch(
+      held, /held while a reload is queued \(waiting\)/,
+      '★ `stuck` 不许被报成 `waiting` —— 那会让"叫人来"伪装成"再等一会儿"',
+    )
+    /** ★ 而状态机那一侧也照样钉（两条出口**各自**都要对）。 */
+    const state = restartQueueFrom([{ id: 't1', status: 'pending' }])
+    assert.equal(state.status, 'stuck')
+    assert.equal('reason' in state, true, '★ 而它必须说出成因（`waiting` 没有 `reason`）')
+  } finally {
+    clearRestartRequest()
+  }
+})
+
+test('★ 臂 13（★ 交叉臂）：`kickMember` 单独调用时**也**被挡住（不许有绕过闸门的路）', async () => {
+  /**
+   * ★ 为什么这一臂必须存在：`kickMember` 可以被**单独**调用（不是每次都经过
+   *   `kickTeam`）⇒ 只挡 `kickTeam` 会让另一条路径成为**绕过闸门**的路。
+   *
+   * ★ 而它与臂 11 是**一对**：一个测"整队扫描被挡"，一个测"单成员派发被挡"。
+   */
+  const fixture = await schedulerFixture([{ ...HOLD_TASK, status: 'in_progress', assignee: 'worker', attempt: 1, attemptId: 'a1' }, {
+    ...HOLD_TASK, id: 't2', seq: 2, status: 'pending',
+  }])
+  requestRestart(['t1'], Date.now())
+  try {
+    await fixture.scheduler.kickMember(fixture.workspace, 'team', 'worker')
+    assert.equal(
+      fixture.dispatches.length, 0,
+      '★ 单成员派发路径也必须被挡住 —— 否则它是绕过排队闸门的那条路',
+    )
+  } finally {
+    clearRestartRequest()
+  }
+})
+
+test('★ 臂 14（★ 收口后放开）：被等的任务终态 ⇒ 调度器**恢复**派发', async () => {
+  /**
+   * ★ 这一格防的是"不派发**卡住**"：申请排队 ⇒ 不派发 ⇒ 而在被等的任务收口之后，
+   *   闸门**必须**松开（否则团队永久停摆）。
+   *
+   * ★ 而它同时是"自动重载"的前提：收口 ⇒ 名单空 ⇒ `status` 触发重载并消费申请。
+   *   这里只钉**派发面**的行为（重载面在 t49 的臂里）。
+   */
+  const fixture = await schedulerFixture([{ ...HOLD_TASK, status: 'in_progress', assignee: 'worker', attempt: 1, attemptId: 'a1' }, {
+    ...HOLD_TASK, id: 't2', seq: 2, status: 'pending',
+  }])
+  requestRestart(['t1'], Date.now())
+  try {
+    /** 前置：此刻确实被挡（否则下面那条"放开"是在一个没关过的门上断言的）。 */
+    await fixture.scheduler.kickTeam(fixture.workspace, 'team')
+    assert.equal(fixture.dispatches.length, 0, '★ 前置：此刻必须被挡')
+
+    /** ★ 把被等的任务改成终态 ⇒ 名单缩空 ⇒ `status` 的自动重载会消费申请。 */
+    const { readTeam, writeTeam } = await import('../lib/state.js')
+    const team = await readTeam(fixture.stateRoot, 'team')
+    team.tasks[0].status = 'completed'
+    await writeTeam(fixture.stateRoot, team)
+    /**
+     * ★ 消费申请 = "重载已经发生"。这里**手工**模拟那一步，
+     *   因为真实的 `fiber.restart()` 会把本进程 dispose 掉（夹具做不到）。
+     *   ★ 而那正是 `status` 的自动收口在真实路径上做的事。
+     */
+    clearRestartRequest()
+
+    await fixture.scheduler.kickTeam(fixture.workspace, 'team')
+    assert.equal(
+      fixture.dispatches.length, 1,
+      '★ 申请被消费之后调度器必须恢复派发 —— 否则"不派发"卡住了，团队永久停摆',
+    )
+  } finally {
+    clearRestartRequest()
+  }
 })

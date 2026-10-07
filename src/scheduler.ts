@@ -34,6 +34,26 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
+/**
+ * ── ★★ 持住 hold_dispatch 的那一半（t50）─────────────────────────────────────────
+ *
+ * ★ 为什么 scheduler 要读**重载排队**这件事：
+ *
+ *   t49 让"被拒的重载"进入「已申请」，并把读数（`hold_dispatch`）交到 `status` 上。
+ *   而那时**强制点还没落地** —— 派发判定在 `src/scheduler.ts`，不在 t49 的 inScope。
+ *   ⇒ 于是形状是：captain **看得到**"不要派发"，而调度器**还不会自己拒绝**。
+ *
+ * ★★ 而"看得到"是不够的 —— 那正是用户那句话要消灭的东西：
+ *
+ *   「凭经验决定何时触发」= 靠人执行的规则，而该项目文档已证明这类规则会腐烂。
+ *
+ *   ⇒ 一条"captain 看到 hold_dispatch 后应当克制"的规则，**就是**靠人执行的规则。
+ *     它今天成立，因为 captain 记得；而它会在某一次忙碌里失效，
+ *     而失效的那一次**不留痕迹**（没有任何读数会说"你本该不派发"）。
+ *
+ *   ⇒ 所以这一半必须在**机制**里：`nextReadyTask` 自己拒绝。
+ */
+import { restartQueueFrom } from './tools/shared/entities.ts'
 import type { TaskStatus, TeamMember, TeamState, TeamTask } from './types.ts'
 /**
  * ★ t28：终态判定用**唯一那份真值**（`types.ts`），不在本模块重写一遍列表。
@@ -388,6 +408,51 @@ function isMemberAvailable(ctx: Context, member: TeamMember): boolean {
   return live === undefined || live.status === 'idle'
 }
 
+/**
+ * ── ★★ 派发的第三个闸门：重载排队（t50）─────────────────────────────────────────
+ *
+ * ★ 它与 `halted` / `phase === 'staged'` **并列**，理由是同一条：
+ *   三者都回答"此刻**不该**开新工作"，而它们各有各的成因 ⇒ 必须**分别**判。
+ *
+ * ── 三态（与 `status` 报出的那一份逐字同源）───────────────────────────────────
+ *
+ *   `waiting` —— 已申请重载，且**还等得到** ⇒ 不派发（每派发一个新任务就把它推得更远）
+ *   `stuck`   —— 已申请，但等待名单里有**不在任务表里**的任务（永远不会收口）
+ *                ⇒ 也不派发（★ 而它**要上报**：那一等不会有结果，得有人介入）
+ *   无申请    —— 照常派发（★ 反向半边：不许退化成恒不派发）
+ *
+ * ── ★ 为什么它【不是】halted ────────────────────────────────────────────────────
+ *
+ *   `halted` 是一个**持久**的、由人设的状态（团队被叫停）；而重载排队是
+ *   **暂时**的、由机制设的、且**会自己解开**（收口后自动重载 ⇒ 申请被消费）。
+ *   ⇒ 把它们合成一个字段会让"等人叫停"与"等一个必然会过去的窗口"同形 ——
+ *     而这两件事该做的动作完全相反（前者要人，后者只要等）。
+ *
+ * ── ★ 为什么它【也不】复用 `hold_dispatch` 那个布尔 ─────────────────────────────
+ *
+ *   `hold_dispatch` 是**出口**（给 captain 读的）；这里要的是**原因**
+ *   （`waiting` 还是 `stuck`）。⇒ 两边都从 `restartQueueFrom` 算，
+ *   而不是一处算完把结果传给另一处 —— 那样传丢了就问不出"为什么不派发"。
+ */
+function dispatchHeldByReload(tasks: readonly TeamTask[]): { held: boolean; state: string; detail: string } {
+  const state = restartQueueFrom(tasks.map((task) => ({ id: task.id, status: task.status })))
+  if (state.status === 'none') return { held: false, state: 'none', detail: '' }
+  if (state.status === 'waiting') {
+    return {
+      held: true,
+      state: 'waiting',
+      detail: state.waitingOn.length === 0
+        ? 'a reload has been requested and nothing is in flight — it is about to run'
+        : `a reload has been requested and is waiting on ${state.waitingOn.join(', ')}`,
+    }
+  }
+  /**
+   * ★ `stuck` 与 `waiting` **分别**处理：两者都"不派发"，而只有 `stuck` 要上报。
+   *   把它们合成一条会让"再等一会儿"与"叫人来"同形 —— 而那正是本队记过的那条。
+   */
+  return { held: true, state: 'stuck', detail: state.reason }
+}
+
 function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
   return tasks.find(task => task.assignee === memberName
     && (task.status === 'claimed' || task.status === 'in_progress'))
@@ -527,6 +592,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       const stateRoot = stateRootOf(workspace, config)
       const team = await readTeam(stateRoot, teamId)
       if (team === undefined || team.halted === true || team.phase === 'staged') return
+      /**
+       * ★ t50：重载排队期间**不派发新成员工作**。
+       *   ★ 放在 `kickTeam` 这一层，意味着"连一次扫描都不做" ——
+       *     比逐个成员拒绝更早、也更省（而两者都不派发）。
+       */
+      const heldAtTeam = dispatchHeldByReload(team.tasks)
+      if (heldAtTeam.held) {
+        ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtTeam.state}) — ${heldAtTeam.detail}`)
+        return
+      }
       const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
       if (captain === undefined) return
       for (const member of team.members) {
@@ -541,6 +616,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       await serializeMember(queueKey, async () => {
         let team = await readTeam(stateRoot, teamId)
         if (team === undefined || team.halted === true || team.phase === 'staged') return
+        /**
+         * ★ t50：同上 —— 单成员派发也要被挡住。
+         *   ★ 两处都判是**刻意的**：`kickMember` 可被单独调用（不是每次都经过 `kickTeam`），
+         *     只挡一处会让另一条路径成为**绕过闸门**的路。
+         */
+        const heldAtMember = dispatchHeldByReload(team.tasks)
+        if (heldAtMember.held) {
+          ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtMember.state}) — ${heldAtMember.detail}`)
+          return
+        }
         const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
         if (captain === undefined) return
         let member = team.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
@@ -578,6 +663,21 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async (): Promise<DispatchTicket | undefined> => {
           const fresh = await readTeam(stateRoot, team!.id)
           if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged') return undefined
+          /**
+           * ── ★★ t50：**机制自己拒绝**（这一处才是"不派发"真正生效的地方）──────────
+           *
+           * ★ 前两处挡的是"扫描"，而这一处挡的是**取票** —— 即真正把一个任务
+           *   交给某个成员的那一步。⇒ 三处都判，缺任何一处都能被绕过。
+           *
+           * ★ 而它与 `halted` **同一形状**（`return undefined` = 这次不发），
+           *   却带着**不同成因的读数**（见 `dispatchHeldByReload`）——
+           *   于是"为什么不派发"问得出来，而不是一句"没派发"。
+           */
+          const held = dispatchHeldByReload(fresh.tasks)
+          if (held.held) {
+            ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${held.state}) — ${held.detail}`)
+            return undefined
+          }
           const currentMember = fresh.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
           if (currentMember === undefined || !isMemberAvailable(ctx, currentMember)) return undefined
           const owned = ownedOpenTask(fresh.tasks, currentMember.name)
