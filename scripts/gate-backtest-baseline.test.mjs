@@ -466,3 +466,168 @@ test('★★★ 臂 12（接线臂，已翻面）：生产里【真的有】把 
     + `实测消费者：${JSON.stringify(consumers)}`,
   )
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t83：第三条拒绝 —— 基线【不存在】时问什么
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── ★★★ 三条形态（今晚各自被独立撞到，t81 归纳到一起）──────────────────────────
+ *
+ *   ① 基线【不绿】       （t27/t58/t64/t76 —— ★ t76 已修：pin + 按差异归因）
+ *   ② 基线【不存在】     （t18/t23/t81 报过；本仓 79 个任务里 3 个）
+ *   ③ 同 ① 的另一处措辞
+ *
+ * ── ★★★ 而 ② 与 ① 性质不同（本任务的关键）────────────────────────────────────
+ *
+ *   ① 说「基线红」      ⇒ 在本仓【几乎不可满足】（总有已知失败）
+ *   ② 说「基线不存在」  ⇒ ★ 而它是【可修】的 —— 只要问对"它该不该存在"
+ *
+ * ── ★★ 答案：读 `baselineAbsent`（调用方**已经在算**那一格）─────────────────────
+ *
+ *   它既不能问"绿吗"（没有可问的对象），也不能不问（不问就失去意义）
+ *   ⇒ 问**第三种**问题：这次缺席是哪一种？
+ *     `no-worktree`  ⇒ 环境 ⇒ **报告而不拒绝**（而仍然要说话）
+ *     `not-recorded` ⇒ 本该有而丢了 ⇒ **仍然拒绝**
+ *
+ * ★ 而两组臂的分工：t76 的臂测"基线在场"的两条路（不变量），
+ *   下面这些测"基线缺席"的两条路（新行为）。
+ */
+
+test('★★ 臂 13（核心臂 · no-worktree）：这类任务本就没有基线 ⇒ 报告而不拒绝', async () => {
+  /**
+   * ★ 现状：`baseline === undefined` ⇒ 一律 unmeasured（≈ 拒绝：任务收不了口）。
+   *   而"这类任务本就没有基线"是**环境**，不该以拒绝的形式出现。
+   * ★ 而它**仍然要说话** —— 否则与"这条判据压根没跑"同形。
+   */
+  const verdict = await gate(ctx({ baselineAbsent: 'no-worktree' }))
+  assert.equal(
+    verdict.blockers, undefined,
+    `★★ "本就没有基线"不许以拒绝的形式出现。实测：${JSON.stringify(verdict)}`,
+  )
+  assert.equal(
+    typeof verdict.unmeasured, 'string',
+    `★★ 而它仍必须说清"这一轮无法归因"。实测：${JSON.stringify(verdict)}`,
+  )
+  assert.match(
+    String(verdict.unmeasured), /no-worktree|no isolated worktree|environment/i,
+    `★ 说清是【哪一种】没有。实测：${verdict.unmeasured}`,
+  )
+})
+
+test('★★★ 臂 14（反向半边 · not-recorded）：本该有而丢了 ⇒ 仍然拒绝', async () => {
+  /**
+   * ── ★★★ 这一臂防"退化成恒可归因"──────────────────────────────────────────────
+   *
+   * `not-recorded` = 任务被派发过而父版本**丢了**。
+   * ⇒ ★ 那不是环境；把它也放行会让这个观测缺口**永远不被看见** ——
+   *   正是本队记账最久的形态（把可修的缺口读成正常）。
+   */
+  const verdict = await gate(ctx({ baselineAbsent: 'not-recorded' }))
+  assert.equal(verdict.ok, false, `★★ 必须仍然拒绝。实测：${JSON.stringify(verdict)}`)
+  assert.ok(
+    Array.isArray(verdict.blockers) && verdict.blockers.length > 0,
+    `★ 且必须是 blocked（一条要人处理的拒绝），不是 unmeasured。实测：${JSON.stringify(verdict)}`,
+  )
+  assert.match(
+    verdict.blockers.join(' '), /SHOULD have one|not-recorded|lost/i,
+    `★ 必须说清"它本该有"。实测：${JSON.stringify(verdict.blockers)}`,
+  )
+})
+
+test('★★★ 臂 15（三态不同形）：no-worktree / not-recorded / 没说成因 ⇒ 三者不得合并', async () => {
+  /**
+   * ★ 第三条最重要：**"我不知道是哪种缺席"与"它是环境"不同形**。
+   *   把前者读成后者，就是本队记账的「把没能测量并进通过」。
+   */
+  const noWorktree = await gate(ctx({ baselineAbsent: 'no-worktree' }))
+  const notRecorded = await gate(ctx({ baselineAbsent: 'not-recorded' }))
+  const unknown = await gate(ctx({}))
+
+  assert.equal(noWorktree.blockers, undefined, 'no-worktree ⇒ 不是拒绝')
+  assert.ok(notRecorded.blockers?.length > 0, 'not-recorded ⇒ 是拒绝')
+  assert.equal(unknown.ok, false, 'unknown ⇒ 也不通过')
+  assert.equal(typeof unknown.unmeasured, 'string', 'unknown ⇒ unmeasured')
+
+  const shape = (v) => JSON.stringify({ ok: v.ok, unmeasured: v.unmeasured ?? null, blockers: v.blockers ?? null })
+  assert.equal(
+    new Set([shape(noWorktree), shape(notRecorded), shape(unknown)]).size, 3,
+    `★★ 三态两两不同形。实测：\n${[shape(noWorktree), shape(notRecorded), shape(unknown)].join('\n')}`,
+  )
+})
+
+test('★★ 臂 16（★ 不变）：基线在场时，t76 的两条路一字不改', async () => {
+  /** ★ 本任务只碰"基线不存在"那一支；在场的那两支必须原样 —— 这是它的反向半边。 */
+  const green = await gate(ctx({ baseline: { exitCode: 0, label: 'a' } }))
+  assert.equal(green.ok, true, `实测：${JSON.stringify(green)}`)
+
+  const pinned = await gate(ctx({
+    baseline: { exitCode: 1, label: 'a', failedTests: ['k.test.mjs'] },
+    knownBaselineFailures: parseKnownBaselineFailures({ knownFailures: [{ test: 'k.test.mjs', fixture: 'x', because: 'y' }] }),
+    fullScope: { coveredTests: ['scripts/a.test.mjs', 'scripts/b.test.mjs'], failedTests: ['k.test.mjs'] },
+  }))
+  assert.equal(pinned.ok, true, `★ t76 的差异归因必须仍然工作。实测：${JSON.stringify(pinned)}`)
+  assert.equal(pinned.baseline.knownFailures, 1)
+})
+
+test('★ 臂 17（突变臂）：把 no-worktree 改回【拒绝】⇒ 臂 13 会红', async () => {
+  /**
+   * ★ 突变就是**修法前的读法**：不吃 `baselineAbsent`，一律 unmeasured。
+   *   ⇒ 那时臂 13 的"必须说清是哪一种"会红（旧措辞没有那一段）。
+   * ★ 本臂断言那个对照确实存在。
+   */
+  const fixed = await gate(ctx({ baselineAbsent: 'no-worktree' }))
+  const legacy = await gate(ctx({}))
+  assert.notEqual(
+    String(fixed.unmeasured), String(legacy.unmeasured),
+    '★ 修法必须改变这个答案，否则它不是一条机制',
+  )
+  assert.match(String(fixed.unmeasured), /not expected to have one/i, JSON.stringify(fixed))
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 臂 18（接线缺口臂）：判据已能读 `baselineAbsent`，而调用方【还没传它】
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 18（接线缺口，如实记账）：`baselineAbsent` 在调用方还没有注入点', async () => {
+  /**
+   * ── ★★★ 这一臂是**诚实的缺口声明**，不是"已经修好了"的证据 ────────────────────
+   *
+   * MEASURED（本任务实测）：
+   *   · 判据侧【完整】：`gate()` 会读 `ctx.baselineAbsent` 并分两种处置（臂 13/14/15）
+   *   · 而调用方 `src/tools/update-task.ts` **不传它**（grep `baselineAbsent` = 0 命中）
+   *   · ★ 而它**已经算好了那个值**（:802 的 `baselineProvenance`）——
+   *     只是没往 backtest 的 ctx 里放
+   *
+   * ★ 本队那条纪律：**一个没有调用方的修法，与没有修法在观测上完全相同。**
+   *   ⇒ 所以这一臂断言"此刻没有注入点"，并写清【翻转条件】。
+   *
+   * ── ★ 与臂 12（t76 的接线臂）的关系 ──────────────────────────────────────────
+   *
+   *   臂 12 当年也是这么写的，而**它后来翻面了**（captain 把 pin 接上，
+   *   臂 12 改成"生产必须有消费者且必须真的传进 ctx 格"）。
+   *   ⇒ 本臂是同一个形状的**第三次**：先如实记缺口，接上之后翻面。
+   */
+  const { readFileSync: read, readdirSync: ls } = await import('node:fs')
+  const { join: j } = await import('node:path')
+  const srcRoot = j(ROOT, 'src')
+  const walk = (dir) => ls(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = j(dir, entry.name)
+    if (entry.isDirectory()) return walk(full)
+    return entry.name.endsWith('.ts') ? [full] : []
+  })
+  /** ★ 排除判据自己（它定义并读取这一格）。 */
+  const defining = j(srcRoot, 'gates', 'completion', 'backtest.ts')
+  const callers = walk(srcRoot)
+    .filter((file) => file !== defining)
+    .filter((file) => read(file, 'utf8').includes('baselineAbsent'))
+
+  assert.deepEqual(
+    callers, [],
+    '★★★ 生产里出现了 `baselineAbsent` 的调用方 ⇒ **接线完成了**。'
+    + '★ 那是好事 —— 而它意味着这一臂要**翻面**：把断言从"没有注入点"改成'
+    + '"调用方真的把 `resolveBaseRevision` 的 absent.reason 传进了 ctx"，'
+    + '并按同一手法收紧 `scripts/gate-producer-consumer.test.mjs` 的记账值。'
+    + `实测调用方：${JSON.stringify(callers)}`,
+  )
+})

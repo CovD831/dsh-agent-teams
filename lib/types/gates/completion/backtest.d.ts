@@ -204,6 +204,25 @@ export interface BacktestContext {
      *   所有失败的清单【必须不同形】（前者是"我没有那份记录"）。
      */
     knownBaselineFailures?: KnownBaselineFailure[];
+    /**
+     * ── ★★★ t83：基线缺席时，它【为什么】缺席（与 `baseline` 互斥）───────────────────
+     *
+     * ★ 取值与调用方 `resolveBaseRevision` 的 `absent.reason` **一一对应**
+     *   （MEASURED，`src/tools/update-task.ts:802`）—— 判据不发明新词汇：
+     *
+     *     `'no-worktree'`   ⇒ 这类任务**本就没有**父版本（**环境**）
+     *     `'not-recorded'`  ⇒ 本该有而**丢了**（要看一眼）
+     *
+     * ★ 两种缺席的处置**相反**（见 `gate()` 里那两条分支）：
+     *     `no-worktree`  ⇒ **报告而不拒绝**（环境不是工作的问题）
+     *     `not-recorded` ⇒ **仍然拒绝**（本该有的丢了，而那要有人看）
+     *
+     * ★ 而**缺席**（这一格 `undefined`）表示"调用方没说"⇒ 判据**判不了是哪种**
+     *   ⇒ 落回原来的 unmeasured。
+     *   ★ 而那与 `no-worktree` 必须不同形：
+     *     "我不知道是哪种缺席"与"它是环境"是两件事。
+     */
+    baselineAbsent?: 'no-worktree' | 'not-recorded';
     /** 修复/候选版本上跑【全量】测试：`(command) => exitCode`。 */
     execBacktestCommand?: ExecCommand;
     /** 跑【选测】的那条命令：`(command) => exitCode`。 */
