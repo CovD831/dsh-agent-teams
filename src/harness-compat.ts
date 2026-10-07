@@ -300,18 +300,76 @@ export function gitChangedPaths(workspace: string): string[] | undefined {
  *   两格合起来才完整 —— 而这里补的正是"另一棵树也可以作证"。
  */
 export function workspaceAndWorktreeChangedPaths(workspace: string): string[] | undefined {
+  const observed = observeWorkspaces(workspace)
+  return observed === undefined ? undefined : observed.paths
+}
+
+/**
+ * ── ★★★ 观察面 + **它到底看了几棵树**（t59 / j-0007）──────────────────────────────
+ *
+ * ── 它修的是什么失效 ──────────────────────────────────────────────────────────
+ *
+ * MEASURED（t59，本任务）：`dispatch.changed-paths` 的拒绝信息里写着
+ *
+ *     「… not in any of the [N] workspace(s) that were checked
+ *        (the main workspace and every member worktree under it)」
+ *
+ * ★ 而那个 N 读的是 `ctx?.observedWorkspaces ?? 1` —— 而 `observedWorkspaces`
+ *   **从来没有被任何地方赋过值**（全仓 grep：只有声明与读取，零个赋值点）。
+ *   ⇒ 它恒为 `undefined` ⇒ `?? 1` 恒取 1。
+ *
+ * ⇒ ★ 于是那句话里，**数字是兜底值、名词是空头承诺**：
+ *     · `1` 是一个**兜底值伪装成读数**（读起来像"算出来是 1"）
+ *     · "every member worktree under it" 在当时还【没有调用方】——
+ *       本函数的前身只在夹具里被调用过（见 t59 的因果链）
+ *
+ * ★★ 而这不只是措辞问题：**一个没有调用方的扫描，与没有扫描在观测上完全相同。**
+ *
+ * ── 修法：把"看了几棵树"变成【读数】，而不是【兜底】────────────────────────────
+ *
+ * 本函数把两条事实一起交出来：
+ *
+ *     paths       —— 并集（与从前逐字相同，**判定规则一个字不改**）
+ *     workspaces  —— ★ **实际读到了**的工作区数（主工作区 + 每棵读到的 worktree）
+ *
+ * ★ 三态（与判据那一格逐条对齐，且**三者不同形**）：
+ *
+ *     ① `undefined`                    —— 连主工作区都读不到（不是 git 仓库 / git 不可达）
+ *                                          ⇒ "没能观察"，判据那一格不参与判定
+ *     ② `{ paths, workspaces: 1 }`     —— 读了：只有主工作区（没有 worktree，或全读不到）
+ *     ③ `{ paths, workspaces: N>1 }`   —— 读了：主工作区 + N-1 棵读到的 worktree
+ *
+ * ★ 而 ② 与 ① **必须不同形**（它们的补救动作不同）：
+ *     ① 的补救是"去把 git 接上 / 换个能读的工作区"
+ *     ② 的补救是"读到了、确实只有一棵树" —— 那是**结论**，不是**失败**
+ *   把两者合成一个 `?? 1`，正是本任务要消灭的那件事。
+ *
+ * ── ★★ 及物性：读不到的 worktree【不算进"检查过"】──────────────────────────────
+ *
+ * 与下面那个 `continue` 同一口径（它本来就"没被算进来"）。⇒ 于是 `workspaces`
+ * 与 `paths` **出自同一次遍历、同一组事实** —— 而不是各算各的。
+ * ★ 这一点是刻意的：两个来自不同遍历的计数会分叉，而分叉之后
+ *   "扫了 5 棵"与"5 棵里只有 1 棵读到了"在读数上同形。
+ * ★ 而"读不到"本身不失真：`memberWorktreesOf` 列出了目录里**存在**的 worktree，
+ *   而 `workspaces` 数的是**真的读出了内容**的那些（`continue` 掉的不计）。
+ */
+export function observeWorkspaces(workspace: string): { paths: string[]; workspaces: number } | undefined {
   const main = gitChangedPaths(workspace)
   /** ★ 主工作区读不到 ⇒ 整格没能观察（与 `gitChangedPaths` 同一三态，不另发明）。 */
   if (main === undefined) return undefined
 
   const paths = new Set(main)
+  /** ★ 主工作区那一棵已经读到了 —— 所以从 1 起算，而不是从 0。 */
+  let workspaces = 1
   for (const worktree of memberWorktreesOf(workspace)) {
     const dirty = gitChangedPaths(worktree)
     /** ★ 某一棵 worktree 读不到 ⇒ 它只是**没被算进来**（见上面注释），不是整格作废。 */
     if (dirty === undefined) continue
+    /** ★ 而且它**不算进"检查过"** —— 与上面那行 continue 同一口径。 */
+    workspaces += 1
     for (const path of dirty) paths.add(path)
   }
-  return [...paths]
+  return { paths: [...paths], workspaces }
 }
 
 /**

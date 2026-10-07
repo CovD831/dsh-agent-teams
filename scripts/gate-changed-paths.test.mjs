@@ -57,7 +57,7 @@ function expectOk(v) {
 }
 
 /** 一个最小 context：任务契约 + 成员自报 + 观察到的真实写入（+ 工作区观察，t17）。 */
-function ctx({ inScope = [], outOfScope = [], changedPaths, observed, hasObservation = true, gitObserved }) {
+function ctx({ inScope = [], outOfScope = [], changedPaths, observed, hasObservation = true, gitObserved, observedWorkspaces }) {
   return {
     task: { id: 't1', kind: 'implementation', inScope, outOfScope },
     update: { changedPaths },
@@ -69,6 +69,15 @@ function ctx({ inScope = [], outOfScope = [], changedPaths, observed, hasObserva
      *   在这条判据里从来不是同一件事（与 `observedChangedPaths` 同一纪律）。
      */
     ...gitObserved === undefined ? {} : { gitChangedPaths: gitObserved },
+    /**
+     * ★★ t59：**看了几棵树**（读数）。
+     *
+     *   ★ 而它与 `gitChangedPaths` 同一纪律：**不传 ⇒ 缺席**（不是 `1`）。
+     *     从前那句话里的数字是 `?? 1` 兜出来的 —— 于是"没喂"与"喂了 1"
+     *     在措辞上同形，而那条断言因此**从来没有真的测到过它声称的东西**。
+     *     ⇒ 现在不传 ⇒ 那句话【不声称数字】（见 changed-paths.ts 的三支）。
+     */
+    ...observedWorkspaces === undefined ? {} : { observedWorkspaces },
   }
 }
 
@@ -381,6 +390,16 @@ test('★ t17 臂 3（伪造臂，★ 门必须保住）：零工作却自报改
     changedPaths: ['src/a.ts', 'src/b.ts'],
     observed: [],
     gitObserved: [],
+    /**
+     * ★★ t59：**必须喂这个数** —— 而这条臂此前【从来没喂过】它 ──────────────────
+     *
+     * MEASURED（t59）：本臂断言了「说清看了几棵树」，而它从未给过 `observedWorkspaces`
+     * ⇒ 那句话里的数字来自 `?? 1` 那个**兜底值**，而断言照样通过。
+     * ★ 也就是说：**它断言的那个性质从来没有被真的测到过** ——
+     *   它测的是"那句话里有一个数字"，而不是"那个数字是真的"。
+     * ⇒ 现在喂一个**非 1** 的值：只有【真的读了这个数】的实现才说得对。
+     */
+    observedWorkspaces: 3,
   })))
   assert.equal(bothEmpty.length, 2, '★ 两条虚构路径都要报出来（不短路）')
   /**
@@ -403,8 +422,9 @@ test('★ t17 臂 3（伪造臂，★ 门必须保住）：零工作却自报改
   )
   assert.match(
     bothEmpty[0],
-    /not in any of the \d+ workspace\(s\) that were checked/,
-    '★ 而且要说清【看了几棵树】—— "任何"必须有真实计数支撑（t41：从前那句是假话）',
+    /not in any of the 3 workspace\(s\) that were checked/,
+    '★ 而且要说清【看了几棵树】，且那个数必须是【喂进去的那个】—— '
+    + '写死 \d+ 的话，一个兜底成 1 的实现也能过（而那正是 t59 修的缺陷）',
   )
   /**
    * ★ 反向半边：那句旧措辞**不许**再出现 —— 它是 f-0023 里被成员读到的**假话**。
@@ -676,6 +696,11 @@ test('★★★ t41 臂 7（★ 反向半边）：任何工作区里都没有的
     changedPaths: ['src/invented-nowhere.ts'],
     observed: [],
     gitObserved: seen,
+    /**
+     * ★★ t59：同上 —— 这条臂也从未喂过计数，而它断言的正是"计数是真的"。
+     *   ⇒ 喂一个非 1 的值，让它真的测到那件事。
+     */
+    observedWorkspaces: 4,
   })))
   assert.equal(blockers.length, 1)
   /**
@@ -683,7 +708,10 @@ test('★★★ t41 臂 7（★ 反向半边）：任何工作区里都没有的
    *   一棵树却断言一切的假话，f-0023 的原文）。
    */
   assert.match(blockers[0], /not observed anywhere it could have happened/)
-  assert.match(blockers[0], /not in any of the \d+ workspace\(s\) that were checked/)
+  assert.match(
+    blockers[0], /not in any of the 4 workspace\(s\) that were checked/,
+    '★ 那个数必须是【喂进去的那个】（不是兜底值）',
+  )
   assert.doesNotMatch(blockers[0], /not a changed path in the working tree either/)
 })
 
