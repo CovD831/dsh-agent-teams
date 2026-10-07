@@ -246,8 +246,49 @@ export interface R5Context {
    *
    * `undefined`（没有 worktree）与一个空串必须都算"拿不到"—— 绝不产出
    * 一个伪造的父版本，也绝不因为"没隔离"就说"检查通过"。
+   *
+   * ★★ t71：它【不是唯一来源】了 —— 见下面的 `workspaceHead`。
+   *   本格缺席不再直接落 unmeasured，而是走「换一个来源再试一次」那条路。
    */
   parentRevision?: string
+  /**
+   * ── ★★ t71：无 worktree 时的父版本来源 —— **工作区自己的 HEAD** ────────────────
+   *
+   * ── 为什么需要它（MEASURED：t68 没有 worktree ⇒ r5 恒 unmeasured）──────────────
+   *
+   *   `resolveBaseRevision` 落 `{ kind: 'absent', reason: 'no-worktree' }`
+   *   ⇒ 调用方不注入 `parentRevision` ⇒ r5 报「no parent revision is available」
+   *   ⇒ ★ 而 kind-requirements 表里 `implementation` 要 r5
+   *     ⇒ **一个没有 worktree 的 implementation 任务在 r5 上恒不可满足**。
+   *     这是 f-0020 的第三个成因（前两个：宿主持有旧模块 / 基线本身不绿）。
+   *
+   * ── ★★ 而 r5 要的从来不是"一个 worktree"，是【一个"之前"的版本】───────────────
+   *
+   *   它要问的是：把这条测试拿到**这次改动之前**的那棵树上跑，它红不红。
+   *
+   *   ★ 一个【无 worktree】的任务，改动落在**共享工作区**里 ⇒
+   *     "这次改动之前"**就是那个工作区的 HEAD**（未提交的改动才是"之后"）。
+   *   ⇒ **那个父版本是存在的**，与有 worktree 的任务一样存在。
+   *     `absent / no-worktree` 说的是"没有独立目录"，**不是**"没有父版本"。
+   *
+   *   ★ 而旧代码把这两件事读成了同一件 —— 本队记账：
+   *     **读的量（有没有 worktree）超过了它声称的性质（有没有父版本）。**
+   *
+   * ── ★★ 代价必须写在读数里（这是一个有代价的决定，不是一个等价的替换）─────────
+   *
+   *   用 HEAD 当父版本**不是紧的**：共享工作区意味着**别的任务可能已经提交过**等价的东西，
+   *   于是 HEAD 可能**已经包含**本次改动 ⇒ 成员的新测试在 HEAD 上就是绿的
+   *   ⇒ r5 判它「装饰性测试」⇒ **一次假拒绝**。
+   *
+   *   ★ 而它仍比"恒 unmeasured"好，因为失败方向不同：
+   *       恒 unmeasured ⇒ **每一个**无 worktree 的 implementation 都收不了口
+   *       HEAD 当父版本 ⇒ **只有**"别人已提交等价改动"那一种会假拒绝，
+   *                       而它是一个**可复核的具体主张**（有 hash、有补丁可比）
+   *   ⇒ 所以读数里多一格 `base: 'workspace-head'`，让读者看得出这是次优的那个来源。
+   *
+   * ★ 由调用方注入（判据不 import I/O）。`undefined` ⇒ 连它都没有 ⇒ unmeasured。
+   */
+  workspaceHead?: string
   /** 测试文件的扫描范围（workspace 相对目录）。缺席 ⇒ 无法把文件折成测试路径 ⇒ unmeasured。 */
   scanDirs?: string[]
   /**
@@ -397,17 +438,47 @@ export async function gate(ctx: R5Context): Promise<GateVerdict> {
     )
   }
 
-  const parent = ctx?.parentRevision
   /**
-   * ★ ④ 拿不到父版本 ⇒ unmeasured，且措辞必须说清是"隔不了"而不是"不需要"
+   * ── ★★ t71：父版本【两个来源】，而它们不是同一件事 ──────────────────────────────
+   *
+   *   `parentRevision`  —— worktree 的 base。**首选**：它精确地是"本任务开工前的那棵树"。
+   *   `workspaceHead`   —— 工作区自己的 HEAD。**次选**：只在没有 worktree 时用。
+   *
+   * ★ 而这个顺序是刻意的：有 worktree 就**绝不用** HEAD ——
+   *   那会破坏"有隔离时父版本是那个隔离的基准"这条既有的语义（反向半边）。
+   *
+   * ★ 两种"拿不到"必须分得开（本队记账：三态不同形）：
+   *     两者都没有 ⇒ unmeasured（这一轮真的没能测量）
+   *     只有 HEAD  ⇒ **判**，而读数里标出 `base: 'workspace-head'`
+   */
+  const isolatedParent = typeof ctx?.parentRevision === 'string' && ctx.parentRevision.trim() !== ''
+    ? { revision: ctx.parentRevision.trim(), base: 'worktree-base' as const }
+    : undefined
+  const workspaceParent = typeof ctx?.workspaceHead === 'string' && ctx.workspaceHead.trim() !== ''
+    ? { revision: ctx.workspaceHead.trim(), base: 'workspace-head' as const }
+    : undefined
+  const parent = isolatedParent ?? workspaceParent
+
+  /**
+   * ★ ④ 两个来源都拿不到 ⇒ unmeasured，且措辞必须说清是"隔不了"而不是"不需要"
    *   （与 `src/worktree.ts` 的拒绝同一条口径）。
    *
    *   这是本判据最容易走偏的一步：没有隔离时返回 ok，会把"我测不了"变成
    *   "检查通过"，读日志的人再也看不出这条测试有没有被 R5 检查过。
+   *
+   * ★★ t71 而它现在**不再**吞掉"无 worktree"那一类：
+   *   那类任务有 HEAD 可用 ⇒ 走上面那个次选来源。
+   *   ★ 能走到这一行的只剩"连 HEAD 也读不到"（不是 git 仓库 / 没有提交）——
+   *     那一态与"无 worktree"不同形：前者是"这个环境没有可比的版本"，
+   *     后者是"这个任务没有独立目录，而版本是有的"。
+   *   ⇒ ★ 把后者报成 unmeasured 会让一个【结构性】的缺口读起来像**暂时**测不到，
+   *     而"再跑一次可能就好了"与"它永远不会好"是两件事。
    */
-  if (typeof parent !== 'string' || parent.trim() === '') {
+  if (parent === undefined) {
     return unmeasured(
-      `R5 could not check the ${targets.length} reported new test file(s): no parent revision is available (this task has no isolated worktree), so no test could be shown to fail before the fix`,
+      `R5 could not check the ${targets.length} reported new test file(s): no parent revision is available `
+      + '(this task has no isolated worktree, and the workspace HEAD could not be read either — '
+      + 'not a git repository, or no commit yet), so no test could be shown to fail before the fix',
     )
   }
 
@@ -418,7 +489,7 @@ export async function gate(ctx: R5Context): Promise<GateVerdict> {
     let parentResult: { exitCode?: number; output?: string } | undefined
     let fixedResult: { exitCode?: number; output?: string } | undefined
     try {
-      parentResult = await run(test, parent.trim())
+      parentResult = await run(test, parent.revision)
       fixedResult = await run(test, 'working-tree')
     } catch (error) {
       /**
@@ -454,7 +525,24 @@ export async function gate(ctx: R5Context): Promise<GateVerdict> {
    *   这个观测落进记录，而不是让读者只能相信"R5 说它过了"。
    *   （与 verify-rerun 交回 reruns、changed-paths 交回 verifiedChangedPaths 同构。）
    */
-  return { ok: true, r5: { parentRevision: parent.trim(), verified: results } } as GateVerdict
+  return {
+    ok: true,
+    r5: {
+      parentRevision: parent.revision,
+      /**
+       * ★★ t71：这一格【必须】交出去 —— 两条来源的读数不许同形。
+       *
+       *   `worktree-base` —— 那个 worktree 的基准（首选，紧）
+       *   `workspace-head` —— 工作区 HEAD（次选，**不紧**：共享工作区里
+       *                       别的任务可能已经提交过等价的东西 ⇒ 可能假拒绝）
+       *
+       * ★ 少了这一格，上面那个代价在报告里**看不见** —— 而那正是本队记账的
+       *   「把没测到的（这里是"没测到那么紧"）并进看起来正常的那一态」。
+       */
+      base: parent.base,
+      verified: results,
+    },
+  } as GateVerdict
 }
 
 interface R5TestResult {

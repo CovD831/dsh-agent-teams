@@ -205,8 +205,49 @@ export interface R5Context {
      *
      * `undefined`（没有 worktree）与一个空串必须都算"拿不到"—— 绝不产出
      * 一个伪造的父版本，也绝不因为"没隔离"就说"检查通过"。
+     *
+     * ★★ t71：它【不是唯一来源】了 —— 见下面的 `workspaceHead`。
+     *   本格缺席不再直接落 unmeasured，而是走「换一个来源再试一次」那条路。
      */
     parentRevision?: string;
+    /**
+     * ── ★★ t71：无 worktree 时的父版本来源 —— **工作区自己的 HEAD** ────────────────
+     *
+     * ── 为什么需要它（MEASURED：t68 没有 worktree ⇒ r5 恒 unmeasured）──────────────
+     *
+     *   `resolveBaseRevision` 落 `{ kind: 'absent', reason: 'no-worktree' }`
+     *   ⇒ 调用方不注入 `parentRevision` ⇒ r5 报「no parent revision is available」
+     *   ⇒ ★ 而 kind-requirements 表里 `implementation` 要 r5
+     *     ⇒ **一个没有 worktree 的 implementation 任务在 r5 上恒不可满足**。
+     *     这是 f-0020 的第三个成因（前两个：宿主持有旧模块 / 基线本身不绿）。
+     *
+     * ── ★★ 而 r5 要的从来不是"一个 worktree"，是【一个"之前"的版本】───────────────
+     *
+     *   它要问的是：把这条测试拿到**这次改动之前**的那棵树上跑，它红不红。
+     *
+     *   ★ 一个【无 worktree】的任务，改动落在**共享工作区**里 ⇒
+     *     "这次改动之前"**就是那个工作区的 HEAD**（未提交的改动才是"之后"）。
+     *   ⇒ **那个父版本是存在的**，与有 worktree 的任务一样存在。
+     *     `absent / no-worktree` 说的是"没有独立目录"，**不是**"没有父版本"。
+     *
+     *   ★ 而旧代码把这两件事读成了同一件 —— 本队记账：
+     *     **读的量（有没有 worktree）超过了它声称的性质（有没有父版本）。**
+     *
+     * ── ★★ 代价必须写在读数里（这是一个有代价的决定，不是一个等价的替换）─────────
+     *
+     *   用 HEAD 当父版本**不是紧的**：共享工作区意味着**别的任务可能已经提交过**等价的东西，
+     *   于是 HEAD 可能**已经包含**本次改动 ⇒ 成员的新测试在 HEAD 上就是绿的
+     *   ⇒ r5 判它「装饰性测试」⇒ **一次假拒绝**。
+     *
+     *   ★ 而它仍比"恒 unmeasured"好，因为失败方向不同：
+     *       恒 unmeasured ⇒ **每一个**无 worktree 的 implementation 都收不了口
+     *       HEAD 当父版本 ⇒ **只有**"别人已提交等价改动"那一种会假拒绝，
+     *                       而它是一个**可复核的具体主张**（有 hash、有补丁可比）
+     *   ⇒ 所以读数里多一格 `base: 'workspace-head'`，让读者看得出这是次优的那个来源。
+     *
+     * ★ 由调用方注入（判据不 import I/O）。`undefined` ⇒ 连它都没有 ⇒ unmeasured。
+     */
+    workspaceHead?: string;
     /** 测试文件的扫描范围（workspace 相对目录）。缺席 ⇒ 无法把文件折成测试路径 ⇒ unmeasured。 */
     scanDirs?: string[];
     /**
