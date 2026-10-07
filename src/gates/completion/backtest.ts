@@ -147,6 +147,68 @@ export const requires: CtxPaths<BacktestContext>[] = [
   'changedPaths',
 ]
 
+/**
+ * ── ★★★ t76：已知失败清单（"fix or pin the baseline first" 里的 **pin** 那一半）──────
+ *
+ * ── 它修的是什么（MEASURED：t66/t67/t69/t71/t74 五次独立撞到）────────────────────
+ *
+ *   L1 前置要一份【全绿的基线】，而本仓基线【几乎从不全绿】（本 worktree 实测 10 条）
+ *   ⇒ ★ 它要求的那件事不可满足 ⇒ 而它卡住了今晚每一个 worktree 任务的终态。
+ *
+ *   ★ 而它自己的拒绝信息早就写对了方向：
+ *     「fix or pin the baseline first (this red is not the change's fault)」
+ *     —— 缺的正是 **pin** 那一半。
+ *
+ * ── ★★ 它【不是白名单】，而这是一条判据上的区别，不只是措辞 ──────────────────────
+ *
+ *     白名单       ⇒ 让判据**闭嘴**（"这些失败没关系"）
+ *     已知失败清单 ⇒ 让判据**换一个更准的问句**：
+ *                    不问「基线绿吗」（它不绿，而那一格不是本次造成的），
+ *                    而问「这次改动【新增】了失败吗」
+ *
+ *   ⇒ 机制上：判据不再拿 `baseline.exitCode !== 0` 当作"无法归因"的**充分条件**，
+ *     而是在清单在场时继续往下走，并拿它去**扣除**那些已知的失败。
+ *
+ * ── ★★ 而"新增的失败"从哪来（读之前必须知道这一格）─────────────────────────────
+ *
+ *   `fullScope.failedTests`（调用方已经在用同一格交回 `coveredTests`）。
+ *   ★ 那一格**缺席**时，判据**不能**宣称"没有新增" —— 那是"我没能看到"，
+ *     而它必须落回"无法归因"（见下面 gate() 里的两条分支）。
+ *
+ * ── 形状与纪律 ────────────────────────────────────────────────────────────────
+ *
+ *   每条必须带 `test`（那条失败的名字）+ `because`（为什么它不算本次的）。
+ *   ★ 而**坏掉的清单必须抛错**，不许静默降级成空清单：
+ *     一份坏清单与"真的没有已知失败"是两件事 —— 后者会让判据把所有红都当新增。
+ */
+export interface KnownBaselineFailure {
+  test: string
+  because: string
+  fixture?: string
+}
+
+export function parseKnownBaselineFailures(raw: unknown): KnownBaselineFailure[] {
+  const failures = (raw as { knownFailures?: unknown } | undefined)?.knownFailures
+  if (!Array.isArray(failures)) {
+    /**
+     * ★ 抛错而不是返回 `[]`：后者会让"清单坏了"读成"没有已知失败" ——
+     *   而那正是本队记账的「三态合流」。
+     */
+    throw new Error('known baseline failures: `knownFailures` must be an array')
+  }
+  return failures.map((entry) => {
+    const item = entry as { test?: unknown; because?: unknown; fixture?: unknown }
+    if (typeof item?.test !== 'string' || item.test.trim() === '') {
+      throw new Error('known baseline failures: every entry needs a non-empty `test`')
+    }
+    return {
+      test: item.test.trim(),
+      because: typeof item.because === 'string' ? item.because : '',
+      ...typeof item.fixture === 'string' ? { fixture: item.fixture } : {},
+    }
+  })
+}
+
 /** 跑一次命令，返回退出码。与 `completion.verify-rerun` 同一个注入形状。 */
 export type ExecCommand = (command: string) => Promise<number>
 
@@ -166,6 +228,13 @@ export interface BacktestContext {
 
   /** 基准版本上的测试结果。缺席 ⇒ unmeasured（"没测到"不是"通过"）。 */
   baseline?: BaselineState
+  /**
+   * ★★★ t76：已知失败清单。**在场**且基线不绿 ⇒ 按【差异】归因（而不是"无法归因"）。
+   *
+   * ★ 缺席 ⇒ 落回「attribution is impossible」—— 缺席的清单与一份恰好覆盖了
+   *   所有失败的清单【必须不同形】（前者是"我没有那份记录"）。
+   */
+  knownBaselineFailures?: KnownBaselineFailure[]
   /** 修复/候选版本上跑【全量】测试：`(command) => exitCode`。 */
   execBacktestCommand?: ExecCommand
   /** 跑【选测】的那条命令：`(command) => exitCode`。 */
@@ -429,11 +498,26 @@ export async function gate(ctx: BacktestContext): Promise<GateVerdict> {
     const failed = Array.isArray(baseline.failedTests) && baseline.failedTests.length > 0
       ? ` Failing at the baseline: ${baseline.failedTests.map((test) => `"${test}"`).join(', ')}.`
       : ''
-    return blocked(
-      `attribution is impossible: the baseline (${label}) is not green — it exited ${baseline.exitCode} before any of this change existed.` +
-      `${failed} A red backtest now would not tell "it was already broken" apart from "this change broke it", so the change can be neither credited nor blamed;` +
-      ` fix or pin the baseline first (this red is not the change's fault), then re-run the backtest.`,
-    )
+    /**
+     * ── ★★★ t76：基线不绿时，判据不再【当场】宣布"无法归因" ──────────────────────
+     *
+     *   它把那一问**推迟到全量跑之后** —— 因为只有在那一跑的结果里，
+     *   「这次改动新增了失败吗」才答得出来。
+     *
+     * ★ 两条路，而它们的区别是决定性的：
+     *     清单**在场** ⇒ 推迟（等全量的失败清单，再扣除已知的）—— 见下面的 L1′
+     *     清单**缺席** ⇒ **当场**报"无法归因"（没有可扣除的东西，等也等不到）
+     *
+     * ★ 为什么"缺席"不当场改成推迟：一份缺席的清单与一份恰好覆盖了所有失败的清单
+     *   **必须不同形**。前者是"我没有那份记录"，而后者是"我有，而它解释了这次的红"。
+     */
+    if (!Array.isArray(ctx?.knownBaselineFailures)) {
+      return blocked(
+        `attribution is impossible: the baseline (${label}) is not green — it exited ${baseline.exitCode} before any of this change existed.` +
+        `${failed} A red backtest now would not tell "it was already broken" apart from "this change broke it", so the change can be neither credited nor blamed;` +
+        ` fix or pin the baseline first (this red is not the change's fault), then re-run the backtest.`,
+      )
+    }
   }
 
   /**
@@ -573,6 +657,52 @@ export async function gate(ctx: BacktestContext): Promise<GateVerdict> {
   const fullExit = full.exitCode
 
   /**
+   * ── ★★★ L1′：基线不绿、而清单在场 ⇒ 按【差异】归因 ──────────────────────────────
+   *
+   * ★ 它**必须**在这里（全量跑之后），而不是在 L1 那里 —— 因为
+   *   「这次改动新增了失败吗」只有在拿到全量的失败清单之后才答得出来。
+   *   ★ 而在 L1 那里当场宣布"无法归因"，正是今晚卡住五个任务的那个形状。
+   *
+   * ★ 三态，且三者不同形：
+   *     ① 基线绿                    ⇒ L1 已放行（上面的分支根本没进）
+   *     ② 基线红 + 清单在场 + 能扣除 ⇒ **可归因**（下面扣除；无新增则继续）
+   *     ③ 基线红 + 清单在场 + **扣不了**（全量没交失败清单）⇒ "无法归因"，且措辞说清是哪一种
+   */
+  if (baseline.exitCode !== 0) {
+    const label = typeof baseline.label === 'string' && baseline.label.trim() !== '' ? baseline.label : '(unlabelled base)'
+    const known = new Set((ctx?.knownBaselineFailures ?? []).map((entry) => entry.test))
+    const scopeProbe = (ctx as { fullScope?: { failedTests?: unknown } } | undefined)?.fullScope
+    const reportedFailures = Array.isArray(scopeProbe?.failedTests)
+      ? scopeProbe.failedTests.filter((test): test is string => typeof test === 'string')
+      : undefined
+    if (reportedFailures === undefined) {
+      /**
+       * ★★ 清单在场而**全量跑没交回失败清单** ⇒ 判据**不能**说"没有新增"。
+       *   ⇒ 与"清单缺席"是同一件事的两种成因，两者都落「无法归因」——
+       *     而措辞必须分得开（这一句说的是"扣不了"，那一句说的是"没有清单"）。
+       */
+      return blocked(
+        `attribution is impossible: the baseline (${label}) is not green (it exited ${baseline.exitCode} before any of this change existed), `
+        + `and a known-failure list is pinned, but the full run did not report WHICH tests failed, so "nothing new broke" could not be established; `
+        + `the pinned list can only subtract failures it can name — re-run the backtest with the full suite's failed tests.`,
+      )
+    }
+    /**
+     * ★ **扣除已知的那些**，剩下的就是本次新增的。
+     *   ★ 而"没有新增"⇒ 继续往下走（这一次的红不是本改动的）。
+     */
+    const addedHere = reportedFailures.filter((test) => !known.has(test))
+    if (addedHere.length > 0) {
+      return blocked(
+        `the full suite failed ${addedHere.length} test(s) that are NOT among the pinned known baseline failures `
+        + `(${addedHere.map((test) => `"${test}"`).join(', ')}) — the baseline (${label}) was already red, `
+        + `but these are new, so this change broke something that used to pass. `
+        + `Pinned as known-broken at the baseline: ${[...known].map((test) => `"${test}"`).join(', ')}.`,
+      )
+    }
+  }
+
+  /**
    * ★ 标为全量的那次运行，必须真的覆盖了全部已知测试。
    *   否则"全量绿"与"只跑了三个测试却说全量"同形 —— 那是一条永远为真的判据。
    */
@@ -601,7 +731,17 @@ export async function gate(ctx: BacktestContext): Promise<GateVerdict> {
    *   再报关于本次测量本身的问题（选测非确定、选测把改动抓住了）。
    *   反过来写，一条真回归会被"你的选测器有问题"挡在后面。
    */
-  if (fullExit !== 0) {
+  /**
+   * ★★★ t76：这一格的**前提**是「基线是绿的」—— 而它在基线红时**不成立**。
+   *
+   *   基线红 + 清单在场 + 无新增 ⇒ L1′ 已经把"这次改动没造成新失败"证明了。
+   *   ⇒ 那时 `fullExit !== 0` 是**预期的**（已知失败本来就会让它红），
+   *     而在这里再说一遍"改坏了本来好的东西"会与 L1′ 的结论**直接矛盾**。
+   *   ★ 所以条件是 `baseline.exitCode === 0 && fullExit !== 0` ——
+   *     而加上那个 `baseline.exitCode === 0` 不是放宽：
+   *     基线红的那条路已经在 L1′ 里逐条扣过了，**比这里更严**。
+   */
+  if (baseline.exitCode === 0 && fullExit !== 0) {
     blockers.push(
       `the full suite exited ${fullExit} on top of a green baseline (${baseline.label ?? '(unlabelled base)'}) — this change broke something that used to pass` +
       `${blind.length > 0 ? `. Known blind spot (never selected): ${blind.map((test) => `"${test}"`).join(', ')}` : ''}`,
@@ -627,7 +767,19 @@ export async function gate(ctx: BacktestContext): Promise<GateVerdict> {
    */
   return {
     ok: true,
-    baseline: { label: baseline.label, exitCode: baseline.exitCode, status: 'passed' as const },
+    baseline: {
+      label: baseline.label,
+      exitCode: baseline.exitCode,
+      status: 'passed' as const,
+      /**
+       * ★★ t76：这一轮用了哪个 pin、有几条 —— **必须交出去**。
+       *   否则"基线绿"与"基线红但已知失败都扣掉了"在报告里同形，
+       *   而后者是这条判据新开的那条路（读者要能看得出它走的是哪条）。
+       */
+      ...Array.isArray(ctx?.knownBaselineFailures) && baseline.exitCode !== 0
+        ? { knownFailures: ctx.knownBaselineFailures.length }
+        : {},
+    },
     selection: selectionReport,
     full: fullBacktest,
   } as unknown as GateVerdict

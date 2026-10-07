@@ -134,6 +134,46 @@ export declare const description = "\u6309\u4F9D\u8D56\u56FE\u9009\u6D4B\u5E76\u
  *   声明说缺"这种自相矛盾的核对结论出现。
  */
 export declare const requires: CtxPaths<BacktestContext>[];
+/**
+ * ── ★★★ t76：已知失败清单（"fix or pin the baseline first" 里的 **pin** 那一半）──────
+ *
+ * ── 它修的是什么（MEASURED：t66/t67/t69/t71/t74 五次独立撞到）────────────────────
+ *
+ *   L1 前置要一份【全绿的基线】，而本仓基线【几乎从不全绿】（本 worktree 实测 10 条）
+ *   ⇒ ★ 它要求的那件事不可满足 ⇒ 而它卡住了今晚每一个 worktree 任务的终态。
+ *
+ *   ★ 而它自己的拒绝信息早就写对了方向：
+ *     「fix or pin the baseline first (this red is not the change's fault)」
+ *     —— 缺的正是 **pin** 那一半。
+ *
+ * ── ★★ 它【不是白名单】，而这是一条判据上的区别，不只是措辞 ──────────────────────
+ *
+ *     白名单       ⇒ 让判据**闭嘴**（"这些失败没关系"）
+ *     已知失败清单 ⇒ 让判据**换一个更准的问句**：
+ *                    不问「基线绿吗」（它不绿，而那一格不是本次造成的），
+ *                    而问「这次改动【新增】了失败吗」
+ *
+ *   ⇒ 机制上：判据不再拿 `baseline.exitCode !== 0` 当作"无法归因"的**充分条件**，
+ *     而是在清单在场时继续往下走，并拿它去**扣除**那些已知的失败。
+ *
+ * ── ★★ 而"新增的失败"从哪来（读之前必须知道这一格）─────────────────────────────
+ *
+ *   `fullScope.failedTests`（调用方已经在用同一格交回 `coveredTests`）。
+ *   ★ 那一格**缺席**时，判据**不能**宣称"没有新增" —— 那是"我没能看到"，
+ *     而它必须落回"无法归因"（见下面 gate() 里的两条分支）。
+ *
+ * ── 形状与纪律 ────────────────────────────────────────────────────────────────
+ *
+ *   每条必须带 `test`（那条失败的名字）+ `because`（为什么它不算本次的）。
+ *   ★ 而**坏掉的清单必须抛错**，不许静默降级成空清单：
+ *     一份坏清单与"真的没有已知失败"是两件事 —— 后者会让判据把所有红都当新增。
+ */
+export interface KnownBaselineFailure {
+    test: string;
+    because: string;
+    fixture?: string;
+}
+export declare function parseKnownBaselineFailures(raw: unknown): KnownBaselineFailure[];
 /** 跑一次命令，返回退出码。与 `completion.verify-rerun` 同一个注入形状。 */
 export type ExecCommand = (command: string) => Promise<number>;
 export interface BacktestContext {
@@ -157,6 +197,13 @@ export interface BacktestContext {
     changedPaths?: string[];
     /** 基准版本上的测试结果。缺席 ⇒ unmeasured（"没测到"不是"通过"）。 */
     baseline?: BaselineState;
+    /**
+     * ★★★ t76：已知失败清单。**在场**且基线不绿 ⇒ 按【差异】归因（而不是"无法归因"）。
+     *
+     * ★ 缺席 ⇒ 落回「attribution is impossible」—— 缺席的清单与一份恰好覆盖了
+     *   所有失败的清单【必须不同形】（前者是"我没有那份记录"）。
+     */
+    knownBaselineFailures?: KnownBaselineFailure[];
     /** 修复/候选版本上跑【全量】测试：`(command) => exitCode`。 */
     execBacktestCommand?: ExecCommand;
     /** 跑【选测】的那条命令：`(command) => exitCode`。 */

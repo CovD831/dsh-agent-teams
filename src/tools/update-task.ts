@@ -95,6 +95,36 @@ function loadKindRequirementsSync(): KindRequirementsLoad {
 }
 
 /**
+ * ── ★★ t76 的接线（captain 2026-10-08 裁定 A）───────────────────────────────────
+ *
+ * MEASURED（t76 实测）：判据侧完整 —— `backtest.gate()` 会读 `ctx.knownBaselineFailures`
+ * 并按【差异】归因。★ 而**往那一格塞东西的是调用方**，而它此前【没有】。
+ * ⇒ 于是那条修法【没有调用方】，而那与没有修法在观测上完全相同（本队那条纪律）。
+ *
+ * ★ 与 `loadKindRequirementsSync` 同形：每次调用都读盘，不缓存 ——
+ *   改那张 pin 立刻生效，不需要重跑构建。
+ * ★ 而读不到时【返回 undefined 而不是空数组】—— 因为「清单缺席」与
+ *   「清单恰好覆盖了全部失败」必须不同形（判据的第三态靠这个区分）。
+ */
+function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailures> | undefined {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    join(here, '..', '..', 'scripts', 'fixtures', 'baseline-known-failures.json'),
+    join(process.cwd(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const raw = JSON.parse(readFileSync(candidate, 'utf8')) as { knownFailures?: unknown }
+      return parseKnownBaselineFailures(raw.knownFailures)
+    } catch {
+      continue
+    }
+  }
+  /** ★ 读不到 ⇒ **缺席**（不是"没有已知失败"）⇒ 判据落回第三态"无法归因"。 */
+  return undefined
+}
+
+/**
  * ── ★★ t67：问表「这个 kind 要求哪些门」—— 而**答不出来时返回 `undefined`** ──────
  *
  * 它是给 {@link traceEvidenceConsumer} 用的那一格输入。
@@ -129,6 +159,8 @@ import { readFileSync } from 'node:fs'
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
+/** ★ 与 parseKindRequirements 同一条先例：工具层直接 import 判据模块的【纯函数】。 */
+import { parseKnownBaselineFailures } from '../gates/completion/backtest.ts'
 import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
@@ -830,6 +862,14 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              *   "不缓存"这一条与上面那格逐字一致：缓存会让"改表"在下一次进程重启前不生效。
              */
             loadKindRequirements: () => loadKindRequirementsSync(),
+            /**
+             * ★★ t76 的 pin：让 backtest 在基线不全绿时【仍能按差异归因】。
+             *   ★ 而它缺席时那条判据落回"attribution is impossible"——
+             *     那不是退化，那是它该有的第三态。
+             */
+            ...loadKnownBaselineFailures() === undefined
+              ? {}
+              : { knownBaselineFailures: loadKnownBaselineFailures() },
             // ── r5：父版本 + 扫描范围 + 在指定版本上跑一条测试的执行器
             ...worktreeBase === undefined ? {} : { parentRevision: worktreeBase },
             ...worktreeBase === undefined ? {} : { worktreePath: workspace },
