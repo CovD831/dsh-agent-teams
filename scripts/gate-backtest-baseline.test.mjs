@@ -589,7 +589,7 @@ test('★ 臂 17（突变臂）：把 no-worktree 改回【拒绝】⇒ 臂 13 �
 // ★★★ 臂 18（接线缺口臂）：判据已能读 `baselineAbsent`，而调用方【还没传它】
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★★★ 臂 18（接线缺口，如实记账）：`baselineAbsent` 在调用方还没有注入点', async () => {
+test('★★★ 臂 18（接线臂，已翻面）：调用方真的把 `absent.reason` 传进了 ctx', async () => {
   /**
    * ── ★★★ 这一臂是**诚实的缺口声明**，不是"已经修好了"的证据 ────────────────────
    *
@@ -622,12 +622,27 @@ test('★★★ 臂 18（接线缺口，如实记账）：`baselineAbsent` 在�
     .filter((file) => file !== defining)
     .filter((file) => read(file, 'utf8').includes('baselineAbsent'))
 
-  assert.deepEqual(
-    callers, [],
-    '★★★ 生产里出现了 `baselineAbsent` 的调用方 ⇒ **接线完成了**。'
-    + '★ 那是好事 —— 而它意味着这一臂要**翻面**：把断言从"没有注入点"改成'
-    + '"调用方真的把 `resolveBaseRevision` 的 absent.reason 传进了 ctx"，'
-    + '并按同一手法收紧 `scripts/gate-producer-consumer.test.mjs` 的记账值。'
+  /**
+   * ── ★★★ 已翻面（captain 2026-10-08）───────────────────────────────────────────
+   *
+   * 上面那段"接线缺口"的声明【按它自己写下的翻转条件】被翻面了：
+   *   captain 把那一行接上了（update-task.ts 注入 `baselineAbsent: baseResolution.reason`）
+   * ★ 而本臂红的那一刻就是"缺口真正关闭"的证据 —— 那正是它当初的设计。
+   *
+   * ⇒ 新口径：生产里【必须】有调用方，且它必须真的把 `resolveBaseRevision`
+   *   的 `absent.reason` 传进那一格。
+   */
+  assert.ok(
+    callers.length > 0,
+    '★★★ 生产里【没有】`baselineAbsent` 的调用方 ⇒ 接线断了（回到了 t83 那条形态：'
+    + '判据侧完整，而两种缺席被当成同一件事）',
+  )
+  /** ★ 而"有人提到它"还不够 —— 必须有人把它【传进那个 ctx 格】。 */
+  const injecting = callers.filter((file) => read(file, 'utf8').includes('baselineAbsent:'))
+  assert.ok(
+    injecting.length > 0,
+    '★★★ 有人提到 `baselineAbsent`，而【没有任何地方把它传进 ctx】'
+    + '⇒ 那仍然是没有调用方的修法（本队那条纪律）。'
     + `实测调用方：${JSON.stringify(callers)}`,
   )
 })

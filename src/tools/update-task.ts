@@ -870,6 +870,24 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             ...loadKnownBaselineFailures() === undefined
               ? {}
               : { knownBaselineFailures: loadKnownBaselineFailures() },
+            /**
+             * ── ★★ t83 的接线（captain 2026-10-08）─────────────────────────────────
+             *
+             * MEASURED（t83 实测）：判据侧完整 —— `backtest.gate()` 会读
+             * `ctx.baselineAbsent` 并据此**分别处置**两种缺席：
+             *   · `'no-worktree'`   ⇒ 这类任务本就没有父版本（**环境**）⇒ 报告而不拒绝
+             *   · `'not-recorded'`  ⇒ 本该有而丢了（**缺口**）⇒ 仍然拒绝
+             * ★ 而**算它的是调用方**，而它此前【没有把结果交出去】。
+             * ⇒ 于是那条判据拿到的是 undefined ⇒ 两种缺席被当成同一件事。
+             * ★ 而本队那条纪律：**一个没有调用方的修法，与没有修法在观测上完全相同。**
+             *
+             * ★ 而它的形状与 `knownBaselineFailures` 同一条先例：
+             *   只在【缺席】时挂这个字段 —— 有父版本时它没有信息量，
+             *   而"总是出现"会让三态里最该被看见的那两种淹没在噪音里。
+             */
+            ...baseResolution.kind !== 'absent'
+              ? {}
+              : { baselineAbsent: baseResolution.reason },
             // ── r5：父版本 + 扫描范围 + 在指定版本上跑一条测试的执行器
             ...worktreeBase === undefined ? {} : { parentRevision: worktreeBase },
             ...worktreeBase === undefined ? {} : { worktreePath: workspace },
