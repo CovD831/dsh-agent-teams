@@ -93,10 +93,32 @@ function loadKindRequirementsSync(): KindRequirementsLoad {
   }
   return { status: 'absent', reason: `the kind-requirements table could not be read from any known location (${lastError})` }
 }
+
+/**
+ * ── ★★ t67：问表「这个 kind 要求哪些门」—— 而**答不出来时返回 `undefined`** ──────
+ *
+ * 它是给 {@link traceEvidenceConsumer} 用的那一格输入。
+ *
+ * ★ `undefined` 的三种成因（表读不到 / 表坏 / 表里没有这个 kind）**都必须落 undefined**：
+ *   "我问不出这个 kind 要什么门"与"它不要任何门"是**两件事** ——
+ *   后者会让 `produced`（生产了、没人读）被误报成 `consumed`（有人读）。
+ *   ⇒ 而那是一句**反过来的假结论**：把缺陷说成正常。
+ *
+ * ★ 而它与判据层那条纪律逐字对齐（`kind-requirements.ts` 的四态：
+ *   `absent` / `malformed` / `kind-unknown` 让门降级成 `unmeasured`，
+ *   **绝不静默退化成"不需要门"**）。
+ */
+function requiredGateIdsFor(kind: string | undefined): readonly string[] | undefined {
+  const load = loadKindRequirementsSync()
+  if (load.status !== 'loaded') return undefined
+  const requirement = typeof kind === 'string' ? load.requirements.byKind.get(kind) : undefined
+  if (requirement === undefined) return undefined
+  return requirement.requiredGates
+}
 import { registry } from '../gates/index.ts'
 import { gitChangedPaths, observeWorkspaces, observedChangedPaths } from '../harness-compat.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
-import { appendTaskEvidence, repairCompletionVerdict } from '../quality-gates.ts'
+import { appendTaskEvidence, repairCompletionVerdict, traceEvidenceConsumer } from '../quality-gates.ts'
 import { TERMINAL_TASK_STATUSES } from '../types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { dirname, join } from 'node:path'
@@ -535,6 +557,67 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             ctx.logger.warn(`agent-teams: repair completion evidence is unmeasured (recorded, not rejected): ${repairEvidence.unmeasured}`)
           }
           /**
+           * ── ★★★ t67：`killerSuites` 的文件清单 = 两条供给链的并集 ─────────────────
+           *
+           * MEASURED（本任务复现）：t54 之后，`discriminatingFiles` 的唯一消费者
+           * （r5）对 repair 不再生效 ⇒ 那条证据**没人读**；而 mutation（repair
+           * **要求**的门）读的 `killerSuites` 此前只来自 **会话事件**。
+           * 于是在 f-0020 那个形状里（会话观察缺席）：
+           *
+           *     repairEvidence  从**任务契约**读出了那份夹具 ⇒ 喂给 newTestFiles ⇒ 没人读
+           *     observedTestFiles 缺席                        ⇒ killerSuites 不注入 ⇒ mutation 空手
+           *
+           * ⇒ 证据落在没人读的那一格，而**该读它的那一格**空着。
+           *
+           * ── 三态，且**与原来那条纪律逐条对齐** ──────────────────────────────────
+           *
+           *   `undefined` —— ★ 两条链**都没能观察**（会话读不到 **且** 契约没给出）
+           *                  ⇒ 不注入 ⇒ mutation 自己报 unmeasured。**不猜、不回退到全套。**
+           *   `[]`        —— 两条链都观察到了、**确实没有**可用的套件
+           *                  ⇒ 不注入（理由同上：空清单不是"用一个空集去杀变异体"）
+           *   `[...]`     —— 并集，去重排序
+           *
+           * ★ 而"两条链都没能观察"与"确实没有"在这里**同形地被处理**（都不注入）——
+           *   那不是合流：判据那一侧对"没注入"给出的**是同一句话**（unmeasured），
+           *   而它是对的那句话（这两种情形下它都确实没有可杀的东西）。
+           *   ★ 真正的合流风险在**别处**，本任务把它留在它的原处：
+           *     `repairEvidence.ok === false` 的两种成因（没能观察 / 观察到了、确实没有）
+           *     在 `repairCompletionVerdict` 里是**两句不同的话**，而上面那条 warn 照旧打出。
+           */
+          const killerSuiteFiles = observedTestFiles === undefined && (repairEvidence === undefined || repairEvidence.ok === false)
+            ? undefined
+            : [...new Set([
+              ...(observedTestFiles ?? []),
+              ...(repairEvidence !== undefined && repairEvidence.ok === true ? repairEvidence.evidence : []),
+            ])].sort()
+          /**
+           * ── ★★★ t67：把"这份证据有没有人读"变成一条**可读的**读数 ─────────────────
+           *
+           * MEASURED：`discriminatingFiles` 被生产出来、而 t54 之后它在 repair 上
+           * **没有消费者** —— 而那是**沉默的**：没有任何一行日志会说这件事。
+           * ⇒ 下一个会话只会看到 `repairEvidence.ok === true`，然后以为一切正常。
+           *
+           * ★ 所以这里在**生产出证据的那一刻**问一次"谁会读它"，并把
+           *   `produced`（生产了、没人读）**记下来**。
+           *
+           * ★★ 而它**不拒绝任何东西**：证据没人读 ≠ 任务做错了（契约明说
+           *   "不会阻断任何任务"）。⇒ 它只 `warn` 一行，与上面那条 unmeasured 的
+           *   warn 同一形状。★ 把"没人读"当拒绝会让**每一个 repair 任务**都失败 ——
+           *   那是把一条**读数**当成了裁决。
+           *
+           * ★ 而这正是它要修的那件事的字面落点：**第二种状态必须可读**。
+           */
+          if (discriminatingFiles !== undefined && discriminatingFiles.length > 0) {
+            const reading = traceEvidenceConsumer('newTestFiles', requiredGateIdsFor(task.kind))
+            if (reading.status === 'produced') {
+              ctx.logger.warn(
+                `agent-teams: repair discriminating evidence was produced (${discriminatingFiles.length} file(s)) `
+                + `but nothing consumes it on kind=${task.kind ?? 'work'}: ${reading.detail}. `
+                + 'Recorded, not rejected — produced-and-unconsumed is a supply/consumer fact, not a failure of the work.',
+              )
+            }
+          }
+          /**
            * 基准 = 【在父版本上跑一遍任务的 verify 命令】的退出码。
            *
            * 不注入（返回 undefined）的两种情形，都保持"没测到"：
@@ -726,10 +809,55 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              * 把后者写成前者，"这次没新增测试"就会变成"没有杀手套件"⇒ unmeasured。
              *
              * ★ 观察不到 ⇒ 不注入 ⇒ 判据 unmeasured。**不猜、不回退到全套。**
+             *
+             * ── ★★★ t67：t54 之后这条供给链【接错了插座】─────────────────────────
+             *
+             * MEASURED（t67 复现，与 t54 的核实一致）：
+             *
+             *   `discriminatingFiles → newTestFiles` 这条链的**唯一消费者是 r5**；
+             *   而 kind 需求表（`kind-requirements.json`）说 **repair 不要求 r5**
+             *   ⇒ 那条证据在 repair 上**没人读**。
+             *
+             * ★ 而 mutation 读的是 `killerSuites` —— 它此前的**唯一**来源是
+             *   `observedTestFiles`（**会话事件**）。于是 f-0020 那个形状里：
+             *
+             *     会话观察缺席（= f-0020 的成因）
+             *       ⇒ observedTestFiles === undefined ⇒ killerSuites 不注入
+             *       ⇒ mutation 拿不到任何杀手套件 ⇒ unmeasured
+             *     而**同一时刻**，repairEvidence 从**任务契约**读出了那份夹具
+             *       ⇒ discriminatingFiles 非空 ⇒ 喂给 newTestFiles ⇒ **没人读**
+             *
+             *   ⇒ ★ 证据落在没人读的那一格，而**该读它的那一格**空着。
+             *     这不是"松了一根线"，是**线接错了插座**。
+             *
+             * ── 而需求表自己写着该接哪一格 ────────────────────────────────────────
+             *
+             * `kind-requirements.json` 的 repair 一节逐字写着：
+             *
+             *     "Mutation stays because it is what proves the discriminating
+             *      fixture really discriminates"
+             *
+             *   ⇒ ★ 设计意图早就说了：**证明那份夹具真的能判别**是 mutation 的活。
+             *     而它当时拿不到那份证据 ⇒ 表说的是 A，接线接的是 B。
+             *
+             * ── 修法：把两条来源**并起来**喂给 killerSuites ────────────────────────
+             *
+             *   `observedTestFiles`（会话观察到的测试写入）
+             *   ∪ `repairEvidence.evidence`（契约里改动过的既有夹具）
+             *
+             * ★ 为什么是【并】而不是【换成后者】：
+             *   · 只用后者 ⇒ implementation 类的既有行为变了（它有真新增的测试，
+             *     而 `repairEvidenceFiles` 也收 changedPaths 里的测试 —— 两者本可互补）；
+             *   · 只用前者 ⇒ 就是今天这个缺陷（f-0020 形状下它恒空）。
+             *   ⇒ 并集让"会话看得到"与"契约里写着"**各自**都能单独成立。
+             *
+             * ★★ 而"没有套件"这一支**必须仍然存在**：两边都空 ⇒ 不注入 ⇒
+             *   mutation 照旧 unmeasured（**不猜、不回退到全套**）。
+             *   那一条纪律一个字没动 —— 本修法只是**多给了它一个真实的来源**。
              */
-            ...observedTestFiles === undefined || observedTestFiles.length === 0
+            ...killerSuiteFiles === undefined
               ? {}
-              : { killerSuites: observedTestFiles.map((file) => ({ id: file, files: [file] })) },
+              : { killerSuites: killerSuiteFiles.map((file) => ({ id: file, files: [file] })) },
             testCommand: 'node --test *',
             // ── backtest：基准 + 覆盖证据 + 两个执行器
             ...baseline === undefined ? {} : { baseline },

@@ -483,6 +483,104 @@ export interface RepairCompletionContext {
 }
 
 /**
+ * ── ★★★ 「判别证据」这条供给链，喂给了哪一格，而那一格有没有人读（t67）──────────
+ *
+ * ── 它修的是什么（MEASURED，2026-10-07/08）────────────────────────────────────
+ *
+ * `discriminatingFiles → newTestFiles` 这条链的**唯一消费者是 r5**。
+ * 而 kind 需求表说 **repair 不要求 r5** ⇒ 那条证据在 repair 上**没人读**，
+ * 而它**仍然被生产出来**。
+ *
+ * ★ 而那正是本队反复记账的形态：
+ *     **一个没有调用方的产出，与没有那个产出在观测上完全相同。**
+ *
+ * ── ★★ 为什么它必须【可读】，而不能停在"我们知道它没人读"──────────────────────
+ *
+ * 今天的它**是沉默的**：没有任何一行日志、任何一个返回值会告诉你
+ * "这份证据生产出来了、而没人消费它"。⇒ 下一个会话只会看到
+ * `repairEvidence.ok === true` 然后以为一切正常。
+ *
+ * ⇒ 所以本函数把那条链的**每一格**都变成可读的读数，而它有三态（★ 不同形）：
+ *
+ *     `consumed`    —— 有判据真的会读它（★ 由 kind 需求表回答，不是猜）
+ *     `produced`    —— 生产出来了，而**没有**任何门会读（★ 沉默的那一格，现在可读）
+ *     `unmeasured`  —— **无法判断**（需求表读不到 / 这个 kind 不在表里）
+ *
+ * ── ★ 为什么"有没有人读"要问【表】，而不是在这里写一张名单 ────────────────────
+ *
+ * 判据的 kind → 门 的映射**已经在 `kind-requirements.json` 里**（t54 建的）。
+ * 在这里再写一张"谁读 newTestFiles"的名单，就是**两份真相** ——
+ * 而它们会漂移，漂移之后两边读起来都正常。⇒ 问表。
+ *
+ * ★ 而"哪条判据读哪一格"这件事**仍然是本文件的知识**（`GATE_INPUT_FIELDS`）——
+ *   它是"判据的输入面"这一事实，不是"某个 kind 要什么门"那个决定。
+ *   两者不同轴：前者随判据实现变，后者随项目决定变。
+ */
+export const GATE_INPUT_FIELDS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  'completion.r5': ['newTestFiles'],
+  'completion.mutation': ['killerSuites'],
+  'completion.backtest': ['baseline', 'coverage'],
+})
+
+/** 一条供给链的读数。★ 三态，且第二种**必须**可读（那正是本任务要修的）。 */
+export interface EvidenceConsumerReading {
+  /** 这份证据落在哪一格（`update.<field>`）。 */
+  field: string
+  status: 'consumed' | 'produced' | 'unmeasured'
+  /** 读它的门的 id（`consumed` 时非空）。 */
+  consumers: string[]
+  /** 人话一句。★ 三种状态的措辞**必须不同形**。 */
+  detail: string
+}
+
+/**
+ * 判定"这份候选证据会被谁读"。
+ *
+ * @param field - 证据落在哪一格（例如 `newTestFiles` / `killerSuites`）。
+ * @param requiredGateIds - 这个 kind 要求的门的 id（来自需求表）。
+ *        ★ 传 `undefined` ⇒ **无法判断**（表读不到 / 这个 kind 不在表里）
+ *          ⇒ `unmeasured`，**不是** `produced`。
+ */
+export function traceEvidenceConsumer(
+  field: string,
+  requiredGateIds: readonly string[] | undefined,
+): EvidenceConsumerReading {
+  if (requiredGateIds === undefined) {
+    return {
+      field,
+      status: 'unmeasured',
+      consumers: [],
+      detail: `whether anything reads "${field}" could not be judged: the kind-requirements table was unavailable, `
+        + 'and a judgement that could not be made must not be reported as one that was',
+    }
+  }
+  const withField = Object.entries(GATE_INPUT_FIELDS)
+    .filter(([, fields]) => fields.includes(field))
+    .map(([id]) => id)
+  const consumers = withField.filter((id) => requiredGateIds.includes(id))
+  if (consumers.length > 0) {
+    return {
+      field,
+      status: 'consumed',
+      consumers,
+      detail: `"${field}" is read by ${consumers.join(', ')}, and this kind requires ${consumers.length === 1 ? 'it' : 'them'}`,
+    }
+  }
+  /**
+   * ★★ 这一格就是本任务的核心读数：生产出来了、而**没有任何门会读**。
+   *   ★ 而它**不是**一个错误 —— 它是一个**事实**，而在此之前它是沉默的。
+   */
+  return {
+    field,
+    status: 'produced',
+    consumers: [],
+    detail: withField.length === 0
+      ? `"${field}" is produced but no gate declares it as an input, so nothing can read it`
+      : `"${field}" is produced and ${withField.join(', ')} would read it, but this kind does not require ${withField.length === 1 ? 'that gate' : 'those gates'} — so it is produced and never consumed`,
+  }
+}
+
+/**
  * ── ★★ `discriminable`：这次到底有没有【可判的对象】（t44 加）──────────────────
  *
  * 它**不是** `ok` 的重复，也不是"能不能判"的同义改写 —— 两者回答不同的问题：
