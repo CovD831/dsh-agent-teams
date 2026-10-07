@@ -659,3 +659,136 @@ test('臂 4 ★ 对账臂：手写的 EMITTERS 参考表必须与【源码产出
     `★ 全部工具被认出的产出面加起来至少要有 4 格（实测 ${covered}）—— 空集合上"都对得上"是恒真的`,
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 5 / 6（t35 / f-0017）：`delivery` 的"没能测量"必须有**自己的** schema 槽位
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 为什么这一节属于【本文件】──────────────────────────────────────────────────
+ *
+ * 本文件守的是「工具的输出 schema 必须接受它自己会返回的东西」。
+ * 而 f-0017 的修法**正是**在这一层：`status` 的 `delivery` 对象拿到了一个新字段
+ * `unmeasured`。★ 若只改产出、不改 schema，宿主会当场拒掉那一次返回 ——
+ * 那正是本文件臂 1 存在的理由（t14 那一类，已经发生过一次）。
+ *
+ * ⇒ 所以这里钉两件**不同**的事，缺一不可：
+ *   ① 产出面**确实**带上那一格（不是"schema 声明了、代码没产出"）
+ *   ② 那一格**过得了** `additionalProperties: false` 的 schema（不是"产出了、schema 不认"）
+ *
+ * ★ 而它同时钉住 f-0017 的**要害**：`unmeasured` 不许再出现在 `blockers` 里。
+ *   两半一起断言，是因为"两处都写"会让任何一个单独的半边都绿。
+ */
+
+/** 一个最小但够真的插件实例（与其它臂同形）。 */
+async function statusFixture() {
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { execFileSync } = await import('node:child_process')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const ws = mkdtempSync(join(tmpdir(), 't35-delivery-'))
+  const git = (args) => execFileSync('git', args, { cwd: ws, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  writeFileSync(join(ws, 'a.ts'), 'a\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  /**
+   * ★ 关键：`members` 非空是刻意的 —— `delivery.convergence` 在**没有成员观察**时
+   *   必报 unmeasured，于是这一格可以被真实地诱导出来（不是构造的）。
+   */
+  await createTeamDir(join(ws, '.agent-teams'), {
+    phase: 'running', id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 0,
+    members: [{ id: 'm1', name: 'w', status: 'working', joinedAt: 1 }], tasks: [],
+  })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined }, list() { return [] },
+      sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+  const agent = { id: 'cap', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} }
+  return { call: (name, args) => tools.get(name).execute(args, { agent, signal: new AbortController().signal }), tools }
+}
+
+test('★ 臂 5（t35 / f-0017）：`delivery` 的 unmeasured 有【自己的】字段，且不进 blockers', async () => {
+  const { call, tools } = await statusFixture()
+  const statusTool = tools.get('agent_teams_status')
+  const result = await call('agent_teams_status', {})
+  const delivery = result.delivery
+  assert.notEqual(delivery, undefined, '★ 前置：delivery 必须在场')
+
+  /**
+   * ★ ① 产出面**确实**带那一格。
+   *   本臂的 ctx（有成员、没有 goal 矩阵）会让 `delivery.convergence` 报 unmeasured
+   *   ⇒ 那一格必须出现在返回值里。
+   */
+  assert.equal(
+    Object.hasOwn(delivery, 'unmeasured'), true,
+    `★ delivery 没有自己的 unmeasured 字段（实测字段：${Object.keys(delivery).join(', ')}）—— `
+    + '"没能测量"只能挤进 blockers，于是它与"发现了问题"走同一出口',
+  )
+  assert.equal(typeof delivery.unmeasured, 'string')
+
+  /**
+   * ★★ ② 反向半边：那句"没能测量"**不许**同时出现在 blockers 里。
+   *   缺了这一半，"两处都写"会蒙过去 —— 而那是**两份真相**（同一事实两个出口，会分叉）。
+   */
+  const leaked = (delivery.blockers ?? []).filter((line) => /could not measure/i.test(String(line)))
+  assert.deepEqual(
+    leaked, [],
+    '★ "没能测量"被同时写进了 blockers：\n' + leaked.map((l) => `  · ${l}`).join('\n'),
+  )
+
+  /**
+   * ★★★ ③ **过得了它自己的 schema** —— 这是本文件的看家本领，也是 f-0017 的修法
+   *   必须同时改 schema 的理由（`delivery` 是 `additionalProperties: false`）。
+   *   ★ 直接拿真实返回值去问宿主校验器，而不是"看一眼 schema 里有没有那个键"：
+   *     后者在"声明了但拼错位置"时照样绿。
+   */
+  const schema = statusTool?.output ?? statusTool?.parameters?.output ?? statusTool?.outputSchema
+  const surface = schema ?? (statusTool?.parameters ?? {}).output
+  if (surface !== undefined) {
+    const violations = violationsOf(surface, result)
+    assert.deepEqual(
+      violations, [],
+      '★ status 的返回值过不了自己的 output schema（`delivery.unmeasured` 是不是没进 properties？）：\n'
+      + violations.map((v) => `  · ${String(v)}`).join('\n'),
+    )
+  }
+})
+
+test('★ 臂 6（t35 的对照臂）：delivery 报 unmeasured 时，**它不是**一条"交付被拒的理由"', async () => {
+  const { call } = await statusFixture()
+  const result = await call('agent_teams_status', {})
+  const delivery = result.delivery
+
+  /**
+   * ★ 本臂钉住 f-0017 的**代价**那一半：`blockers` 的原意是「测出来了、是坏的」。
+   *   ⇒ 一个**只有** unmeasured 的场景里，`blockers` 里**不许**出现它的影子。
+   *
+   * ★ 而 status 是**报告**入口：它不许因为"没能测量"而拒绝（那是 f-0003 的形态 ——
+   *   把"没能测量"当成一条拒绝理由）。⇒ 这次调用必须正常返回。
+   */
+  assert.equal(typeof result.team_id, 'string', '★ status 照常返回（报告入口不因"没能测量"拒绝）')
+  const measurementInBlockers = (delivery.blockers ?? []).filter((line) => /could not measure/i.test(String(line)))
+  assert.deepEqual(measurementInBlockers, [], '★ 那句"没能测量"不许出现在 blockers 里')
+
+  /**
+   * ★ 反向半边（缺了它，本臂在"什么都不报"的实现上照样绿）：那一格必须**说出来**。
+   *   一次未能测量变成一片静默，与"测过了、没问题"在读者眼里同形。
+   */
+  assert.equal(
+    Object.hasOwn(delivery, 'unmeasured'), true,
+    '★ 调用点把那条 unmeasured 完全丢掉了 —— 那比读错更坏：静默与"测过了"同形',
+  )
+})

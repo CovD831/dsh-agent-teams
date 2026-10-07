@@ -5840,6 +5840,36 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
             additionalProperties: false,
             properties: {
               ok: { type: 'boolean' },
+              /**
+               * ── ★★ 这个位置的三态各有自己的字段（t35 / f-0017）────────────────────
+               *
+               * MEASURED（verifier6 的普查臂 1/2/3）：此前这里**只有** `blockers`，
+               * 而"没能测量"在 `execute` 里被**拼进 blockers 数组**
+               * （`could not measure: …`）。
+               *
+               * ⇒ 后果不是"措辞不够清楚"，是**结构上无处安放**：这个对象是
+               *   `additionalProperties: false`，字段集就是上面那几个 ——
+               *   于是"没能测量"**只能**挤进 `blockers`。
+               *
+               * ★ 而 `blockers` 的原意是「**测出来了、是坏的**」。把"没能测量"
+               *   并进去，等于把两种相反的事实放进同一个出口：
+               *
+               *     测到了问题  ⇒ 去修产物
+               *     没能测量    ⇒ 去接线 / 去看基础设施
+               *
+               * ★★ 而 `delivery` 今天**恒** unmeasured（`coverage` 与 `convergence`
+               *   两格在没有 goal 矩阵 / 没有成员观察时必报）⇒ 那是一条**每次都出现**
+               *   的假拒绝理由。一个恒常出现的假告警不会只是"多报一次"，它会教人
+               *   **永久忽略整个 `blockers` 字段** —— 那正是本队反复记账的代价。
+               *
+               * ⇒ 与**同位置的另一个入口** `declare_delivery` 同形：它早已用独立分支
+               *   （`throwWithSurface`）把 unmeasured 与 blockers 分开。两处的 ctx
+               *   逐字段相同（刻意设计）⇒ **ctx 相同保护不了消费方式**，
+               *   读法必须各自正确。
+               *
+               * ★ 缺席（`undefined`）与空串不同形：没产出这一格 ⇒ 属性不出现。
+               */
+              unmeasured: { type: 'string' },
               blockers: { type: 'array', items: { type: 'string' } },
               gates_evaluated: { type: 'number' },
               input_surface: inputSurfaceSchema(),
@@ -6091,10 +6121,37 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       }
       const delivery = {
         ok: deliveryEvaluation.ok === false ? false : deliveryCheck.ok,
+        /**
+         * ── ★★ "没能测量"有**自己的**出口，不再拼进 blockers（t35 / f-0017）─────────
+         *
+         * MEASURED（verifier6 的普查臂 1/2/3）此前这里是：
+         *
+         *     blockers: [ ..., ...deliveryEvaluation.unmeasured === undefined
+         *                    ? [] : [`could not measure: ${deliveryEvaluation.unmeasured}`] ]
+         *
+         * ⇒ 把「没能测量」写进了「测出来了、是坏的」那个数组。★ 而这不是措辞问题：
+         *   读者按字段名判断**该去修什么**，而两种事实的补救动作相反：
+         *
+         *     测到了问题  ⇒ 去修产物（交付确实不合格）
+         *     没能测量    ⇒ 去接线（这一格根本没被读到）
+         *
+         * ★★ 更贵的是它的**恒常性**：`delivery` 今天恒 unmeasured（`coverage` 与
+         *   `convergence` 在没有 goal 矩阵 / 成员观察时必报）⇒ **每一次** status 都往
+         *   `blockers` 里加一条。一个每次都出现的假告警，代价不是"多读一行"，
+         *   是教人**永久忽略 `blockers`** —— 那时真正的问题也一起被忽略。
+         *
+         * ★ 与同位置的 `declare_delivery` 同形：它早就是独立分支（`throwWithSurface`
+         *   带着 `could not measure` 的措辞拒绝），而 status 把它并进 blockers。
+         *   两处 ctx 逐字段相同（刻意设计）⇒ **ctx 相同保护不了消费方式**。
+         *
+         * ★ `undefined` 与空串不同形：没产出 ⇒ 属性**不出现**（与 `input_surface`
+         *   同一条纪律）。写一个 `unmeasured: undefined` 会让"没测到"与"有一个空的
+         *   测量结果"在 `Object.hasOwn` 那一层同形。
+         */
+        ...deliveryEvaluation.unmeasured === undefined ? {} : { unmeasured: deliveryEvaluation.unmeasured },
         blockers: [
           ...deliveryCheck.blockers,
           ...deliveryEvaluation.blockers,
-          ...deliveryEvaluation.unmeasured === undefined ? [] : [`could not measure: ${deliveryEvaluation.unmeasured}`],
         ],
         /**
          * ★ 判据层有没有就交付说话。`false` 表示这个位置这一轮没有任何判据求值
