@@ -505,6 +505,53 @@ export interface FrictionCapture {
     moduleFreshness?: ModuleFreshness;
 }
 export declare function toReplayableSnapshot(value: unknown, depth?: number, seen?: WeakSet<object>): unknown;
+/**
+ * ── ★★★ 重放：把记录里的 ctx 还原成【能真的跑】的那一份（t79）────────────────────
+ *
+ * ── 它修的是什么失效（MEASURED，t69 报、t79 定位）──────────────────────────────
+ *
+ * `gate-friction-capture` 臂 4 自称「记录 vs 日志的分水岭」，而它红着：
+ *
+ *     · 记录里写的是 `[completion.mutation]`
+ *     · 而重放得到的是 `[completion.verify-rerun]`
+ *
+ * ★ 根因（本任务实测，比"缺一格"更精确）：
+ *
+ *   `toReplayableSnapshot` 把**每一个函数**序列化成 `{ __absent: 'function' }`
+ *   —— 而那是**忠实**的：函数确实进不了 JSON。实测记录里 8 个注入点是：
+ *
+ *       loadKindRequirements · loadRules · execVerifyCommand · runTestOnRevision
+ *       readFile · runTest · scanDirs · （killerSuites 是数组，留下来了）
+ *
+ *   ⇒ 于是重放时的 ctx 里，那些位置上是**对象**而不是函数。
+ *   ⇒ 而 `loadKindRequirementsOfHost` 判的是 `typeof ctx.loadKindRequirements === 'function'`
+ *     ⇒ 它读到 `absent` ⇒ **kind 表不可用** ⇒ `mutation.appliesTo` 返回 `false`
+ *       ⇒ ★ **门不说话（silently skipped）** ⇒ 裁决落到另一条分支上。
+ *
+ * ── ★★ 为什么"把缺什么记进记录"（②）不够 ──────────────────────────────────────
+ *
+ *   ★ 它**已经**记了：`{ __absent: 'function' }` 就是"这一格是个函数，而它没被带来"。
+ *   ⇒ 而它没用：记录是诚实的，**撒谎的是重放** —— 重放拿着一个它兑现不了的
+ *     ctx 照常跑，然后交出一个**属于另一条分支**的结论，而那个结论看起来完全正常。
+ *
+ * ⇒ 所以修法必须是 ①：**重放时把那些函数重新注入**（从宿主拿，而不是从 JSON 拿）。
+ *   ★ 而这正是本函数做的事。
+ *
+ * ── 它怎么工作 ────────────────────────────────────────────────────────────────
+ *
+ * 把记录里的快照与一份**注入表**合并：
+ *   · 注入表里有那一格的函数 ⇒ 用**宿主的**实现（与生产同形）
+ *   · 注入表里没有         ⇒ ★ **如实标成不可兑现**，而不是留一个 `{__absent}` 让它
+ *     在判据里被误读成"一个对象"（那正是"缺 loader 时四条门一起沉默"的成因）
+ *
+ * ★ 而"注入表里没有"这一态**必须与"注入成功"不同形**：
+ *   前者的补救动作是"去把那一格接上"，后者是"无"（见 `replayCtx().unreplayable`）。
+ */
+export declare function rehydrateReplayCtx(snapshot: unknown, injections: Record<string, unknown>): {
+    ctx: Record<string, unknown>;
+    injected: string[];
+    unreplayable: string[];
+};
 export declare function sessionEventRefs(session: unknown): {
     sessionId?: string;
     eventIndices: number[];

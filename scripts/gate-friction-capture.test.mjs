@@ -282,27 +282,130 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
   )
 
   /**
-   * ★ 从记录里取出 ctx 并**重跑**。判据来自真实注册表（与运行时同一份）。
+   * ── ★★★ 重放的正确形式：把那些**函数**从宿主重新注入（t79）───────────────────
+   *
+   * MEASURED（本任务定位）：`toReplayableSnapshot` 把每一个函数序列化成
+   * `{ __absent: 'function' }` —— 而那是**忠实**的（函数进不了 JSON）。
+   * ⇒ 于是重放时 `loadKindRequirements` 那个位置上是**对象**，
+   *   `loadKindRequirementsOfHost` 读 `typeof !== 'function'` ⇒ kind 表不可用
+   *   ⇒ `mutation.appliesTo` 返回 false ⇒ **门不说话** ⇒ 裁决落到 `verify-rerun`。
+   *
+   * ★ 所以重放**必须**从宿主重新注入那些函数，而不是拿 JSON 里的占位对象凑合。
+   *   ★ 而注入什么、由谁决定：由**这个夹具**决定（它就是"重放宿主"）。
+   *     生产里那一份由 `src/tools/update-task.ts` 注入 —— 两者**同一批名字**。
    */
   const { registry } = await import('../lib/gates/index.js')
+  const { rehydrateReplayCtx } = await import('../lib/tools/shared/entities.js')
   const point = record.index.component
-  const replay = await registry.evaluate(point, record.scene.ctx)
+
+  /**
+   * ★ 注入表：本夹具能提供的、与生产同形的实现。
+   *   ★ 而**故意不提供全部** —— 下面要证明"缺一格"会被如实报出来，
+   *     而不是像从前那样静默跑到另一条分支上。
+   */
+  /**
+   * ★★★ 而 `loadKindRequirements` 必须交一份【真的表】（t79 实测的关键一格）─────
+   *
+   * MEASURED：我第一版给的是 `() => ({})` —— 那会被 `parseKindRequirements`
+   *   判成 `malformed`（"no kinds array"）⇒ 与"没注入"**在后果上相同**：
+   *   `mutation.appliesTo` 返回 false ⇒ 门沉默 ⇒ 裁决落到 `verify-rerun`。
+   *
+   * ⇒ ★ 于是"重新注入"这件事**必须注入一个形状正确的东西**，
+   *   否则那一步是仪式性的（它跑了、而判据读到的仍然是"用不了"）。
+   * ★ 而这一条正是本任务最有价值的发现：**"注入了"与"注入的东西能用"是两件事。**
+   */
+  const { parseKindRequirements } = await import('../lib/gates/completion/kind-requirements.js')
+  const { readFileSync } = await import('node:fs')
+  const kindTable = parseKindRequirements(JSON.parse(readFileSync(
+    new URL('../src/gates/completion/kind-requirements.json', import.meta.url), 'utf8',
+  )))
+  assert.equal(kindTable.status, 'loaded', '★ 前置：那一份表必须真的读得出来（否则本臂测的是坏表）')
+
+  const injections = {
+    loadKindRequirements: () => kindTable,
+    loadRules: () => ({}),
+    readFile: () => undefined,
+    runTest: () => undefined,
+    /**
+     * ★ 而 `execVerifyCommand` 也在注入表里 —— 缺它时 `verify-rerun` 会报
+     *   `unmeasured` 并**成为裁决**，那同样把 `mutation` 挡住。
+     *   ★ 而这不是"为了让它绿而凑齐"：生产里那一格**本来就是接上的**
+     *     （`src/tools/update-task.ts` 注入 `runVerifyCommand`）——
+     *     重放要复现生产，就必须也接上它。
+     */
+    execVerifyCommand: async () => 0,
+  }
+  const { ctx: replayedCtx, injected, unreplayable } = rehydrateReplayCtx(record.scene.ctx, injections)
+
+  /** ★ 前置：至少真的重注入了一格 —— 否则本臂测的是"什么都没注入"。 */
+  assert.ok(
+    injected.includes('loadKindRequirements'),
+    `★ 那**关键的一格**必须被重新注入（它就是分叉的根因）。实测注入的：${JSON.stringify(injected)}`,
+  )
+  /**
+   * ★★ 而"注入不了的那几格"必须**如实列出来** —— 这一条就是本任务要的
+   *   「分叉可见」（选项 ② 的价值）与「重放更真」（选项 ① 的价值）的**合取**：
+   *   ① 让能注入的注入了；② 把注入不了的**说出来**，而不是让它静默。
+   */
+  assert.ok(
+    Array.isArray(unreplayable),
+    '★ 注入不了的那几格必须被列出来（它们是"重放做不到"的如实读数）',
+  )
+
+  const replay = await registry.evaluate(point, replayedCtx)
   assert.equal(
     replay.ok, false,
-    `★ 用记录里的 ctx 重跑 "${point}" 必须以**拒绝**结束（卡点再现）—— `
+    `★ 用（重新注入后的）记录 ctx 重跑 "${point}" 必须以**拒绝**结束（卡点再现）—— `
     + `若它是 ok，说明这份 ctx 不足以重放那个卡点，而"可重放"这句话就是假的。`
     + ` 实测：${JSON.stringify(replay).slice(0, 300)}`,
   )
+
   /**
-   * ★ 而且**理由要对得上**：一个"重放出来是拒绝、但拒绝的是别的原因"的记录，
-   *   同样不能叫可重放（那说明 ctx 丢了关键的一格，判据跑到了另一条分支上）。
+   * ── ★★ 三态不同形（契约要求）─────────────────────────────────────────────────
+   *
+   *     `consistent`  —— 重放与记录落到**同一个判据**上
+   *     `diverged`    —— 落到了别的判据上（★ 并说清**分在哪一格**）
+   *     `unmeasurable`—— 重放**跑不起来**（注入不了 ⇒ 不许假装跑过）
+   *
+   * ★ 而这三者必须**不同形**：把 `diverged` 读成 `consistent` 就是本任务修的那个缺陷；
+   *   把 `unmeasurable` 并进任何一者，就是"没测到并进通过/不通过"。
    */
   const recorded = String(record.title ?? '')
   const replayed = String(replay.unmeasured ?? replay.blockers?.join('; ') ?? '')
-  const firstGateId = /\[([\w.-]+)\]/.exec(recorded)?.[1] ?? /\[([\w.-]+)\]/.exec(replayed)?.[1]
+  const recordedGate = /\[([\w.-]+)\]/.exec(recorded)?.[1]
+  const replayedGate = /\[([\w.-]+)\]/.exec(replayed)?.[1]
+  assert.notEqual(recordedGate, undefined, `★ 记录里必须带有判据 id（否则无从比对）：${recorded.slice(0, 120)}`)
+
+  assert.equal(
+    replayedGate, recordedGate,
+    `★ 重放必须落到**同一个判据**上。记录里是「[${recordedGate}]」，`
+    + `重放得到「[${replayedGate}]」——`
+    + ` 分叉说明 ctx 里有**重放兑现不了**的东西，而判据因此跑到了另一条分支上。`
+    + ` ★ 而本任务已修的是：那一格现在会被【重新注入】（注入的：${JSON.stringify(injected)}），`
+    + ` 注入不了的会被如实列出（${JSON.stringify(unreplayable)}）。`
+    + ` 完整重放：${JSON.stringify(replay).slice(0, 300)}`,
+  )
+
+  /**
+   * ── ★★★ 反向半边（“仍能抓住真分叉”）─────────────────────────────────────────
+   *
+   *   本臂必须**仍能**在真分叉上变红 —— 否则它只是"我把它改成绿了"。
+   *   ⇒ 构造一个**故意缺注入**的重放：不给 `loadKindRequirements`
+   *     ⇒ 分叉必须**再次出现**（落到 verify-rerun 而不是 mutation）。
+   *
+   * ★ 缺了这一半，一个"无论输入如何都返回同一个 id"的实现会让本臂恒真。
+   */
+  const broken = rehydrateReplayCtx(record.scene.ctx, { ...injections, loadKindRequirements: undefined })
   assert.ok(
-    firstGateId !== undefined && replayed.includes(`[${firstGateId}]`),
-    `★ 重放的拒绝理由必须提到**同一个判据 id**。记录里是「${recorded.slice(0, 90)}」，`
-    + `重放得到「${replayed.slice(0, 90)}」—— 分叉说明 ctx 缺了关键一格，判据跑到了另一条分支`,
+    broken.unreplayable.includes('loadKindRequirements'),
+    '★ 不给那一格 ⇒ 它必须出现在 `unreplayable` 里（而不是被静默忽略）',
+  )
+  const brokenReplay = await registry.evaluate(point, broken.ctx)
+  const brokenReplayed = String(brokenReplay.unmeasured ?? brokenReplay.blockers?.join('; ') ?? '')
+  const brokenGate = /\[([\w.-]+)\]/.exec(brokenReplayed)?.[1]
+  assert.notEqual(
+    brokenGate, recordedGate,
+    `★ ★ 反向半边：把关键那一格**拿掉**之后，重放必须**再次分叉**（否则本臂对"真分叉"没有分辨力）。`
+    + ` 记录里是「[${recordedGate}]」，缺注入时得到「[${brokenGate}]」`,
   )
 })
