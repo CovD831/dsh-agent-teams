@@ -102,26 +102,125 @@ function findMutantMarkers() {
 }
 
 /**
- * 盘上全部判据模块，按文件枚举。
+ * ── ★★★ t74：一条判据【按什么认】—— 按导出形状，不按目录 ────────────────────────
+ *
+ * ── 缺陷（MEASURED，t69 归因）────────────────────────────────────────────────
+ *
+ * 本文件的普查原本**按目录扫**（`lib/gates/<point>/*.js` 每个文件都算一个判据模块）。
+ * 而 t54 往 `src/gates/completion/` 里放了**两个不是判据的文件**：
+ *
+ *     kind-requirements.json    —— ★ 数据
+ *     kind-requirements.ts      —— ★ 纯函数模块（导出 parseKindRequirements /
+ *                                  gateRequirementFor / loadKindRequirementsOfHost）
+ *
+ * ⇒ 普查把两者都当成判据模块 ⇒ 对它们跑那套「必须有 id / point / description / gate」
+ *   的三态检查 ⇒ 红。★ 而**判据本身一条都没错** —— 错的是普查认判据的方式。
+ *
+ * ── ★★ 而修法不是"把这两个文件加进白名单"─────────────────────────────────────
+ *
+ * 白名单要回答的问题是「**哪些非判据文件是允许的**」—— 而那正是错的问句：
+ *
+ *     按目录认 ⇒ 那个目录里将来放【任何】非判据的文件都会红。
+ *              而 `gates/<point>/` 是一个**合理的家**：判据、它用的数据、
+ *              它用的纯函数模块，都会长在这里。
+ *     ★ 每一次新增都要改白名单 ⇒ 那是一条**靠人记得维护**的规则 ——
+ *       而"凭经验/靠记得"正是本队从头到尾在消灭的东西。
+ *
+ * ⇒ 改成按【判据的定义】认：**一个判据模块 = 导出了那四个名字的模块**
+ *   （`id` / `point` / `description` / `gate`，见 `src/gates/index.ts` 的
+ *   装配契约 `GateModuleParts`）。
+ *   ★ 于是：目录里多一个数据文件 ⇒ 它**不是判据** ⇒ 普查不看它 ⇒ **不红**。
+ *     而目录里少一个 `gate` 导出 ⇒ 它**本应是判据而残了** ⇒ 普查**该红**。
+ */
+const GATE_DEFINING_EXPORTS = ['id', 'point', 'description', 'gate']
+
+/**
+ * ── 三态：是判据 / 不是判据（有理由）/ 无法判断 ──────────────────────────────────
+ *
+ * ★ 第二种（"不是判据，而它在这个目录里"）**必须【有理由可说】**，
+ *   而不是被静默跳过 —— 否则"一个有意的非判据文件"与"一条被漏掉的真判据"
+ *   在读数上同形。那是本队反复记的那个形态。
+ *
+ * ★ 三种各自的判据：
+ *   · `gate`        —— 四个关键导出**都在** ⇒ 它是判据（或本应是）
+ *   · `notAGate`    —— 一个都不在，**且**能说出它是什么（数据 / 纯函数模块）
+ *   · `ambiguous`   —— 只导出了**一部分**关键名 ⇒ ★ 最危险的一种：
+ *                     它可能是"一条残了的判据"（少了 `gate`），也可能是
+ *                     "一个恰好有个叫 id 的纯模块"。⇒ 判不了 ⇒ `unmeasured`
+ */
+function classifyGateModule(module, file) {
+  const present = GATE_DEFINING_EXPORTS.filter((key) => module[key] !== undefined)
+  const missing = GATE_DEFINING_EXPORTS.filter((key) => module[key] === undefined)
+
+  if (missing.length === 0) {
+    /** ★ 四个都在 ⇒ 判据。而 `gate` 必须是函数（与装配层同一条纪律）。 */
+    return typeof module.gate === 'function'
+      ? { verdict: 'gate', present, missing }
+      : { verdict: 'ambiguous', present, missing, why: `it exports "gate" but it is not a function (got ${typeof module.gate})` }
+  }
+
+  if (present.length === 0) {
+    /**
+     * ★ 一个关键导出都没有 ⇒ **不是判据**。而它必须**说得出它是什么** ——
+     *   否则"一个有意的非判据文件"会与"一条被漏掉的真判据"同形。
+     *   ⇒ 这里按**它导出了什么**给理由（而不是按文件名猜）。
+     */
+    const names = Object.keys(module).sort()
+    const allFunctions = names.length > 0 && names.every((name) => typeof module[name] === 'function')
+    const why = names.length === 0
+      ? 'it exports nothing at all (a data-only module)'
+      : allFunctions
+        ? `it is a plain-function module: it exports ${names.join(', ')} — none of them is a gate definition`
+        : `it exports ${names.join(', ')} — none of the four gate-defining names`
+    return { verdict: 'notAGate', present, missing, why, exports: names }
+  }
+
+  /** ★ 只导出了一部分 ⇒ **判不了**（不许猜）。 */
+  return {
+    verdict: 'ambiguous',
+    present, missing,
+    why: `it exports ${present.join(', ')} but not ${missing.join(', ')} — that is either a gate that lost an export, or a module that happens to export one of those names`,
+  }
+}
+
+/**
+ * 盘上全部**判据模块**，按导出形状识别（不是按目录）。
  *
  * ★ `lib/` 不是 `src/`：见文件头。`lib/` 由 `pnpm build` 生成，
  *   而"改了 src 忘了 build"是本队实测过的窗口 —— 本文件读的必须是**真的会跑**的那一份。
+ *
+ * ★★ 返回**三类**，而不是一个数组 —— 因为"不是判据"那类**必须可读**
+ *   （见 `classifyGateModule` 的三态）。只返回 gates 会把那类信息丢掉。
  */
 async function loadGateModules() {
-  const out = []
+  const gates = []
+  const notGates = []
+  const ambiguous = []
   for (const dir of GATE_DIRS) {
     const full = join(ROOT, 'lib/gates', dir)
     if (!existsSync(full)) continue
     for (const name of readdirSync(full).sort()) {
+      /**
+       * ★ 只 import **`.js`**：目录里可能还有 `.json`（数据）与 `.d.ts`（类型），
+       *   而它们既不是模块、也不该被 import。★ 这不是"按扩展名认判据"——
+       *   扩展名只是**能不能 import** 的门槛；**是不是判据**由导出形状回答。
+       */
       if (!name.endsWith('.js')) continue
       const mod = await import(new URL(`../lib/gates/${dir}/${name}`, import.meta.url).href)
-      out.push({ file: `lib/gates/${dir}/${name}`, dir, name, mod })
+      const file = `lib/gates/${dir}/${name}`
+      const classified = classifyGateModule(mod, file)
+      const entry = { file, dir, name, mod, ...classified }
+      if (classified.verdict === 'gate') gates.push(entry)
+      else if (classified.verdict === 'notAGate') notGates.push(entry)
+      else ambiguous.push(entry)
     }
   }
-  return out
+  return { gates, notGates, ambiguous }
 }
 
-const MODULES = await loadGateModules()
+const CENSUS = await loadGateModules()
+/** ★ 向下兼容：下面几条臂此前用 `MODULES`（全部文件）。现在它只含**判据**。 */
+const MODULES = CENSUS.gates
 
 /** 从一条裁决里读出它落在哪一支（三态 + 形状非法）。**这是本文件唯一的读数装置。** */
 function exitOf(verdict) {
@@ -155,7 +254,68 @@ test('臂 0 ★ 普查口径：注册表 11 条 与 磁盘 14 个文件的分叉
   const onDisk = MODULES.map((entry) => entry.mod.id).filter((id) => typeof id === 'string')
 
   console.log(`    ℹ 注册表 ${listed.size} 条：${[...listed].sort().join(', ')}`)
-  console.log(`    ℹ 磁盘 ${onDisk.length} 个判据文件：${onDisk.sort().join(', ')}`)
+  console.log(`    ℹ 磁盘上【是判据】的 ${MODULES.length} 个：${onDisk.sort().join(', ')}`)
+
+  /**
+   * ── ★★★ t74：三态必须都能读出来，且"不是判据"那类**必须带理由**───────────────
+   *
+   * 这是本任务的核心改动。旧口径**按目录**认判据 ⇒ 目录里放任何非判据文件都红。
+   * 新口径**按导出形状**认 ⇒ 而"不是判据"这一类的目录必须**可读、带理由**，
+   * 而不是被静默跳过 —— 否则它与"一条被漏掉的真判据"同形。
+   */
+  console.log(`    ℹ 在这个目录里但【不是判据】的 ${CENSUS.notGates.length} 个：`)
+  for (const entry of CENSUS.notGates) {
+    console.log(`       · ${entry.file}`)
+    console.log(`         理由：${entry.why}`)
+  }
+  if (CENSUS.ambiguous.length > 0) {
+    console.log(`    ℹ 【判不了】的 ${CENSUS.ambiguous.length} 个：`)
+    for (const entry of CENSUS.ambiguous) console.log(`       · ${entry.file} —— ${entry.why}`)
+  }
+
+  /**
+   * ★ 断言①：**"不是判据"这一类必须真的有理由**（不是空字符串、不是 `undefined`）。
+   *   ★ 这一条把"静默跳过"堵死：一个被跳过的文件若说不出理由，那条断言就红。
+   */
+  for (const entry of CENSUS.notGates) {
+    assert.equal(
+      typeof entry.why, 'string',
+      `★ ${entry.file} 被判成"不是判据"而【说不出理由】—— 那与"漏掉一条真判据"同形`,
+    )
+    assert.ok(
+      entry.why.length > 10,
+      `★ ${entry.file} 的"不是判据"理由太短（"${entry.why}"）—— 它要能让人复核那个判断`,
+    )
+  }
+
+  /**
+   * ★ 断言②：**判不了的必须显式存在，不许被并进前两类**。
+   *   而当前它应当为 0（磁盘上每个文件都能被明确归类）—— 而**红的方式**是
+   *   "它非空时逐条打印出来"，不是"断言它为 0"：
+   *   ★ 一个新出现的 `ambiguous` 是一条**要人看一眼**的读数，而把它断言成 0
+   *     会在队友合法地新增一个模块时按设计变红（t5 禁止的那种棘轮）。
+   *   ⇒ 所以：非空时**打印并断言它非空**（让人看见），而不是断言它为空。
+   */
+  assert.ok(
+    Array.isArray(CENSUS.ambiguous),
+    '★ `ambiguous` 必须是数组（空也要在场）—— 缺席与空数组不同形',
+  )
+
+  /**
+   * ★ 断言③（反向半边）：**真的判据一条都不许漏**——
+   *   磁盘上"是判据"的那些，必须能覆盖注册表里每一条已接线的判据。
+   *   ★ 这条数字（现在几条真判据）是契约点名要的读数。
+   */
+  const diskGateIds = new Set(MODULES.map((entry) => entry.mod.id))
+  const missingFromDisk = [...listed].filter((id) => !diskGateIds.has(id))
+  assert.deepEqual(
+    missingFromDisk, [],
+    '★ 注册表里有、而磁盘上【按导出形状认不出】的判据：\n'
+    + missingFromDisk.map((id) => `  · ${id}`).join('\n')
+    + '\n★ 那说明普查漏了它们（或它们的导出残了）—— 这是本任务的反向半边。',
+  )
+  console.log(`    ℹ 反向半边：注册表 ${listed.size} 条，磁盘按形状认出 ${diskGateIds.size} 条，漏 ${missingFromDisk.length} 条`)
+
 
   /**
    * ★ 分叉：磁盘上写了、注册表里没有 ⇒ 判据**永远不会跑**。
@@ -176,14 +336,19 @@ test('臂 0 ★ 普查口径：注册表 11 条 与 磁盘 14 个文件的分叉
    *   而那正是最可能藏着新缺陷的地方（它们还没被任何端到端跑过）。
    */
   assert.ok(
-    MODULES.length >= listed.size,
-    `★ 磁盘上的判据文件数（${MODULES.length}）少于注册表条数（${listed.size}）—— 普查口径有问题`,
+    MODULES.length > 0,
+    '★ 磁盘上一个判据都没认出来 —— 普查口径坏了（不是"没有判据"）',
   )
+  /**
+   * ★ 而这四条是**识别本身的证据**：`classifyGateModule` 说"这四个都在才算判据"，
+   *   于是凡是进了 `MODULES` 的，必然四个都在。★ 若 `classifyGateModule` 被改坏
+   *   （例如把 `missing.length === 0` 写成 `> 0`），这一圈立刻红。
+   */
   for (const entry of MODULES) {
     for (const key of ['id', 'point', 'description', 'gate']) {
       assert.notEqual(
         entry.mod[key], undefined,
-        `★ ${entry.file} 缺少导出 "${key}" —— 它不是一个完整的判据模块，普查会把它的缺陷当成"没有这一条"`,
+        `★ ${entry.file} 被认成了判据却缺少导出 "${key}" —— 识别口径与它自己的定义不一致`,
       )
     }
     assert.equal(typeof entry.mod.gate, 'function', `★ ${entry.file} 的 gate 不是函数`)
@@ -655,4 +820,96 @@ test('臂 4 ★ 污染检查：src/ 与 lib/ 的【可执行代码】里不许�
    */
   const sample = '/* block */\n// line\nconst real = 1\n'
   assert.match(stripComments(sample), /const real = 1/, '★ 剥注释把可执行代码也吃掉了 —— 检出器没有检查对象')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 5 ★★ 定向突变：识别口径【按形状】而不是【按目录】
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一臂是 t74 的核心证据，而它用的是【装置的直接调用】──────────────────────────
+ *
+ * `classifyGateModule` 是纯函数，所以可以对**合成的模块**跑它 ——
+ * 于是两个方向都能被钉住，而不必真的往 `lib/gates/` 里塞文件（那要 build）。
+ *
+ *   方向 A：目录里多一个**非判据**文件（数据 / 纯函数模块）⇒ 它**不该**被判成判据
+ *           ★ 而那正是本任务修的：旧口径按目录 ⇒ 它对这种文件报"缺 id"
+ *   方向 B：一条真判据**少了关键导出** ⇒ 它**该**被判成"不是判据"或"判不了"
+ *           ★ 那是反向半边：缺导出必须仍然可见，不许静默放过
+ */
+test('臂 5 ★★ 定向突变：按形状识别 —— 多一个非判据不红，少一个关键导出要红', () => {
+  /**
+   * ── 方向 A：三种**真实存在**的非判据文件，每一个都必须被判"不是判据" ────────────
+   *
+   * ★ 三种形状取自本仓库的真实文件（t54 的 kind-requirements.ts / .json，
+   *   以及一个纯数据模块）—— 而不是我编的。
+   */
+  const dataOnly = {}                                                        // .json 编译出来的样子：没有导出
+  const plainFunctions = {                                                    // t54 的 kind-requirements.ts
+    parseKindRequirements: () => {}, gateRequirementFor: () => {}, loadKindRequirementsOfHost: () => {},
+  }
+  const mixedNonGate = { helper: () => {}, CONSTANT: 1 }                      // 一个普通工具模块
+
+  for (const [label, mod] of [['纯数据（无导出）', dataOnly], ['纯函数模块', plainFunctions], ['普通工具模块', mixedNonGate]]) {
+    const verdict = classifyGateModule(mod, 'synthetic')
+    console.log(`    ℹ 方向A ${label.padEnd(16)} ⇒ ${verdict.verdict}｜${verdict.why ?? ''}`)
+    assert.equal(
+      verdict.verdict, 'notAGate',
+      `★ 「${label}」没有被判成"不是判据" —— 旧口径（按目录）正是栽在这里：`
+      + '它会对这种文件报"缺 id"，而那让目录里**任何**非判据文件都变成红',
+    )
+    assert.equal(typeof verdict.why, 'string', `★ 「${label}」说不出为什么它不是判据`)
+  }
+
+  /**
+   * ── 方向 B：真判据少一个关键导出 ⇒ **必须仍然可见**（不许静默放过）─────────────
+   *
+   * ★ 而这里要小心一件事：**少了 `gate` 的模块**与**一个恰好导出 `id` 的普通模块**
+   *   在形状上**无法区分** ⇒ 所以那一类落 `ambiguous`（"判不了"），而不是 `notAGate`。
+   *   ★ 那正是三态的第一与第三态之间的分界，而它必须**不同形**。
+   */
+  const completeGate = { id: 'x.y', point: 'contract', description: 'd', gate: () => ({ ok: true }) }
+  assert.equal(classifyGateModule(completeGate, 'synthetic').verdict, 'gate', '★ 完整的判据模块必须被判成 gate')
+
+  /** ① 少 `gate`（而其它三个在）⇒ `ambiguous`（可能是残了的判据）。 */
+  const missingGate = { id: 'x.y', point: 'contract', description: 'd' }
+  const v1 = classifyGateModule(missingGate, 'synthetic')
+  console.log(`    ℹ 方向B 少 gate       ⇒ ${v1.verdict}｜${v1.why ?? ''}`)
+  assert.equal(
+    v1.verdict, 'ambiguous',
+    '★ 一个"少了 gate 而其它三个都在"的模块被判成了非判据 —— 那会让一条**残了的真判据**静默消失。'
+    + '它必须落 `ambiguous`（判不了），因为"残了的判据"与"恰好导出 id 的普通模块"在形状上无法区分。',
+  )
+
+  /** ② 只少 `point` ⇒ 同样是 `ambiguous`。 */
+  assert.equal(classifyGateModule({ id: 'x.y', description: 'd', gate: () => {} }, 'synthetic').verdict, 'ambiguous')
+
+  /** ③ `gate` 不是函数 ⇒ `ambiguous`（与装配层同一条纪律：非函数 gate 不许静默丢掉）。 */
+  const badGate = { id: 'x.y', point: 'contract', description: 'd', gate: 'not-a-function' }
+  const v3 = classifyGateModule(badGate, 'synthetic')
+  console.log(`    ℹ 方向B gate 非函数   ⇒ ${v3.verdict}｜${v3.why ?? ''}`)
+  assert.equal(v3.verdict, 'ambiguous', '★ gate 不是函数的模块被判成了判据 —— 装配层会当场抛错，而普查却说它好')
+
+  /**
+   * ── ★ 三态两两不同形（逐对断言，不循环）────────────────────────────────────
+   */
+  const shapeOf = (v) => JSON.stringify({ verdict: v.verdict, hasWhy: typeof v.why === 'string' })
+  assert.notEqual(shapeOf(classifyGateModule(completeGate, 's')), shapeOf(classifyGateModule(plainFunctions, 's')), '★ gate 与 notAGate 必须不同形')
+  assert.notEqual(shapeOf(classifyGateModule(plainFunctions, 's')), shapeOf(classifyGateModule(missingGate, 's')), '★ notAGate 与 ambiguous 必须不同形')
+  assert.notEqual(shapeOf(classifyGateModule(completeGate, 's')), shapeOf(classifyGateModule(missingGate, 's')), '★ gate 与 ambiguous 必须不同形')
+
+  /**
+   * ── ★★ 而最后一条是**这个口径与旧口径的分水岭** ────────────────────────────────
+   *
+   * 旧口径的判据是"文件在这个目录里吗" ⇒ 一个**真实存在的文件**（数据/纯函数）
+   * 会因为**它的位置**而被判成"残了的判据"。
+   * 新口径的判据是"它导出了那四个名字吗" ⇒ 同一个文件被判成"不是判据，因为它是纯函数模块"。
+   *
+   * ★ 这两句话**指向不同的动作**：前者让人去"补一个 id 导出"（对一个数据文件毫无意义），
+   *   后者让人什么都不做（它本来就对）。⇒ 而一条给出错误动作的红，是**最贵的红**。
+   */
+  const t54Module = classifyGateModule(plainFunctions, 'lib/gates/completion/kind-requirements.js')
+  assert.equal(t54Module.verdict, 'notAGate', '★ t54 的 kind-requirements 必须是"不是判据"')
+  assert.match(t54Module.why, /plain-function module/, '★ 而理由要指名它是**纯函数模块**（那是复核那个判断的依据）')
+  console.log('    ℹ 分水岭：同一份 kind-requirements —— 旧口径说"缺 id"（让人去补一个无意义的导出），新口径说"不是判据"（什么都不用做）')
 })
