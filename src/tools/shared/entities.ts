@@ -2298,3 +2298,156 @@ export function renderStatus(value: JsonValue): string {
   }
   return lines.join('\n')
 }
+
+/**
+ * ── ★★ 重载的【排队】通道（t49）──────────────────────────────────────────────────
+ *
+ * ── 它修的是什么（用户实测的结构性矛盾，原话）──────────────────────────────────
+ *
+ *   「不管是我手动重启，还是调用最新的 restart 去重启，都需要等待团队成员的工作完成。
+ *     我对这个插件的想法是，它需要尽可能把并发打满，尽可能去做快速迭代。
+ *     也就是说，如果有团队成员在工作，就不可能进行手动重启或 restart。
+ *     只要是跟 restart、重载相关的线，都会被阻塞。」
+ *
+ * ★ 那个矛盾的精确形状：
+ *
+ *     重载需要【无进行中工作】  ∧  并发干活 ⇒ 永远有进行中工作
+ *     ⇒ 两者**结构上互斥** ⇒ 旧模块永远换不掉
+ *
+ * ★ 而 captain 的实测给了它两条硬证据：
+ *   ① 调 `agent_teams_restart` ⇒ 拒：「2 task(s) are in progress」
+ *   ② **用户手动重启两次**（PID 52994 → 54529 → 18909），而 `[deployment]` 仍报 stale
+ *      ⇒ ★ **换进程 ≠ 换模块**（比 "reload ≠ restart" 更精确）
+ *
+ * ── 于是：被拒 ≠ 失败，而是**进入队列** ─────────────────────────────────────────
+ *
+ *   一次被拒的重载申请**不丢掉** —— 它变成「已申请」，并带来三件事：
+ *     ① **不再派发新任务**（否则永远有新的工作在跑，闸门永远不满足）
+ *     ② 当前在跑的**收口后自动重载**（不必让 captain 再调一次）
+ *     ③ **能被 `status` 读到**（好让 captain 知道该不该继续派发）
+ *
+ * ── ★★ 三态不同形（本队反复学到的那条）──────────────────────────────────────────
+ *
+ *     `none`       —— 没有申请（重载仍走原闸门）
+ *     `waiting`    —— 已申请，且**还等得到**（附「还要等哪些任务」）
+ *     `stuck`      —— 已申请，但**等不到**（某个任务永不终态 ⇒ 要人工介入）
+ *
+ *   ★ 第三态为什么必须与第二态不同形：`waiting` 会自己收敛，`stuck` **不会**。
+ *     把它们写成同一形状，读的人会一直等一个不会发生的事 ——
+ *     而"等不到"与"还在等"在读数上同形，是本队记过的那条最贵的形态之一。
+ *
+ *   ★ 判定 `stuck` 的口径：**申请之后还有没有可能收敛**。
+ *     一个任务的 status 若已经不可能再变（终态），它不该在等待名单里；
+ *     而"等待名单非空、且其中某个任务**已经很久没有任何变化**"才是最可疑的信号。
+ *     本实现用一条**可机械判定**的口径：等待名单里的任务若**不在当前任务表里**
+ *     （被删了 / 从未存在）⇒ 它永远不会变成终态 ⇒ `stuck`。
+ *
+ *     ★ 为什么不用"超时"：超时需要一个时长阈值，而本队实测任务时长是
+ *       **重尾分布**（最短 1.4 分钟、最长 767 分钟）⇒ 任何阈值都会误判。
+ *       用户提的「预估时长后派发更短的」已被 captain 用 44 条真实数据否定，
+ *       同一个理由在这里也成立：**不要给不可预测的东西设一个预测性的阈值**。
+ */
+export type RestartQueueState =
+  | { status: 'none' }
+  | { status: 'waiting'; requestedAt: number; waitingOn: string[] }
+  | { status: 'stuck'; requestedAt: number; waitingOn: string[]; reason: string }
+
+/**
+ * 进程级的「已申请重载」状态。
+ *
+ * ★ 为什么是**进程级**而不是耐久态：重载是**这个进程**换掉自己的代码 ——
+ *   它属于进程，不属于团队。而把它写进 `TeamState` 要改 `src/types.ts`
+ *   与 `src/state.ts`（**都不在本任务 inScope**）。
+ * ★ 而"进程级"不削弱它的用处：`status` 由**同一个进程**回答，
+ *   而闸门与重载也都在这个进程里 ⇒ 三者看到的是**同一份**状态。
+ *   ★ 反过来说清了它的**边界**：这个状态**不跨进程**（换进程就没了）——
+ *     而那恰好是对的：换了进程，旧的申请本就该作废（新进程有新的模块）。
+ */
+let requestedRestart: { at: number; waitingOn: string[] } | undefined
+
+/** 此刻的排队状态（**纯函数**：只读入参，不读模块状态 —— 便于夹具直接构造三态）。 */
+export function restartQueueState(input: {
+  requestedAt?: number
+  waitingOn: readonly string[]
+  /** 当前任务表里**存在**的任务 id（用来发现"等待一个不存在的任务"）。 */
+  knownTaskIds: readonly string[]
+  /** 当前仍在进行中的任务 id。 */
+  inFlight: readonly string[]
+}): RestartQueueState {
+  if (input.requestedAt === undefined) return { status: 'none' }
+  /**
+   * ★★ 第三态：**等不到**。
+   *
+   *   等待名单里的某个任务**不在任务表里** ⇒ 它永远不会变成终态
+   *   （它已经不在了，没有任何东西能让它收口）⇒ 这一等不会有结果。
+   *
+   *   ★ 而它必须与 `waiting` **不同形**：`waiting` 会自己收敛，`stuck` 不会。
+   *     写成同一形状的后果是**读的人一直等**，而那正是本队记过的
+   *     「等不到与还在等同形」。
+   */
+  const known = new Set(input.knownTaskIds)
+  const vanished = input.waitingOn.filter((id) => !known.has(id))
+  if (vanished.length > 0) {
+    return {
+      status: 'stuck',
+      requestedAt: input.requestedAt,
+      waitingOn: [...input.waitingOn],
+      reason: `waiting on task(s) that are no longer in the team: ${vanished.join(', ')} — nothing can bring them to a terminal status, so this wait will never end`,
+    }
+  }
+  /**
+   * ★ 收口了：等待名单与进行中的交集为空 ⇒ 可以重载了。
+   *   ★ 这里返回 `waiting` 且名单里可能**已经为空** —— 调用方据此决定是否重载。
+   *     而"可重载"由 `waitingOn.length === 0` 表达，不是一个**独立的第四态**：
+   *     一个已经等到的申请仍是"已申请"（它还没有被消费）。
+   */
+  return {
+    status: 'waiting',
+    requestedAt: input.requestedAt,
+    waitingOn: input.waitingOn.filter((id) => input.inFlight.includes(id)),
+  }
+}
+
+/** 记下一次申请（进程级）。 */
+export function requestRestart(waitingOn: readonly string[], now: number): void {
+  requestedRestart = { at: now, waitingOn: [...waitingOn] }
+}
+
+/** 读当前的申请（`undefined` = 没申请过）。 */
+export function pendingRestartRequest(): { at: number; waitingOn: string[] } | undefined {
+  return requestedRestart === undefined ? undefined : { at: requestedRestart.at, waitingOn: [...requestedRestart.waitingOn] }
+}
+
+/** 消费掉申请（重载真的发生了，或申请被放弃）。 */
+export function clearRestartRequest(): void {
+  requestedRestart = undefined
+}
+
+/**
+ * 用**当前的任务表**算出排队状态（`restartQueueState` 的薄封装）。
+ *
+ * ★ 与闸门同一条纪律：输入从**耐久态**来（调用方读 team），不从这个模块缓存。
+ */
+export function restartQueueFrom(tasks: ReadonlyArray<{ id: string; status: string }>): RestartQueueState {
+  const request = pendingRestartRequest()
+  if (request === undefined) return { status: 'none' }
+  const inFlight = tasks.filter((task) => task.status === 'in_progress').map((task) => task.id)
+  return restartQueueState({
+    requestedAt: request.at,
+    waitingOn: request.waitingOn,
+    knownTaskIds: tasks.map((task) => task.id),
+    inFlight,
+  })
+}
+
+/** 一句人话（供工具结果与 status 读）。★ 三态措辞必须互不同形。 */
+export function restartQueueMessage(state: RestartQueueState): string {
+  if (state.status === 'none') return 'no reload has been requested'
+  if (state.status === 'waiting') {
+    return state.waitingOn.length === 0
+      ? `a reload was requested at ${state.requestedAt} and nothing is in flight any more — it can proceed`
+      : `a reload was requested at ${state.requestedAt} and is waiting on ${state.waitingOn.join(', ')}`
+  }
+  return `a reload was requested at ${state.requestedAt} but CANNOT converge: ${state.reason}`
+}
+

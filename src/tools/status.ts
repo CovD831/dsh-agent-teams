@@ -9,10 +9,16 @@ import { mailboxContent, readCurrentMailbox } from '../mailbox.ts'
 import { TERMINAL_TASK_STATUSES } from '../types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
+import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
 import { memberActivity } from '../members.ts'
 import { CAPTAIN_KEY, acknowledgeMailbox, buildCoverageMatrix, canDeclareDelivery, describeQualityLoop, taskKindOf, withTeamLock } from '../state.ts'
 import { AgentTeamsRuntime, renderStatus } from './shared/entities.ts'
+/**
+ * ★ t49：排队状态要能被 `status` 读到 —— 那是"captain 该不该继续派发"的唯一读数。
+ *   ★ 它从 `shared/` 来（不是从 `restart.ts`）：**工具模块之间不许互相 import**
+ *     （`gate-tool-split` 臂 3），而 `status.ts` 与 `restart.ts` 都是工具模块。
+ *     `shared/` 正是为此存在的。
+ */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolsConfig } from './shared/entities.ts'
 
@@ -162,6 +168,37 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              *   ★ 它是**部署状态的读数**，不是判据结论 ⇒ **不得**让 `status` 因此拒绝。
              *     让它有否决权会把"这个进程旧了"变成"你这次读取失败"。
              */
+            /**
+             * ── ★★ 重载排队状态（t49）──────────────────────────────────────────────
+             *
+             * ★ 它回答 captain 的一个具体问题：**我现在能不能继续派发？**
+             *   一旦有申请在排队，答案就是"不要" —— 因为每派发一个新任务，
+             *   就把闸门推得更远（用户的实测矛盾正是这样形成的）。
+             *
+             * ★★ 三态不同形（本队反复学到的那条）：
+             *     `none`    —— 没申请
+             *     `waiting` —— 已申请且**等得到**（附 `waiting_on`）
+             *     `stuck`   —— 已申请但**等不到**（要人工介入）
+             *   ★ 把后两者写成同一形状，读的人会**一直等一个不会发生的事**。
+             */
+            reload: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                /** `'none'` / `'waiting'` / `'stuck'` —— 三态。 */
+                status: { type: 'string', required: true },
+                /** ★ `'waiting'` 与 `'stuck'` 时在场：申请的时刻。 */
+                requested_at: { type: 'number' },
+                /** ★ 还要等哪些任务（`none` 时缺席）。 */
+                waiting_on: { type: 'array', items: { type: 'string' } },
+                /** ★ `true` = **不要继续派发**（申请在排队）。 */
+                hold_dispatch: { type: 'boolean', required: true },
+                /** ★ `stuck` 时的成因（`waiting` 时缺席 ⇒ 两态不同形）。 */
+                reason: { type: 'string' },
+                /** ★ 一句人话。 */
+                message: { type: 'string', required: true },
+              },
+            },
             deployment: {
               type: 'object',
               additionalProperties: false,
@@ -476,6 +513,52 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            *   同一条纪律 —— 调用方不必写 `?? …`，而"没能测量"由 `status: 'unknown'`
            *   表达，不靠**字段缺席**（缺席与"没有这个概念"同形）。
            */
+          /**
+           * ── ★★ 重载排队（t49）：读一次，顺带【自动收口】────────────────────────────
+           *
+           * ★ 这一格同时做两件事，而它们必须一起做（否则会分叉）：
+           *   ① 报出三态（captain 据此决定要不要继续派发）
+           *   ② **若申请还在排队且已经等到** ⇒ 触发那次重载
+           *
+           * ★ 为什么把"自动重载"挂在 `status` 上：
+           *   `status` 是**唯一一个**每次收口后必然被读的出口
+           *   （captain 与成员都在读它）。⇒ 把它挂在这里，意味着
+           *   **"工作收口"到"重载发生"之间不需要任何人再记得做一件事** ——
+           *   而那正是本任务的全部意义：用户的矛盾是"没人会记得"造成的。
+           *
+           *   ★ 而它**不改变 `status` 的裁决**：`status` 从不拒绝，
+           *     这一格只报告 + 触发一个**已经获准**的动作（闸门在排队时就判过了）。
+           */
+          reload: (() => {
+            const tasksNow = tasks.map((task) => ({ id: task.id, status: task.status }))
+            const state = restartQueueFrom(tasksNow)
+            /**
+             * ★ **自动收口**：申请在排队、且名单已经空了 ⇒ 现在就是那一刻。
+             *   ★ 而"名单空了"要用 `queue_state.waitingOn.length === 0` 判 ——
+             *     不是"任务表里没有 in_progress"，因为那两者在
+             *     "某个被等待的任务被删掉"时会**不同形**（那时是 `stuck`，不是可重载）。
+             */
+            if (state.status === 'waiting' && state.waitingOn.length === 0) {
+              const fiber = (ctx as unknown as { fiber?: { restart?: () => Promise<void> } }).fiber
+              if (typeof fiber?.restart === 'function') {
+                clearRestartRequest()
+                ctx.logger.info('agent-teams: the queued reload is now due (nothing is in flight) — reloading')
+                void fiber.restart().catch((error: unknown) => {
+                  ctx.logger.error(`agent-teams: queued reload failed: ${String(error)}`)
+                })
+              } else {
+                ctx.logger.error('agent-teams: a reload is due but this host does not expose fiber.restart')
+              }
+            }
+            return {
+              status: state.status,
+              /** ★ `true` = **不要继续派发**（`none` 时为 false）。 */
+              hold_dispatch: state.status !== 'none',
+              message: restartQueueMessage(state),
+              ...state.status === 'none' ? {} : { requested_at: state.requestedAt, waiting_on: state.waitingOn },
+              ...state.status === 'stuck' ? { reason: state.reason } : {},
+            }
+          })(),
           deployment: (() => {
             const freshness = moduleFreshness()
             /**
