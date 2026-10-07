@@ -276,3 +276,239 @@ test('arm 12 — the unmutated generator DOES produce a complete document', () =
   assert.match(result.html, /<\/html>\s*$/, 'a complete document is what arm 11 is defending')
   rmSync(root, { recursive: true, force: true })
 })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t57：判决（judgements）也必须可读 —— 而它必须与卡点【分开呈现】
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── ★★ 这一节修的是什么（MEASURED，t57 开工时实测）────────────────────────────
+ *
+ *   captain 手写了 4 条判决在 `.agent-teams/judgements/`，而生成器只读
+ *   `.agent-teams/frictions/`（第 33 行）⇒ ★ **判决写在盘上而没有人读它**。
+ *
+ *   ⇒ 那是本队那条纪律的又一实例：
+ *     「一个没有人读的记录，与没有那个记录在观测上完全相同。」
+ *
+ * ── ★★ 而两种记录【不许合并成一种呈现】─────────────────────────────────────────
+ *
+ *   卡点说「我卡住了」   ⇒ 场景 / 观测 / 未知 / 处置
+ *   判决说「我学到了」   ⇒ claim / counterexample / reuse / status
+ *
+ *   ★ 合并会让「执行到位」与「出问题了」同形 —— 而那正是本队一直防的那条。
+ *   ⇒ 所以它们是**两份 HTML 并排**，而不是拼成一张表。
+ *
+ * ── ★★★ 而 `counterexample` 必须在 HTML 里【显眼】──────────────────────────────
+ *
+ *   README 逐字写着：判决必须带反例，**否则它就是一个【未检验的声称】**，
+ *   而未检验的声称与猜测同形。⇒ 它不能被埋在角落。
+ */
+
+/** 一份判决（字段取自 `.agent-teams/frictions/README.md` 的规格）。 */
+function judgement(extra = {}) {
+  return {
+    id: 'j-0001',
+    at: '2026-10-07T19:20:00+08:00',
+    project: 'agent-teams-dev',
+    claim: 'the capability claim',
+    scene: { from: 't30 / t39', what: 'three disconnects, all three recoverable' },
+    counterexample: 'if a task mid-state is not recoverable, a disconnect loses work',
+    reuse: 'ask before dispatching a long task',
+    status: 'adopted',
+    ...extra,
+  }
+}
+
+/**
+ * 在假仓库里追加一个判决目录。
+ * ★ `omitJudgements`（不加目录）与 `judgements: []`（加了空目录）**必须不同形** ——
+ *   那正是本任务的三态要求之一。
+ */
+function withJudgements(root, { judgements = [], broken = [], omit = false } = {}) {
+  if (omit) return root
+  const dir = join(root, '.agent-teams', 'judgements')
+  mkdirSync(dir, { recursive: true })
+  judgements.forEach((item, index) => {
+    writeFileSync(join(dir, `j-${String(index + 1).padStart(4, '0')}.json`), JSON.stringify(item))
+  })
+  broken.forEach(({ name, text }, index) => {
+    writeFileSync(join(dir, name ?? `j-${String(judgements.length + index + 1).padStart(4, '0')}.json`), text)
+  })
+  return root
+}
+
+/** 生成器现在写两份产物；本助手读 `docs/judgements.html`。 */
+function judgementsHtml(root) {
+  const out = join(root, 'docs', 'judgements.html')
+  return existsSync(out) ? readFileSync(out, 'utf8') : undefined
+}
+
+test('★ 臂 17 — a judgement written to disk must be READ: it appears in docs/judgements.html', () => {
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), { judgements: [judgement()] })
+  const result = run(root)
+  assert.equal(result.code, 0, `stderr=${result.stderr}`)
+  const html = judgementsHtml(root)
+  assert.ok(html, '★ 判决必须有一份自己的产物 —— 否则它与"没有这个记录"同形')
+  assert.match(html, /the capability claim/, '★ claim 必须出现在 HTML 里')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★★ 臂 18 — the three states of the judgement side are pairwise DISTINCT', () => {
+  /**
+   * ★ 目录不存在 / 目录存在但为空 / 有记录 —— 三者不同形。
+   *   ★ 而前两者【最容易】被做成同形（都渲染成"0 条"），那正是本队记账的合流。
+   */
+  const absent = withJudgements(fakeRepo({ entries: [entry()] }), { omit: true })
+  const empty = withJudgements(fakeRepo({ entries: [entry()] }), { judgements: [] })
+  const present = withJudgements(fakeRepo({ entries: [entry()] }), { judgements: [judgement()] })
+  const rAbsent = run(absent)
+  const rEmpty = run(empty)
+  const rPresent = run(present)
+
+  for (const [label, r] of [['absent', rAbsent], ['empty', rEmpty], ['present', rPresent]]) {
+    assert.equal(r.code, 0, `state「${label}」必须 exit 0（记录工具不许变成门禁）`)
+  }
+  const texts = [rAbsent.stdout.trim(), rEmpty.stdout.trim(), rPresent.stdout.trim()]
+  assert.equal(new Set(texts).size, 3, `★ 三态必须两两不同形。实测：${JSON.stringify(texts)}`)
+  /** ★ 而"目录不存在"不许被读成"没有判决" —— 前者是"这一格没有接上"。 */
+  assert.match(rAbsent.stdout, /不存在|no judgement directory/i, `实测：${rAbsent.stdout}`)
+  assert.match(rEmpty.stdout, /0 条|为空|no judgements yet/i, `实测：${rEmpty.stdout}`)
+  rmSync(absent, { recursive: true, force: true })
+  rmSync(empty, { recursive: true, force: true })
+  rmSync(present, { recursive: true, force: true })
+})
+
+test('★★ 臂 19 — a MISSING judgement directory must NOT fail the whole generation', () => {
+  /**
+   * ★ 缺判决目录不该让整份 HTML 生成失败 —— 那会把「记录工具」变成「门禁」。
+   *   （t47 已经在这个方向上犯过一次，本臂是它的机械形式。）
+   */
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), { omit: true })
+  const result = run(root)
+  assert.equal(result.code, 0, '★ 缺判决目录必须仍然 exit 0')
+  assert.ok(result.html, '★ 而卡点那一半必须照常生成 —— 一半缺席不许拖垮另一半')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★★★ 臂 20 — the counterexample must be PROMINENT, not buried', () => {
+  /**
+   * ── ★ 为什么这一条是判决的核心 ────────────────────────────────────────────────
+   *
+   *   README 逐字：判决必须带反例，**否则它就是一个【未检验的声称】**。
+   *   ⇒ 一条没有反例的判决，与一句猜测在读者眼里同形。
+   *   ⇒ 所以它必须在 HTML 里【显眼】：
+   *     · 必须在场（不是可选的）
+   *     · 必须有自己的标签（可被找到、可被引用）
+   *     · ★ 必须靠近 claim（不是页面末尾的附录）
+   */
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), { judgements: [judgement()] })
+  run(root)
+  const html = judgementsHtml(root)
+  assert.match(html, /if a task mid-state is not recoverable/, '★ 反例的原文必须在 HTML 里')
+  /**
+   * ★ "显眼"的可执行形式：反例必须带一个**可定位的标记**，
+   *   而且那个标记必须与 claim 在同一张卡片里（相邻，不是远隔）。
+   */
+  const claimAt = html.indexOf('the capability claim')
+  const counterAt = html.indexOf('if a task mid-state is not recoverable')
+  assert.ok(claimAt >= 0 && counterAt >= 0, '前置：两者都在')
+  assert.ok(
+    Math.abs(counterAt - claimAt) < 4000,
+    `★ 反例必须靠近 claim（同一张卡片），而不是被挪到页面别处。实测距离 ${Math.abs(counterAt - claimAt)} 字符`,
+  )
+  assert.match(
+    html, /class="[^"]*counter[^"]*"|反例|会证伪|what would refute/i,
+    '★ 反例必须带一个可定位的标记/标签 —— 否则它不可被引用',
+  )
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★★ 臂 21 — the two record kinds are SEPARATE renderings, never merged into one list', () => {
+  /**
+   * ── ★★ 本臂防的是"合并会让两种东西同形"──────────────────────────────────────
+   *
+   *   卡点说「我卡住了」；判决说「我学到了」。
+   *   ⇒ 若把判决并进卡点列表，那么"一条卡点"与"一条判决"在页面上同形 ——
+   *     而"执行到位"与"出问题了"就再也分不开。
+   *
+   * ★ 可执行形式：**两份产物**，且各自【只】呈现自己那一类。
+   *   一份产物里的另一类内容是 0 —— 那比"看起来分开了"强，因为它是结构事实。
+   */
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), { judgements: [judgement()] })
+  run(root)
+  const frictions = readFileSync(join(root, 'docs', 'frictions.html'), 'utf8')
+  const judgements = judgementsHtml(root)
+
+  assert.ok(frictions && judgements, '前置：两份产物都在')
+  assert.match(frictions, /a friction/, '★ 卡点那份必须有卡点')
+  assert.doesNotMatch(
+    frictions, /the capability claim/,
+    '★★ 判决不许并进卡点那份 —— 合并会让"我卡住了"与"我学到了"同形',
+  )
+  assert.match(judgements, /the capability claim/, '★ 判决那份必须有判决')
+  assert.doesNotMatch(
+    judgements, /a friction/,
+    '★ 反向：卡点也不许并进判决那份',
+  )
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★ 臂 22 — the judgement side reports unreadable records, distinctly from "none"', () => {
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), {
+    judgements: [judgement()],
+    broken: [{ name: 'j-0002.json', text: '{not json' }],
+  })
+  const result = run(root)
+  assert.equal(result.code, 0, '一条坏判决不许让生成失败')
+  assert.match(result.stdout + result.stderr, /j-0002\.json/, '★ 坏判决必须被指名')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★ 臂 23 — judgement status is rendered, and an UNKNOWN status is not silently "adopted"', () => {
+  /**
+   * ★ `status` ∈ {adopted, refuted, pending}。
+   *   一条【没有标注】或标了非法值的判决，不许被读成 `adopted` ——
+   *   那会让"没人检验过"与"已被采纳"同形（本队记账）。
+   */
+  const root = withJudgements(fakeRepo({ entries: [entry()] }), {
+    judgements: [judgement({ status: 'pending' }), judgement({ id: 'j-0002', claim: 'unmarked claim' })],
+  })
+  run(root)
+  const html = judgementsHtml(root)
+  assert.match(html, /待定|pending/i, '★ pending 必须读得出来')
+  assert.match(html, /未标注|unknown/i, '★ 缺 status 的判决必须显示成"未标注"，不是默认 adopted')
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★★ 臂 24 — the frictions half is UNCHANGED (reverse half: adding judgements must not reshape it)', () => {
+  /**
+   * ── ★ 反向半边（契约明写）────────────────────────────────────────────────────
+   *
+   *   「改完之后，卡点那一半的三维度呈现必须与现在逐字相同。」
+   *
+   * ★ 可执行形式：同一个假仓库、同一份卡点，**加判决之前与之后**各生成一次，
+   *   断言 `docs/frictions.html` 的核心区块**逐字相同**。
+   *
+   * ★ 比较时剔除**生成时间**那一行（`new Date().toLocaleString`）——
+   *   它每次都会变，而它不是"呈现形状"的一部分。
+   *   ★ 若不做这个剔除，本臂会变成一个恒红的噪声源；而若把整份文件都比对
+   *     又会让"时间戳"掩盖真正的形状变化。⇒ 只剔除那一处，其余逐字比。
+   */
+  const before = fakeRepo({ entries: [entry(), entry({ id: 'f-0002', title: 'second' })] })
+  const after = withJudgements(fakeRepo({ entries: [entry(), entry({ id: 'f-0002', title: 'second' })] }), {
+    judgements: [judgement()],
+  })
+  run(before)
+  run(after)
+  const strip = (html) => html
+    .replace(/生成于 [^<]*/u, '生成于 <TIME>')
+    .replace(/<title>[^<]*<\/title>/u, '<title></title>')
+  const a = strip(readFileSync(join(before, 'docs', 'frictions.html'), 'utf8'))
+  const b = strip(readFileSync(join(after, 'docs', 'frictions.html'), 'utf8'))
+  assert.equal(
+    b, a,
+    '★★ 加了判决之后，卡点那一半必须逐字不变 —— 本任务的改动是【加一份产物】，不是重构已有的',
+  )
+  rmSync(before, { recursive: true, force: true })
+  rmSync(after, { recursive: true, force: true })
+})

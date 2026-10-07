@@ -26,12 +26,27 @@
  */
 
 import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DIR = join(ROOT, '.agent-teams', 'frictions')
 const OUT = process.argv[2] ?? join(ROOT, 'docs', 'frictions.html')
+/**
+ * ── ★★ t57：判决是【第二种记录】，而它必须有自己的一份产物 ──────────────────────
+ *
+ * ★ 为什么是【另一份文件】而不是拼进同一份：
+ *   卡点说「我卡住了」；判决说「我学到了」。
+ *   ⇒ 合并会让「执行到位」与「出问题了」同形 —— 而那正是本队一直防的那条。
+ *   ⇒ 两份产物、两组字段、两个阅读入口。
+ *
+ * ★ 输出路径由 `OUT` 推导：默认 `docs/frictions.html` ⇒ 判决落 `docs/judgements.html`。
+ *   调用方若给了自定义 `OUT`（夹具就是），判决跟着它走 ——
+ *   于是"两份产物总在同一处"是一个可依赖的性质，而不是一句巧合。
+ */
+const OUT_JUDGEMENTS = process.argv[3] ?? join(dirname(OUT), 'judgements.html')
+/** 判决的来源目录。★ 与 `frictions/` 并列，而不是嵌在它里面（两种记录，两条通路）。 */
+const JUDGEMENT_DIR = join(ROOT, '.agent-teams', 'judgements')
 
 /**
  * ── ★★ 三态：生成成功 / 降级（有坏条目）/ 无法生成（台账目录不存在）────────────
@@ -69,6 +84,92 @@ function load() {
 
 const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+/**
+ * ── ★★ 判决的读取：三态，且与卡点那一侧【逐条对齐】────────────────────────────
+ *
+ *   `available: false`  —— 判决目录不存在（这一条通路还没接上）
+ *   `entries: []`       —— 目录在，但还没有判决
+ *   `entries: [...]`    —— 有判决
+ *
+ * ★ 前两者【最容易被做成同形】（都渲染成"0 条"），而它们说的是两件事：
+ *   前者是"这一格没有接上"，后者是"接上了，而确实还没有结论"。
+ *   ⇒ 本队记账：三态不同形。
+ *
+ * ★ 坏条目与卡点那一侧同一口径：**解析失败不静默跳过** ——
+ *   一条坏记录与一条不存在的记录必须不同形。
+ */
+function loadJudgements() {
+  if (!existsSync(JUDGEMENT_DIR)) return { entries: [], broken: [], available: false }
+  const out = []
+  const broken = []
+  for (const f of readdirSync(JUDGEMENT_DIR).filter((f) => /^j-\d+\.json$/.test(f)).sort()) {
+    try {
+      out.push(JSON.parse(readFileSync(join(JUDGEMENT_DIR, f), 'utf8')))
+    } catch (error) {
+      broken.push({ file: f, why: String(error?.message ?? error) })
+    }
+  }
+  return { entries: out, broken, available: true }
+}
+
+/**
+ * ── ★★ 判决的状态：读【显式字段】，缺字段⇒ `unknown`，绝不舍默成 `adopted` ────────
+ *
+ * ★ 为什么这一格重要：一条【没人标注过】的判决与一条【已被采纳】的判决，
+ *   在读者眼里如果同形，那么"未检验的声称"就混进了"结论"里 ——
+ *   而 README 写明判决的价值恰恰在于它能被证伪、被降级。
+ *   ⇒ 缺字段与非法值都落 `unknown`，且它在页面上有**自己的**标签与措辞。
+ */
+const JUDGEMENT_STATUSES = ['adopted', 'refuted', 'pending']
+function judgementStatusOf(j) {
+  const s = j?.status
+  return JUDGEMENT_STATUSES.includes(s) ? s : 'unknown'
+}
+const JUDGEMENT_STATUS_LABEL = {
+  adopted: '已采纳',
+  refuted: '★ 已被证伪',
+  pending: '待定',
+  unknown: '★ 未标注状态',
+}
+const JUDGEMENT_STATUS_NOTE = {
+  adopted: '它经得住目前的反例 —— 而那不等于它被证明了。',
+  refuted: '★ 它在某次卡点里被证伪 ⇒ 已降级（按 README：保留原 id，status 改成 refuted）。',
+  pending: '有人记下了它，而还没有裁定采纳或证伪。',
+  unknown: '★ 这条记录没有可识别的 status ⇒ 它【不是】"已采纳"，是"没人标注过"。两者必须不同形。',
+}
+
+/**
+ * ── ★★★ 一张判决卡 ─────────────────────────────────────────────────────────────
+ *
+ * ★ `counterexample` 单独成块、带自己的 class 与标题，且**紧跟在 claim 之后** ——
+ *   README 写明：判决必须带反例，否则它就是一个【未检验的声称】。
+ *   ⇒ 把它埋在页面末尾等于让每条判决都退化成一个声称。
+ */
+function judgementCard(j) {
+  const st = judgementStatusOf(j)
+  return `
+  <article class="jcard ${st}">
+    <header>
+      <span class="id">${esc(j.id)}</span>
+      <span class="pill jstatus-${st}">${esc(JUDGEMENT_STATUS_LABEL[st])}</span>
+      ${j.project ? `<span class="pill">${esc(j.project)}</span>` : ''}
+      ${j.at ? `<span class="pill">${esc(j.at)}</span>` : ''}
+    </header>
+    <h3 class="claim">${esc(j.claim)}</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>${esc(j.counterexample ?? '（这一格是空的）')}</p>
+      ${j.counterexample ? '' : '<p class="why">★ 一条没有反例的判决是一个【未检验的声称】—— 它与猜测同形。</p>'}
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>${esc(j.scene?.from)}${j.scene?.what ? `<div class="why">${esc(j.scene.what)}</div>` : ''}</dd>
+      <dt>怎么复用</dt><dd>${esc(j.reuse)}</dd>
+      <dt>状态含义</dt><dd class="why">${esc(JUDGEMENT_STATUS_NOTE[st])}</dd>
+      ${j.notes?.length ? `<dt>备注</dt><dd><ul>${j.notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
+    </dl>
+  </article>`
+}
 
 /**
  * ── 本质归类 ────────────────────────────────────────────────────────────────
@@ -195,6 +296,146 @@ function section(title, sub, items) {
 }
 
 const { entries, broken, available } = load()
+
+/**
+ * ── ★★ t57：判决那一侧【独立生成】，不随卡点那一侧的早退一起消失 ────────────────
+ *
+ * ★ 为什么必须独立：缺判决目录不该拖垮卡点（契约明写），而**反过来也成立** ——
+ *   一个没有卡点目录的环境仍可能已经写了判决。
+ *   ⇒ 把两侧做成"各自判自己的三态"，而不是"一个总开关"。
+ *
+ * ★ 三态（判决侧）：
+ *     absent  ⇒ 判决目录不存在        —— 这一条通路还没接上
+ *     empty   ⇒ 目录在、没有判决      —— 接上了，确实还没有结论
+ *     present ⇒ 有判决
+ *   三者必须不同形，且**都必须 exit 0** —— 记录工具不许变成门禁。
+ */
+const JUDGEMENT_STYLE = `
+  :root { --fg:#1a1a1a; --dim:#666; --line:#e3e3e3; --bg:#fafafa; --acc:#0b5fff;
+          --adopted:#2f855a; --refuted:#c0392b; --pending:#b7791f; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --dim:#9a9a9a; --line:#333;
+          --bg:#141414; --acc:#6ea8ff; --adopted:#5fd39a; --refuted:#ff6b5e; --pending:#e0b050; } }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2.5rem 2rem 6rem; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; }
+  h1 { font-size:1.6rem; margin:0 0 .3rem }
+  h2 { font-size:1.15rem; margin:2.5rem 0 .6rem; padding-bottom:.4rem; border-bottom:1px solid var(--line) }
+  h3 { font-size:1.05rem; margin:.2rem 0 .7rem }
+  .lede { color:var(--dim); margin:0 0 2rem }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(460px,1fr)); gap:1rem }
+  .jcard { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem }
+  .jcard.adopted { border-left:4px solid var(--adopted) }
+  .jcard.refuted { border-left:4px solid var(--refuted) }
+  .jcard.pending { border-left:4px solid var(--pending) }
+  .jcard.unknown { border-left:4px solid var(--dim); border-style:dashed }
+  .jcard header { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; margin-bottom:.3rem }
+  .id { font-family:ui-monospace,monospace; color:var(--dim); font-size:.85rem }
+  .pill { font-size:.72rem; padding:.15rem .5rem; border-radius:999px; border:1px solid var(--line); color:var(--dim) }
+  .pill.jstatus-adopted { color:var(--adopted); border-color:var(--adopted) }
+  .pill.jstatus-refuted { color:var(--refuted); border-color:var(--refuted) }
+  .pill.jstatus-pending { color:var(--pending); border-color:var(--pending) }
+  dl { margin:0; display:grid; grid-template-columns:5.5rem 1fr; gap:.35rem .8rem; font-size:.92rem }
+  dt { color:var(--dim); font-size:.85rem; padding-top:.1rem }
+  dd { margin:0 }
+  ul { margin:0; padding-left:1.1rem } li { margin:.15rem 0 }
+  code { font-family:ui-monospace,monospace; font-size:.85em; background:rgba(127,127,127,.12);
+         padding:.05rem .3rem; border-radius:4px }
+  /* ★★★ 反例那一块：边框 + 底色 + 加粗标签 —— 它必须一眼可见 */
+  .counter { border:2px solid var(--refuted); border-radius:8px; padding:.6rem .75rem; margin:0 0 .9rem;
+             background:rgba(192,57,43,.06) }
+  .counter b { color:var(--refuted); font-size:.85rem }
+  .counter p { margin:.3rem 0 0 }
+  .why { color:var(--dim); font-size:.85rem; margin-top:.25rem }
+  .note { border:1px solid var(--line); border-radius:10px; padding:1rem; margin:1rem 0; color:var(--dim) }
+  .warn { border:1px solid var(--refuted); border-radius:10px; padding:1rem; margin:1.5rem 0 }
+  a { color:var(--acc) }
+</style>`
+
+{
+  const j = loadJudgements()
+  const byStatus = Object.fromEntries(
+    ['adopted', 'refuted', 'pending', 'unknown'].map((s) => [s, j.entries.filter((e) => judgementStatusOf(e) === s)]),
+  )
+  /** ★ 缺反例的判决单独列出来 —— 它是"未检验的声称"，而那不是一种状态，是一个缺口。 */
+  const missingCounter = j.entries.filter((e) => !e.counterexample)
+
+  const body = j.available
+    ? `${j.entries.length} 条判决 · 生成于 ${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`
+      + ` · 机器读的是 <code>.agent-teams/judgements/*.json</code>（唯一真源）`
+    : '这一条通路【还没有接上】：没有 <code>.agent-teams/judgements/</code> 目录。'
+      + '★ 这不是故障 —— 但它与「接上了、确实还没有判决」是两件事。'
+
+  const sections = []
+  if (!j.available) {
+    sections.push(`<div class="note"><b>★ 判决目录不存在</b>
+      <div class="why">「这一格没有接上」与「接上了、确实还没有判决」必须不同形 ——
+      前者是配置问题，后者是事实。本页是前者。</div></div>`)
+  } else if (j.entries.length === 0) {
+    sections.push(`<div class="note"><b>目录在，而还没有判决</b>
+      <div class="why">这一条通路是通的，只是还没有人写下结论。
+      ★ 它与「没有这个目录」不同形：那一边是没接上，这一边是接上了而为空。</div></div>`)
+  } else {
+    for (const [status, list] of Object.entries(byStatus)) {
+      if (list.length === 0) continue
+      sections.push(`<section><h2>${esc(JUDGEMENT_STATUS_LABEL[status])} <span style="color:var(--dim);font-weight:400;font-size:.9rem">${list.length} 条</span></h2>
+        <p class="why">${esc(JUDGEMENT_STATUS_NOTE[status])}</p>
+        <div class="grid">${list.map(judgementCard).join('')}</div></section>`)
+    }
+    if (missingCounter.length > 0) {
+      sections.push(`<div class="warn"><b>★ ${missingCounter.length} 条判决没有反例</b>
+        <ul>${missingCounter.map((e) => `<li><b>${esc(e.id)}</b>：${esc(e.claim)}</li>`).join('')}</ul>
+        <div class="why">按 README：判决必须带反例，否则它就是一个【未检验的声称】——
+        而未检验的声称与猜测同形。</div></div>`)
+    }
+  }
+
+  const html = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>判决台账 · ${j.entries.length} 条</title>
+<style>${JUDGEMENT_STYLE}</head><body>
+
+<h1>判决台账</h1>
+<p class="lede">${body}</p>
+
+<p class="lede">★ 这是【第二种记录】。它与<a href="frictions.html">卡点台账</a>是两条通路，<b>不合并呈现</b>：
+  卡点说「我卡住了」（场景 / 观测 / 未知 / 处置）；
+  判决说「我学到了」（claim / 反例 / 复用 / 状态）。
+  ★ 合并会让「执行到位」与「出问题了」同形。</p>
+
+${j.broken.length ? `<div class="warn"><b>★ ${j.broken.length} 条判决读不出来</b>
+  <ul>${j.broken.map((b) => `<li>${esc(b.file)}: ${esc(b.why)}</li>`).join('')}</ul>
+  <div class="why">一条坏记录与一条不存在的记录必须不同形 —— 所以它们在这里，而不是被跳过。</div></div>` : ''}
+
+${sections.join('\n')}
+
+<footer style="margin-top:4rem;color:var(--dim);font-size:.85rem">
+  ★ 每张卡片里那个红色框就是这条判决的<b>反例</b> —— 它回答「什么会证伪它」。<br>
+  ★ 本页只读 JSON，不写回任何东西：记录不可重算。
+</footer>
+</body></html>`
+
+  writeFileSync(OUT_JUDGEMENTS, html)
+  /**
+   * ★ 三态在【输出文本】上必须分得开（都 exit 0，所以"说了什么"是唯一的区分面）：
+   *     absent  ⇒ "无法生成：判决目录不存在"
+   *     empty   ⇒ "生成成功（判决侧为空）：目录在，而还没有判决"
+   *     present ⇒ "生成成功（判决）：N 条"
+   */
+  if (!j.available) {
+    console.log(`无法生成（判决侧）：判决目录不存在 —— ${JUDGEMENT_DIR}`)
+    console.log('  ★ 这不是故障：判决是另一种记录，没有它是正常的。')
+    console.log('  ★ 它与「目录在、而还没有判决」不同形 —— 前者是没接上，后者是接上了而为空。')
+  } else if (j.entries.length === 0) {
+    console.log('生成成功（判决侧为空）：目录在，而还没有判决')
+    console.log(`  写出 ${OUT_JUDGEMENTS}`)
+  } else {
+    console.log(`生成成功（判决）：${j.entries.length} 条`)
+    console.log(`  写出 ${OUT_JUDGEMENTS}`)
+    if (j.broken.length) console.log(`  ★ ${j.broken.length} 条判决读不出来：${j.broken.map((b) => b.file).join(', ')}`)
+    if (missingCounter.length) console.log(`  ★ ${missingCounter.length} 条判决没有反例（= 未检验的声称）`)
+  }
+}
 
 /**
  * ── ★ 状态 ③：无法生成（台账目录不存在）─────────────────────────────────────

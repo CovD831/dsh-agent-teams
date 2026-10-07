@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>判决台账 · 5 条</title>
+<style>
+  :root { --fg:#1a1a1a; --dim:#666; --line:#e3e3e3; --bg:#fafafa; --acc:#0b5fff;
+          --adopted:#2f855a; --refuted:#c0392b; --pending:#b7791f; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8e8e8; --dim:#9a9a9a; --line:#333;
+          --bg:#141414; --acc:#6ea8ff; --adopted:#5fd39a; --refuted:#ff6b5e; --pending:#e0b050; } }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2.5rem 2rem 6rem; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; }
+  h1 { font-size:1.6rem; margin:0 0 .3rem }
+  h2 { font-size:1.15rem; margin:2.5rem 0 .6rem; padding-bottom:.4rem; border-bottom:1px solid var(--line) }
+  h3 { font-size:1.05rem; margin:.2rem 0 .7rem }
+  .lede { color:var(--dim); margin:0 0 2rem }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(460px,1fr)); gap:1rem }
+  .jcard { background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem }
+  .jcard.adopted { border-left:4px solid var(--adopted) }
+  .jcard.refuted { border-left:4px solid var(--refuted) }
+  .jcard.pending { border-left:4px solid var(--pending) }
+  .jcard.unknown { border-left:4px solid var(--dim); border-style:dashed }
+  .jcard header { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; margin-bottom:.3rem }
+  .id { font-family:ui-monospace,monospace; color:var(--dim); font-size:.85rem }
+  .pill { font-size:.72rem; padding:.15rem .5rem; border-radius:999px; border:1px solid var(--line); color:var(--dim) }
+  .pill.jstatus-adopted { color:var(--adopted); border-color:var(--adopted) }
+  .pill.jstatus-refuted { color:var(--refuted); border-color:var(--refuted) }
+  .pill.jstatus-pending { color:var(--pending); border-color:var(--pending) }
+  dl { margin:0; display:grid; grid-template-columns:5.5rem 1fr; gap:.35rem .8rem; font-size:.92rem }
+  dt { color:var(--dim); font-size:.85rem; padding-top:.1rem }
+  dd { margin:0 }
+  ul { margin:0; padding-left:1.1rem } li { margin:.15rem 0 }
+  code { font-family:ui-monospace,monospace; font-size:.85em; background:rgba(127,127,127,.12);
+         padding:.05rem .3rem; border-radius:4px }
+  /* ★★★ 反例那一块：边框 + 底色 + 加粗标签 —— 它必须一眼可见 */
+  .counter { border:2px solid var(--refuted); border-radius:8px; padding:.6rem .75rem; margin:0 0 .9rem;
+             background:rgba(192,57,43,.06) }
+  .counter b { color:var(--refuted); font-size:.85rem }
+  .counter p { margin:.3rem 0 0 }
+  .why { color:var(--dim); font-size:.85rem; margin-top:.25rem }
+  .note { border:1px solid var(--line); border-radius:10px; padding:1rem; margin:1rem 0; color:var(--dim) }
+  .warn { border:1px solid var(--refuted); border-radius:10px; padding:1rem; margin:1.5rem 0 }
+  a { color:var(--acc) }
+</style></head><body>
+
+<h1>判决台账</h1>
+<p class="lede">5 条判决 · 生成于 2026/10/7 23:17:33 · 机器读的是 <code>.agent-teams/judgements/*.json</code>（唯一真源）</p>
+
+<p class="lede">★ 这是【第二种记录】。它与<a href="frictions.html">卡点台账</a>是两条通路，<b>不合并呈现</b>：
+  卡点说「我卡住了」（场景 / 观测 / 未知 / 处置）；
+  判决说「我学到了」（claim / 反例 / 复用 / 状态）。
+  ★ 合并会让「执行到位」与「出问题了」同形。</p>
+
+
+
+<section><h2>已采纳 <span style="color:var(--dim);font-weight:400;font-size:.9rem">5 条</span></h2>
+        <p class="why">它经得住目前的反例 —— 而那不等于它被证明了。</p>
+        <div class="grid">
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0001</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T19:20:00+08:00</span>
+    </header>
+    <h3 class="claim">「停在可恢复的中间态」让掉线无害 —— 而它的判据是「重做一遍的代价」</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 反例：若一个任务的中间态【不可恢复】（例如它正在写一个多文件重构的中途、而 worktree 只落了一半），那掉线就会损失工作。⇒ 所以这条判据【只对设计成可恢复的任务成立】，不是「掉线无害」的一般结论。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t30/t39（absorb-dev 三次掉线）<div class="why">absorb-dev 掉线三次（TRANSPORT），而三次产出【都完好】：第一次只有设计与基线（没落笔）、第二次 15 个素材已搬出而 tools.ts 未动、第三次同上。</div></dd>
+      <dt>怎么复用</dt><dd>派任何长任务时：问「若它此刻掉线，我损失什么？」—— 若答案不是「重跑一遍」，就该在派工前把它切成可恢复的步。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★★★ 而它后来被用上了一次：captain 据此把 t30 收窄成【只交中间形态】，并把真接线另立 t39 —— 而那正是把一个大任务切成两段可恢复的。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0002</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T19:21:00+08:00</span>
+    </header>
+    <h3 class="claim">「尾斜杠对照对」—— 用同一件工作的两种写法，把「形状检查」与「真判断」分开</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 反例：若两份输入【不是同一件工作】的两种写法，对照就不成立。所以构造时必须确认「两边做的事逐项相同」，而那正是它做的（只差一个字符）。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t43（verifier6 独立验证 t38）<div class="why">判据断言 inScope 里有【目录条目】= 会新建目录 ⇒ 不原子。而它只做 path.trim().endsWith(&#39;/&#39;)。verifier6 构造：[&#39;src/registry.ts&#39;,&#39;src/index.ts&#39;] ⇒ ok，而加一个 &#39;src/&#39; ⇒ blocked —— 两边工作完全相同。更尖锐：[&#39;src/a.ts&#39;] ⇒ ok 而 [&#39;src/&#39;] ⇒ blocked（信息更少却判定更确定）。</div></dd>
+      <dt>怎么复用</dt><dd>任何「看起来能分开」的信号，都可以用【同一件工作的两种写法】去试它 ⇒ 若两者不同裁，它判的是写法。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它当场兑现了 t38 自己写下的那句判据：「一份『看起来能分开』的信号，可能只是在两个样本上重合。」</li><li>★ 而 t38 用它解释为什么不该接线，verifier6 用它【证伪那个信号本身】。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0003</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T19:22:00+08:00</span>
+    </header>
+    <h3 class="claim">「代理读数在它所代理的东西没变时也会变」</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 反例：若那个代理读数【直接就是】它要测的东西（例如它读的是一个布尔字段），那它不会这样失效。⇒ 所以这条只对【间接读数】（距离、行号、缩进、文本特征）成立。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t49（point-dev）<div class="why">臂 7 用 if (!arbitration.allowed)[\s\S]{0,400}?return { 判「提前返回」。t49 在拒绝分支里【加了一段注释】⇒ 距离变成 1165 ⇒ 臂红，而控制流一个字没变。</div></dd>
+      <dt>怎么复用</dt><dd>写任何「按位置/距离/文本特征」的断言时，先问：这个读数变化，是否只可能由我关心的事引起？</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★★ 而它与今天另外两条同族：t39（用「下一个 register 的位置」当边界，而注释里也提到 register）、t45/t48（三条夹具在旧位置找已搬走的东西）。</li><li>⇒ 共同形态：**「我数的东西」与「我要的那个东西」不是同一个。**</li><li>★ 修法：按配平取块看控制流，而不是按距离取。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0004</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T19:23:00+08:00</span>
+    </header>
+    <h3 class="claim">「手改与重新生成，今天看起来一样，下一次才分岔」</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 反例：若那个产物【本来就是手工维护的】（例如一份人写的设计文档），那它没有「重新生成」这个选项 ⇒ 这条判据不适用。⇒ 它只对【派生物】成立。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t42（integrator6）<div class="why">golden 快照的 deployment 一格需要加四格。captain 说「我来手工更新那一格」，而 integrator6 更正：手工改与重新生成，在【当下】看起来一样（都得把那四格放进去），在【下一次】不同形。</div></dd>
+      <dt>怎么复用</dt><dd>面对一个派生产物：问「它是从什么生成的？那条路径写下来了吗？」—— 若没写下来，那它其实已经是手工维护的了。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★★ 而这直接导致了 fe9de34：把重新生成路径固化成 scripts/tool-definitions.mjs。</li><li>★ 而它当场兑现了一次：t49 改了 status 的 output ⇒ 走正规再生成路径，而不是手工改那一格。</li><li>★ 它与 f-0033 同源：两者都是「某个机制在它作者当时没想到的场景里，变成了障碍」。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0005</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T23:12:00+08:00</span>
+    </header>
+    <h3 class="claim">突变要打在「被测模块自己」的行上，不要打在它依赖的常量表上 —— 否则你测的是 import 缓存，不是行为</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若那个常量表就在被测模块自己里（不跨模块），这条不适用 —— 因为那时没有两个实例。判据是「针脚所在的模块，与断言读的模块，是不是同一个实例」。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t55（checkpoint-dev）<div class="why">夹具 freshState 只 bust lib/state.js，而它静态 import 的 ./types.js 是裸路径 ⇒ 与夹具 ?tag 加载的 lib/types.js?tag 是两个模块实例。探针实测：mutant.DELIVERY_OUTCOMES 看到的是突变体，而 mutant.buildDeliveryRecord 用的仍是旧的 ⇒ 断言红，而报告会读作「突变没打红」。方向恰好相反。</div></dd>
+      <dt>怎么复用</dt><dd>写任何跨模块突变的夹具时：先问「这个突变真的施加到被测模块实例上了吗？」验证方法是让探针同时读两个模块并比对。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>修法不是「再 bust 一层」（每加一层依赖就再失效一次），而是把针脚放在被测模块自己那一行上。</li><li>与 t53 同族：t53 是「静态 import JSON 被内联 ⇒ 改数据不生效」，t55 是「跨模块实例的常量 ⇒ 突变不生效」。</li><li>共同形态：我改的那个，与它测的那个，是不是同一个。</li></ul></dd>
+    </dl>
+  </article></div></section>
+
+<footer style="margin-top:4rem;color:var(--dim);font-size:.85rem">
+  ★ 每张卡片里那个红色框就是这条判决的<b>反例</b> —— 它回答「什么会证伪它」。<br>
+  ★ 本页只读 JSON，不写回任何东西：记录不可重算。
+</footer>
+</body></html>
