@@ -1,8 +1,29 @@
 /**
- * ── 判据：这个任务的契约够不够【原子】—— 失败能不能归因到一个原因？──────────────
+ * ── 判据：契约【声明面的形状】是不是可能不可归因（★ 而不是"够不够原子"）─────────
  *
  * 插入点：`contract`（建任务 / 改契约 —— 契约 §1 ①）
  *
+ * ── ★★★ 开头这句是 t75 改过的，而它原来写的是「够不够【原子】」 ────────────────
+ *
+ * MEASURED（t43 证伪，t69 又撞到一次，t75 复现）：
+ *
+ *     同一件工作，两种写法：
+ *       ['src/registry.ts', 'src/index.ts']          ⇒ ok
+ *       ['src/registry.ts', 'src/index.ts', 'src/']   ⇒ blocked
+ *
+ *     ⇒ 而判据实际只做 `path.trim().endsWith('/')` —— **它判的是字符串最后一个字符。**
+ *
+ * ★ 所以本文头、以及 `description`（控制台渲染给读的人看的那一句）都**不许**
+ *   再声称它判"原子性" —— 那是替一个**已知做不到的结论**作证。
+ *
+ * ★★ 而"原子性不可机械化"这个结论（t43）：它不是本判据的缺陷，是**标准本身**的性质。
+ *   ⇒ 于是本判据的定位只能是：**一个形状信号**，其读数**可能**指向"不可归因"，
+ *     而它**不能**判定那件事。下面的分析仍然有效 —— 只是它的**称谓**必须诚实。
+ *
+ * ── 它防的是什么失效（用户裁定 + 本轮实测）────────────────────────────────────
+ *
+ * 用户原话：
+
  * ── 它防的是什么失效（用户裁定 + 本轮实测）────────────────────────────────────
  *
  * 用户原话：
@@ -84,7 +105,27 @@ import { type GateVerdict } from '../registry.ts';
 import type { CtxPaths } from '../requires.ts';
 export declare const id = "contract.task-atomicity";
 export declare const point = "contract";
-export declare const description = "\u8FD9\u4E2A\u4EFB\u52A1\u7684\u5951\u7EA6\u591F\u4E0D\u591F\u539F\u5B50 \u2014\u2014 \u5224\u522B\u9762\uFF08verify\uFF09\u662F\u5426\u53EA\u6709\u4E00\u6761\u3001inScope \u662F\u5426\u8DE8\u4E86\u6982\u5FF5\u4E0A\u72EC\u7ACB\u7684\u6587\u4EF6\u7EC4\u3001objective \u662F\u5426\u5217\u4E86\u591A\u4E2A\u5E76\u5217\u4EA4\u4ED8\u3002\u4E0D\u539F\u5B50\u65F6\u8BF4\u6E05\u53EF\u4EE5\u62C6\u6210\u4EC0\u4E48\uFF1B\u5224\u4E0D\u4E86\u65F6\u62A5 unmeasured\uFF08\u7EDD\u4E0D\u5F53\u6210\u539F\u5B50\uFF09";
+/**
+ * ── ★★★ 它判的是【字符串形状】，**不是**「原子性」（t75 / t43 / t69）─────────────
+ *
+ * MEASURED：t43 用一对**同一件工作**（`['src/registry.ts','src/index.ts']` 与
+ * 在它基础上多一个 `'src/'`）证伪了这个信号 —— 两边的工作完全相同，而判据
+ * 一个 ok、一个 blocked。
+ *
+ * ⇒ 而本判据实际上只做 `path.trim().endsWith('/')`：**它判的是字符串最后一个字符。**
+ *
+ * ★★ 所以 `description` 里【不许】再出现"够不够原子"这类措辞 ——
+ *   它是**控制台渲染给读的人看的那一句**（`registry.ts`：`description` 是
+ *   "the console renders it"）。把它写成"判原子性"，就是在替一个
+ *   **已知做不到的结论**作证 —— 而那正是本队记了一整天的那个形态：
+ *   **一句话里的每个名词，能不能指出它的来源？**
+ *
+ * ⇒ 新的措辞**如实说出它做了什么**，并把那件事的边界写在句子里：
+ *   · 它判的是【声明面的形状】（verify 条数 / inScope 的分组 / 并列动词）
+ *   · 而"形状不原子"是"失败可能不可归因"的**一个征兆**，不是它的判据
+ *   · 且它**不接生产**（t38 刻意如此），所以这句话只对直接调用它的人有效
+ */
+export declare const description = "\u2605 \u5B83\u5224\u7684\u662F\u3010\u5951\u7EA6\u58F0\u660E\u9762\u7684\u5F62\u72B6\u3011\uFF0C\u4E0D\u662F\u300C\u539F\u5B50\u6027\u300D\u672C\u8EAB \u2014\u2014 \u4E09\u6761\u53EF\u673A\u68B0\u8BFB\u51FA\u7684\u4FE1\u53F7\uFF1Averify \u7684\u6761\u6570\u4E0E\u8986\u76D6\u9762\u3001inScope \u662F\u5426\u8DE8\u4E86\u6982\u5FF5\u4E0A\u72EC\u7ACB\u7684\u76EE\u5F55\u7EC4\u3001objective \u662F\u5426\u5217\u4E86\u591A\u4E2A\u5E76\u5217\u4EA4\u4ED8\u3002\u2605 \u800C\"\u5F62\u72B6\u770B\u8D77\u6765\u4E0D\u539F\u5B50\"\u53EA\u662F\"\u5931\u8D25\u53EF\u80FD\u4E0D\u53EF\u5F52\u56E0\"\u7684\u4E00\u4E2A\u3010\u5F81\u5146\u3011\uFF0C\u4E0D\u662F\u5B83\u7684\u5224\u636E\uFF08t43 \u5DF2\u7528\"\u53EA\u5DEE\u4E00\u4E2A\u5C3E\u659C\u6760\u7684\u540C\u4E00\u4EF6\u5DE5\u4F5C\"\u8BC1\u4F2A\u8FC7\u90A3\u4E2A\u66F4\u5F3A\u7684\u58F0\u79F0\uFF09\u3002\u5224\u4E0D\u4E86\u65F6\u62A5 unmeasured\uFF08\u7EDD\u4E0D\u5F53\u6210\u539F\u5B50\uFF09\u3002\u2605 \u672C\u5224\u636E\u3010\u4E0D\u63A5\u751F\u4EA7\u3011\uFF08t38\uFF1A\u63A5\u7EBF\u4F1A\u8BA9\u6CA1\u6709 verify \u7684\u4EFB\u52A1\u5168\u90E8\u5EFA\u4E0D\u51FA\u6765\uFF09";
 /**
  * ── ★ 输入面声明 ──────────────────────────────────────────────────────────────
  *
