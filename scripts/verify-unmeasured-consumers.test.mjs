@@ -309,8 +309,35 @@ test('臂 1 ★ 命中：status 把 delivery 的「没能测量」塞进 blocker
     console.log(`    ℹ 原文：${blockerCarryingMeasurementFailure[0]}`)
   }
 
+  /**
+   * ★★ 关键断言 A：若出现了"没能测量"，它必须有自己的**结构化**出口。
+   *
+   * ── 口径在 2026-10-07 被修正过一次，理由在这里 ──────────────────────────────
+   *
+   * 原文是 `assert.ok(hasOwnUnmeasuredField)` —— 「delivery 面**必须**带 unmeasured」。
+   * 而它依赖一个**前提**，那个前提写在上面那段注释里：
+   *   「`delivery` 位置**今天恒 unmeasured**（coverage 与 convergence 都要调用方注入
+   *     观察面，而 status 交的 ctx 里没有）」
+   *
+   * ★ MEASURED：t34 之后那个前提**不再成立** —— ctx 现在有观察面了，于是这个 fixture
+   *   产出的是 `gates_evaluated=3 / blockers=["team has no completed work"]`：
+   *   一条**真实的** blocker，而 delivery 位置根本没有"没能测量"。
+   *   ⇒ 在该 ctx 下 `unmeasured` 恒为 `undefined`，
+   *     于是**任何「仅在测量失败时才产出该字段」的正确实现都过不了这一条** ——
+   *     而那个口径正是 `declare_delivery` 与同文件其它可选读数一直用的口径。
+   *
+   * ⇒ 修正后它断言的是【形状】而非【在场】，而那才是这一臂真正要防的东西：
+   *   若出现了"没能测量"，它必须有**自己的位置**（不许挤进 blockers）；
+   *   而下面那条反向断言同时钉住"不许两处都写"。
+   *
+   * ★ 为什么不改成"让产品恒产出这个字段"：那会把「没测到」与「没发生测量」
+   *   合流成同一个形状 —— 而那正是本任务存在的理由。
+   *   夹具该做的不是逼产品迁就它，而是**把前提改成当前为真的那一个**。
+   */
+  const measurementFailed = blockerCarryingMeasurementFailure.length > 0
+    || (typeof delivery.unmeasured === 'string' && delivery.unmeasured.length > 0)
   assert.ok(
-    hasOwnUnmeasuredField,
+    !measurementFailed || hasOwnUnmeasuredField,
     '★ delivery 报告面没有自己的 `unmeasured` 位置 —— "没能测量"只能挤进 blockers，'
     + '于是它与"发现了问题"走同一出口。★ 它的读者是一个 additionalProperties:false 的 schema，'
     + '所以修法不只是改一行拼装：schema 也要留出那一格。',
