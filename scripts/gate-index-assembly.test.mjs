@@ -1203,12 +1203,40 @@ const AUDIT_CALL_SITES = (() => {
   lines.forEach((line, index) => {
     const match = line.match(/(?:const\s+)?(\w+)\s*=\s*inputSurfaceOf\('(\w+)'/)
     if (!match) return
-    const window = lines.slice(index, index + 80).join('\n')
+    /**
+     * ── ★★★ t69：这里此前是一个**按距离取的代理读数**，而它当场失效了 ─────────────
+     *
+     * 原写法：`const window = lines.slice(index, index + 80).join('\n')`
+     *         `logsGaps: new RegExp(`${match[1]}\\.missing`).test(window)`
+     *
+     * MEASURED（t69）：我在 `update-task.ts` 的 dispatch 那一段加了 **4 行注释**
+     * （修另一个缺陷），于是 `dispatchInputSurface.missing` 那句日志从偏移 84 行处
+     * 掉到窗口**之外** ⇒ `logsGaps` 变 false ⇒ 本臂红。
+     *
+     * ★ 而**日志一个字都没少**（`grep dispatchInputSurface.missing` 仍在）。
+     *   ⇒ 它红的原因是"两次出现的**距离**变了"，而它声称在测"日志还在不在"。
+     *
+     * ★★ 这正是本队记过的 j-0003：
+     *     **「代理读数在它所代理的东西没变时也会变」** ——
+     *     这里的代理是"**距离**"（80 行内），被代理的是"那句日志存在吗"。
+     *     它还会让**任何**无关的插入/删除把这一臂打红，而那时读的人会去查日志
+     *     （而日志是好的）⇒ 归因方向是错的。
+     *
+     * ── 修法：按**归属**取，而不是按距离取 ────────────────────────────────────────
+     *
+     * ★ 那一格要问的是「**这个变量**有没有被读出它的缺格」—— 那是一个**全文**问题，
+     *   不是"附近 80 行"问题：`<varName>.missing` 出现在哪里都算它被交出去了。
+     *
+     * ★ 而它**没有放宽**：原写法在"日志还在但挪远了"时给**假红**、
+     *   在"日志真的被删了"时给真红；新写法两种情形都给真读数
+     *   （删了 ⇒ 全文找不到 ⇒ false ⇒ 仍红）。
+     *   ⇒ 缺的那一半（"只留字段、把日志删了 ⇒ 这里红"那条纪律）**一个字没动**。
+     */
     sites.push({
       point: match[2],
       varName: match[1],
       line: line.trim(),
-      logsGaps: new RegExp(`${match[1]}\\.missing`).test(window),
+      logsGaps: new RegExp(`${match[1]}\\.missing`).test(source),
     })
   })
   return sites

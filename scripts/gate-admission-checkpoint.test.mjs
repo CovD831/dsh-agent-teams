@@ -451,7 +451,13 @@ test('★ 闸门：没交产物清单 ⇒ 这条判据不说话（skipped），�
   return r.evaluate(point, {}).then((evaluation) => {
     assert.equal(evaluation.evaluated, 0)
     assert.equal(evaluation.skipped, 1)
-    assert.equal(evaluation.ok, true, '★ 跳过是正常情形，不翻成 ok:false')
+    /**
+     * ★★★ t69：这一条断言的是【t58 之前】的口径（**夹具过期**，不是真实缺陷）。
+     *   t58 有意把「有判据却一条没跑」改成 `ok:false`，且本队那条纪律正对着它：
+     *   **"这一步没被检查"不许读成"通过"**（不把没测到并进通过）。
+     *   ★ 修法是改夹具（不是把 registry 改回去 —— 那是 out-of-scope，且会弄坏正确口径）。
+     */
+    assert.equal(evaluation.ok, false, '★ t58 之后：全跳过 ⇒ ok:false（"没被检查"不许读成"通过"）')
     assert.deepEqual(evaluation.blockers, [])
   })
 })

@@ -79,7 +79,24 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 export const DECLARED_WIRING = [
   {
     id: 't41-worktree-aware-scan',
-    file: 'src/tools/update-task.ts',
+    /**
+     * ── ★★ t70：这条接线的**位置**变了，而它不是"被回退"─────────────────────────────
+     *
+     * MEASURED（本判据自己的措辞就说了）：`the wiring line … is gone:
+     *   no line matches … (the call may have been reverted **or moved**)`。
+     *
+     * ★ 而 t70 把 dispatch 那一整段搬进了 `src/tools/update-task/dispatch.ts` ——
+     *   于是这一行**搬了家而没有变内容**。
+     *   ⇒ ★ 而那正是本判据**要分辨**的那件事：**"被回退"与"被搬家"必须不同形。**
+     *     前者是缺陷（函数又变成零调用方），后者是拆分的预期结果。
+     *
+     * ★ 而 t70 的另一条护栏（`gate-update-task-injections`）**钉的正是"没变内容"**：
+     *   它逐条断言 17 格注入的**右侧表达式逐字相同**。
+     *   ⇒ 所以两条夹具在这里**分工**：
+     *     · 本判据：这一行**还在**（在它该在的文件里）
+     *     · 那条：这一行的**内容**没变
+     */
+    file: 'src/tools/update-task/dispatch.ts',
     symbol: 'observeWorkspaces',
     /**
      * ★★ `at` 是【那一行接线】的锚点 —— 而它是本判据最容易漏掉的一格（实测）。
@@ -679,7 +696,12 @@ test('★★ 臂 9（端到端臂）：在**仓库的一份真实副本**上回�
 
   const root = mkdtempSync(join(tmpdir(), 'wiring-pinned-'))
   try {
-    mkdirSync(join(root, 'src', 'tools'), { recursive: true })
+    /**
+     * ★ t70：目录要按 `declaration.file` 的**实际层级**建 ——
+     *   接线搬进 `src/tools/update-task/` 之后，写死了 `src/tools` 会让
+     *   `writeFileSync` 抛 ENOENT（而那个错与"接线断了"不同形）。
+     */
+    mkdirSync(join(root, dirname(declaration.file)), { recursive: true })
     writeFileSync(join(root, declaration.file), reverted)
     const verdict = verdictOfOne(declaration, readFileSync(join(root, declaration.file), 'utf8'))
     assert.equal(verdict.state, 'unwired', `实测：${JSON.stringify(verdict)}`)

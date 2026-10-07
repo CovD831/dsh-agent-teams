@@ -172,7 +172,33 @@ test('臂 2 ★ 反向臂：admission 一条判据都没有 ⇒ 放行，且与�
     { ...probe('admission.probe.skipped', POINT, blocked('would have fired')), appliesTo: () => false },
   ])
   const skipped = await allSkipped.evaluate(POINT, {})
-  assert.equal(skipped.ok, true, '★ 全跳过同样不翻成 ok:false（那是正常情形），区分靠形状而不是靠把正常读成异常')
+  /**
+   * ── ★★★ t69：这一条断言的是【t58 之前】的口径，而 t58 有意改掉了它 ─────────────
+   *
+   * 原文（本行此前）：`assert.equal(skipped.ok, true, '★ 全跳过同样不翻成 ok:false…')`
+   *
+   * MEASURED：t58 把「有判据却一条没跑」从 `ok:true` 改成 **`ok:false`**，
+   * 理由写在 `registry.ts` 那一支的注释里（逐字）：
+   *
+   *     ok:false · blockers:[] · unmeasured:undefined · skippedAll:在场  ← 这一步没被检查
+   *     ok:false · blockers:[…]                          · skippedAll:缺席  ← 判据说有问题
+   *     ok:false · unmeasured:在场                        · skippedAll:缺席  ← 判据说测不了
+   *
+   * ⇒ ★ 也就是："**这一步没被检查**"不许与"检查了、通过了"同形 ——
+   *   而那正是本队那条最贵的纪律（不把没测到并进通过）。
+   *
+   * ★★ 所以本行是**夹具过期**（口径被有意改了，而臂没跟上），不是真实缺陷：
+   *   它断言的是旧决定，而旧决定被推翻时留下了它。⇒ 修法是**改夹具**，
+   *   **不是**把 `registry.ts` 改回去（那是 out-of-scope，且会把一条正确的口径弄坏）。
+   *   ★ 而"哪一个是对的"有据可查：`registry.ts` 那一支带着完整的论证与三态表，
+   *     而这一行只有一句"那是正常情形"—— 前者是决定，后者是被推翻的默认。
+   *
+   * ★ 而**空位置**那一半（`verdict.ok === true`）**一个字没动**（见上面第 159 行）：
+   *   空位置仍是放行 —— 两者仍然不同形，而**差别现在同时体现在 `ok` 与 `skippedAll` 上**。
+   */
+  assert.equal(skipped.ok, false, '★ t58 之后：全跳过 ⇒ ok:false（"没被检查"不许读成"通过"）')
+  assert.equal(skipped.unmeasured, undefined, '★ 而它不是"没能测量" —— 第三种形态，两者不许同形')
+  assert.deepEqual(skipped.blockers, [], '★ 也不是"判据说有问题"')
   assert.equal(skipped.registered, 1)
   assert.equal(skipped.evaluated, 0)
   assert.equal(typeof skipped.skippedAll, 'string', '★ 有判据却一条没跑 ⇒ 必须留下那句话')

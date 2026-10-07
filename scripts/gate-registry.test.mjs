@@ -137,7 +137,15 @@ test('⑦ appliesTo 为假 ⇒ 跳过（且可分辨"跳过"与"通过"）', asy
     gate: () => blocked('should not run for non-implementation'),
   })
   const skipped = await r.evaluate('completion', { kind: 'review' })
-  assert.equal(skipped.ok, true)
+  /**
+   * ── ★★★ t69：这一条断言的是【t58 之前】的口径（夹具过期，不是真实缺陷）───────
+   *
+   * t58 有意把「有判据却一条没跑」从 `ok:true` 改成 **`ok:false`**，理由逐字在
+   * `registry.ts` 那一支：三态必须不同形，而"这一步没被检查"不许读成"通过"。
+   * ⇒ 修法是**改夹具**（不是把 registry 改回去 —— 那是 out-of-scope，且会弄坏一条正确的口径）。
+   */
+  assert.equal(skipped.ok, false, '★ t58 之后：全跳过 ⇒ ok:false（"没被检查"不许读成"通过"）')
+  assert.equal(skipped.unmeasured, undefined, '★ 而它不是"没能测量"')
   assert.deepEqual(skipped.ran, [{ id: 'impl-only', verdict: 'skipped' }])
   const ran = await r.evaluate('completion', { kind: 'implementation' })
   assert.equal(ran.ok, false)
@@ -292,7 +300,12 @@ test('⑯ 臂 1 ★ 全跳过：有判据、却一条没跑 ⇒ 可读出「跑�
    *   改动前这两行 `shapeOf` 完全相等 —— 一次忘了传上下文的重构会让四条判据
    *   静默全跳过，而门禁返回 `ok: true`，读起来与"都过了"一模一样。
    */
-  assert.equal(skipped.ok, true, '★ 全跳过【不翻成 ok:false】—— 那是正常情形（空位置同理），拒掉它会卡死流程')
+  /**
+   * ★★★ t69：与上面同一条夹具过期（口径由 t58 有意改掉）。
+   *   ★ 而**空位置**那一半仍然是 `ok:true` —— 两者仍然不同形，见下面那两行。
+   */
+  assert.equal(skipped.ok, false, '★ t58 之后：全跳过 ⇒ ok:false（而空位置仍是放行，见下）')
+  assert.equal(skipped.unmeasured, undefined, '★ 而它不是"没能测量" —— 第三种形态')
   assert.notDeepEqual(shapeOf(skipped), shapeOf(passed), '★ 全跳过与都通过必须不同形，否则人只能看见"通过"')
   assert.equal(skipped.evaluated, 0, '★ 必须能读出"一条都没跑"')
   assert.equal(skipped.skipped, 3)
@@ -578,7 +591,8 @@ test('⑰ 臂 8 ★ "开火了但被放过" 与 "根本没跑" 必须不同形',
   const skipped = await skippedR.evaluate('completion', {})
 
   assert.equal(fired.ok, true)
-  assert.equal(skipped.ok, true)
+  /** ★★★ t69：同一条夹具过期（t58 有意改了口径）。 */
+  assert.equal(skipped.ok, false, '★ t58 之后：全跳过 ⇒ ok:false')
   assert.deepEqual(
     [fired.ran[0].verdict, fired.ran[0].observed, fired.observedBlockers, fired.skipped],
     ['blocked', true, 1, 0],

@@ -327,10 +327,35 @@ test('⑨ appliesTo：只有【表说它要 r5】且声明了新增测试的任�
     appliesTo({ ...base, task: { kind: 'repair' } }), false,
     '★ t54：repair **不要求** r5 —— 它要的是既有夹具能判别（t31）',
   )
-  // ★ 别的类别本就不该填 newTestFiles；对它们做核对会把"本就不该填"误判成"漏报"
-  for (const kind of ['work', 'review', 'requirements', 'verification', 'integration']) {
+  /**
+   * ── ★★★ t69：这一行此前把 `verification` 也列进"不该被 R5 管" ─────────────────
+   *
+   * MEASURED（t69）：`src/gates/completion/kind-requirements.json` 里
+   * `verification` 的 `requiredGates` 是 **`['completion.r5']`** —— 也就是说
+   * **表说它要 R5**，而这条断言说它不该被管。两者**直接冲突**。
+   *
+   * ★★ 而更值得记的是：**那张表与它自己的 `because` 也冲突**（逐字引用）：
+   *
+   *     "a verification task adds no behaviour, so there is nothing new for r5/mutation
+   *      to discriminate … **Not required: r5** (no new behaviour to pin), mutation …"
+   *
+   * ⇒ 数据（`requiredGates`）说"要 r5"，同一行的理由（`because`）说"不要 r5"。
+   *   **两者必有一个错**，而"哪个错"需要人裁 —— 我不猜。
+   *
+   * ★ 所以本行的立场是：**如实对齐当前的数据**（门读的是数据，不是 `because`），
+   *   并把那个冲突写在这里与 `docs/BASELINE-RED.md` 里。
+   *   ★ 而 `src/gates/completion/` **不在本任务的写域里** ⇒ 我**不能**去改那张表，
+   *     也不该把这条断言改成"两边都行"（那会让冲突**消失**，而本队的纪律是：
+   *     把缺陷写成不变量、与把它删掉，都不是修好它）。
+   */
+  for (const kind of ['work', 'review', 'requirements', 'integration']) {
     assert.equal(appliesTo({ ...base, task: { kind } }), false, `${kind} 不该被 R5 管`)
   }
+  assert.equal(
+    appliesTo({ ...base, task: { kind: 'verification' } }), true,
+    '★ 对齐**当前的表**：verification 的 requiredGates 含 completion.r5 ⇒ 它被管。'
+    + '★ 而那张表的 because 说"Not required: r5" —— 两者冲突，见 docs/BASELINE-RED.md',
+  )
   // 没声明新测试 ⇒ 没有"新测试"这个对象
   assert.equal(appliesTo({ ...base, update: {} }), false)
   assert.equal(appliesTo({ ...base, update: undefined }), false)

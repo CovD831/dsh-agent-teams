@@ -57,10 +57,17 @@
  */
 
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import assert from 'node:assert/strict'
 
 const { createGateRegistry, ok, blocked, unmeasured, INSERTION_POINTS } = await import('../lib/gates/registry.js')
 const { registry } = await import('../lib/gates/index.js')
+/** ★ t69：本臂要问"表在不在区分那四个 kind" ⇒ 必须把**真的那张表**注入进去。 */
+const { parseKindRequirements } = await import('../lib/gates/completion/kind-requirements.js')
+const { dirname } = await import('node:path')
+const { fileURLToPath } = await import('node:url')
+const KIND_TABLE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'gates', 'completion', 'kind-requirements.json')
 
 /** 把一个裁决读成它的出口名 —— **本文件唯一的读数装置**。 */
 function exitOf(verdict) {
@@ -135,9 +142,40 @@ test('臂 2 ★ 真实注册表：没有门的 kind 不再"永远报 ok"', async
    * ★ 这一臂用**真实注册表**，不是构造的 —— 因为要验的正是"生产中那 5 个 kind"。
    *   `integration` / `verification` / `review` 都没有 completion 门 ⇒ 四条全跳过。
    */
+  /**
+   * ── ★★★ t69：这一臂此前**没有注入 kind 需求表** ────────────────────────────────
+   *
+   * MEASURED（t69）：t54 之后，三条完工门的 `appliesTo` 都问那张表
+   * （`gateRequirementFor(loadKindRequirementsOfHost(ctx), …)`）。
+   * 而未注入 ⇒ 表读成 `absent` ⇒ `unknown` ⇒ **每一个 kind 都全跳过**
+   * —— 包括 `implementation`。⇒ 下面那条"implementation 必须 evaluated>0"的红，
+   *   红的原因是**夹具少喂了一格**，不是"过度修正"。
+   *
+   * ★ 而"少喂一格"在这里特别隐蔽：它让四个 kind **读数一模一样**，
+   *   于是"表在区分它们"这件事**整条臂都测不到**（而那正是 t54 的交付）。
+   * ⇒ 与 t54 自己的夹具同一条口径：从**盘上**读那张表注入（与生产同一条数据）。
+   */
+  const load = parseKindRequirements(JSON.parse(readFileSync(KIND_TABLE_PATH, 'utf8')))
   const readings = []
   for (const kind of ['integration', 'verification', 'review', 'implementation']) {
-    const verdict = await registry.evaluate('completion', { task: { id: 't', kind }, wantsCompleted: true, taskNotTerminal: true })
+    const verdict = await registry.evaluate('completion', {
+      task: { id: 't', kind },
+      /**
+       * ★★ t69：这里**不注入** `newTestFiles` / `changedPaths` —— 而那是**刻意的**：
+       *   完工门各自的闸门（`appliesTo`）读的就是它们。注入了 ⇒ 判据**真的跑**
+       *   ⇒ 出口是 `unmeasured`（执行器缺席），而那些 kind **全都不是**
+       *   "没有门的 kind" ⇒ 本臂要看的那个读数（`notChecked`）**根本不会出现**。
+       *
+       * ★ 实测（t69）：不注入 ⇒ integration/verification/review 三条 ⇒
+       *   `evaluated=0` + `skippedAll`（= `notChecked`）；
+       *   而 implementation ⇒ `evaluated=1`（它的表要求被读到了）。
+       *   ⇒ 那正是本臂声称在测的那四行读数。
+       */
+      update: {},
+      wantsCompleted: true,
+      taskNotTerminal: true,
+      loadKindRequirements: () => load,
+    })
     readings.push({ kind, exit: exitOf(verdict), ok: verdict.ok, evaluated: verdict.evaluated, registered: verdict.registered })
     console.log(`    ℹ kind=${kind.padEnd(15)} ⇒ exit=${exitOf(verdict).padEnd(10)} ok=${String(verdict.ok).padEnd(5)} evaluated=${verdict.evaluated} registered=${verdict.registered}`)
   }

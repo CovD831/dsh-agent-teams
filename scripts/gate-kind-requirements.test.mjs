@@ -263,17 +263,34 @@ test('★★★ 臂 4（★ 改表立刻生效）：把某条门加进某个 kin
   const load = realTable()
   const kind = 'verification'
 
-  /** ★ 反向半边（先做）：原表下 `verification` **不要求** r5。 */
+  /**
+   * ── ★★★ t69：这一条"反向半边"的前提**已经过期** ──────────────────────────────
+   *
+   * 它原先断言：原表下 `verification` **不要求** r5（于是"加进去 ⇒ 变了"才来自表）。
+   *
+   * MEASURED（t69）：当前那张表里 `verification.requiredGates` 是
+   * **`['completion.r5']`** ⇒ 它**本来就要求** r5 ⇒ 基线不再是 false。
+   * ★ 而这条断言的前提一假，"加进去 ⇒ 变了"就不再证明**表**在起作用
+   *   （它可能只是恒真）—— 也就是这条臂的**分辨力**没了。
+   *
+   * ★★ 所以修法不是把期望值翻过来（那会让臂恒真：加不加都是 true）——
+   *   而是**换一个原表下确实【不要求】r5 的 kind** 来当反向半边。
+   *   实测：`integration` 的要求是 `['completion.backtest']` ⇒ **不含 r5** ⇒ 它是合格的反向半边。
+   *   ⇒ 下面"加进去"那一步随之改成动 `integration`。
+   *
+   * ★ 而 `verification` 那个**数据与自述冲突**的事实另记一处（见 docs/BASELINE-RED.md）。
+   */
+  const reverseKind = 'integration'
   assert.equal(
-    r5AppliesTo(ctxFor(kind, load)), false,
-    '★ 原表下 verification 不要求 r5 ⇒ 下面那条"变了"必须来自表，不是来自恒真',
+    r5AppliesTo(ctxFor(reverseKind, load)), false,
+    '★ 原表下 integration 不要求 r5（它的要求只有 backtest）⇒ 下面那条"变了"必须来自表，不是来自恒真',
   )
 
   /** ★ 而把 r5 加进 `verification` 的要求里 ⇒ 同一段代码立刻改变行为。 */
   const mutated = parseKindRequirements({
     kinds: [...load.requirements.knownKinds].map((k) => ({
       kind: k,
-      requiredGates: k === kind
+      requiredGates: k === reverseKind
         ? [...load.requirements.byKind.get(k)?.requiredGates, 'completion.r5']
         : [...load.requirements.byKind.get(k)?.requiredGates],
       because: load.requirements.byKind.get(k)?.because,
@@ -281,8 +298,8 @@ test('★★★ 臂 4（★ 改表立刻生效）：把某条门加进某个 kin
   })
   assert.equal(mutated.status, 'loaded')
   assert.equal(
-    r5AppliesTo(ctxFor(kind, mutated)), true,
-    '★ 把 r5 加进表里 ⇒ 同一条门**立刻**对 verification 生效（★ 全程未改任何 .ts）',
+    r5AppliesTo(ctxFor(reverseKind, mutated)), true,
+    `★ 把 r5 加进表里 ⇒ 同一条门**立刻**对 ${reverseKind} 生效（★ 全程未改任何 .ts）`,
   )
   /** ★ 而它**没有**波及其它 kind（证明我们改的是那一行，不是整张表）。 */
   assert.equal(
