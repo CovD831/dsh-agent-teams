@@ -144,6 +144,19 @@ const SUBJECTS = [
      */
     executorGaps: ['baseline', 'coverage', 'execBacktestCommand'],
     satisfying: {
+      /**
+       * ── ★★ t48：这一格此前**没有 kind** —— 而那正是缺陷的形状 ───────────────────
+       *
+       * MEASURED：`backtest.appliesTo` 当时没有 kind 守卫，于是"只喂 changedPaths"
+       * 就能让它生效。⇒ 本夹具的 satisfying ctx **照着那个实现写**，
+       * 于是一份"完整 ctx"其实缺了契约真正要求的那一格。
+       *
+       * ★ 加了 kind 守卫之后，少了它会让本判据落进 `appliesTo === false`（skipped），
+       *   而本文件把它读成"完整 ctx 上必须 ok，实际 skipped" ⇒ **臂 A 红**。
+       *   ★ 而那次红是**对的**：它说明"这份完整 ctx 其实不完整"。
+       *   ★ 形态：**夹具可以为缺陷背书** —— 只要它照着实现写，而不是照着契约写。
+       */
+      task: { id: 't4', kind: 'implementation' },
       changedPaths: ['src/a.ts'],
       baseline: { exitCode: 0, label: 'HEAD' },
       coverage: {

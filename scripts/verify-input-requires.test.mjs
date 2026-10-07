@@ -53,12 +53,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
-import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -101,11 +99,17 @@ function pluginFixture(workspace) {
   const runtime = registerAgentTeamsTools(ctx, {
     stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined,
   })
-  const call = async (name, args, agentId) => {
+  const call = async (name, args, agentId, callEvents = []) => {
     const tool = tools.get(name)
     if (tool === undefined) throw new Error(`tool "${name}" was not registered`)
+    /**
+     * ★ t48：`call` 可以额外接收 `events` —— 本文件 arm 5 需要一个**真的走得到
+     *   completion 位置**的调用，而 `dispatch.changed-paths` 要求申报的改动
+     *   有**观察面**（磁盘上真的变了，或会话事件里真的写了）。
+     *   ⇒ 那正是本队那条纪律：**申报的改动要有真实痕迹**。
+     */
     return await tool.execute(args, {
-      agent: { id: agentId ?? 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} },
+      agent: { id: agentId ?? 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: callEvents }, steer() {} },
       signal: new AbortController().signal,
     })
   }
@@ -767,7 +771,7 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
  *   而虚高的读数会让真正漏接的那一处藏起来。
  */
 function sourceWiredPoints() {
-  const code = toolsSource()
+  const code = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
   return [...new Set([...code.matchAll(/inputSurfaceOf\('(\w+)'/g)].map((match) => match[1]))].sort()
@@ -795,6 +799,43 @@ test('★ 臂 5（④）：核对报缺时流程【照常走完】—— 五个�
    *   只断言 (b) ⇒ 一个从不报缺的实现也能过。
    */
   const outcomes = []
+
+  /**
+   * ── ★★ t48：本臂的"缺格"读数此前**完全来自 backtest 的缺陷** ────────────────────
+   *
+   * MEASURED（逐格核对过）：修之前那条缺格是
+   *
+   *     update_task for task "t1" reached completion with an unfinished input surface:
+   *       [completion.backtest] declares 6 ctx path(s) …: baseline, coverage, …
+   *
+   * ★ 而那次调用是 `status: 'in_progress'` + `kind: 'work'`
+   *   ⇒ `wantsCompleted` 为假、kind 也不是写域类
+   *   ⇒ **completion 位置的判据按契约一条都不该跑**（开工/中途更新不该被审判）。
+   *   ★ 而 backtest 当时没有 kind 守卫、**也**不看 `wantsCompleted`
+   *     ⇒ 它是唯一一个在那次调用上仍然跑起来的判据。
+   *   ⇒ **那条读数是一个不该跑的判据跑出来的。**
+   *
+   * ⇒ 修了守卫之后它合理地不报 ⇒ 本臂失去场景。
+   * ★ 而本臂要测的东西（"核对报缺时流程照常走完"）**没变** ——
+   *   只是缺格来源换成**诚实**的那一个：一次 `kind=work` 的建任务，
+   *   它**不带 verify** ⇒ `contract.verify-command` 真的缺它要的执行器输入。
+   *   （implementation 类会因为"require a non-empty verify list"被提前拒，
+   *    所以用 work 类 —— 那也是本文件 arm 4b 用的同一个形状。）
+   */
+  const gapFixture = await fixtureWith({ tasks: [{ ...TASK, kind: 'implementation' }], members: [MEMBER] })
+  /**
+   * ★ 让这次调用**真的走得到 completion 位置**：申报的改动要有观察面 ——
+   *   这里两种都给它（磁盘 + 会话事件），因为它本来就该有真实的痕迹。
+   */
+  const gapPath = join(gapFixture.workspace, 'src', 'a.ts')
+  mkdirSync(dirname(gapPath), { recursive: true })
+  writeFileSync(gapPath, 'export const a = 1\n')
+  const gapRead = await gapFixture.capture(() => gapFixture.call('agent_teams_update_task', {
+    task_id: 't1', status: 'completed', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
+  }, 'member-1', [
+    { type: 'tool/result', meta: { diffs: [{ path: 'src/a.ts', oldText: null, newText: 'x' }] } },
+  ]).then((value) => ({ value }), (error) => ({ error })))
+  outcomes.push(['completion-completing', gapRead.warnings])
 
   // ── contract：一次真实的建任务（implementation，带齐 verify / acceptance）
   const contractFixture = await fixtureWith({})
@@ -1208,8 +1249,8 @@ test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 in
     changedPaths: ['src/a.ts'],
   }
   const bare = (await build().evaluate('completion', bareContext)).requires
-  assert.equal(bare.skipped, 3, `★ kind=work 且 task.verify 缺席 ⇒ 三条跳过（实际 ${bare.skipped}）`)
-  assert.equal(bare.notApplicable, 2, `★ 其中两条是"按设计闭嘴"（r5 / mutation，实际 ${bare.notApplicable}）`)
+  assert.equal(bare.skipped, 4, `★ kind=work 且 task.verify 缺席 ⇒ 四条跳过（含 backtest，t48）（实际 ${bare.skipped}）`)
+  assert.equal(bare.notApplicable, 3, `★ 其中三条是"按设计闭嘴"（r5 / mutation / backtest，实际 ${bare.notApplicable}）`)
   assert.equal(bare.inputSurfaceAbsent, 1, `★ 一条是"闸门格没接"（verify-rerun 的 task.verify，实际 ${bare.inputSurfaceAbsent}）`)
   /**
    * ★ 而 `backtest` **不在这两条里**：它的闸门是 `changedPaths`（与 kind 无关），
@@ -1218,12 +1259,12 @@ test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 in
    */
   assert.equal(
     bare.checks.filter((check) => check.skipReason === 'not-applicable').map((check) => check.id).sort().join(','),
-    'completion.mutation,completion.r5',
+    'completion.backtest,completion.mutation,completion.r5',
     '★ "按设计闭嘴"的只能是被 task.kind 挡下的那两条 —— backtest 与 verify-rerun 的闸门与 kind 无关',
   )
   assert.equal(
-    bare.checks.find((check) => check.id === 'completion.backtest').status, 'incomplete',
-    '★ 前置：backtest 在这份 ctx 上**是适用的**（changedPaths 非空）⇒ 它不可能被算进 skipped',
+    bare.checks.find((check) => check.id === 'completion.backtest').status, 'skipped',
+    '★ t48：`kind=work` 上 backtest **按设计闭嘴** —— 它在这里曾走 `incomplete`，那正是缺陷的读数',
   )
 
   /**
@@ -1265,11 +1306,11 @@ test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 in
    *   `r5` / `mutation` 才是被 `task.kind` 挡下的那两条。
    */
   assert.equal(
-    work.notApplicable, 2,
+    work.notApplicable, 3,
     `★ 补饱其余闸门格之后，"按设计闭嘴"的只剩 r5 与 mutation 两条（它们的 appliesTo 以 task.kind 起头）；`
     + `verify-rerun 不在其中 —— 它的门槛是 task.verify（已补上）。实际 notApplicable=${work.notApplicable}`,
   )
-  assert.equal(work.skipped, 2, `★ 相应地，跳过的只有那两条（实际 ${work.skipped}）`)
+  assert.equal(work.skipped, 3, `★ 相应地，跳过的是那三条（实际 ${work.skipped}）`)
   assert.equal(
     work.inputSurfaceAbsent, 0,
     `★ 一个都不许是"闸门格没接"（实际 ${work.inputSurfaceAbsent}）—— 这一半与 shape-dev 的口径一致`,
@@ -1282,7 +1323,7 @@ test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 in
    */
   const quiet = work.checks.filter((check) => check.skipReason === 'not-applicable').map((check) => check.id)
   assert.deepEqual(
-    quiet.sort(), ['completion.mutation', 'completion.r5'],
+    quiet.sort(), ['completion.backtest', 'completion.mutation', 'completion.r5'],
     `★ "不适用不报"的那两条要指名：实际 ${JSON.stringify(quiet)}`,
   )
   for (const check of work.checks.filter((entry) => entry.skipReason === 'not-applicable')) {
@@ -1308,14 +1349,14 @@ test('★ 臂 8（⑥）：kind=work 的成因分流 —— notApplicable 与 in
   const gateCellMissing = { ...workContext }
   delete gateCellMissing.wantsCompleted
   const absent = (await build().evaluate('completion', gateCellMissing)).requires
-  assert.equal(absent.skipped, 3, `★ 跳过数从 2 变 3 —— r5 从"按设计闭嘴"翻成了"闸门格没接"（实际 ${absent.skipped}）`)
-  assert.equal(absent.notApplicable, 2, `★ 而 notApplicable 仍是 2（r5 已经不在这一格里了，实际 ${absent.notApplicable}）`)
+  assert.equal(absent.skipped, 4, `★ 跳过数从 3 变 4 —— r5 从"按设计闭嘴"翻成了"闸门格没接"（实际 ${absent.skipped}）`)
+  assert.equal(absent.notApplicable, 3, `★ 而 notApplicable 仍是 3（r5 已经不在这一格里了，实际 ${absent.notApplicable}）`)
   assert.equal(
     absent.inputSurfaceAbsent, 1,
     `★ 恰好一条是"闸门格没接" —— 这就是那次缺口的读数（实际 ${absent.inputSurfaceAbsent}）。`
     + '若这里是 0，说明"闸门格没接线"与"这一轮本来不该跑"又同形了（t11 的缺口回来了）',
   )
-  assert.equal(absent.incomplete, 1, '★ `incomplete` 与第一轮**相同**（1 条）—— 两件事分开数，不许互相污染')
+  assert.equal(absent.incomplete, 0, '★ t48：`incomplete` 1 → 0（那条是 backtest，它现在按契约闭嘴）；inputSurfaceAbsent 仍是 1 ⇒ 两件事仍分开数')
   assert.equal(
     work.incomplete, absent.incomplete,
     '★ "闸门格没接"【不是】接线缺陷：它不进 incomplete。这一对相等正是"守住不适用不报"的证据',
@@ -1657,6 +1698,8 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
 
   /** 形态 A：`baseline` 与 `coverage` 都缺席（真实的 update_task 上就是这个形状）。 */
   const withoutBoth = {
+    /** ★ t48：闸门是**两个条件**（写域类 kind + changedPaths），缺了 kind 它正确地不适用。 */
+    task: { id: 't1', kind: 'implementation' },
     baseline: undefined,
     coverage: undefined,
     changedPaths: ['src/a.ts'],
@@ -1730,7 +1773,7 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
    *   不是接线事故。⇒ 这正是"它报的不是误报"的另一半证据：
    *   缺的是**条件格**，而判据把条件格缺席读成 `unmeasured`（设计如此）。
    */
-  const source = toolsSource()
+  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
   /**
    * ★ 逐格对拍（本臂第一版把 `coverage` 的名字写死了，实测打回）：
    *   `baseline` 的条件注入写的是 `...baseline === undefined ? {} : { baseline }`，
@@ -1830,7 +1873,7 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
     registrySource, /checkRequires\(reg, context/,
     '★ 注册表求值时用的 ctx 必须与核对用的是同一个 `context` 形参 —— 一份 ctx 只读一次',
   )
-  const toolsCodeText = toolsSource()
+  const toolsSource = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
   /**
    * ── ★ 五处调用点：**核对与求值必须读同一份 ctx 表达式** ────────────────────────
    *
@@ -1845,10 +1888,10 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
    *   ★ 而"剥注释"这件事本身由下面那条**注释样本**断言钉住 —— 一个连注释
    *     都数进去的读数会让真正漏接的那一处藏起来（虚高的读数与"没测到"同形）。
    */
-  const codeLines = toolsCodeText.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+  const codeLines = toolsSource.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
   const code = codeLines.join('\n')
   assert.ok(
-    toolsCodeText.includes("registry.evaluate('completion', …)"),
+    toolsSource.includes("registry.evaluate('completion', …)"),
     '★ 前置：源里确实有"注释里提到求值调用"的样本 —— 没有它，本臂的"剥注释"就是一句空话'
   )
 

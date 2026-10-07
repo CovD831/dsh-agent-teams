@@ -40,8 +40,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gate, appliesTo, id, point } from '../lib/gates/completion/backtest.js'
-// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
-import { toolsSource } from './tools-source.mjs'
 
 /** 收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形。 */
 function expectBlocked(v) {
@@ -377,17 +375,46 @@ test('★ 接线臂：判据已接进注册表，且 id / point / description / 
 test('★ 接线臂：三条 completion 判据能同一次求值一起跑，且本判据的产出真被收走', async () => {
   const { buildRegistry } = await import('../lib/gates/index.js')
   const registry = buildRegistry()
-  const evaluation = await registry.evaluate('completion', ctx({ task: { id: 'x', verify: undefined } }))
+  /**
+   * ★ t48：`task` 整格被覆盖时必须**带上 kind** —— 否则 `appliesTo` 的 kind 守卫
+   *   会让本判据沉默，而"沉默"在这里会让下面那条断言红得莫名其妙
+   *   （它会读成"接线坏了"，其实是"这个 ctx 少了契约要求的字段"）。
+   */
+  const evaluation = await registry.evaluate('completion', ctx({ task: { id: 'x', kind: 'implementation', verify: undefined } }))
   const ran = Object.fromEntries(evaluation.ran.map((entry) => [entry.id, entry.verdict]))
   assert.equal(ran['completion.backtest'], 'ok', '★ 真实注册表跑出来的裁决，不是直接调 gate()')
   assert.ok(evaluation.outputs['completion.backtest'], '★ 通过时交出的三段结果必须被注册表收走（否则落盘的是成员自述）')
   assert.equal(evaluation.outputs['completion.backtest'].full.exitCode, 0)
 })
 
-test('⑩ appliesTo：只有声明了改动文件的任务才生效', () => {
-  assert.equal(appliesTo({ changedPaths: ['src/a.ts'] }), true)
-  assert.equal(appliesTo({ update: { changedPaths: ['src/a.ts'] } }), true)
-  assert.equal(appliesTo({ changedPaths: [] }), false, '★ 空的改动集不是"改动集"')
+test('⑩ appliesTo：只有【声明了改动文件的实现/修复】任务才生效', () => {
+  /**
+   * ── ★★ t48：本臂此前只喂 `changedPaths`，而**这正是缺陷的形状** ────────────────
+   *
+   * MEASURED：`backtest.appliesTo` 当时**没有 kind 守卫**，而它自己的文档注释
+   * 逐字写着「只对【声明了改动文件】的【实现/修复】任务生效」。
+   * ★ 而本臂（以及下面那条接线臂）当时用**不含 kind 的 ctx** 断言 `true` ——
+   *   ⇒ 它们把那个缺陷**当成了正确行为**并钉住了它。
+   *   ★ 形态：**夹具可以为缺陷背书** —— 只要它照着实现写，而不是照着注释写。
+   */
+  const impl = { task: { kind: 'implementation' }, changedPaths: ['src/a.ts'] }
+  const repair = { task: { kind: 'repair' }, update: { changedPaths: ['src/a.ts'] } }
+  assert.equal(appliesTo(impl), true)
+  assert.equal(appliesTo(repair), true)
+  assert.equal(appliesTo({ task: { kind: 'implementation' }, changedPaths: [] }), false, '★ 空的改动集不是"改动集"')
+
+  /**
+   * ★ 三格守卫各自的半边（缺一即无法分辨）：
+   *   · 非写域 kind ⇒ 不生效（**t48 修的那一格**）
+   *   · kind 缺席（= work）⇒ 不生效
+   *   · 没有 task 整格 ⇒ 不生效
+   */
+  assert.equal(
+    appliesTo({ task: { kind: 'integration' }, update: { changedPaths: ['src/a.ts'] } }), false,
+    '★ 非写域类 kind 不生效 —— 它们的契约不要求 changedPaths，被审判就是恒交不出终态',
+  )
+  assert.equal(appliesTo({ task: {}, changedPaths: ['src/a.ts'] }), false, '★ kind 缺席 = work')
+  assert.equal(appliesTo({ changedPaths: ['src/a.ts'] }), false, '★ 没有 task ⇒ 不生效')
   assert.equal(appliesTo({}), false)
   assert.equal(appliesTo(undefined), false)
 })
@@ -528,7 +555,7 @@ test('★ t18 臂 3（★ 落盘臂）：父版本必须【落进耐久态】，
   const { readFileSync } = await import('node:fs')
   const { join, dirname } = await import('node:path')
   const { fileURLToPath } = await import('node:url')
-  const source = toolsSource()
+  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'tools.ts'), 'utf8')
 
   assert.match(
     source, /persistTaskBaseRevision/,
