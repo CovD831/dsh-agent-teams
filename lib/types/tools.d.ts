@@ -11,7 +11,16 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { AgentTeamsRuntime, ToolsConfig } from './tools/shared/entities.ts';
-export { RESTART_ESCAPE_HATCH_ENV, applyQualityFollowUp, arbitrateRestart, arbitrateRestartWithEscape, moduleFreshness, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
+export { RESTART_ESCAPE_HATCH_ENV, applyQualityFollowUp, arbitrateRestart, arbitrateRestartWithEscape, moduleFreshness, 
+/**
+ * ★★ f-0026：新增的出口 —— 它们把"提交维"变成**可测的**：
+ *   · `moduleFreshnessFrom` ⇒ 全部输入注入（纯数据变换，夹具能精确驱动两个时机）
+ *   · `stampCommitOf`       ⇒ 「构建时的提交」这一格可被单独核对
+ *   · `currentHead`         ⇒ 「当前 HEAD」可被单独核对
+ * ★ 不导出它们，修法就只能靠"读 live 读数"去测 —— 而那正是 f-0027 记的
+ *   「读错位置的出口」（命令行进程那次加载必然报 current，测不到任何东西）。
+ */
+moduleFreshnessFrom, stampCommitOf, currentHead, readStamp, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
 export type { AgentTeamsRuntime, BaseRevisionResolution, ModuleFreshness, RestartArbitration, StagedPlanMutation, ToolsConfig, } from './tools/shared/entities.ts';
 export { steerCaptainReport } from './members.ts';
 /**

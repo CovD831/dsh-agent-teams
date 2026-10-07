@@ -179,12 +179,24 @@ test('★ 臂 4（边界臂）：stamp 一致**不等于**每一段都新 ——
   /**
    * ★ 而这一格确实**测不了**：stamp 一致时，本读数**无法**回答段落级的真假。
    *   可执行形式：一致 ⇒ `current`，而 `current` 这个取值**不携带**任何段落信息。
+   *
+   * ★★ t42 修正：这一格原先把**当时的字段清单**写成了不变量
+   *   （`deepEqual(keys, ['loaded','onDisk','status'])`）。
+   *   f-0026 给 `current` 补了 `commit` / `head` 之后它变红 —— 而那**不是**回归：
+   *   它断言的是"字段集不许变"，而它该断言的是"**不许有段落级的字段**"。
+   *   ⇒ 这正是本队记账的「夹具不得把当前形状写成不变量」。
+   *     改成按**性质**断言：没有任何键声称"哪一段是新的/旧的"。
    */
   const freshness = moduleFreshness()
-  assert.deepEqual(
-    Object.keys(freshness).sort(), ['loaded', 'onDisk', 'status'],
-    '★ `current` 只携带"两个指纹相同"这一个事实 —— 它没有、也不该有段落级的字段',
-  )
+  const keys = Object.keys(freshness).sort()
+  for (const key of keys) {
+    assert.doesNotMatch(
+      key, /(section|module|segment|part)/i,
+      `★ \`current\` 不许携带段落级字段（它做不到那一格）。实测字段：${JSON.stringify(keys)}`,
+    )
+  }
+  /** ★ 而它必须携带"两个指纹相同"这一个事实 —— 那才是它声称的东西。 */
+  assert.ok(keys.includes('loaded') && keys.includes('onDisk'), `★ 实测字段：${JSON.stringify(keys)}`)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -572,4 +584,312 @@ test('★ 臂 11（先软后硬）：那一行**不参与裁决** —— 去掉�
    */
   assert.equal(error instanceof Error, true, '★ 仍是 Error（`instanceof` 语义不变）')
   assert.match(message, /\[deployment\] /, '★ 前置：那一行确实在（否则上面那条"去掉之后"没有对象）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t42 / f-0026：stamp 缺【构建时的 git 提交】⇒ 检测器答不出「进程落后于当前提交吗」
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★ 这一节修的是什么（MEASURED，point-dev 发现、captain 核实）─────────────────
+ *
+ * 上面那八条臂比的是【进程启动时读到的 output】vs【此刻盘上的 output】。
+ * ⇒ 它只回答一个问题：
+ *
+ *      「盘上自本进程启动以来，有没有被 rebuild 过？」
+ *
+ * 而它**不**回答另一个问题：
+ *
+ *      「本进程加载的是哪个 commit 的代码？」
+ *
+ * ★ 缺口在哪：若进程启动【之前】盘上就已经是当前这一版，则两个 output 相等
+ *   ⇒ 恒报 `current`。**而那时进程里的代码仍可能是更早 commit 的。**
+ *   ⇒ 那不是"没测到"伪装成"通过"，是**另一个问题被当成了这个问题的答案**
+ *     （本队记账：守卫检查了另一个同名的东西）。
+ *
+ * ── 为什么 output 比对【补不上】这一格 ─────────────────────────────────────────
+ *
+ *   output = 内容摘要。两个人改动**互相抵消**（或一次 amend / rebase / revert）
+ *   可以让内容回到同一个摘要，而 commit 已经不同。
+ *   ★ 反之亦然：改一行注释 ⇒ output 变、而"代码是否落后"这件事与它无关。
+ *   ⇒ 两者测的**不是同一件事**，所以两个都要，且各自可读（本任务的硬要求）。
+ *
+ * ── ★ 取值时机（f-0025「按取值时机区分」）───────────────────────────────────────
+ *
+ *   「构建时的提交」  —— 常量，写进 stamp，随 stamp 变 ⇒ 加载时读一次即可
+ *   「当前 HEAD」     —— **每次调用都可能变**的量 ⇒ 必须在**调用时**读
+ *   ★ 把后者也做成"加载时读一次"，会让它退化成与 output 同一个问句。
+ */
+
+import { execFileSync as execFileSyncT42 } from 'node:child_process'
+import { mkdtempSync as mkdtempT42, writeFileSync as writeFileT42, readFileSync as readFileT42 } from 'node:fs'
+
+const gitT42 = (cwd, args) => execFileSyncT42('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+/** 造一个真仓库，返回 { root, commit(msg) => sha }。 */
+function gitRepo() {
+  const root = mkdtempT42(join(tmpdir(), 'f0026-'))
+  gitT42(root, ['init', '-q', '.'])
+  gitT42(root, ['config', 'user.email', 't@t'])
+  gitT42(root, ['config', 'user.name', 't'])
+  writeFileT42(join(root, 'a.txt'), 'a\n')
+  gitT42(root, ['add', '-A'])
+  gitT42(root, ['commit', '-qm', 'one'])
+  return {
+    root,
+    head: () => gitT42(root, ['rev-parse', 'HEAD']).trim(),
+    commit: (msg) => {
+      writeFileT42(join(root, 'a.txt'), `${msg}\n`)
+      gitT42(root, ['add', '-A'])
+      gitT42(root, ['commit', '-qm', msg])
+      return gitT42(root, ['rev-parse', 'HEAD']).trim()
+    },
+  }
+}
+
+test('★ 臂 9（f-0026 核心）：stamp 没变、而 HEAD 前进了一个提交 ⇒ 必须报 stale', async () => {
+  /**
+   * ── 这是本任务存在的理由的**可执行形式** ────────────────────────────────────────
+   *
+   * 构造：进程"加载"时 stamp 的 output 是 X（构建于 commit A）；
+   *       之后仓库前进到 commit B，而 **stamp 的 output 一个字没变**
+   *       （现实中：有人改了 src 又改回来、amend、或只因别的原因动了历史）。
+   * ⇒ 此刻两个 output 相等（旧检测器会说 current），而 HEAD ≠ stamp 的提交。
+   * ⇒ 检测器**必须**报 stale，并指明它落后于哪个提交。
+   *
+   * ★ 这一臂在旧实现上**必然红** —— 因为旧实现根本读不到"构建时的提交"这一格。
+   */
+  const { moduleFreshnessFrom, stampCommitOf } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const builtAt = repo.head()
+  // stamp 声称：output 摘要 X，构建于 commit A。
+  const stamp = { schema: 1, source: 'src-digest', output: 'output-digest', commit: builtAt }
+  // 仓库前进到 B，而 stamp 的 output **没有变**。
+  const advanced = repo.commit('two')
+  assert.notEqual(advanced, builtAt, '前置：仓库确实前进了一个提交')
+
+  const freshness = moduleFreshnessFrom({
+    loaded: stamp,
+    onDisk: { ...stamp },
+    head: advanced,
+  })
+  assert.equal(
+    freshness.status, 'stale',
+    `★ stamp 的 output 没变、而 HEAD 已前进 ⇒ 必须报 stale（旧实现会报 current）。实测：${JSON.stringify(freshness)}`,
+  )
+  assert.match(
+    moduleFreshnessMessage(freshness), /reload/i,
+    `★ 必须给出动作。实测：${moduleFreshnessMessage(freshness)}`,
+  )
+  /** ★ 而它必须**指明落后于哪个提交** —— 只说"旧了"仍然要人去猜从哪旧起。 */
+  assert.ok(
+    typeof freshness.behind === 'string' && freshness.behind.length > 0,
+    `★ 必须交出错过的那个提交。实测：${JSON.stringify(freshness)}`,
+  )
+  assert.equal(stampCommitOf(stamp), builtAt, '★ 而「构建时的提交」这一格必须真的来自 stamp')
+})
+
+test('★ 臂 10（对照臂）：HEAD 与构建提交一致 ⇒ current（两个问题都要能答）', async () => {
+  const { moduleFreshnessFrom } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const at = repo.head()
+  const stamp = { schema: 1, source: 's', output: 'o', commit: at }
+  const freshness = moduleFreshnessFrom({ loaded: stamp, onDisk: { ...stamp }, head: at })
+  assert.equal(freshness.status, 'current', `实测：${JSON.stringify(freshness)}`)
+  /** ★ 而 current 时也要交出两个指纹与提交 —— 让人能核对。 */
+  assert.equal(freshness.loaded, 'o')
+  assert.equal(freshness.onDisk, 'o')
+})
+
+test('★ 臂 11（★ 三维齐全臂）：两个问题**各自可读**，不许合成一个布尔', async () => {
+  const { moduleFreshnessFrom } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const builtAt = repo.head()
+  const laterCommit = repo.commit('two')
+
+  /**
+   * ★ 四格：{output 变没变} × {提交落后没落后}。
+   *   旧实现只读得出前者；新实现两个都要读得出，且**分别**读得出。
+   *   ⇒ 合成一个布尔会让"盘上被 rebuild 了但代码更旧"这种组合消失。
+   */
+  const cases = [
+    { name: 'output 同 + 提交同', loaded: { s: 1, output: 'o', commit: builtAt }, onDisk: { s: 1, output: 'o', commit: builtAt }, head: builtAt, expect: 'current' },
+    { name: 'output 同 + 提交落后', loaded: { s: 1, output: 'o', commit: builtAt }, onDisk: { s: 1, output: 'o', commit: builtAt }, head: laterCommit, expect: 'stale' },
+    { name: 'output 异 + 提交同', loaded: { s: 1, output: 'o', commit: builtAt }, onDisk: { s: 1, output: 'o2', commit: builtAt }, head: builtAt, expect: 'stale' },
+    { name: 'output 异 + 提交落后', loaded: { s: 1, output: 'o', commit: builtAt }, onDisk: { s: 1, output: 'o2', commit: builtAt }, head: laterCommit, expect: 'stale' },
+  ]
+  for (const item of cases) {
+    const freshness = moduleFreshnessFrom({ loaded: item.loaded, onDisk: item.onDisk, head: item.head })
+    assert.equal(freshness.status, item.expect, `case「${item.name}」实测：${JSON.stringify(freshness)}`)
+  }
+})
+
+test('★ 臂 12（★★ 三态臂）：读不到提交 ⇒ unknown，且与 current 不同形', async () => {
+  const { moduleFreshnessFrom, moduleFreshnessMessage: msgOf } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const at = repo.head()
+
+  /**
+   * ★ 两种"读不到"必须都落 unknown，且**二者互不同形**（本队记账：三态不同形）：
+   *     ① stamp 里没有 commit 这一格（旧 stamp / 手写的 stamp）
+   *     ② HEAD 读不到（不是 git 仓库、git 不可用）
+   *   ★ 而它们都**不许**被读成 current —— 那正是本任务要消灭的合流。
+   */
+  const noCommitField = moduleFreshnessFrom({ loaded: { s: 1, output: 'o' }, onDisk: { s: 1, output: 'o' }, head: at })
+  assert.equal(noCommitField.status, 'unknown', `① 实测：${JSON.stringify(noCommitField)}`)
+
+  const noHead = moduleFreshnessFrom({ loaded: { s: 1, output: 'o', commit: at }, onDisk: { s: 1, output: 'o', commit: at }, head: undefined })
+  assert.equal(noHead.status, 'unknown', `② 实测：${JSON.stringify(noHead)}`)
+
+  assert.notEqual(
+    msgOf(noCommitField), msgOf(noHead),
+    '★ 两种"读不到"必须不同形 —— 否则"stamp 没记这一格"与"这个环境没有 git"同形',
+  )
+
+  const current = moduleFreshnessFrom({ loaded: { s: 1, output: 'o', commit: at }, onDisk: { s: 1, output: 'o', commit: at }, head: at })
+  assert.equal(current.status, 'current')
+  assert.notEqual(
+    msgOf(noCommitField), msgOf(current),
+    '★★ unknown 与 current 必须不同形 —— 把"没能测量"读成"是新的"就是本任务要消灭的形态',
+  )
+  assert.doesNotMatch(msgOf(noCommitField), /holds the current build/i, '★ 不许读成"是新的"')
+})
+
+test('★ 臂 13（★ 定向突变臂）：去掉 HEAD 比对 ⇒ 臂 9 必须红', async () => {
+  const { moduleFreshnessFrom } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const builtAt = repo.head()
+  const advanced = repo.commit('two')
+
+  /**
+   * ★ 突变就是"只比 output、不比提交"（= 修法前的读法）。
+   *   ⇒ 在臂 9 那份输入上它给出 `current`，而正解是 `stale`。
+   *   本臂把这个**对照**钉住：若有人把 HEAD 比对删掉，臂 9 会红，而本臂说明为什么。
+   */
+  const legacyOnly = (input) => (input.loaded.output === input.onDisk.output
+    ? { status: 'current' }
+    : { status: 'stale' })
+  const legacy = legacyOnly({ loaded: { output: 'o' }, onDisk: { output: 'o' } })
+  assert.equal(legacy.status, 'current', '★ 只看 output 的旧读法在这里报 current —— 那正是缺陷')
+
+  const fixed = moduleFreshnessFrom({ loaded: { s: 1, output: 'o', commit: builtAt }, onDisk: { s: 1, output: 'o', commit: builtAt }, head: advanced })
+  assert.notEqual(
+    fixed.status, legacy.status,
+    '★ 修法必须改变这个答案，否则它不是一条机制',
+  )
+  assert.equal(fixed.status, 'stale')
+})
+
+test('★ 臂 14（★ 定向突变臂）：把 unknown 并入 current ⇒ 臂 12 必须红', async () => {
+  const { moduleFreshnessFrom } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const at = repo.head()
+
+  /**
+   * ★ 突变：读不到提交时**返回 current**（= 把"没能测量"并进"是新的"）。
+   *   本臂断言那个突变的形状是错的，且它与正解不同形。
+   */
+  const merged = (input) => (input.loaded.commit === input.head
+    ? { status: 'current' }
+    : { status: 'current' })  // ← 两路都 current：合流
+  const mutated = merged({ loaded: { output: 'o' }, head: undefined })
+  assert.equal(mutated.status, 'current', '★ 合流后它报 current')
+
+  const real = moduleFreshnessFrom({ loaded: { s: 1, output: 'o' }, onDisk: { s: 1, output: 'o' }, head: undefined })
+  assert.equal(real.status, 'unknown', '★ 正解必须是 unknown')
+  assert.notEqual(real.status, mutated.status, '★ 若两者相等，说明 unknown 被并进了 current —— 臂 12 会红')
+})
+
+test('★ 臂 15（★ 只读 + 取值时机臂）：当前 HEAD 必须在**调用时**读，而不是加载时读一次', async () => {
+  const { moduleFreshnessFrom } = await import('../lib/tools.js')
+  const repo = gitRepo()
+  const builtAt = repo.head()
+  const stamp = { schema: 1, source: 's', output: 'o', commit: builtAt }
+
+  /**
+   * ★ 同一个"加载时的 stamp"，配两个不同的"当前 HEAD" ⇒ 必须给出**两个不同**的读数。
+   *   若实现把 HEAD 也做成"加载时读一次"，这两次调用会给出同一个答案 —— 本臂随即红。
+   *   ★ 这就是 f-0025「按取值时机区分」的可执行形式：
+   *     「构建时的提交」是常量，「当前 HEAD」是每次调用都要重新取的量。
+   */
+  const first = moduleFreshnessFrom({ loaded: stamp, onDisk: stamp, head: builtAt })
+  const advanced = repo.commit('two')
+  const second = moduleFreshnessFrom({ loaded: stamp, onDisk: stamp, head: advanced })
+
+  assert.equal(first.status, 'current', `第一次实测：${JSON.stringify(first)}`)
+  assert.equal(second.status, 'stale', `HEAD 前进后实测：${JSON.stringify(second)}`)
+  assert.notEqual(
+    first.status, second.status,
+    '★ 同一份 stamp 配两个 HEAD 必须给出不同读数 —— 否则 HEAD 是加载时读的（取值时机错了）',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t42：出口 schema 必须接受它自己新返回的字段（t14 形态的第 10 次预防）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 16（★ schema 对齐臂）：`status` 的 deployment schema 必须声明提交维的字段', async () => {
+  /**
+   * ── ★★ 这一臂修的是什么（MEASURED，本任务开工时实测）────────────────────────
+   *
+   * `status` 的 `deployment` 是 `additionalProperties: false`，字段集是写死的。
+   * 我加完提交维之后，`status` **当场拒绝了自己**：
+   *
+   *     tool "agent_teams_status" returned invalid output:
+   *       "value.deployment.built_commit" is not a declared property
+   *       (additionalProperties: false)
+   *
+   * ⇒ `scripts/capabilities.test.mjs` 从 18/18 变 9 条红（PTC / run_code / HMR /
+   *   cold captain 等全部经 `status` 的子测试）。
+   *
+   * ★ 这是本队记账的 t14 形态（12 个工具的 output schema 不接受自己返回的新字段）
+   *   的**第 10 次**。⇒ 把"声明与产出必须对齐"钉成可执行断言，让下一次当场红。
+   *
+   * ★ 而它断言的是【性质】而不是字段清单：**产出里有的键，schema 里必须有**。
+   *   照抄一份字段名单会让这一臂在字段增减时无意义地红 —— 那是把当前形状写成不变量
+   *   （本队记账；本文件臂 4 就刚被这一条咬过一次）。
+   */
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const ws = mkdtempSync(join(tmpdir(), 'freshness-schema-'))
+  const git = (args) => execFileSync('git', args, { cwd: ws, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  writeFileSync(join(ws, 'a.ts'), 'a\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  await createTeamDir(join(ws, '.agent-teams'), { id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 0, members: [], tasks: [] })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined }, list() { return [] },
+      sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+  const statusTool = tools.get('agent_teams_status')
+  const declared = Object.keys(statusTool.output.schema.properties.deployment.properties ?? {})
+
+  const captain = { id: 'cap', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} }
+  const result = await statusTool.execute({}, { agent: captain, signal: new AbortController().signal })
+
+  /**
+   * ★ 逐键核对：产出里的每一个 `deployment` 键，都必须被 schema 声明过。
+   *   这是"schema 不接受自己返回的新字段"的**直接**可执行形式。
+   */
+  for (const key of Object.keys(result.deployment)) {
+    assert.ok(
+      declared.includes(key),
+      `★ deployment 产出了 "${key}"，而 schema 只声明了 ${JSON.stringify(declared)} —— `
+      + 'additionalProperties:false 会当场拒绝自己（t14 形态）',
+    )
+  }
+  /** ★ 而提交维的两格必须在（否则本任务的修法在出口上不可读）。 */
+  for (const key of ['built_commit', 'head']) {
+    assert.ok(declared.includes(key), `★ schema 必须声明 "${key}"。实测：${JSON.stringify(declared)}`)
+  }
 })

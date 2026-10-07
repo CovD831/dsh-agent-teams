@@ -159,26 +159,93 @@ export declare const runtimeGateLog: Array<{
     event: string;
     outcome: string;
 }>;
+/**
+ * ── ★★ f-0026：三态里【两维各自可读】，不合成一个布尔 ────────────────────────────
+ *
+ * 这两维测的**不是同一件事**（本任务硬要求：两个都要，且各自可读）：
+ *
+ *   `output` 维（t23 起）：盘上自本进程启动以来，有没有被 rebuild 过？  —— 「内容变没变」
+ *   `commit` 维（本任务）：本进程加载的是哪个 commit 的代码？            —— 「代码落后没落后」
+ *
+ * ★ 合成一个布尔会让 `{output 同, 提交落后}` 这种组合**消失** —— 而那正是
+ *   f-0026 的全部内容：进程启动前盘上就是当前版 ⇒ 旧读数恒报 current。
+ *
+ * ★ `stale` 带一个可选的 `behind` / `aheadOf`（提交），**不是**可选的措辞：
+ *   只说"旧了"仍然要人去猜从哪旧起，而那个猜测正是误诊开始的时刻。
+ */
 export type ModuleFreshness = {
     status: 'current';
     loaded: string;
     onDisk: string;
+    commit?: string;
+    head?: string;
 } | {
     status: 'stale';
     loaded: string;
     onDisk: string;
+    commit?: string;
+    head?: string;
+    behind?: string;
+    why: 'content' | 'commit' | 'both';
 } | {
     status: 'unknown';
     loaded?: string;
+    onDisk?: string;
+    commit?: string;
+    head?: string;
     reason: string;
 };
 export declare const BUILD_STAMP_FILE = "git-artifact-stamp.json";
+/** stamp 里与 git 有关的那一格。★ 缺省缺席（旧 stamp）⇒ `undefined`，不是空串。 */
+export interface BuildStamp {
+    schema?: unknown;
+    output?: unknown;
+    commit?: unknown;
+}
+export declare function readStamp(root: string): BuildStamp | undefined;
 export declare function readStampOutput(root: string): string | undefined;
-export declare function pluginRoot(): string;
-export declare let LOADED_STAMP_OUTPUT: string | undefined;
-export declare let LOADED_STAMP_READ: boolean;
-export declare function loadedStampOutput(): string | undefined;
+/**
+ * ── ★★ 「构建时的提交」从 stamp 读；「当前 HEAD」在【调用时】读 ─────────────────────
+ *
+ * ★ f-0025「按取值时机区分」的可执行形式：
+ *
+ *     「构建时的提交」 —— **常量**。它随 stamp 落盘，进程加载后不会变 ⇒ 加载时读一次即可。
+ *     「当前 HEAD」    —— **每次调用都可能变**的量 ⇒ 必须在**调用时**重新取。
+ *
+ * ★ 把后者也做成"加载时读一次"，它就退化成与 `output` 同一个问句 ——
+ *   而"答的是另一个问题"正是 f-0026 要修的那一格。
+ */
+export declare function stampCommitOf(stamp: BuildStamp | undefined): string | undefined;
+/**
+ * 读【此刻】的 HEAD。取不到 ⇒ `undefined`（**不是**空串）。
+ *
+ * ★ 三种"取不到"必须都是 `undefined`，而**成因写进 reason**（由调用方区分）：
+ *   不是 git 仓库 / git 不可用 / 仓库还没有任何提交（`HEAD` 未出生）。
+ *   ★ 而它与"读到了但内容为空"不同形 —— 后者不是一个合法 sha，也走不到这里。
+ */
+export declare function currentHead(root?: string): string | undefined;
+/**
+ * ── ★★ 新鲜度的【全部输入】都注入进来 —— 于是它可以被夹具精确驱动 ────────────────
+ *
+ * ★ 这条与 `r5` / `mutation` / `backtest` 同一纪律：判据本身是纯数据变换，
+ *   I/O 由调用方注入。★ 而它有一个额外好处：**"取值时机"可以被测**——
+ *   同一份 `loaded` 配两个不同的 `head`，必须给出两个不同的读数（臂 15）。
+ */
+export interface FreshnessInput {
+    /** 进程加载时读到的 stamp（常量，只读一次）。 */
+    loaded?: BuildStamp;
+    /** 此刻盘上的 stamp。 */
+    onDisk?: BuildStamp;
+    /** 此刻的 HEAD。★ 由调用方在**调用时**取。 */
+    head?: string;
+}
+export declare function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness;
 export declare function moduleFreshness(): ModuleFreshness;
+/** ★ 加载时读一次的整份 stamp —— 「构建时的提交」是常量，与 `output` 同一时机。 */
+export declare let LOADED_STAMP: BuildStamp | undefined;
+export declare let LOADED_STAMP_READ: boolean;
+export declare function loadedStamp(): BuildStamp | undefined;
+export declare function pluginRoot(): string;
 export declare function moduleFreshnessMessage(freshness?: ModuleFreshness): string;
 export declare function freshnessLine(): string;
 export type RestartArbitration = 

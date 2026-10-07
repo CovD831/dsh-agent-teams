@@ -12,6 +12,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { dirname, join } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
 import type { GatePoint } from '../../gates/index.ts'
@@ -596,19 +597,171 @@ export async function stopTeamMemberActivations(
 }
 export const RUNTIME_GATE_LOG_LIMIT = 50
 export const runtimeGateLog: Array<{ at: number; event: string; outcome: string }> = []
+/**
+ * ── ★★ f-0026：三态里【两维各自可读】，不合成一个布尔 ────────────────────────────
+ *
+ * 这两维测的**不是同一件事**（本任务硬要求：两个都要，且各自可读）：
+ *
+ *   `output` 维（t23 起）：盘上自本进程启动以来，有没有被 rebuild 过？  —— 「内容变没变」
+ *   `commit` 维（本任务）：本进程加载的是哪个 commit 的代码？            —— 「代码落后没落后」
+ *
+ * ★ 合成一个布尔会让 `{output 同, 提交落后}` 这种组合**消失** —— 而那正是
+ *   f-0026 的全部内容：进程启动前盘上就是当前版 ⇒ 旧读数恒报 current。
+ *
+ * ★ `stale` 带一个可选的 `behind` / `aheadOf`（提交），**不是**可选的措辞：
+ *   只说"旧了"仍然要人去猜从哪旧起，而那个猜测正是误诊开始的时刻。
+ */
 export type ModuleFreshness =
-  | { status: 'current'; loaded: string; onDisk: string }
-  | { status: 'stale'; loaded: string; onDisk: string }
-  | { status: 'unknown'; loaded?: string; reason: string }
+  | { status: 'current'; loaded: string; onDisk: string; commit?: string; head?: string }
+  | { status: 'stale'; loaded: string; onDisk: string; commit?: string; head?: string; behind?: string; why: 'content' | 'commit' | 'both' }
+  | { status: 'unknown'; loaded?: string; onDisk?: string; commit?: string; head?: string; reason: string }
 export const BUILD_STAMP_FILE = 'git-artifact-stamp.json'
-export function readStampOutput(root: string): string | undefined {
+/** stamp 里与 git 有关的那一格。★ 缺省缺席（旧 stamp）⇒ `undefined`，不是空串。 */
+export interface BuildStamp {
+  schema?: unknown
+  output?: unknown
+  commit?: unknown
+}
+export function readStamp(root: string): BuildStamp | undefined {
   try {
     const raw = readFileSync(join(root, 'lib', BUILD_STAMP_FILE), 'utf8')
-    const parsed = JSON.parse(raw) as { output?: unknown }
-    return typeof parsed.output === 'string' && parsed.output.trim() !== '' ? parsed.output : undefined
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed === null || typeof parsed !== 'object') return undefined
+    return parsed as BuildStamp
   } catch {
     return undefined
   }
+}
+export function readStampOutput(root: string): string | undefined {
+  const parsed = readStamp(root)
+  return typeof parsed?.output === 'string' && parsed.output.trim() !== '' ? parsed.output : undefined
+}
+/**
+ * ── ★★ 「构建时的提交」从 stamp 读；「当前 HEAD」在【调用时】读 ─────────────────────
+ *
+ * ★ f-0025「按取值时机区分」的可执行形式：
+ *
+ *     「构建时的提交」 —— **常量**。它随 stamp 落盘，进程加载后不会变 ⇒ 加载时读一次即可。
+ *     「当前 HEAD」    —— **每次调用都可能变**的量 ⇒ 必须在**调用时**重新取。
+ *
+ * ★ 把后者也做成"加载时读一次"，它就退化成与 `output` 同一个问句 ——
+ *   而"答的是另一个问题"正是 f-0026 要修的那一格。
+ */
+export function stampCommitOf(stamp: BuildStamp | undefined): string | undefined {
+  return typeof stamp?.commit === 'string' && /^[0-9a-f]{40}$/u.test(stamp.commit.trim())
+    ? stamp.commit.trim()
+    : undefined
+}
+/**
+ * 读【此刻】的 HEAD。取不到 ⇒ `undefined`（**不是**空串）。
+ *
+ * ★ 三种"取不到"必须都是 `undefined`，而**成因写进 reason**（由调用方区分）：
+ *   不是 git 仓库 / git 不可用 / 仓库还没有任何提交（`HEAD` 未出生）。
+ *   ★ 而它与"读到了但内容为空"不同形 —— 后者不是一个合法 sha，也走不到这里。
+ */
+export function currentHead(root: string = pluginRoot()): string | undefined {
+  try {
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    return /^[0-9a-f]{40}$/u.test(sha) ? sha : undefined
+  } catch {
+    return undefined
+  }
+}
+/**
+ * ── ★★ 新鲜度的【全部输入】都注入进来 —— 于是它可以被夹具精确驱动 ────────────────
+ *
+ * ★ 这条与 `r5` / `mutation` / `backtest` 同一纪律：判据本身是纯数据变换，
+ *   I/O 由调用方注入。★ 而它有一个额外好处：**"取值时机"可以被测**——
+ *   同一份 `loaded` 配两个不同的 `head`，必须给出两个不同的读数（臂 15）。
+ */
+export interface FreshnessInput {
+  /** 进程加载时读到的 stamp（常量，只读一次）。 */
+  loaded?: BuildStamp
+  /** 此刻盘上的 stamp。 */
+  onDisk?: BuildStamp
+  /** 此刻的 HEAD。★ 由调用方在**调用时**取。 */
+  head?: string
+}
+export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
+  const loadedOutput = typeof input.loaded?.output === 'string' && input.loaded.output.trim() !== ''
+    ? input.loaded.output
+    : undefined
+  const onDiskOutput = typeof input.onDisk?.output === 'string' && input.onDisk.output.trim() !== ''
+    ? input.onDisk.output
+    : undefined
+  const builtCommit = stampCommitOf(input.loaded)
+  const onDiskCommit = stampCommitOf(input.onDisk)
+  const head = typeof input.head === 'string' && /^[0-9a-f]{40}$/u.test(input.head) ? input.head : undefined
+
+  /**
+   * ★★ ① 「读不到」这一格的【两个成因必须不同形】（本队记账：三态不同形）。
+   *
+   *   两件事都落 `unknown`，但**措辞不同**：
+   *     · 盘上读不到 stamp（还没 build / 文件被删 / 解析失败）⇒ 整个读数无从谈起
+   *     · 读不到 HEAD（不是 git 仓库 / 没有提交）⇒ 只缺"落后没落后"这一维
+   *   ★ 把它们写成同一句，会让"stamp 没记这一格"与"这个环境没有 git"同形。
+   */
+  if (onDiskOutput === undefined) {
+    return {
+      status: 'unknown',
+      ...loadedOutput === undefined ? {} : { loaded: loadedOutput },
+      reason: `no build stamp at lib/${BUILD_STAMP_FILE} (not built, or removed)`,
+    }
+  }
+  if (loadedOutput === undefined) {
+    return {
+      status: 'unknown',
+      onDisk: onDiskOutput,
+      ...onDiskCommit === undefined ? {} : { commit: onDiskCommit },
+      reason: `the build stamp was unreadable when this process loaded (lib/${BUILD_STAMP_FILE}); the one on disk now is ${onDiskOutput.slice(0, 12)}…`,
+    }
+  }
+  /**
+   * ★ ② commit 维读不到 ⇒ **unknown，不是 current**。
+   *   这是本任务最容易做错的一格：把"没能比对提交"并进"是新的"，
+   *   就是本任务要消灭的那个合流。★ 而它**不掩盖** output 维已经测出的事实。
+   */
+  if (builtCommit === undefined || head === undefined) {
+    const which = builtCommit === undefined
+      ? `this build's stamp records no git commit, so whether the loaded code is behind HEAD could not be measured`
+      : `the current HEAD could not be read (not a git repository, or no commit yet), so whether the loaded code is behind it could not be measured`
+    return { status: 'unknown', loaded: loadedOutput, onDisk: onDiskOutput, ...head === undefined ? {} : { head }, reason: which }
+  }
+  /**
+   * ★★ ③ 两维【分别判定】，然后合成 `why` —— 而不是先合成再判定。
+   *
+   *   content 维：进程加载的 output vs 此刻盘上的 output（"盘上被 rebuild 过吗"）
+   *   commit  维：构建时的提交 vs 此刻的 HEAD（"代码落后于当前提交吗"）
+   */
+  const contentChanged = loadedOutput !== onDiskOutput
+  const commitBehind = builtCommit !== head
+  if (!contentChanged && !commitBehind) {
+    return { status: 'current', loaded: loadedOutput, onDisk: onDiskOutput, commit: builtCommit, head }
+  }
+  return {
+    status: 'stale',
+    loaded: loadedOutput,
+    onDisk: onDiskOutput,
+    commit: builtCommit,
+    head,
+    why: contentChanged && commitBehind ? 'both' : contentChanged ? 'content' : 'commit',
+    ...commitBehind ? { behind: builtCommit } : {},
+  }
+}
+export function moduleFreshness(): ModuleFreshness {
+  return moduleFreshnessFrom({ loaded: loadedStamp(), onDisk: readStamp(pluginRoot()), head: currentHead() })
+}
+/** ★ 加载时读一次的整份 stamp —— 「构建时的提交」是常量，与 `output` 同一时机。 */
+export let LOADED_STAMP: BuildStamp | undefined
+export let LOADED_STAMP_READ = false
+export function loadedStamp(): BuildStamp | undefined {
+  if (!LOADED_STAMP_READ) {
+    LOADED_STAMP = readStamp(pluginRoot())
+    LOADED_STAMP_READ = true
+  }
+  return LOADED_STAMP
 }
 export function pluginRoot(): string {
   /**
@@ -643,37 +796,25 @@ export function pluginRoot(): string {
    */
   return dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
 }
-export let LOADED_STAMP_OUTPUT: string | undefined
-export let LOADED_STAMP_READ = false
-export function loadedStampOutput(): string | undefined {
-  if (!LOADED_STAMP_READ) {
-    LOADED_STAMP_OUTPUT = readStampOutput(pluginRoot())
-    LOADED_STAMP_READ = true
-  }
-  return LOADED_STAMP_OUTPUT
-}
-export function moduleFreshness(): ModuleFreshness {
-  const loaded = loadedStampOutput()
-  const onDisk = readStampOutput(pluginRoot())
-  if (onDisk === undefined) {
-    return { status: 'unknown', ...loaded === undefined ? {} : { loaded }, reason: `no build stamp at lib/${BUILD_STAMP_FILE} (not built, or removed)` }
-  }
-  if (loaded === undefined) {
-    /**
-     * ★ 加载时读不到、而现在读得到 ⇒ 仍是 `unknown`：**我当初加载的是什么**没人知道，
-     *   于是"盘上现在是什么"不能替它作证。把 `onDisk` 一并带上是为了让人读得出来
-     *   "现在有值了"—— 但它**不改**这条读数的结论（那正是三态的意义）。
-     */
-    return { status: 'unknown', reason: `the build stamp was unreadable when this process loaded (lib/${BUILD_STAMP_FILE}); the one on disk now is ${onDisk.slice(0, 12)}…` }
-  }
-  return loaded === onDisk
-    ? { status: 'current', loaded, onDisk }
-    : { status: 'stale', loaded, onDisk }
-}
 export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshness()): string {
   if (freshness.status === 'current') return 'this process holds the current build'
   if (freshness.status === 'stale') {
-    return `this process holds a build OLDER than the one on disk (loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…) — reload the plugin before trusting any judgement it makes`
+    /**
+     * ★★ 措辞按【是哪一维】分，因为两维的补救**动作不同**（f-0026）：
+     *
+     *     content 维旧 ⇒ 盘上被 rebuild 过 ⇒ 重载即可拿到新的
+     *     commit  维旧 ⇒ 加载的代码落后于当前提交 ⇒ **重载之后才谈得上"用哪一版"**；
+     *                  而它此前恒报 current，所以这一句从前**从来没人看到过**
+     *
+     * ★ 两维都旧时说清两件事，不说成一句笼统的"旧了"——
+     *   笼统措辞会让读的人以为是其中一个原因，而修掉一个另一个还在。
+     */
+    const detail = freshness.why === 'commit'
+      ? `this process loaded code built at ${String(freshness.commit).slice(0, 12)}…, but HEAD is now ${String(freshness.head).slice(0, 12)}…`
+      : freshness.why === 'content'
+        ? `loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…`
+        : `loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…, and built at ${String(freshness.commit).slice(0, 12)}… while HEAD is ${String(freshness.head).slice(0, 12)}…`
+    return `this process holds a build OLDER than the one on disk (${detail}) — reload the plugin before trusting any judgement it makes`
   }
   return `whether this process holds an old build could NOT be determined (${freshness.reason}) — that is "not measured", not "up to date"`
 }
