@@ -40,6 +40,8 @@ import { buildRegistry, registry, gateModuleViews, asRegistration } from '../lib
  *   的位置（见臂 3d 的注释：那会把临时状态写成不变量）。
  */
 import { createGateRegistry, INSERTION_POINTS } from '../lib/gates/registry.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 /** 本仓库根（夹具要读源文件，import 的是编译产物 —— 与现有 24 个测试同构）。 */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -1026,7 +1028,7 @@ test('臂 4c ★ 集成臂（读数出口）：每个有判据的位置都必须
    *   本臂必须立刻红。下面第 ① 条就是那句"回不去"的机械形式。
    */
   const STRUCTURED = 'inputSurfaceOf'
-  const code = read('src/tools.ts')
+  const code = toolsSource()
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
 
@@ -1101,7 +1103,7 @@ test('臂 4c ★ 集成臂（读数出口）：每个有判据的位置都必须
      * 80 行的窗口 ⇒ 读不到那次交出去 ⇒ 本臂会**误报**"没有出口"，
      * 而源码里明明写着。★ 误报与漏报一样有害：它会教人把这条臂忽略掉。
      */
-    const source = read('src/tools.ts')
+    const source = toolsSource()
     const lines = source.split('\n')
     const index = lines.findIndex((line) => line.includes(site.line))
     const window = lines.slice(index, index + 600).join('\n')
@@ -1157,7 +1159,7 @@ test('臂 4c ★ 集成臂（读数出口）：每个有判据的位置都必须
  *   "名单过时了"在断言层面同形，而本臂要的正是让那个变化**可见**。
  */
 const STRUCTURED_OUTLET_POINTS = (() => {
-  const code = read('src/tools.ts')
+  const code = toolsSource()
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
   const found = new Set()
@@ -1185,7 +1187,7 @@ const STRUCTURED_OUTLET_POINTS = (() => {
  *   断言层面同形。
  */
 const AUDIT_CALL_SITES = (() => {
-  const source = read('src/tools.ts')
+  const source = toolsSource()
   const lines = source.split('\n')
   const sites = []
   lines.forEach((line, index) => {

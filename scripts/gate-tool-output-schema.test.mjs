@@ -57,6 +57,8 @@ import { fileURLToPath } from 'node:url'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -228,7 +230,7 @@ function valueFor(schema, fields) {
  *   手写的 `EMITTERS` 降级成一条**参考**：它的正确性由臂 4 与源码对账，
  *   而它**不再决定**普查的范围。
  */
-const TOOLS_SOURCE = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+const TOOLS_SOURCE = toolsSource()
 /** ★ 剥注释：注释里大量讨论这些字段名（本文件与 `tools.ts` 自己都是证据）。 */
 const TOOLS_CODE = TOOLS_SOURCE.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
 

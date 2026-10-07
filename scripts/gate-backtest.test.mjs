@@ -40,6 +40,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gate, appliesTo, id, point } from '../lib/gates/completion/backtest.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 /** 收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形。 */
 function expectBlocked(v) {
@@ -526,7 +528,7 @@ test('★ t18 臂 3（★ 落盘臂）：父版本必须【落进耐久态】，
   const { readFileSync } = await import('node:fs')
   const { join, dirname } = await import('node:path')
   const { fileURLToPath } = await import('node:url')
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'tools.ts'), 'utf8')
+  const source = toolsSource()
 
   assert.match(
     source, /persistTaskBaseRevision/,

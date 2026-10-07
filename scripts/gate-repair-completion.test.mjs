@@ -44,6 +44,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { repairEvidenceFiles, repairCompletionVerdict } from '../lib/quality-gates.js'
 import * as r5 from '../lib/gates/completion/r5.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -495,7 +497,7 @@ test('arm 11 — DIRECTED MUTATION: removing the wiring must send the real path 
    *   而"接线在不在"是一个**文本级**的事实，读得准就够了 ——
    *   真正的行为证据由 arm 9/9b 的端到端读数给出（那才是主语）。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const source = toolsSource()
   assert.match(
     source, /repairCompletionVerdict\(/,
     '★ 调用点必须真的调用它 —— 一个没有调用方的修法与没有修法在观测上完全相同',

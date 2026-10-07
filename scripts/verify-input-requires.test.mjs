@@ -57,6 +57,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -765,7 +767,7 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
  *   而虚高的读数会让真正漏接的那一处藏起来。
  */
 function sourceWiredPoints() {
-  const code = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const code = toolsSource()
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
   return [...new Set([...code.matchAll(/inputSurfaceOf\('(\w+)'/g)].map((match) => match[1]))].sort()
@@ -1728,7 +1730,7 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
    *   不是接线事故。⇒ 这正是"它报的不是误报"的另一半证据：
    *   缺的是**条件格**，而判据把条件格缺席读成 `unmeasured`（设计如此）。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const source = toolsSource()
   /**
    * ★ 逐格对拍（本臂第一版把 `coverage` 的名字写死了，实测打回）：
    *   `baseline` 的条件注入写的是 `...baseline === undefined ? {} : { baseline }`，
@@ -1828,7 +1830,7 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
     registrySource, /checkRequires\(reg, context/,
     '★ 注册表求值时用的 ctx 必须与核对用的是同一个 `context` 形参 —— 一份 ctx 只读一次',
   )
-  const toolsSource = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const toolsCodeText = toolsSource()
   /**
    * ── ★ 五处调用点：**核对与求值必须读同一份 ctx 表达式** ────────────────────────
    *
@@ -1843,10 +1845,10 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
    *   ★ 而"剥注释"这件事本身由下面那条**注释样本**断言钉住 —— 一个连注释
    *     都数进去的读数会让真正漏接的那一处藏起来（虚高的读数与"没测到"同形）。
    */
-  const codeLines = toolsSource.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+  const codeLines = toolsCodeText.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
   const code = codeLines.join('\n')
   assert.ok(
-    toolsSource.includes("registry.evaluate('completion', …)"),
+    toolsCodeText.includes("registry.evaluate('completion', …)"),
     '★ 前置：源里确实有"注释里提到求值调用"的样本 —— 没有它，本臂的"剥注释"就是一句空话'
   )
 

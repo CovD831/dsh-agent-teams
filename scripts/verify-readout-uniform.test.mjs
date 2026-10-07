@@ -56,7 +56,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -64,6 +64,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { registry, gateModuleViews } from '../lib/gates/index.js'
 import { createTeamDir } from '../lib/state.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -1454,8 +1456,33 @@ test('★ 臂 9：`lib/tools.js` 是**当前** `src/tools.ts` 的产物（不是
    * （这不是"读源码断言"——断言的是**产物**里有没有那几处补齐，而本文件其余的臂
    *   断言的是**运行期**读到的值。两者服务不同的问题。）
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
-  const built = readFileSync(join(ROOT, 'lib', 'tools.js'), 'utf8')
+  const source = toolsSource()
+  /**
+   * ★★ t39：产物面**不再只有一个文件**。
+   *
+   * 拆分之后 `lib/tools.js` 是**装配**，而 `inputSurfaceOf` / `withInputSurfaceOnError`
+   * 这些机制住在 `lib/tools/shared/entities.js` —— 实测：
+   *
+   *     lib/tools.js                 -> 'function inputSurfaceOf(' 出现 0 次
+   *     lib/tools/shared/entities.js -> 出现 1 次
+   *
+   * ⇒ 与源码侧【对称地】扩大范围：源码面读 `src/tools.ts` + `src/tools/**`，
+   *   产物面就读 `lib/tools.js` + `lib/tools/**`。
+   * ★ 判别力一个字不动：仍然断言"产物里找得到这些特征串"，
+   *   而"改源码不重建"仍然会让本臂红（markers 不在产物里）。
+   */
+  const builtFiles = [join(ROOT, 'lib', 'tools.js')]
+  const walkBuilt = (dir) => {
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walkBuilt(full)
+      else if (entry.name.endsWith('.js')) builtFiles.push(full)
+    }
+  }
+  walkBuilt(join(ROOT, 'lib', 'tools'))
+  const built = builtFiles.map((file) => readFileSync(file, 'utf8')).join('\n')
   const markers = [
     /** 唯一的构造点 */
     'function inputSurfaceOf(',

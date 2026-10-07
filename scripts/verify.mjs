@@ -199,7 +199,28 @@ const agentTeamsCardCss = await readFile(new URL('../src/client/AgentTeamsCard.m
 const agentTeamsCardSource = await readFile(new URL('../src/client/AgentTeamsCard.tsx', import.meta.url), 'utf8')
 const artworkSource = await readFile(new URL('../src/client/artwork.ts', import.meta.url), 'utf8')
 const hostSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
-const toolsSource = await readFile(new URL('../src/tools.ts', import.meta.url), 'utf8')
+/**
+ * ── ★ t39：工具的源码面**不再只有一个文件** ─────────────────────────────────────
+ *
+ * 拆分之后：`src/tools.ts`（装配）+ `src/tools/*.ts`（15 个工具模块）+ `src/tools/shared/`。
+ * ★ 与夹具侧【同一口径】（见 scripts/tools-source.mjs）：扩大取数范围，
+ *   而**判别力一个字不动** —— 下面每一条 check 仍然断言"找得到那些特征串"。
+ */
+const toolsSource = await (async () => {
+  const root = new URL('../src/tools/', import.meta.url)
+  const walk = async (dir) => {
+    let entries
+    try { entries = await readdir(dir, { withFileTypes: true }) } catch { return [] }
+    const out = []
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir)
+      if (entry.isDirectory()) out.push(...await walk(full))
+      else if (entry.name.endsWith('.ts')) out.push(await readFile(full, 'utf8'))
+    }
+    return out
+  }
+  return [await readFile(new URL('../src/tools.ts', import.meta.url), 'utf8'), ...await walk(root)].join('\n')
+})()
 const localesSource = await readFile(new URL('../src/client/locales.ts', import.meta.url), 'utf8')
 const localeKeys = Object.keys(agentTeamsZh).sort()
 const englishLocaleKeys = Object.keys(agentTeamsEn).sort()

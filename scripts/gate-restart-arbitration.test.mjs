@@ -30,6 +30,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 import {
   RESTART_ESCAPE_HATCH_ENV,
   arbitrateRestart,
@@ -209,7 +211,7 @@ test('★ 臂 7（接线臂）：重载动作必须**真的经过**仲裁 ——
    *     ② 不放行时**提前返回**（而不是继续往下重载）；
    *     ③ 真正调用 `fiber.restart()` 的那一行**在**那个返回**之后**。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const source = toolsSource()
   const toolStart = source.indexOf("name: 'agent_teams_restart'")
   assert.ok(toolStart > 0, '★ 找不到 agent_teams_restart —— 锚点失效，本臂必须跟着看清新形状')
   const body = source.slice(toolStart, source.indexOf('\n  }))\n', toolStart))

@@ -54,6 +54,8 @@ import { fileURLToPath } from 'node:url'
 import { registerAgentTeamsTools, runtimeGateLogSnapshot, waitRecordSnapshot } from '../lib/tools.js'
 import { registry, gateModuleViews } from '../lib/gates/index.js'
 import { createTeamDir } from '../lib/state.js'
+// ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
+import { toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -677,7 +679,7 @@ test('★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值
    * ★ 两处口径都扫（`inputSurfaceOf` 与它内部调用的 `auditGateRequires`），
    *   于是"有人把 `inputSurfaceOf` 绕开、直接调 `auditGateRequires`"也仍被本臂看见。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  const source = toolsSource()
   assert.ok(source.length > 0, '★ 前置：必须读得到 src/tools.ts')
 
   /**
