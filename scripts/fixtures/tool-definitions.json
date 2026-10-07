@@ -1214,6 +1214,15 @@
           "deployment": {
             "additionalProperties": false,
             "properties": {
+              "behind": {
+                "type": "string"
+              },
+              "built_commit": {
+                "type": "string"
+              },
+              "head": {
+                "type": "string"
+              },
               "loaded": {
                 "type": "string"
               },
@@ -1224,6 +1233,9 @@
                 "type": "string"
               },
               "reason": {
+                "type": "string"
+              },
+              "stale_why": {
                 "type": "string"
               },
               "status": {

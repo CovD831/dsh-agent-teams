@@ -106,7 +106,9 @@
     "verify:source-runner": "node --test scripts/harness-source-verify.test.mjs",
     "verify:git-artifact": "node scripts/git-artifacts.mjs",
     "test:gates": "node --test scripts/gate-*.test.mjs scripts/observed-changed-paths.test.mjs scripts/worktree-isolation.test.mjs scripts/verify-gates-integration.test.mjs scripts/verify-runtime-integration.test.mjs scripts/verify-input-requires.test.mjs scripts/verify-readout-uniform.test.mjs scripts/verify-gate-tristate.test.mjs scripts/verify-unmeasured-consumers.test.mjs scripts/verify-task-atomicity.test.mjs",
-    "verify:gates": "pnpm test:gates"
+    "verify:gates": "pnpm test:gates",
+    "fixtures:tools": "node scripts/tool-definitions.mjs --write",
+    "verify:fixtures": "node scripts/tool-definitions.mjs --check"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
