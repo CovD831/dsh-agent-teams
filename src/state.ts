@@ -17,7 +17,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { TERMINAL_TASK_STATUSES, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
+import { DELIVERY_OUTCOMES, TERMINAL_TASK_STATUSES, type DeliveryOutcome, type DeliveryRecord, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
 import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
 
 export {
@@ -210,13 +210,23 @@ export function unsatisfiedDependencies(tasks: TeamTask[], dependencies: string[
  *   那个方向会给一个没人检查过的任务扣上最重的帽子。
  */
 
-/** 一条依赖最后落在哪。★ 三态 + 两种汇总，不是两个布尔。 */
+/** 一条依赖最后落在哪。★ 三态 + 三种汇总，不是两个布尔。 */
 export type DependencyOutcome =
   | 'completed'
   | 'failed_delivery'
   | 'failed_context'
   | 'inconclusive'
   | 'cancelled'
+  /**
+   * ── ★★ 交付合格、而门拦着（t55）──────────────────────────────────────────────
+   *
+   * 它**不是** `cancelled` 的一种：`cancelled` 说"被中止了"，而这一格说
+   * "做完了、交付是好的，**只是记录不了**"。
+   * ★ 下游据此可以**继续**（上游确实了结了），而它同时读得出"那一份是合格的"。
+   *   把两者合成一个，会让"上面被中止了"与"上面做完了但没人验收"在下游眼里同形 ——
+   *   而它们的补救动作不同（重排 vs 直接往下走）。
+   */
+  | 'delivered_blocked'
 
 /**
  * 一次 failed 的细分。★ 取值与 `output` / `verdict` 上的既有事实**一一对应**，
@@ -238,6 +248,19 @@ export type FailureKind = (typeof FAILURE_KINDS)[number]
 export function dependencyOutcomeOf(task: TeamTask | undefined): DependencyOutcome {
   if (task === undefined) return 'failed_context'
   if (task.status === 'completed') return 'completed'
+  /**
+   * ── ★★ 先看**收口记录**，再看裸 status（t55）─────────────────────────────────
+   *
+   * 顺序是刻意的：一条 `cancelled` 的任务，如果**记着**"交付合格、门拦着"，
+   * 那它对下游的含义是 `delivered_blocked`（**做完了**），而不是 `cancelled`（被中止）。
+   * ⇒ 记录比裸 status **更具体**，所以它先说。
+   *
+   * ★ 而没记录的 `cancelled` 仍然是 `cancelled` —— 本函数**不猜**：
+   *   一个没有成因记录的终态，它的成因就是"不知道"，而不是"多半是好的"。
+   *   把"没有记录"读成 `delivered_blocked` 会把今天那个缺口**抹平**
+   *   （那是把缺陷写成不变量的另一种写法）。
+   */
+  if (task.delivery?.outcome === 'delivered_blocked') return 'delivered_blocked'
   if (task.status === 'cancelled') return 'cancelled'
   if (task.status !== 'failed') {
     /**
@@ -348,6 +371,196 @@ export function describeDependencyOutcomes(statuses: readonly DependencyStatus[]
   return [
     'Dependency outcomes (terminal = satisfied, so work may proceed; read before you start):',
     ...lines,
+  ].join('\n')
+}
+
+/**
+ * ── ★★ 把一次收口记下来：**为什么**这个任务停在终态（t55）────────────────────────
+ *
+ * ── 它补的是什么（MEASURED，2026-10-07）──────────────────────────────────────
+ *
+ * 今天 16 个任务全部由 captain 代落终态，**多数交付物合格**（25/25 夹具、
+ * `pnpm verify exit=0`），而它们被记成 `cancelled`。⇒ 台账读不出「哪些真做完了」。
+ *
+ * 本函数是那个"读得出"的落点：**落终态的同时，把成因与门的原话一起记下来**。
+ *
+ * ── ★★ 它【不】改 `status`，也不替调用方挑 status（刻意的分工）──────────────────
+ *
+ * 调用方仍然自己决定落 `cancelled` / `failed` / `completed`（那是它的裁决，
+ * 本文件不做编排）。本函数只回答**另一个问题**：「这一次为什么是这样」。
+ *
+ * ⇒ 两个轴各归各的：`status` 说"停在哪一点"，`delivery.outcome` 说"为什么停在那里"。
+ *   ★ 这也是为什么本函数**不校验** status 与 outcome 的搭配：
+ *     一个 `cancelled` + `delivered_blocked` 是**完全正常**的组合
+ *     （"我中止了它，因为门拦着而交付是好的"），而那正是今天的真实形态。
+ *
+ * ── ★ 校验的是**证据的完整性**，不是"这个组合对不对"
+ *
+ *   `delivered_blocked` / `gate_fault` ⇒ **必须**带 `gateRefusals`（门的拒绝原文）
+ *   `not_delivered`                    ⇒ **必须**带 `reason`（哪一点坏了）
+ *
+ * ★ 为什么这两条是硬要求：**少了它们，三种收口在读的人眼里同形** ——
+ *   而"同形"正是本任务要消灭的东西。一个只有 `outcome` 一个词的记录，
+ *   与没有记录相比只多了一个标签；而标签是会腐烂的（本项目的开场白）。
+ *
+ * @returns 记录本身，或一句说清缺什么的人话（**不是**抛错 ——
+ *   调用方在"记不下来"与"记得不对"之间需要能分辨，见下面的返回值形状）。
+ */
+export function buildDeliveryRecord(input: {
+  outcome?: unknown
+  gateRefusals?: unknown
+  reason?: unknown
+  by?: unknown
+  at?: unknown
+}): { ok: true; record: DeliveryRecord } | { ok: false; error: string } {
+  const outcome = input?.outcome
+  if (typeof outcome !== 'string' || !(DELIVERY_OUTCOMES as readonly string[]).includes(outcome)) {
+    return {
+      ok: false,
+      error: `delivery outcome must be one of: ${DELIVERY_OUTCOMES.join(', ')} (got ${JSON.stringify(outcome)})`,
+    }
+  }
+  const kind = outcome as DeliveryOutcome
+  const refusals = Array.isArray(input?.gateRefusals)
+    ? input.gateRefusals.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    : []
+  const reason = typeof input?.reason === 'string' && input.reason.trim() !== '' ? input.reason.trim() : undefined
+
+  /**
+   * ★ 两条"必须有"的证据，各自对着一种补救动作：
+   *   · 门拦着 / 门自己错了 ⇒ 没有门的原话，人无从判断"是门错了还是活没干好"；
+   *   · 交付不合格        ⇒ 没有理由，"重做"就不知道要重做什么。
+   */
+  if (kind !== 'not_delivered' && refusals.length === 0) {
+    return {
+      ok: false,
+      error: `a "${kind}" delivery must carry the gate's own refusal text (gateRefusals), or it is indistinguishable from "the work was bad" — that distinction is the whole point of recording it`,
+    }
+  }
+  if (kind === 'not_delivered' && reason === undefined) {
+    return {
+      ok: false,
+      error: 'a "not_delivered" delivery must say what was wrong (reason), because its remedy is to redo the work and nobody can redo what was not named',
+    }
+  }
+
+  return {
+    ok: true,
+    record: {
+      outcome: kind,
+      ...refusals.length === 0 ? {} : { gateRefusals: refusals },
+      ...reason === undefined ? {} : { reason },
+      ...typeof input?.by === 'string' && input.by.trim() !== '' ? { by: input.by.trim() } : {},
+      ...typeof input?.at === 'number' && Number.isFinite(input.at) ? { at: input.at } : {},
+    },
+  }
+}
+
+/**
+ * ── ★★ 「有多少任务卡在门上、各是哪个门」—— 台账的那一格读数（t55）──────────────
+ *
+ * 用户原话（痛点）：**「什么时候触发也是凭我的个人经验」**。
+ * 同一件事在收口这一侧的形状是：**"无人值守还差什么"只能靠人手工数卡点**。
+ * ⇒ 本函数把那个手工动作变成一次可复现的读数。
+ *
+ * ── 它回答什么，以及**不**回答什么 ────────────────────────────────────────────
+ *
+ *   回答：`status` 的分布 × `delivery.outcome` 的分布 × **每一道门各拦了几次**
+ *   不回答：哪一份交付物"更好"（那要人看内容，本函数只受理已记录的事实）
+ *
+ * ── ★ 为什么按 `gateRefusals` 里的**判据 id** 分组，而不是按整句原文 ─────────────
+ *
+ * 判据的原文里带着**每次都不一样**的细节（路径、版本号、计数）——
+ * 按整句分组会让每一个实例各自成一类，于是"哪一道门拦得最多"永远读不出来
+ * （本队记账的「守卫检查了另一个同名的东西」在统计上的形态）。
+ * ⇒ 从原文里**只取 `[judge.id]` 那一段**（判据自己写在开头的稳定标识）。
+ *   ★ 取不到 id 的原文**单独归一类**（`unattributed`），不许静默丢掉 ——
+ *     丢掉的正是"这条拒绝到底来自哪道门"这个问题的答案。
+ */
+export function summariseDeliveries(tasks: readonly TeamTask[]): {
+  total: number
+  terminal: number
+  /** 已收口、但**没有**记录成因的终态任务数（★ 读数里的缺口本身也要看得见）。 */
+  unrecorded: number
+  byOutcome: Record<DeliveryOutcome, number>
+  /** 门 id → 它拦了几次。★ 取不到 id 的落在 `unattributed`。 */
+  byGate: Record<string, number>
+} {
+  const byOutcome: Record<DeliveryOutcome, number> = {
+    delivered_blocked: 0,
+    not_delivered: 0,
+    gate_fault: 0,
+  }
+  const byGate: Record<string, number> = {}
+  let terminal = 0
+  let unrecorded = 0
+
+  for (const task of tasks) {
+    if (!TERMINAL_TASK_STATUSES.includes(task.status)) continue
+    terminal += 1
+    const record = task.delivery
+    if (record === undefined) {
+      /**
+       * ── ★★ 只有【非 completed 的终态】才算缺口（本任务实测抓出来的第一版缺陷）────
+       *
+       * MEASURED：第一版把**每一个**没有记录的终态都算成 `unrecorded`，
+       * 于是 `summariseDeliveries([completed])` 报出 1 个缺口 ——
+       * 而一个**自己走到 completed** 的任务没有任何"为什么停下"要交代：
+       * 它的 status 已经把话说完了。
+       *
+       * ⇒ 那会让**每一份正常完成的活**都变成读数里的一行缺口，而"缺口"这个数字
+       *   一旦被正常情形填满，它就再也指不出真正的洞了 —— 噪音淹没有效读数，
+       *   与本队记账的"噪音会教人忽略告警"同源。
+       *
+       * ★ 所以缺口 = 终态 **且不是** `completed` **且**没有记录：
+       *   `cancelled` / `failed` 停在"非成功"那一侧，**而它们为什么停在那里**
+       *   正是今天读不出来的那件事（16 个任务全落 cancelled、多数交付合格）。
+       */
+      if (task.status !== 'completed') unrecorded += 1
+      continue
+    }
+    if (record.outcome in byOutcome) byOutcome[record.outcome] += 1
+    for (const refusal of record.gateRefusals ?? []) {
+      byGate[gateIdOf(refusal)] = (byGate[gateIdOf(refusal)] ?? 0) + 1
+    }
+  }
+
+  return { total: tasks.length, terminal, unrecorded, byOutcome, byGate }
+}
+
+/**
+ * 从一条判据的拒绝原文里取出**它自己的 id**。
+ *
+ * 判据的 blocker 由注册表加上 `[judge.id]` 前缀（见 `registry.ts` 的合并规则），
+ * 所以这是从原文里读一个**稳定标识**，不是猜措辞。
+ * ★ 取不到 ⇒ `unattributed`：**不许**退化成"算在某一类里"。
+ */
+function gateIdOf(refusal: string): string {
+  const match = /^\[([a-z][\w.-]*)\]/u.exec(refusal.trim())
+  return match?.[1] ?? 'unattributed'
+}
+
+/**
+ * 把 {@link summariseDeliveries} 的读数渲染成人话（给报告/状态读）。
+ *
+ * ★ 只在**有值得说的事**时产出内容（全 `completed` 时返回空串）——
+ *   一个每次状态读取都渲染一行的实现，会让真正要看的那一行淹没在噪音里。
+ * ★ 而且它**如实报缺口**（`unrecorded`）：一个"看起来完整"的台账比一个
+ *   承认自己有洞的台账更危险。
+ */
+export function describeDeliveries(summary: ReturnType<typeof summariseDeliveries>): string {
+  const notable = (Object.entries(summary.byOutcome) as Array<[DeliveryOutcome, number]>)
+    .filter(([, count]) => count > 0)
+  if (notable.length === 0 && summary.unrecorded === 0) return ''
+  const lines = notable.map(([outcome, count]) => `- ${outcome}: ${count}`)
+  if (summary.unrecorded > 0) {
+    lines.push(`- (no reason recorded): ${summary.unrecorded} — terminal tasks whose outcome was never written down`)
+  }
+  const gates = Object.entries(summary.byGate).sort((a, b) => b[1] - a[1])
+  return [
+    `Terminal tasks: ${summary.terminal}/${summary.total}. Why they stopped:`,
+    ...lines,
+    ...gates.length === 0 ? [] : ['Gates that blocked:', ...gates.map(([gate, count]) => `- ${gate}: ${count}`)],
   ].join('\n')
 }
 

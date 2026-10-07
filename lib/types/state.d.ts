@@ -12,7 +12,7 @@
  * `fs` service offers no directory deletion.
  * @module dsh-agent-teams/state
  */
-import { type TaskStatus, type TeamMessage, type TeamState, type TeamTask } from './types.ts';
+import { type DeliveryOutcome, type DeliveryRecord, type TaskStatus, type TeamMessage, type TeamState, type TeamTask } from './types.ts';
 export { amendTaskContract, buildCoverageMatrix, canDeclareDelivery, classifyChangedPath, collectChangedPaths, defaultQualityDeliveryGraph, describeQualityLoop, evaluateQualityCompletion, hasValidQualityTaskFields, isQualityKind, isTaskRevision, normalizeBlankOptionalTaskFields, pathMatchesScope, planQualityFollowUp, qualityPlanningPrompt, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, validateCreateTask, } from './quality-gates.ts';
 export type { ContractAmendmentInput } from './quality-gates.ts';
 /** Mailbox key of the captain. */
@@ -119,8 +119,18 @@ export declare function unsatisfiedDependencies(tasks: TeamTask[], dependencies:
  *   `failed_delivery`：**读不到的成因不许推断成"交付物坏了"** ——
  *   那个方向会给一个没人检查过的任务扣上最重的帽子。
  */
-/** 一条依赖最后落在哪。★ 三态 + 两种汇总，不是两个布尔。 */
-export type DependencyOutcome = 'completed' | 'failed_delivery' | 'failed_context' | 'inconclusive' | 'cancelled';
+/** 一条依赖最后落在哪。★ 三态 + 三种汇总，不是两个布尔。 */
+export type DependencyOutcome = 'completed' | 'failed_delivery' | 'failed_context' | 'inconclusive' | 'cancelled'
+/**
+ * ── ★★ 交付合格、而门拦着（t55）──────────────────────────────────────────────
+ *
+ * 它**不是** `cancelled` 的一种：`cancelled` 说"被中止了"，而这一格说
+ * "做完了、交付是好的，**只是记录不了**"。
+ * ★ 下游据此可以**继续**（上游确实了结了），而它同时读得出"那一份是合格的"。
+ *   把两者合成一个，会让"上面被中止了"与"上面做完了但没人验收"在下游眼里同形 ——
+ *   而它们的补救动作不同（重排 vs 直接往下走）。
+ */
+ | 'delivered_blocked';
 /**
  * 一次 failed 的细分。★ 取值与 `output` / `verdict` 上的既有事实**一一对应**，
  * 不引入新的写入口（本轮不改 `src/tools.ts`）。
@@ -202,6 +212,90 @@ export declare function dependencyStatuses(tasks: readonly TeamTask[], dependenc
  *   而下游知道的东西比这里多（它知道自己的 objective）。
  */
 export declare function describeDependencyOutcomes(statuses: readonly DependencyStatus[]): string;
+/**
+ * ── ★★ 把一次收口记下来：**为什么**这个任务停在终态（t55）────────────────────────
+ *
+ * ── 它补的是什么（MEASURED，2026-10-07）──────────────────────────────────────
+ *
+ * 今天 16 个任务全部由 captain 代落终态，**多数交付物合格**（25/25 夹具、
+ * `pnpm verify exit=0`），而它们被记成 `cancelled`。⇒ 台账读不出「哪些真做完了」。
+ *
+ * 本函数是那个"读得出"的落点：**落终态的同时，把成因与门的原话一起记下来**。
+ *
+ * ── ★★ 它【不】改 `status`，也不替调用方挑 status（刻意的分工）──────────────────
+ *
+ * 调用方仍然自己决定落 `cancelled` / `failed` / `completed`（那是它的裁决，
+ * 本文件不做编排）。本函数只回答**另一个问题**：「这一次为什么是这样」。
+ *
+ * ⇒ 两个轴各归各的：`status` 说"停在哪一点"，`delivery.outcome` 说"为什么停在那里"。
+ *   ★ 这也是为什么本函数**不校验** status 与 outcome 的搭配：
+ *     一个 `cancelled` + `delivered_blocked` 是**完全正常**的组合
+ *     （"我中止了它，因为门拦着而交付是好的"），而那正是今天的真实形态。
+ *
+ * ── ★ 校验的是**证据的完整性**，不是"这个组合对不对"
+ *
+ *   `delivered_blocked` / `gate_fault` ⇒ **必须**带 `gateRefusals`（门的拒绝原文）
+ *   `not_delivered`                    ⇒ **必须**带 `reason`（哪一点坏了）
+ *
+ * ★ 为什么这两条是硬要求：**少了它们，三种收口在读的人眼里同形** ——
+ *   而"同形"正是本任务要消灭的东西。一个只有 `outcome` 一个词的记录，
+ *   与没有记录相比只多了一个标签；而标签是会腐烂的（本项目的开场白）。
+ *
+ * @returns 记录本身，或一句说清缺什么的人话（**不是**抛错 ——
+ *   调用方在"记不下来"与"记得不对"之间需要能分辨，见下面的返回值形状）。
+ */
+export declare function buildDeliveryRecord(input: {
+    outcome?: unknown;
+    gateRefusals?: unknown;
+    reason?: unknown;
+    by?: unknown;
+    at?: unknown;
+}): {
+    ok: true;
+    record: DeliveryRecord;
+} | {
+    ok: false;
+    error: string;
+};
+/**
+ * ── ★★ 「有多少任务卡在门上、各是哪个门」—— 台账的那一格读数（t55）──────────────
+ *
+ * 用户原话（痛点）：**「什么时候触发也是凭我的个人经验」**。
+ * 同一件事在收口这一侧的形状是：**"无人值守还差什么"只能靠人手工数卡点**。
+ * ⇒ 本函数把那个手工动作变成一次可复现的读数。
+ *
+ * ── 它回答什么，以及**不**回答什么 ────────────────────────────────────────────
+ *
+ *   回答：`status` 的分布 × `delivery.outcome` 的分布 × **每一道门各拦了几次**
+ *   不回答：哪一份交付物"更好"（那要人看内容，本函数只受理已记录的事实）
+ *
+ * ── ★ 为什么按 `gateRefusals` 里的**判据 id** 分组，而不是按整句原文 ─────────────
+ *
+ * 判据的原文里带着**每次都不一样**的细节（路径、版本号、计数）——
+ * 按整句分组会让每一个实例各自成一类，于是"哪一道门拦得最多"永远读不出来
+ * （本队记账的「守卫检查了另一个同名的东西」在统计上的形态）。
+ * ⇒ 从原文里**只取 `[judge.id]` 那一段**（判据自己写在开头的稳定标识）。
+ *   ★ 取不到 id 的原文**单独归一类**（`unattributed`），不许静默丢掉 ——
+ *     丢掉的正是"这条拒绝到底来自哪道门"这个问题的答案。
+ */
+export declare function summariseDeliveries(tasks: readonly TeamTask[]): {
+    total: number;
+    terminal: number;
+    /** 已收口、但**没有**记录成因的终态任务数（★ 读数里的缺口本身也要看得见）。 */
+    unrecorded: number;
+    byOutcome: Record<DeliveryOutcome, number>;
+    /** 门 id → 它拦了几次。★ 取不到 id 的落在 `unattributed`。 */
+    byGate: Record<string, number>;
+};
+/**
+ * 把 {@link summariseDeliveries} 的读数渲染成人话（给报告/状态读）。
+ *
+ * ★ 只在**有值得说的事**时产出内容（全 `completed` 时返回空串）——
+ *   一个每次状态读取都渲染一行的实现，会让真正要看的那一行淹没在噪音里。
+ * ★ 而且它**如实报缺口**（`unrecorded`）：一个"看起来完整"的台账比一个
+ *   承认自己有洞的台账更危险。
+ */
+export declare function describeDeliveries(summary: ReturnType<typeof summariseDeliveries>): string;
 /**
  * The allowed task status transitions, keyed by current status.
  * Terminal statuses have no outgoing transitions.
