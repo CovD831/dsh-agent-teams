@@ -208,6 +208,45 @@ export declare function repairEvidenceFiles(ctx: RepairCompletionContext | undef
  *     (i)  没能观察文件改动        ⇒ "could not observe any file change"
  *     (ii) 观察到了、但没有既有夹具 ⇒ "the repair changed no test fixture"
  *   否则"我瞎了"与"我看清了、确实没有"在日志里同形。
+ *
+ * ── ★★★ 而上面那个 `unmeasured` **还不够**：它是 f-0020 的另一半 ─────────────────
+ *
+ * MEASURED（2026-10-07，t44 复现；本队 t26/t28/t32/t40/t41 五次同形终止）：
+ *
+ *     「带 changedPaths ⇒ changedPaths 判据拒；不带 ⇒ completion 门拒」
+ *
+ * t41 修好了第一半（观察面从主树扩到「主树 ∪ 成员 worktree」）。而第二半仍在，
+ * 且它的形状是**反直觉的**：
+ *
+ *     一份【确实把证据交齐了】的 repair，在真实路径上拿到的 `newTestFiles`
+ *     是**空数组**（不是缺席）⇒ `r5.appliesTo` 为真（它只问 `Array.isArray`）
+ *     ⇒ 进 `gate()` ③ 支 ⇒ 恒 `unmeasured` ⇒ **永远交不出终态**
+ *
+ * ★ 而**缺席**（`undefined`）反而**不会**被拒：`appliesTo` 为假 ⇒ 判据直接跳过。
+ *   ⇒ **空数组比没有数组更坏** —— 它触发一次永远不可能通过的检查。
+ *   这是本队记账的「触发点偏了」的第二次发作（第一次是 t40 的 inScope 覆盖检查）：
+ *   一条规则在**它没有对象可判**的时候仍然开火，而它开火的产物是一个恒常的拒绝。
+ *
+ * ── 所以这一格要**多交一个事实**：这次到底有没有"可判的对象" ────────────────────
+ *
+ * 调用方需要区分三件事，而它们今天被压成了两件：
+ *
+ *     `evidence` 非空        ⇒ 去测量那些文件（正常路径）
+ *     `evidence` 空 + 有观察 ⇒ ★【没有可判的对象】⇒ 调用方**必须不要**注入空数组，
+ *                              否则就是上面那个恒常拒绝（f-0020 的第二半）
+ *     `evidence` 空 + 无观察 ⇒ 没能观察（unmeasured，保留原样）
+ *
+ * ★ 这就是新增的 `discriminable` 那一格：`false` 时调用方**不注入** `newTestFiles`
+ *   （让它缺席），于是 r5 正确地跳过 —— 与 `verify-rerun` 对空 `verify` 的处理
+ *   逐字同形（`ctx.task.verify.length > 0` 才开火）。
+ *   ⇒ **不是放宽**：没有任何证据被跳过，因为**本来就没有证据可跳**。
+ *     而"有证据、但证据不判别"那一路**一步都没让** —— 见夹具的定向突变臂。
+ *
+ * ★ 为什么把这件事放在本文件而不是让调用方自己看 `evidence.length === 0`：
+ *   调用方已经**写着**那个判断，而它写成 `repairEvidence.ok === false ? newTestFiles`
+ *   —— 也就是回落到空数组。要点不是"再写一遍"，是**把口径放在产生它的地方**：
+ *   "有没有可判的对象" 是这一格的知识，调用方不该重新推导一遍
+ *   （两份推导会漂移，而漂移之后两者读起来都正常 —— 本队记账过）。
  */
 export declare function repairCompletionVerdict(ctx: RepairCompletionContext | undefined): RepairCompletionResult;
 export interface RepairCompletionContext {
@@ -223,12 +262,40 @@ export interface RepairCompletionContext {
     };
     [key: string]: unknown;
 }
+/**
+ * ── ★★ `discriminable`：这次到底有没有【可判的对象】（t44 加）──────────────────
+ *
+ * 它**不是** `ok` 的重复，也不是"能不能判"的同义改写 —— 两者回答不同的问题：
+ *
+ *     `ok === true`      ⇒ 有证据，**去测量它们**（`evidence` 非空）
+ *     `discriminable`    ⇒ 这一次**有没有东西可测**
+ *
+ * 三态读数（调用方必须分开处理，合成一个布尔就会回到 f-0020）：
+ *
+ *     `{ ok: true,  discriminable: true,  evidence: [...] }`  ⇒ 注入 evidence
+ *     `{ ok: false, discriminable: false, unmeasured: '…' }`  ⇒ ★ **不要注入**
+ *     `{ ok: false, discriminable: true,  unmeasured: '…' }`  ⇒ 理论支（今天不产出）
+ *
+ * ★ 为什么 `false` 时调用方要"不要注入"而不是"注入空数组"：
+ *   注入 `[]` 会让 `r5.appliesTo` 为真（它只问 `Array.isArray`）⇒ 进 ③ 支
+ *   ⇒ 恒 `unmeasured` ⇒ **永远交不出终态**。而**缺席**会让 `appliesTo` 为假
+ *   ⇒ 判据正确跳过。⇒ 空数组比没有数组更坏，这是本格的**全部理由**。
+ *
+ * ★★ 边界（刻意的，且必须有臂钉住）：`discriminable: false` **不表示**"这份工作
+ *   没问题"。它表示"这条判据没有对象可判，所以它不说话"。
+ *   ⇒ 一个**改了测试夹具、而那个夹具不再能判别**的 repair **仍然** `discriminable: true`
+ *     （它有对象），于是照常被 r5 按红前绿后拒绝。★ 见夹具的定向突变臂：
+ *     把这一格改成恒 `false` ⇒ 那条"装饰品必须被拒"的臂必须红。
+ *   ⇒ 换句话说：本格放宽的是「没有对象」，**不是**「对象不合格」。
+ */
 export type RepairCompletionResult = {
     ok: true;
     evidence: string[];
+    discriminable: true;
 } | {
     ok: false;
     unmeasured: string;
+    discriminable: boolean;
 };
 export declare function collectChangedPaths(gitStatusText: string): string[];
 export declare function inScopeOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): string[];

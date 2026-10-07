@@ -25,7 +25,7 @@
  *   ★ 判据：一个产物的受众，决定了它该放在哪。
  */
 
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -33,8 +33,28 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url))
 const DIR = join(ROOT, '.agent-teams', 'frictions')
 const OUT = process.argv[2] ?? join(ROOT, 'docs', 'frictions.html')
 
-/** 读全部条目。解析失败【不静默跳过】—— 一条坏记录与一条不存在的记录必须不同形。 */
+/**
+ * ── ★★ 三态：生成成功 / 降级（有坏条目）/ 无法生成（台账目录不存在）────────────
+ *
+ * ★ 为什么 ③（无法生成）也必须 exit 0：
+ *   台账是**按项目分**的（`frictions/README.md`）⇒ 一个干净 checkout 里
+ *   没有 `.agent-teams/frictions/` 是**正常**的，不是故障。
+ *   让它 exit≠0 会把"不适用"当成"失败"，而它一旦挂进 `pnpm verify`（`&&` 串联），
+ *   每一个没有台账的环境都会在 verify 上失败。
+ *   ★ 而后果比"多一条红"更坏：为了通过验证，人会去删/改台账 ——
+ *     那会把「记录工具」变成「门禁」，而记录工具的第一条纪律是记录不可重算。
+ *
+ * ★ 但 ③ 与 ① 必须在**输出上**不同形：都 exit 0，而必须说得出发生了什么。
+ *   否则"我生成了 38 条"与"我什么都没找到"在日志里长得一模一样 ——
+ *   那正是本队记账的三态合流。
+ *
+ * ★ 实现上，它是【catch ENOENT 并把状态说清】，而不是让异常抛到栈顶：
+ *   一条原始 stack trace 与"生成器坏了"同形，而它与"这个环境没有台账"不同形。
+ *   MEASURED（2026-10-07，接线时实测）：此前缺台账目录 ⇒ 未捕获的 ENOENT +
+ *   exit 1 + 无输出，读起来完全像生成器崩了。
+ */
 function load() {
+  if (!existsSync(DIR)) return { entries: [], broken: [], available: false }
   const out = []
   const broken = []
   for (const f of readdirSync(DIR).filter((f) => /^f-\d+\.json$/.test(f)).sort()) {
@@ -44,7 +64,7 @@ function load() {
       broken.push({ file: f, why: String(error?.message ?? error) })
     }
   }
-  return { entries: out, broken }
+  return { entries: out, broken, available: true }
 }
 
 const esc = (s) =>
@@ -174,7 +194,21 @@ function section(title, sub, items) {
     <div class="grid">${items.map(entryCard).join('')}</div></section>`
 }
 
-const { entries, broken } = load()
+const { entries, broken, available } = load()
+
+/**
+ * ── ★ 状态 ③：无法生成（台账目录不存在）─────────────────────────────────────
+ *
+ * ★ 在写文件【之前】返回：绝不写一份"0 条"的 HTML。
+ *   后者会覆盖一份真有内容的 `docs/frictions.html`，让读者以为台账是空的 ——
+ *   而"台账是空的"与"这个环境没有台账"是两件事。
+ */
+if (!available) {
+  console.log(`无法生成：台账目录不存在 —— ${DIR}`)
+  console.log('  ★ 这不是故障：台账按项目分，一个干净 checkout 里没有它是正常的。')
+  console.log('  ★ 已跳过生成，且【没有】覆盖既有的 docs/frictions.html（一份空的视图比没有更坏）。')
+  process.exit(0)
+}
 
 // ── ① 池子 ──────────────────────────────────────────────────────────────────
 const escalate = entries.filter((e) => e.resolution?.pool === 'escalate')
@@ -290,6 +324,18 @@ ${essenceGroups.map((g) => `
 </body></html>`
 
 writeFileSync(OUT, html)
+/**
+ * ★ 状态标签放在【第一行】—— 三态的主判据就是这一行，人扫一眼日志就能分开：
+ *     generated   ⇒ "生成成功"   + 条数
+ *     degraded    ⇒ "生成成功（降级）" + 条数 + 坏条目
+ *     unavailable ⇒ "无法生成"   （上面已早退，走不到这里）
+ *   三种措辞必须能一眼分开：都 exit 0，所以"说了什么"是唯一的区分面。
+ */
+if (broken.length) {
+  console.log(`生成成功（降级）：${broken.length} 条记录读不出来，其余 ${entries.length} 条已渲染`)
+} else {
+  console.log('生成成功')
+}
 console.log(`写出 ${OUT}`)
 console.log(`  ${entries.length} 条 · 需上报 ${escalate.length} · 可自解 ${self.length}`)
 console.log(`  已修 ${byStatus.fixed.length} · 已排任务 ${byStatus.scheduled.length} · 开着 ${byStatus.open.length}`)

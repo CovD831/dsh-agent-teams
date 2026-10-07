@@ -1,0 +1,1505 @@
+{
+ "_note": "Frozen corpus of REAL tasks, lifted verbatim from .agent-teams/planning-loop/team.json. Do not tidy.",
+ "_source": ".agent-teams/planning-loop/team.json",
+ "_count": 43,
+ "tasks": [
+  {
+   "id": "t5",
+   "subject": "前置：新增「成团之前」的插入点",
+   "kind": "implementation",
+   "status": "completed",
+   "inScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "scripts/gate-admission-point.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/admission/",
+    "src/gates/contract/",
+    "src/gates/dispatch/",
+    "src/gates/completion/",
+    "src/gates/delivery/",
+    "src/gates/runtime/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-point.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "INSERTION_POINTS 新增一个「成团之前」的位置，名字能自解释（判的是准入，不是契约合法性）",
+    "★ registry.ts 与 index.ts 是单点，只有本任务改；不新增任何判据",
+    "三臂夹具：新位置能被 evaluate 到 / 空位置不报错 / 与 contract 位置不互相影响",
+    "★ 夹具不得把「新位置现在为空」写成不变量（本队已因这类棘轮返工多次）",
+    "定弖突变能打红：把新位置从 INSERTION_POINTS 拿掉 ⇒ 对应臂红",
+    "pnpm verify exit=0，既有 448 条不回归"
+   ],
+   "objective": "新增一个「成团之前」的插入点，作为后续三个判据的位置前提。现有五个位置全部在成团之后，而「能不能进场」与「这个契约合不合法」是两件事，合成一个会让两类缺陷同形。",
+   "dependencies": []
+  },
+  {
+   "id": "t6",
+   "subject": "检查点判据：产物相对上次审查变了没有",
+   "kind": "implementation",
+   "status": "completed",
+   "inScope": [
+    "src/gates/admission/checkpoint.ts",
+    "scripts/gate-admission-checkpoint.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/admission.ts",
+    "src/gates/admission/absorb.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-checkpoint.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "检查点判据：读会话事件里真实的文档写入，产物相对「上次审查时的版本」变了 ⇒ 触发",
+    "★ 输出要说清楚【哪份文档、从哪个版本到哪个版本、距上次多久】—— 而不是笼统说「你该审了」",
+    "「上次审查的版本」用 git rev（用户裁定：不可伪造，比内容 hash 或自报强）",
+    "三态不同形：无未审改动=ok / 有=blocked（告警+证据，不拒流程）/ 读不到事件或非 git=unmeasured",
+    "★ unmeasured 与 ok 必须不同形：拿不到版本 ≠ 没改动",
+    "定向突变能打红：把「版本变了没」的比较改成恒真或恒假 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "实现检查点判据：判断「产物相对上次审查时的版本变了没有」，从而回答「什么时候该做对抗性审查」。这是把用户「凭经验决定何时触发」变成机制的第一格。",
+   "dependencies": [
+    "t5"
+   ]
+  },
+  {
+   "id": "t7",
+   "subject": "吸收判据：声称吸收了 vs 产物真的变了",
+   "kind": "implementation",
+   "status": "completed",
+   "inScope": [
+    "src/gates/admission/absorb.ts",
+    "scripts/gate-admission-absorb.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/admission.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-absorb.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "吸收判据：主会话声称「已吸收审查意见」⇒ 产物必须真的变了，或明确记录「无需改」",
+    "★ 与已有 dispatch.changed-paths 同构（自报 vs 真实痕迹），但观察对象是【文档】不是代码",
+    "三态不同形：声称吸收且产物真变/记了无需改=ok / 只声称却没动=blocked / 拿不到输入=unmeasured",
+    "★ 定向突变：把「产物真的变了」那半边去掉（只信声明）⇒ 对应臂必须红",
+    "夹具不得把「当前没有声称」写成不变量",
+    "pnpm verify exit=0"
+   ],
+   "objective": "实现吸收判据：判断主会话「声称吸收了审查意见」是否伴随真实痕迹。用户希望模型自主吸收、不把子代理的话原样给他看，但「看着来」不等于「可以不发生」—— 否则一个空操作与真的吸收同形。",
+   "dependencies": [
+    "t5"
+   ]
+  },
+  {
+   "id": "t8",
+   "subject": "成团判据：产物非空 + 无未审改动 + 无待确认问题",
+   "kind": "implementation",
+   "status": "cancelled",
+   "inScope": [
+    "src/gates/admission/admission.ts",
+    "scripts/gate-admission.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/absorb.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "成团判据三条全过才 ok：产物存在且非空 / 无未审改动 / 无待确认问题；缺哪条 ⇒ blocked 且【说清缺什么】",
+    "★ 它读前两个判据的【输出】，不重新算一遍（否则就是两份真相 —— 本队已记账三次）",
+    "open-questions.json 结构化：必须能机械回答「还有没有未回答的问题」",
+    "★ 自动成团的成员数【上限】兜底：超过上限 ⇒ 不自动，回到要人确认（成员名是不可回收的稀缺资源）",
+    "不负责真的调 approve —— 只给出「能不能成团」的裁决 + 证据（那是编排层的事）",
+    "三态不同形；定向突变能打红（去掉任意一条 ⇒ 对应臂红）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "实现成团判据：判断需求阶段的循环够了没有（产物非空 + 无未审改动 + 无待确认问题），够了就允许自动成团 —— 用户明确说成团不需要他点头。",
+   "dependencies": [
+    "t6",
+    "t7"
+   ]
+  },
+  {
+   "id": "t9",
+   "subject": "独立验证：三条准入判据真的成立、三态不同形、去掉机制臂会红",
+   "kind": "verification",
+   "status": "failed",
+   "inScope": [
+    "scripts/verify-admission.test.mjs",
+    "package.json"
+   ],
+   "outOfScope": [
+    "src/"
+   ],
+   "verify": [
+    "pnpm build",
+    "node --test scripts/verify-admission.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "独立验证三条判据（检查点 / 吸收 / 成团）的裁决真的成立 —— 不看实现者夹具，自己构造输入、走真实入口",
+    "★ 三态必须两两不同形：逐个构造 ok / blocked / unmeasured，确认返回值可分辨",
+    "★ 确认「没说就不能算过」：unmeasured 不得被读成 ok（拿不到版本 ≠ 没改动）",
+    "★ 规则二后半句：把每一条判据的机制单独去掉，对应臂必须红；绿 ⇒ 它测的不是它声称的东西",
+    "★ 检查有没有第五种恒真写法（已记账四种：恒真 / 恒红 / 读错位置的出口 / 守卫检查另一个同名物）",
+    "确认成团判据读的是前两条的【输出】而不是重算一遍（两份真相）",
+    "报告要给「没找到」划边界"
+   ],
+   "objective": "独立验证「成团之前」三条判据（检查点 / 吸收 / 成团）：它们真的能判断吗、三态真的不同形吗、把机制单独去掉臂会不会红。",
+   "dependencies": [
+    "t5"
+   ]
+  },
+  {
+   "id": "t10",
+   "subject": "集成：装配三条准入判据 + 全量回归 + 报告真实有效性",
+   "kind": "integration",
+   "status": "cancelled",
+   "inScope": [
+    "src/gates/index.ts",
+    "scripts/gate-index-assembly.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/registry.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/absorb.ts",
+    "src/gates/admission/admission.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把三条判据装配进 admission 位置，跑通全量：pnpm verify exit=0，既有 448 条不回归",
+    "★ 串行收口：确认无人再改 src → 确认 lib/ 完整 → 统一 build 一次 → 跑全量（rm -rf lib/ 的窗口会让并行读到假红）",
+    "★ 走 §8.5 checklist 全部六项（含新增的「新建的数据结构有没有被读」与「把机制单独去掉臂还绿吗」）",
+    "★ 报告三条判据的【当前生效状态】：它们接进真实路径了吗？还是只在夹具里跑过？",
+    "★ 逐个报告：检查点 / 吸收 / 成团 在真实会话里【谁调用它们】—— 若无人调用，如实说明（本队已记账「装了但调不到」五次）",
+    "报告 admission 位置与 contract 位置的分工是否真的分开了"
+   ],
+   "objective": "集成收口：把三条准入判据装配起来，全量回归 + 走 checklist + 如实报告它们当前是否真的接进了真实路径。",
+   "dependencies": [
+    "t11"
+   ]
+  },
+  {
+   "id": "t11",
+   "subject": "给 admission 位置加真实调用点（它现在 0 个，其余五个各有 1-3 个）",
+   "kind": "integration",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "scripts/gate-admission-callsite.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-callsite.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "在 src/tools.ts 加 admission 位置的调用点，使三条准入判据在真实会话里【真的会被求值】",
+    "★ 调用时机要正确：它必须在【成团之前】——那时还没有团队、没有任务，因此调用点不在 agent_teams_* 的工具处理器里",
+    "★ 报告清楚：这个调用点用什么触发（agent/pre-step？其他钩子？），以及为什么",
+    "★ 造一个真实场景证明它会开火：构造「有未审改动」的情形 ⇒ 判据必须报出 blocked",
+    "★ 确认它与另五个位置【不互相影响】（admission 的读数不改变 contract/dispatch 等的裁决）",
+    "定向突变能打红：把调用点单独去掉 ⇒ 对应臂红（证明它真的承重）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "给 admission 位置加真实调用点。它现在 0 个调用点（其余五个位置各有 1-3 个），所以即使三条判据接进 ALL_GATES 也是「装了但调不到」—— 这是本队记账的该形态第 6 次，而这次是【整个位置】没接线，比前五次（判据的输入面没接）更靠上一层。",
+   "dependencies": [
+    "t9"
+   ]
+  },
+  {
+   "id": "t12",
+   "subject": "修：admission.absorb 的 appliesTo 用了不存在的 kind ⇒ 它永不发言",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/gates/admission/absorb.ts",
+    "scripts/gate-admission-absorb.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/convene.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-absorb.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "修 admission.absorb 的 appliesTo：它现在用 kind === 'requirement' || kind === 'plan'，而 src/types.ts 的 TASK_KINDS 里【没有这两个值】",
+    "★ 实测基线（我已复现）：kind='requirements'（真实值）⇒ 永不发言；kind='requirement' ⇒ 会发言。即判据在真实运行中【永远不发言】",
+    "决定正确的闸门口径：是改成 'requirements'，还是【不依赖 kind】（用别的信号判断这是不是需求阶段的产物）",
+    "★ 若选后者，说明理由 —— checkpoint 的闸门刻意不依赖 kind，两条判据的口径应当一致或明确说明为什么不同",
+    "★ 加一条臂钉住它：用【真实 TASK_KINDS 里的值】构造 ctx，断言判据会发言（否则同类缺陷会再发生）",
+    "定向突变能打红：把 kind 改回不存在值 ⇒ 新臂必须红",
+    "pnpm verify exit=0，既有 527 条不回归"
+   ],
+   "objective": "修一个真实缺陷：admission.absorb 的 appliesTo 用 kind === 'requirement' || kind === 'plan'，而本仓 TASK_KINDS 里没有这两个值（真实值是 'requirements'）⇒ 该判据在真实运行中永远不发言。这是本队记账的该形态第 7 次，且比\"装了但调不到\"更隐蔽：它装了、也被调到了，但它自己选择不说话。",
+   "dependencies": []
+  },
+  {
+   "id": "t13",
+   "subject": "修：convene 把「提问表缺席」读成了「没有未回答的问题」",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/gates/admission/convene.ts",
+    "lib/gates/admission/convene.js",
+    "lib/types/gates/admission/convene.d.ts",
+    "scripts/gate-admission-convene.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/absorb.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-convene.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "修 admission.convene 的第③条：openQuestions 缺席必须落 unmeasured，与空数组（ok）不同形",
+    "★ 实测基线（我已复现）：缺席与空表返回【完全相同的 JSON】—— 两者都被读成 noPendingQuestion:true ⇒ ok",
+    "★ 而缺席的真实含义是「没人接 open-questions.json」⇒ 无法判断，不是「问题都答完了」",
+    "同时修形状坏掉的情形（含非字符串条目）⇒ unmeasured，不许「忽略它、看剩下的」",
+    "★ 三种「没能测量」必须互不同形（一格没接上不掩盖另外两格）",
+    "定向突变能打红：把缺席分支改回 ok ⇒ 对应臂必须红",
+    "pnpm verify exit=0，既有不回归"
+   ],
+   "objective": "修一个真实缺陷：admission.convene 的第③条把「open-questions.json 没被接上」读成了「没有未回答的问题」。实测缺席与空数组返回完全相同的 JSON（都 ok、noPendingQuestion:true），即\"没人接这张表\"被读成了\"问题都答完了\"—— 这正是\"绝不把没测到并进通过\"那条纪律要防的事，也是本队记账同族形态的第 8 次。",
+   "dependencies": []
+  },
+  {
+   "id": "t14",
+   "subject": "修：12 个工具的 output schema 不接受自己返回的新字段",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-tool-output-schema.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-tool-output-schema.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "让工具的 output schema 接受 input_surface / runtime_gates / dispatch_input_surface / completion_input_surface",
+    "★ 实测基线（我已复现）：agent_teams_create_task 的调用【被自己的 output schema 拒绝】——'value.input_surface' is not a declared property；12 个工具全部缺这两个字段",
+    "★ 全部 12 个工具逐个核对：凡是返回值里可能出现的新字段，schema 必须都声明",
+    "★ 加一条臂：对每个工具，用带新字段的返回值走一次 schema 校验，必须通过（防止同类再发生）",
+    "定向突变能打红：把某个工具的字段从 schema 拿掉 ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修一个全局真实缺陷：12 个 agent_teams_* 工具的 output schema 是 additionalProperties:false，而 t7 的调用点接线给返回值加了 input_surface / runtime_gates / dispatch_input_surface / completion_input_surface ⇒ 加了字段的返回值通不过自己的 schema。这是本队记账同族形态的第 9 次：调用点加了字段，而【声明它的地方（schema）】没跟上。captain 本人刚刚在调 create_task 时被它拒绝过一次。",
+   "dependencies": []
+  },
+  {
+   "id": "t15",
+   "subject": "给工具 output schema 加一条普查臂（防止同类第 10 次）",
+   "kind": "verification",
+   "status": "completed",
+   "inScope": [
+    "scripts/gate-tool-output-schema.test.mjs"
+   ],
+   "verify": [
+    "pnpm build",
+    "node --test scripts/gate-tool-output-schema.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "对每个 agent_teams_* 工具：用带新字段（input_surface / runtime_gates / dispatch_input_surface / completion_input_surface）的返回值走一次 schema 校验，必须通过",
+    "★ 普查要【遍历全部工具】而不是列举几个 —— 已记账第 9 次的成因就是声明处落在实现后面",
+    "定向突变能打红：把某个工具的字段从 schema 拿掉 ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "加一条机械普查臂：每个工具的 output schema 必须接受它自己可能返回的诊断字段。这是本轮记账同族形态第 9 次（调用点加了字段、声明它的 schema 没跟上，导致 create_task 被自己的 schema 完全阻断）的防复发措施。",
+   "dependencies": []
+  },
+  {
+   "id": "t16",
+   "subject": "收口 absorb 的 kind 修复：夹具跟上已改的行为 + 真实 TASK_KINDS 臂",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/gates/admission/absorb.ts",
+    "lib/gates/admission/absorb.js",
+    "lib/types/gates/admission/absorb.d.ts",
+    "scripts/gate-admission-absorb.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/registry.ts",
+    "src/gates/index.ts",
+    "src/tools.ts",
+    "src/gates/admission/checkpoint.ts",
+    "src/gates/admission/convene.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-absorb.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "收口 t12（absorb 的 kind 修复）：夹具跟上已改的 behavior —— 现在所有真实 kind 下 absorb 都会发言",
+    "★ 实测基线（captain 已复现）：修复前 kind='requirement'/'plan' ⇒ 会发言（但这两个值在本仓不存在），kind='requirements'（真实值）⇒ 永不发言；修复后所有真实 kind 都会发言",
+    "修 gate-admission-absorb.test.mjs 的 2 条红：臂 2e「闸门格」与「appliesTo 两个条件缺一不可」——它们现在断言的是旧行为（kind 相关的闸门）",
+    "★ 加一条臂钉住它：用【真实 TASK_KINDS 里的值】（从 src/types.ts 读出，不写死字符串）构造 ctx，断言判据会发言",
+    "定向突变能打红：把 kind 判断加回去（用不存在的值）⇒ 新臂必须红",
+    "pnpm verify exit=0，既有不回归"
+   ],
+   "objective": "收口 t12：admission.absorb 的 appliesTo 曾用 kind === 'requirement' || 'plan'（本仓不存在的值）⇒ 判据永不发言。核心修复已在盘上（所有真实 kind 都会发言），但夹具的 2 条臂还在断言旧行为。这是本队记账同族形态第 7 次——比\"装了但调不到\"更隐蔽：它装了、也被调到了，但它自己选择不说话，症状与「这一轮本来不适用」完全同形。",
+   "dependencies": []
+  },
+  {
+   "id": "t17",
+   "subject": "修：重派/并入时诚实的 changedPaths 无法申报（判据死锁）",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/harness-compat.ts",
+    "src/tools.ts",
+    "lib/harness-compat.js",
+    "lib/tools.js",
+    "lib/types/harness-compat.d.ts",
+    "lib/types/tools.d.ts",
+    "scripts/gate-changed-paths.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-changed-paths.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修「重派 attempt / captain 并入时，诚实的 changedPaths 被读成虚报」这个缺口",
+    "★ 实测基线（三人独立复现，含 captain 本人）：填真实路径 ⇒ dispatch.changed-paths 报 'was reported as changed but no write to it was ever observed in this member's session'；填空数组 ⇒ r5 报 'no scan directories were declared' + mutation 报 'nothing to mutate' ⇒ 两条判据各自都对，合起来【没有任何合法输入】",
+    "★ 必须保住 dispatch.changed-paths 的原意：它防的是「零真实工作却自报改动」—— 不得为了放行而削弱它",
+    "定向突变能打红：构造一个真正虚报的 ctx（零写入却报改动）⇒ 仍然必须被拒",
+    "自带三臂夹具：真实写入被接受 / 重派或并入的 attempt 被接受 / ★ 真虚报仍被拒",
+    "pnpm verify exit=0，既有 537 条不回归"
+   ],
+   "objective": "修一个阻断性的派发层缺口：dispatch.changed-paths 要求 observed ⊆ reported，而 observed 只来自【本次 attempt 的会话事件】。写入发生在别的 attempt（重派）或别的进程（captain 用 cp 并入）时 observed 为空，于是诚实的申报被读成虚报；改成空数组又被 r5/mutation 拒（它们要一个可测范围）。两条判据各自都对，合起来让每一个被中断过的 attempt 无法收口 —— 已由三人独立撞上，包括 captain 本人。",
+   "dependencies": []
+  },
+  {
+   "id": "t18",
+   "subject": "修：无 worktree 的任务在 backtest 上恒不可满足（baseline 输入面恒缺）",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-backtest.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts",
+    "src/harness-compat.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-backtest.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修「无 worktree 的任务在 completion.backtest 上恒不可满足」—— 该判据的 baseline 由 worktreeBaseOf(task.id) 推导，无 worktree ⇒ 恒 undefined ⇒ 恒 unmeasured",
+    "★ 实测基线（point-dev 定位到源码）：src/tools.ts:4173 worktreeBaseOf(task.id) → :4273 baseline = worktreeBase === undefined ? undefined : {...}",
+    "★ 保持该判据的口径不变：它现在【诚实地】报「没能测量」，没有把没测到并进通过也没并进拒绝 —— 不得为了让它可满足而削弱这条",
+    "区分「无 worktree 因此拿不到基线」与「有 worktree 但基线不可用」：两者都应 unmeasured，但成因必须可读（本队纪律：unmeasured 的不同成因不应同形）",
+    "定向突变能打红：把基线注入改成恒 undefined ⇒ 对应臂红；把基线伪造一个值 ⇒ 反向臂红",
+    "pnpm verify exit=0，既有 538 条不回归"
+   ],
+   "objective": "修第二个派发层缺口：completion.backtest 的 baseline 由本任务的 worktree base 推导，而【无 worktree 的任务】—— 例如在主树干活的、或 captain 接管的 —— 恒拿不到 baseline ⇒ 该判据恒 unmeasured ⇒ 这类任务永远无法收口。它是与 t17 同族但成因不同的缺口：前者是把「没能测量」读成「虚报」，后者是「某类任务在该判据上恒不可满足」。",
+   "dependencies": []
+  },
+  {
+   "id": "t19",
+   "subject": "修臂 11 的口径：它抓的是「一切改动」，而不是「偷偷改」（第三次）",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "scripts/verify-input-requires.test.mjs"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/",
+    "scripts/gate-changed-paths.test.mjs"
+   ],
+   "verify": [
+    "pnpm build",
+    "node --test scripts/verify-input-requires.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "修 verify-input-requires.test.mjs 臂 11 的口径：它现在读的量（判据源码相对钉死基线的全部改动）大于它声称的性质（本验证文件没有偷偷改判据源码）",
+    "★ 实测基线：t5 加 admission 位置时它红过一次（纯产品改动），t17 修 changed-paths.ts 时又红（本任务的正当目的）—— 同一条臂第三次口径不匹配",
+    "★ 保住原意：本文件（verify-input-requires.test.mjs）对判据源码的改动【仍然必须为空】—— 一个字都不改",
+    "把「判据源码相对基线的改动」从「必须为空」改成「必须申报得上」：落在某个任务的 changedPaths / inScope 里，或落在本轮 git 历史的工作提交里",
+    "★ 两半成对证据：(a) 构造「验证者偷偷改判据源码」⇒ 必须红；(b) 构造「按任务修判据」⇒ 必须绿。缺一即恒真",
+    "pnpm verify exit=0，既有 543 条不回归"
+   ],
+   "objective": "修一条验证者自己的守卫（verify-input-requires.test.mjs 臂 11）的口径：它声称防的是「本验证文件偷偷改判据源码」，实际读的量是「判据源码相对钉死基线的任何改动」。于是每一个合法修判据的任务都会撞红它——t5（加 admission 位置）一次，t17（修 changed-paths）又一次。根因：基线钉死 ⇒ 它抓的不是「偷偷改」，而是「一切改」。",
+   "dependencies": []
+  },
+  {
+   "id": "t20",
+   "subject": "预测验证①：扫全部判据找「unmeasured 与其他出口同形」的地方",
+   "kind": "verification",
+   "status": "failed",
+   "inScope": [
+    "scripts/verify-gate-tristate.test.mjs",
+    "package.json"
+   ],
+   "outOfScope": [
+    "src/"
+   ],
+   "verify": [
+    "pnpm build",
+    "node --test scripts/verify-gate-tristate.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "扫全部判据，找出【unmeasured 与 ok/blocked 同形】的地方 —— 即：某个输入下，本该报「没能测量」却掉进了另一个出口",
+    "★ 这是本质探索第④步的预测验证：本质①「判据自己把没能判断与判断了合流」还应导致【尚未观测到的】表象",
+    "★ 必须能【诱导复现】：对每条可疑判据，构造一个它没能测量的输入，断言它真的报 unmeasured（而不是 ok/blocked）",
+    "★ 同时报出反例：如果某条判据【没有】这个问题，也要说清它为什么没有（否则普查等于没查）",
+    "定向突变能打红：把某条判据的 unmeasured 分支改成 ok ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "本质探索的第④步（预测验证）：从本质①「判据自己把『没能判断』与『判断了』合流」出发，预测它还会导致【尚未观测到的】表象 —— 即任何只有一个出口的判据都会在某个输入上合流三态。用机械普查去找出这些地方，并诱导复现验证。",
+   "dependencies": []
+  },
+  {
+   "id": "t21",
+   "subject": "预测验证②：扫全部调用点找「把 unmeasured 读成 blocked/ok」的地方",
+   "kind": "verification",
+   "status": "cancelled",
+   "inScope": [
+    "scripts/verify-unmeasured-consumers.test.mjs",
+    "package.json"
+   ],
+   "outOfScope": [
+    "src/"
+   ],
+   "verify": [
+    "pnpm build",
+    "node --test scripts/verify-unmeasured-consumers.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "扫全部调用点，找出【怎么消费 unmeasured】的地方 —— 即：调用方是否把「没能测量」当成了 blocked 或 ok",
+    "★ 这是本质探索第④步的预测验证：本质②「判据判得对，而读它的那一层把输出读错了」还应导致尚未观测到的表象",
+    "★ 实测基线（已有实例）：f-0003 执行器缺席 ⇒ 判据诚实报 unmeasured ⇒ 被上层读成拒绝 ⇒ 所有普通任务建不出来",
+    "★ 必须能诱导复现：构造一个调用点拿到 unmeasured 的场景，断言它【不】被当成拒绝或通过",
+    "★ 报告要按调用点逐个列出：它怎么读 unmeasured，以及为什么那样读是对的或错的",
+    "定向突变能打红：把某个调用点的 unmeasured 处理改成当成 blocked ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "本质探索的第④步（预测验证）第二条：从本质②「判据判得对，而读它的那一层把输出读错了」出发，预测它还会导致尚未观测到的表象 —— 即任何按 unmeasured 做决策的调用点都可能读错。逐个调用点核查它怎么消费 unmeasured。",
+   "dependencies": []
+  },
+  {
+   "id": "t22",
+   "subject": "让卡点在发生时自动记录（含 ctx 快照 + 事件定位 + 机制状态）",
+   "kind": "implementation",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-friction-capture.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts",
+    ".agent-teams/frictions/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-friction-capture.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "让卡点在【发生时】自动落一条记录，而不是事后补 —— 否则记录不可重放（12/12 条 replayable=false 已证）",
+    "★ 记录必须含三样（本轮试跑证明缺了它们就补不上）：① 当时的 ctx 快照（或能重建的最小集）② 会话事件定位（session id + seq）③ 机制状态（requires 核对结论 + 输入面三态 + 判据的完整输出）",
+    "★ 挂点：auditGateRequires 是唯一的核对入口，判据拒绝/未测量时它就在场",
+    "★ 记录的形状对齐 .agent-teams/frictions/README.md 里已有的字段（不要另发明一套）",
+    "★ 关键：这次记录本身【要能重放】—— 写完之后，拿它去重跑那条判据，卡点必须能再发生一次",
+    "定向突变能打红：把 ctx 快照那段去掉 ⇒ 重放臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修台账机制自己的缺口（f-0014）：12 条卡点全是 replayable=false，因为 ctx / 事件定位 / 机制状态都没在【发生时】记录，事后补不上。让卡点在判据拒绝或未测量时【自动】落一条可重放的记录。",
+   "dependencies": []
+  },
+  {
+   "id": "t23",
+   "subject": "C：让「持有旧模块」可检测可上报（不再伪装成判据缺陷）",
+   "kind": "implementation",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-stale-module.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-stale-module.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "让「插件持有旧模块」变成可检测、可上报的状态 —— 而不是伪装成判据缺陷",
+    "★ 实测基线（本轮三次：t14/t17/t19）：成员看到判据拒绝会去查代码，而真相是进程加载了旧模块",
+    "★ 用本队已有的指纹：lib/git-artifact-stamp.json 的 output hash",
+    "做法：插件启动时记下【加载时的 output hash】；工具调用时比对当前磁盘的 ⇒ 不一致就报告「我持有旧模块，请重载」",
+    "★ 这个读数【不参与裁决】—— 部署状态的读数，不得让判据因此拒绝（先软后硬）",
+    "★ 三态：一致 / 不一致 / 读不到 stamp（后者必须与「一致」不同形）",
+    "定向突变能打红：改一个 lib 产物而模拟不重载 ⇒ 臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "做 C：让「插件持有旧模块」变成可检测、可上报的状态。现状是它伪装成判据缺陷 —— 成员看到判据拒绝会去查代码，而真相是进程加载了旧模块。这属于「读的来源与声称的对象不一致」的第四种长相（读了过期的来源）。",
+   "dependencies": []
+  },
+  {
+   "id": "t24",
+   "subject": "D：captain 可安全重载（闸门 = 已通过的判决 + 无进行中工作）",
+   "kind": "implementation",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-restart-arbitration.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-restart-arbitration.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "让 captain 能安全重载插件（无人值守的前提：否则每改一次判据就要用户重载）",
+    "★ 闸门按用户裁定的框架：它是【仲裁】，不是【状态检查】—— 用户原话：「我们在做代码修改的时候，应该已经跑过这种蓝绿判决了。所以最后在需要仲裁的时候，判决其实已经跑完了，只是需要进行仲裁。在这种情况下，确实只需要检测任务情况就行了」",
+    "⇒ 前置一：★ 有一份【已经通过的判决】（判据全绿，即 pnpm verify exit=0）—— 它保证新代码是对的",
+    "⇒ 前置二：★ 没有【正在进行的工作】会被它打断 —— 判定 = 所有任务处于终态或未开工（无 in_progress）",
+    "★ 不重复检查「新代码对不对」—— 那是蓝绿判决已给出结论的事；这里只做仲裁",
+    "★ 能力来源：cordis 的 fiber.restart()（已核实存在）",
+    "★ 与 HMR 的区别：HMR 文件一变就换（无闸门，本队已否决）；这个闸门显式，且前置是一个已完成的判决",
+    "定向突变能打红：绕过闸门直接重载 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "做 D：给 captain 一条【有闸门】的重载通路，让无人值守不必等用户重载。闸门是【仲裁】而非【状态检查】：蓝绿判决（判据全绿）已给出\"新代码对不对\"的结论，所以这里只需检测任务情况（有没有 in_progress 会被打断）。",
+   "dependencies": []
+  },
+  {
+   "id": "t25",
+   "subject": "修：convene 无视 absorb 的裁决 ⇒ 未知吸收状态下自动成团",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/gates/admission/convene.ts",
+    "lib/gates/admission/convene.js",
+    "lib/types/gates/admission/convene.d.ts",
+    "scripts/gate-admission-convene.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/admission/absorb.ts",
+    "src/gates/admission/checkpoint.ts",
+    "scripts/verify-gate-tristate.test.mjs"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-admission-convene.test.mjs",
+    "node --test scripts/verify-gate-tristate.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 admission.convene 无视 admission.absorb 裁决的缺陷：ok / blocked / unmeasured / 键缺席 四态全部返回 {ok:true, autoApprove:true}",
+    "★ 实测基线（t20 普查命中，captain 复现）：四态返回完全相同 ⇒ 成团闸门拿着【未知的吸收状态】自动成团，而成团不需要用户点头",
+    "★ 修法：照同文件 checkpoint 那支补三态分流 —— blocked 带原文、unmeasured 进 unmeasuredReasons、键缺席 ⇒ unmeasured",
+    "★ 不得弱化 t20 的普查臂 1：它红着正是在报告这个缺陷。修好后它应【自动转绿】，而不是被改绿",
+    "★ t20 指出的矛盾要一并修：文件注释 644-651 声称「每一个 unmeasured 支都先于返回」，而 absorb 那侧没有 unmeasured 支 —— 修完注释与实现必须一致",
+    "定向突变能打红：把吸收裁决改回吞掉 ⇒ 臂 1 必须红",
+    "pnpm verify exit=0（含 t20 的普查在 test:gates 里）"
+   ],
+   "objective": "修 t20 预测验证命中的真缺陷：admission.convene 无视 admission.absorb 的裁决，四态同形，导致成团闸门在【未知的吸收状态】下自动成团。这是「判据把别的判据给的结论当布尔用」——上游的 unmeasured 在传递中蒸发。",
+   "dependencies": []
+  },
+  {
+   "id": "t26",
+   "subject": "修：终态依赖不该卡死下游（failed 细分 + 终态即满足）",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/state.ts",
+    "lib/state.js",
+    "lib/types/state.d.ts",
+    "scripts/gate-terminal-dependency.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-terminal-dependency.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "改 unsatisfiedDependencies：从「只认 completed」改成「终态即满足」—— failed/cancelled 都是终态，不得让下游永远无法开工",
+    "★ 实测基线（captain 复现）：src/state.ts:137 `dependencies.filter((id) => byId.get(id)?.status !== 'completed')` ⇒ t18 ← t17(failed)、t21 ← t20(failed) 全部卡死",
+    "★ 把 failed 细分（用户裁定）：failed_delivery（交付物真有问题）/ failed_context（环境或口径使它无法以 completed 收口）/ inconclusive（任务性质就是找问题而找到了）",
+    "★ 阻断口径（用户裁定，我建议的乙）：全都终态即满足，但★ 下游【能读到上游是哪种终态】 —— 不替下游做决定，而是把状态交出去",
+    "★ 关键实例：本轮 t17/t20 的 failed 都是【如实报告】，它们的交付物没问题（t17 已并入、t20 的普查正是它该红的）—— 机制把它们当成不合格",
+    "定向突变能打红：把某个 failed 类型改回「阻断」⇒ 对应臂必须红；★ 反向：failed_delivery 的下游仍应能开工（但看得到它是哪一种）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修一个阻断性缺陷：unsatisfiedDependencies 只认 completed，而 failed/cancelled 是终态 ⇒ 一条 failed 卡死整条链。本轮 5 个任务（t18/t21/t22/t23/t24）因此全部无法开工。用户裁定：终态即满足（甲），并把 failed 细分。",
+   "dependencies": []
+  },
+  {
+   "id": "t27",
+   "subject": "翻面臂 3：从「修复前的事实」到「修复后的事实」",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "scripts/verify-gate-tristate.test.mjs"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/",
+    "scripts/gate-admission-convene.test.mjs"
+   ],
+   "verify": [
+    "node --test scripts/verify-gate-tristate.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 t20 的臂 3 从其【修复前的事实】翻面到【修复后的事实】—— 它现在断言 product.ok === swallowed.ok，那是缺陷存在时的事实",
+    "★ 实测基线：t25 修复并入后，臂 1 自动转绿、臂 3 自动转红 —— 而这正是臂 3 注释里写下的预言",
+    "★ 保留对照意义：改成断言 product 落在【propagate】一侧，而不是 swallow 一侧 —— 不是删掉它",
+    "★ 两半成对：臂 1 说「这不该发生」，臂 3 说「确实发生过、现在不发生了」；缺任一条即恒真或恒假",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把 t20 的臂 3 翻面：t25 修好 convene 之后，臂 1 自动转绿而臂 3 自动转红 —— 后者编码的是修复前的事实。这是那对臂的设计（一句说\"不该发生\"，一句说\"确实发生着\"），修好后两句必须一起翻。",
+   "dependencies": []
+  },
+  {
+   "id": "t28",
+   "subject": "修 f-0018：终态上游的结论被 scheduler 丢掉（下游解锁却拿不到东西）",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/scheduler.ts",
+    "lib/scheduler.js",
+    "lib/types/scheduler.d.ts",
+    "scripts/gate-terminal-dependency.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-terminal-dependency.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 src/scheduler.ts:227 的过滤：终态上游的结论也要交给下游，不只是 completed 的",
+    "★ 实测基线：探针实测下游派发文本是「Completed dependency results:\\n(none)」，而它依赖的上游是 failed —— 解锁了但什么都没拿到",
+    "★ t26 已准备好接口：src/state.ts 的 dependencyStatuses 已就绪",
+    "★ 下游拿到的必须能区分【上游是哪种终态】（completed / failed_delivery / failed_context / inconclusive / cancelled）—— 而不是把 failed 当 completed",
+    "★ 关键：不得把「下游看得见上游」写成不变量 —— 先修实现，再让 t26 那条 KNOWN GAP 断言翻面（实现者已注明何时该翻）",
+    "定向突变能打红：把 filter 改回只收 completed ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0018：t26 修好了「终态该不该放行下游」，但没修「放行之后下游拿不拿得到上游的结论」。scheduler.ts:227 的 filter 把 failed/cancelled 上游整个丢掉 ⇒ 下游解锁了却什么都没拿到（探针实测派发文本是 (none)）。",
+   "dependencies": []
+  },
+  {
+   "id": "t29",
+   "subject": "B：registry.evaluate 改并行执行（判据是纯数据变换）",
+   "kind": "implementation",
+   "status": "failed",
+   "inScope": [
+    "src/gates/registry.ts",
+    "lib/gates/registry.js",
+    "lib/types/gates/registry.d.ts",
+    "scripts/gate-parallel-evaluate.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/state.ts",
+    "src/gates/admission/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-parallel-evaluate.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "让 registry.evaluate 并行跑同一位置的判据 —— 本队契约要求判据是纯数据变换，它们天然可并行",
+    "★ 实测基线：src/gates/registry.ts 的 evaluate 用 `for (const reg of byId.values())` 顺序 await ⇒ completion 的 4 条里 mutation 与 backtest 是跑测试的重活，顺序=相加",
+    "★ 关键正确性：结果必须与顺序执行【逐字段相同】（含 blockers 收集顺序、unmeasured 的择取、evaluated/skipped 计数）",
+    "★ 契约要求判据不互相调用、不依赖执行顺序 —— 若有判据违反，并行会暴露它，那是好事但要如实报",
+    "★ 三态：并行后 ok/blocked/unmeasured 的合并规则不得改变（unmeasured 优先于 blockers）",
+    "定向突变能打红：把某条判据改成有副作用 ⇒ 并行臂必须红（否则它测不到真正的并行性）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "让 registry.evaluate 并行执行同一位置的判据。本队契约明确要求判据是纯数据变换（不互相调用、不依赖顺序），所以它们天然可并行。completion 有 4 条判据，其中 mutation 与 backtest 都是跑测试的重活 —— 顺序执行 = 时间相加，并行 = 取最大值。",
+   "dependencies": []
+  },
+  {
+   "id": "t30",
+   "subject": "A：拆分 src/tools.ts（并行度的瓶颈：5729 行装 15 个工具）",
+   "kind": "implementation",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "src/tools/",
+    "lib/tools.js",
+    "lib/tools/",
+    "lib/types/tools.d.ts",
+    "lib/types/tools/",
+    "scripts/gate-tool-split.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-tool-split.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 src/tools.ts（5729 行 / 15 个工具）拆成多个文件，使【不同工具的改动不再互相串行】",
+    "★ 它是本轮并行度的瓶颈：四条任务链全被它串成一条（inScope 冲突表证明）",
+    "★ 拆分不得改变任何行为 —— 全量 571 条必须逐条不回归",
+    "★ 每个工具的定义（name/schema/render/execute）必须完整搬走，不得遗漏或改动",
+    "★ tools.ts 保留装配（导出注册入口），且对外接口不变",
+    "★ 拆完后要能证明【并行度真的提高了】：给出新的 inScope 冲突表，显示不同工具落在不同文件",
+    "pnpm verify exit=0"
+   ],
+   "objective": "拆分 src/tools.ts。它现在 5729 行、装 15 个工具，是本轮并行度的真实瓶颈 —— 任何工具行为的改动都碰它，导致四条任务链被串成一条。拆完之后，\"用 AgentTeams 尽可能并行\"才有可能。",
+   "dependencies": []
+  },
+  {
+   "id": "t31",
+   "subject": "★★ 修 f-0020：worktree worker 交不出终态（无人值守的硬阻断）",
+   "kind": "repair",
+   "status": "cancelled",
+   "inScope": [
+    "src/quality-gates.ts",
+    "lib/quality-gates.js",
+    "lib/types/quality-gates.d.ts",
+    "scripts/gate-repair-completion.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/gates/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-repair-completion.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修「worktree worker 交不出终态」—— 本队已 5 次同形终止（t13/t16/t19/t25/t26 cancelled + t27 failed），全部由 captain 代落",
+    "★ 三道拒绝的成因（verifier6 逐条实测）：① changedPaths 读 captain 工作区 ② r5 只看 newTestFiles 而 repair 改的是【已有】夹具 ③ backtest 的基线是【worktree 出身】而它可能本就红",
+    "★ 核心：repair 类任务与 TDD 完工门不匹配 —— r5/mutation 度量『为新工作写了新测试』，而 repair 的验收是『改既有夹具后它仍能判别』",
+    "★ 三条修法（verifier6 提出，captain 采纳）：① repair 的完工门看『既有夹具更新且仍绿』而非 newTestFiles ② 或明确记入文档『worktree worker 的终态一律由 captain 代落』 ③ 或让判据同时看 worktree",
+    "★ 必须保住 r5/mutation 的原意：它们防的是『装饰性测试』（为新工作写测试却抓不住缺陷），不得为了放行而削弱",
+    "定向突变能打红：构造一个『只更新既有夹具但夹具不再能判别』的情形 ⇒ 必须被拒",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0020：worktree worker 交不出终态。本队已 5 次同形终止（t13/t16/t19/t25/t26 cancelled、t27 failed），全部由 captain 代落。如果每个 worker 都交不出，无人值守就退化成 captain 逐个手收 —— 而那正是要消灭的形态。",
+   "dependencies": []
+  },
+  {
+   "id": "t32",
+   "subject": "翻面那条过期的 KNOWN GAP 守卫（t28 的收尾）",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "scripts/lifecycle-verify.mjs"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/",
+    "scripts/gate-terminal-dependency.test.mjs"
+   ],
+   "verify": [
+    "node scripts/lifecycle-verify.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "翻面那条过期的 KNOWN GAP 守卫：scripts/lifecycle-verify.mjs:719 现在断言 secondText.includes('(none)')，那是【缺口存在时】的事实",
+    "★ 实测基线：t28 修好 collectCompletedDependencyOutputs 之后它按设计翻红，而它自己的注释原文写着「改对之后它应当变红，那时把它翻过来（改成断言上游的 outcome 真的出现在文本里），而不是把断言删掉」",
+    "★ 翻成三条（t28 的成员已给出形状）：① 必须有 [failed] ② 不许是 [completed] ③ 不许再说 (none)",
+    "★ 必须走【真实派发路径】（update_task → scheduler），不是单元级调用 —— 那比单元断言强",
+    "定向突变能打红：把 scheduler 的 filter 改回只收 completed ⇒ 新断言必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "翻面那条过期的 KNOWN GAP 守卫。它故意钉住了 f-0018 的缺口位置，并在注释里写明「改对之后它应当变红，那时把它翻过来，而不是删掉」。t28 已修好那个缺口，所以现在正是翻它的时候 —— 否则全量会一直红着一条已经过期的缺口记录。",
+   "dependencies": []
+  },
+  {
+   "id": "t33",
+   "subject": "接线：把 repair 完工判据接到真实调用点（t31 缺的那一行）",
+   "kind": "integration",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-repair-completion.test.mjs"
+   ],
+   "outOfScope": [
+    "src/quality-gates.ts",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/gates/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-repair-completion.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 repairEvidenceFiles / repairCompletionVerdict 接到 src/tools.ts:4232 的 completion 调用点 —— 它们现在【零调用方】",
+    "★ 实测基线（integrator6 报，captain 核实）：grep 确认这两个函数除它们自己的夹具外零调用方 ⇒ 一个没有调用方的修法与没有修法在观测上完全相同",
+    "★ 接线之后：scripts/gate-repair-completion.test.mjs 的【臂 9（WIRING GAP）】必须翻面 —— 它现在断言真实路径仍 unmeasured，并注明接线落地时它应翻面",
+    "★ 这正是 integrator6 说的「那一刻才是 f-0020 真正关闭的证据。在那之前，任何『已修好』都是没有根据的」",
+    "★ 端到端验证：用真实的 update_task 入口跑一个 repair 类任务（改既有夹具、两轮父红子绿）⇒ r5 必须 ok；而装饰性夹具（两轮都绿）⇒ 必须 blocked",
+    "定向突变能打红：把接线去掉 ⇒ 臂 9 必须回到 unmeasured（即翻面验证）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把 t31 的修法接到真实路径。integrator6 报了 WIRING GAP：repairEvidenceFiles / repairCompletionVerdict 零调用方（调用点是 src/tools.ts:4232，在它 outOfScope）。它的原话：「一个没有调用方的修法，与没有修法在观测上完全相同」—— 所以它把缺口写成臂 9 并如实报 failed，而不是用夹具 10/10 冒充已修好。接线完成后臂 9 翻面，那才是 f-0020 真正关闭的证据。",
+   "dependencies": []
+  },
+  {
+   "id": "t34",
+   "subject": "接线：把 moduleFreshness 接到 status 出口（从插件进程读，而不是命令行）",
+   "kind": "integration",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-stale-module.test.mjs"
+   ],
+   "outOfScope": [
+    "src/quality-gates.ts",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/gates/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-stale-module.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 moduleFreshness 接到 agent_teams_status 的返回值 —— 让 captain 能【从工具出口】读到插件进程的真实新鲜度",
+    "★ 实测基线（f-0027）：captain 用命令行 `node -e` 调 moduleFreshness ⇒ 每次都起新进程、加载最新 lib ⇒ 必然报 current ⇒ 【它从来没有测过插件进程】",
+    "★ 证据：两次命令行读数的 loaded 不同（b2103754 → 670b5c22），而盘上 stamp 是后者 ⇒ 说明读的是命令行进程",
+    "★ 这正是「读错位置的出口」的又一实例：从一个不属于那个位置的地方读了值",
+    "★ 接线要求：status 的返回值必须带 deployment（或 moduleFreshness）一格，且【三态不同形】（current / stale / unknown）",
+    "★ 它【不参与裁决】—— 部署状态的读数，不得让 status 因此拒绝",
+    "定向突变能打红：把 status 的那格去掉 ⇒ 对应臂红；把 unknown 与 current 合并 ⇒ 臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把 moduleFreshness 接到 agent_teams_status 的返回值。f-0027 记的是：captain 一直用命令行 node -e 去问检测器，而那只测到【命令行进程】，不是插件进程 —— 所以「重启后检测器说 current」那句话从来无效。接线之后，一次 status 调用就能给出【插件进程的真实新鲜度】，终结\"重启未生效\"这一整类猜测。",
+   "dependencies": []
+  },
+  {
+   "id": "t35",
+   "subject": "修 f-0017：status 把 unmeasured 塞进 blockers（与 declare_delivery 不同形）",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-tool-output-schema.test.mjs"
+   ],
+   "outOfScope": [
+    "src/quality-gates.ts",
+    "src/state.ts",
+    "src/gates/",
+    "scripts/verify-unmeasured-consumers.test.mjs"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-tool-output-schema.test.mjs",
+    "node --test scripts/verify-unmeasured-consumers.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 f-0017：让 status 与 declare_delivery【同形地】暴露 delivery 的 unmeasured，而不是把它塞进 blockers",
+    "★ 实测基线（verifier6 的普查臂 1/2/3 正红着报告它）：tools.ts 把 deliveryEvaluation.unmeasured 拼进 blockers 数组",
+    "★ schema 层证据：delivery 对象的 schema 是 additionalProperties:false，字段只有 {ok, blockers, gates_evaluated, input_surface} ⇒ 结构上无处安放 unmeasured",
+    "★ 修法：给 delivery 对象加独立字段（如 unmeasured），并让 status 不再把它拼进 blockers —— 两处入口同形",
+    "★ 必须保住 blockers 的原意：它是【测出来了、是坏的】，不得与 unmeasured 合流",
+    "★ 修好后 verifier6 的普查臂 1/2/3 必须【自动转绿】—— 它不在你的 inScope，只能靠修产品让它绿",
+    "定向突变能打红：把 unmeasured 改回拼进 blockers ⇒ 臂 1 必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0017：status 把 delivery 的「没能测量」塞进 blockers 数组，而 declare_delivery 独立暴露它。两处 ctx 逐字段相同（刻意设计），所以 ctx 相同保护不了消费方式。而 delivery 今天恒 unmeasured ⇒ 每次 status 都加一条假拒绝理由 —— 一个恒常出现的假告警会教人永久忽略那个字段。",
+   "dependencies": [
+    "t30",
+    "t34"
+   ]
+  },
+  {
+   "id": "t36",
+   "subject": "实测 f-0028：成员进程在生产里是否嵌套 node --test",
+   "kind": "verification",
+   "status": "cancelled",
+   "inScope": [
+    "scripts/gate-nested-test-probe.test.mjs",
+    "scripts/verify-nested-runtime.mjs"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/"
+   ],
+   "verify": [
+    "node --test scripts/gate-nested-test-probe.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "实测：AgentTeams 的成员进程在生产里是否嵌套在 node --test 结构下 —— 这决定 f-0028 是「夹具的环境限制」还是「f-0020 级的生产缺口」",
+    "★ 背景（f-0028，captain 独立复现）：从一个 node --test 进程里再起 node --test 会被【静默跳过】—— 输出完全为空、exitCode = 0、没有报错。而 mutation 的 runTest 恰恰要起子进程。",
+    "★ 对照组（必须做，否则结论不可信）：同一个套件【单独跑】是绿的（输出 'INNER RAN' + pass 1）；嵌套跑则输出完全为空 + pass 1 ⇒ 静默不跑",
+    "★ 要回答的问题：真实成员进程（AgentTeams 的 worker）在跑 update_task 时，它的进程祖先链里有没有 node --test？方法：在成员进程里读 process.argv / process.execArgv / 父进程命令行，把结论写进报告",
+    "★ 必须区分【观测到的】与【推断的】—— 若无法观测（比如成员进程不暴露祖先链），如实报 unmeasured 而不是猜",
+    "★ 若实测为「会嵌套」⇒ 那是一条 f-0020 级缺口：repair 恒 unmeasured ⇒ 那类任务永远无法收口 ⇒ 应升级为 independent finding 并给出修法",
+    "定向突变能打红：用夹具模拟「不嵌套」的情形 ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "实测 f-0028：AgentTeams 的成员进程在生产里是否嵌套在 node --test 下。captain 已独立复现「嵌套 node --test 会被静默跳过、exitCode=0」（输出完全为空、无报错），而 mutation 的 runTest 要起子进程 —— 若生产也嵌套，则 repair 恒 unmeasured，那是一条 f-0020 级缺口。",
+   "dependencies": []
+  },
+  {
+   "id": "t37",
+   "subject": "预防：把 freshness 读数附到拒绝的错误信息里（让错的路走不通）",
+   "kind": "integration",
+   "status": "cancelled",
+   "inScope": [
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "scripts/gate-stale-module.test.mjs"
+   ],
+   "outOfScope": [
+    "src/quality-gates.ts",
+    "src/state.ts",
+    "src/gates/",
+    "scripts/verify-unmeasured-consumers.test.mjs"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-stale-module.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 moduleFreshness 的读数附到【工具被拒绝时的错误信息】里 —— 不只是 status 的返回值",
+    "★ 动机（captain 的两次实测错误）：我两次用命令行读插件进程的状态，读到的都是命令行进程。而【成员】连位置都没有 —— 读数不存在，或指向别处，是同一格的两种表现。",
+    "★ 预防的形态：不是提醒人小心，而是让错的那条路走不通 —— 任何成员撞上拦截时，错误信息【当场】告诉它本进程持有的构建与盘上是否一致",
+    "★ 三态在错误信息里也分形：current（可省略或明说）/ stale（必须说，且指向动作：reload）/ unknown（没能测量，不得说成 current）",
+    "★ 不得改变任何拒绝的理由与措辞语义 —— 只【追加】一行部署状态；且它不参与裁决（先软后硬）",
+    "★ 必须走真实的 throwWithSurface 路径（不是另加一个包装）",
+    "定向突变能打红：把 freshness 那行去掉 ⇒ 对应臂红；把 unknown 与 current 合并 ⇒ 臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把「本进程持有的构建 vs 盘上」这个读数【附到拒绝的错误信息里】。captain 今天两次用命令行读插件进程的状态（读到的都是命令行进程），而成员连位置都没有 —— 读数不存在与读数指向别处，是同一格的两种表现。修法不是提醒人小心，而是让错的那条路走不通：任何成员撞上拦截时，错误信息当场告诉它是不是旧模块。",
+   "dependencies": []
+  },
+  {
+   "id": "t38",
+   "subject": "甲：立「任务原子化」判据（contract.task-atomicity）",
+   "kind": "implementation",
+   "status": "in_progress",
+   "inScope": [
+    "src/gates/contract/task-atomicity.ts",
+    "src/gates/index.ts",
+    "src/gates/registry.ts",
+    "lib/gates/contract/task-atomicity.js",
+    "lib/types/gates/contract/task-atomicity.d.ts",
+    "lib/gates/index.js",
+    "lib/gates/registry.js",
+    "lib/types/gates/index.d.ts",
+    "lib/types/gates/registry.d.ts",
+    "scripts/gate-task-atomicity.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/state.ts",
+    "src/scheduler.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-task-atomicity.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "新增一条 contract 位置的判据：`contract.task-atomicity` —— 建任务/改契约时判定「这次任务是不是足够原子」",
+    "★ 动机（今天实测）：派任务的约束原来是两条（写域不重叠、依赖正确），而实测出第三条 ——【原子化】。而\"任务拆解\"现在完全由 captain 在对话里手动做，没有判据、没有形状约束、没有检查。",
+    "★ 实测支撑（absorb-dev 掉线三次 + 它自己的话）：它说「我不想在一个 attempt 里同时做『搬运 3302 行』和『重接 57 个依赖』两件事 —— 那样一旦全量红了，我分不清是搬运错了还是重接错了」。⇒ 一个 attempt 里有两类可能的原因时，失败不可归因。",
+    "★ 判据必须可机械判定（不能靠\"感觉这个任务大不大\"）。三个候选信号，实现者择一或组合并说清理由：① verify 列表里有多条【会因不同原因失败】的命令 ② inScope 跨越多个概念上独立的文件组 ③ 任务的 objective 里含多个【并列的】交付动词",
+    "★ 三态不同形：ok（原子）/ blocked（不原子，且说清该拆成什么）/ unmeasured（判不了，例如没给 verify 或 inScope）—— 绝不允许\"判不了\"当成\"原子\"",
+    "★ 先软后硬：它进注册表但【不参与裁决】的开关要有，且形状里不许有 ok/blockers（与 runtime 位置的判据同例）",
+    "★ 必须能诱导复现：构造一个【已知不原子】的契约（例如「改 A 文件并重构 B 模块」+ 两条互不相关的 verify）⇒ 判据必须 blocked，且给出可执行的拆分建议",
+    "定向突变能打红：把某条不原子契约改成原子 ⇒ 判据必须翻面；把 unmeasured 与 ok 合并 ⇒ 臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "给「任务拆解」立一条判据：判定一个任务的契约是不是够原子，不够原子时说清该拆成什么。★ 动机来自今天的实测：absorb-dev 掉线三次而每次都能恢复，是因为它的任务停在可恢复的中间态；而它自己指出「一个 attempt 里有两类可能的原因时，失败不可归因」。而那件事现在完全由 captain 手动判断，没有机制。",
+   "dependencies": []
+  },
+  {
+   "id": "t39",
+   "subject": "丙：真接线 —— 57 个实体进 shared/，15 个工具改 import",
+   "kind": "implementation",
+   "status": "in_progress",
+   "inScope": [
+    "src/tools.ts",
+    "src/tools/",
+    "lib/tools.js",
+    "lib/tools/",
+    "lib/types/tools.d.ts",
+    "lib/types/tools/",
+    "scripts/gate-tool-split.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-tool-split.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把 57 个模块级实体 + 7 个闭包变量移进 src/tools/shared/，让 15 个已搬出的素材文件能 import 到它们，tools.ts 只剩装配",
+    "★ 素材位置：docs/tools-split-materials/*.ts（15 文件，16 个工具体【逐字】搬出，`orig in txt` 验证 16/16）+ scripts/fixtures/tool-definitions.json（golden 快照，活注册表捕获，实测有分辨力）",
+    "★ 实测数字（absorb-dev 从设计里纠正过来的）：设计写「共享核 72 行」，而那是【13 个高频 helper】；全部模块级实体是 57 个，闭包变量 7 个，而 update_task 一个就要 43 个依赖",
+    "★ 走法：全部 57 个实体进 shared/（不是「13 个进 shared/、其余留 tools.ts」）—— 后者会成环（tools.ts import 子模块、子模块 import tools.ts），而设计 §3.3 明令禁止",
+    "★ 分步：一次搬一个工具、每搬一个跑一次全量 —— 一次搬 16 个之后若出现回归，你分不清是哪个搬坏的",
+    "★ 收口标准（清单级对拍）：拆分前 639/630/0（现已全绿）⇒ 拆分后必须仍是 639/630/0",
+    "★ 6 条臂：逐工具普查 / golden 快照逐字对拍（须从【拆分前】的 commit 生成，不能自拍）/ import 图无环无横跨 / 共享态只一份（从 update_task 写 wait 记录、从 status 读得到）/ 对外接口不变 / tools.ts 不再含工具体（★ 不写「必须小于 N 行」—— 那会把当前数量写成不变量）",
+    "定向突变能打红：删掉任一工具的定义 ⇒ 对应臂红（不是「总数少 1」那种恒真）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把 t30 的未接线素材接成真拆分：57 个模块级实体 + 7 个闭包变量进 src/tools/shared/，15 个工具文件 import 它们，tools.ts 只剩装配。★ 这才会产生并行度收益（16 个工具各自一个文件）。",
+   "dependencies": []
+  },
+  {
+   "id": "t40",
+   "subject": "丙：修 f-0019 —— inScope 重叠检查只豁免一个方向",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/quality-gates.ts",
+    "lib/quality-gates.js",
+    "lib/types/quality-gates.d.ts",
+    "scripts/gate-inscope-overlap.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/state.ts",
+    "src/gates/"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-inscope-overlap.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 f-0019：inScope 重叠检查只豁免【一个方向】—— 而实测它挡住了合法依赖链上的任务",
+    "★ 实测（captain 2026-10-07）：清空 t18 的依赖时被拦，报 \"inScope overlaps t22 at src/tools.ts\"；而实际关系是【t22 依赖 t18】（别人依赖我）",
+    "★ 根因（src/quality-gates.ts:395）：豁免规则是 `if (dependencies.includes(other.id) || …) continue` —— 它判的是【我依赖它】⇒ 只豁免一个方向",
+    "★ 而方向的实质：一条【已声明的依赖链】恰恰【证明】两个任务的写域会被串行执行 ⇒ 那种重叠是【设计的一部分】，不是冲突",
+    "★ 修法：豁免应当是【双向的】—— 两侧任一方依赖另一方 ⇒ 写域重叠是新接线的正常次序，不是冲突",
+    "★ 且触发点也偏了：检查对【既有任务的 inScope】无条件生效，哪怕我改的是 dependencies 或 description，根本没碰 inScope ⇒ 应当只在校验【inScope 字段本身】时生效",
+    "★ 必须能诱导复现：构造一个 t22 依赖 t18、且两者 inScope 重叠的图 ⇒ 对 t18 的 dependencies 做 update_task 必须【通过】；而两者无依赖关系且 inScope 重叠时仍必须【拒绝】",
+    "定向突变能打红：把双向豁免改回单向 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0019：inScope 重叠检查只豁免一个方向（「我依赖它」），而「别人依赖我」那个方向没有豁免 ⇒ 合法依赖链上的两个任务无法同时被编辑。而方向搞反的实质是：一条已声明的依赖链恰恰证明写域会被串行执行，那种重叠是设计的一部分。",
+   "dependencies": []
+  },
+  {
+   "id": "t41",
+   "subject": "丙：修 f-0023 —— changedPaths 读 captain 工作区（拦了成员 4 次）",
+   "kind": "repair",
+   "status": "failed",
+   "inScope": [
+    "src/gates/dispatch/changed-paths.ts",
+    "lib/gates/dispatch/changed-paths.js",
+    "lib/types/gates/dispatch/changed-paths.d.ts",
+    "scripts/gate-changed-paths.test.mjs",
+    "src/harness-compat.ts",
+    "lib/harness-compat.js",
+    "lib/types/harness-compat.d.ts"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/state.ts",
+    "src/scheduler.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-changed-paths.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 f-0023：`dispatch.changed-paths` 读的是【captain 的工作区】，而成员在【被派发的 worktree】里干活 ⇒ 成员申报真实改动被判据拒收",
+    "★ 实测（今天 4 次独立实例）：t26 / t28 / t30(×3) / t32 / t35 —— 每次原文都是 'reported as changed but no write to it was observed … and it is not a changed path in the working tree either'，而每次文件【都真的在】worktree 里",
+    "★ 根因：src/tools.ts:4141 `gitChangedPaths(workspace)`，而 :2791 `const workspace = workspaceOf(captain)` ⇒ 判据的观察面是【队长的树】",
+    "★ 而它【无法自我纠正】：成员拿不到别的合法输入 —— 填 worktree 路径被拒、填空数组又被 completion 门拒（t32 双向死锁）",
+    "★ 修法（在三个里选一个并说清理由）：① 判据把该成员 worktree 的写入算进观察面（知道 worktree 在哪 = worktreeBaseOf）② 判据的观察面【同时】接受 worktree diff（git -C <worktree> diff）③ 明确区分「未观察到的写入」与「不在任何工作区里的路径」两种拒绝，并各自给成因",
+    "★ 必须能诱导复现：构造一个在 worktree 里改了文件、而主工作区该文件未改的情形 ⇒ 申报该路径必须【通过】",
+    "★ 反向半边（不许退化成不把关）：申报一个【任何工作区里都没有】的路径 ⇒ 必须仍被拒",
+    "定向突变能打红：把 worktree 观察面去掉 ⇒ 对应臂红；把「任何路径都放行」 ⇒ 反向臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0023：changedPaths 判据的观察面对着 captain 的工作区，而成员在被派发的 worktree 里干活 ⇒ 成员申报真实改动被拒，且没有任何合法输入可给（填真实路径被拒、填空数组被 completion 门拒）。今天它拦了成员 4 次，而每次都要求 captain 手工并入。",
+   "dependencies": []
+  },
+  {
+   "id": "t42",
+   "subject": "丙：修 f-0026 —— stamp 缺「构建时的 git 提交」",
+   "kind": "repair",
+   "status": "pending",
+   "inScope": [
+    "scripts/git-artifacts.mjs",
+    "src/tools.ts",
+    "lib/tools.js",
+    "lib/types/tools.d.ts",
+    "lib/git-artifact-stamp.json",
+    "scripts/gate-stale-module.test.mjs"
+   ],
+   "outOfScope": [
+    "src/gates/",
+    "src/state.ts",
+    "src/scheduler.ts",
+    "src/quality-gates.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-stale-module.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 f-0026：`lib/git-artifact-stamp.json` 里只有 { schema, source, output } 三个【内容摘要】，而没有【构建时的 git 提交】⇒ 检测器无法回答『进程落后于当前提交吗』",
+    "★ 实测（point-dev 发现，captain 核实）：检测器比的是【进程启动时读到的 output】vs【此刻盘上的 output】⇒ 它只回答『盘上自进程启动以来有没有被 rebuild 过』，不回答『进程加载的是哪个 commit 的代码』。若进程启动【之前】盘上就已经是当前这版，current 恒成立 —— 而那时进程里的代码仍可能是更早 commit 的。",
+    "★ 修法：build 时（scripts/git-artifacts.mjs --write）把【当时的 git 提交】写进 stamp；进程启动时把它记下来；调用时与【当前 HEAD】比 —— ★ 而『当前 HEAD』必须在调用时读（那是每次都可能变的量，见 f-0025 的『按取值时机区分』）",
+    "★ 三态要扩展而不是合流：current（提交一致）/ stale（落后，且指明落后于哪个提交）/ unknown（读不到 stamp 或读不到 HEAD）—— 且 unknown 与 current 必须不同形",
+    "★ 而这一维不能替代原有的 output 比对：两者测的是不同的事（内容变没变 vs 代码落后没落后）⇒ 两个都要，且各自可读",
+    "★ 必须能诱导复现：构造一个『stamp 的 output 没变、而 HEAD 前进了一个提交』的情形 ⇒ 检测器必须报 stale",
+    "定向突变能打红：把 HEAD 比对去掉 ⇒ 对应臂红；把 unknown 并入 current ⇒ 臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0026：给 moduleFreshness 补一维 —— stamp 里加「构建时的 git 提交」，让检测器能回答「进程落后于当前提交吗」。现在的检测器只比 output hash，因此在「进程启动前盘上已是当前版」时恒报 current，而那正是今天下午误判几小时的成因之一。",
+   "dependencies": [
+    "t39"
+   ]
+  },
+  {
+   "id": "t43",
+   "subject": "丙：独立验证「任务原子化判据」是否真的可判",
+   "kind": "verification",
+   "status": "pending",
+   "inScope": [
+    "scripts/verify-task-atomicity.test.mjs"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/"
+   ],
+   "verify": [
+    "node --test scripts/verify-task-atomicity.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "独立验证「任务原子化判据」（t38）真的成立：它是否真的能判『这个任务失败时能不能归因到一个原因』，还是只是换了名字的形状检查",
+    "★ 独立验证的核心：不采信 t38 的报告，直接构造若干契约（原子 / 不原子 / 判不了）走真实入口，看判据的裁决是否与【你的独立判断】一致",
+    "★ 特别要查：它会不会把「判不了」当成「原子」（那是本队明令禁止的合流）",
+    "★ 特别要查：它的误报面有多大 —— 构造【已知原子】的任务（例如只改一个文件、一条 verify）看它是否误报 blocked",
+    "★ 特别要查：它的三态是否真的不同形（ok / blocked / unmeasured 两两不同）",
+    "★ 若发现它的判定与你的独立判断不一致，【如实报 findings】而不是替它辩护 —— 包括「这个判据本身不可判定」这个可能",
+    "定向突变能打红：把判据的某个分支去掉 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "独立验证「任务原子化判据」（t38）是否真的成立。★ 而这一条特别重要，因为\"原子\"与\"不原子\"的边界是模糊的，而模糊的判据最容易变成形状检查 —— 即：它检查的东西看起来对，而与它声称要判的东西无关。",
+   "dependencies": [
+    "t38"
+   ]
+  },
+  {
+   "id": "t44",
+   "subject": "丙：f-0020 的另一半 —— completion 门的双向死锁（先复现，可能已解）",
+   "kind": "repair",
+   "status": "in_progress",
+   "inScope": [
+    "src/quality-gates.ts",
+    "lib/quality-gates.js",
+    "lib/types/quality-gates.d.ts",
+    "scripts/gate-repair-completion.test.mjs",
+    "scripts/gate-completion-deadlock.test.mjs"
+   ],
+   "outOfScope": [
+    "src/tools.ts",
+    "src/gates/",
+    "src/state.ts"
+   ],
+   "verify": [
+    "pnpm build",
+    "pnpm typecheck",
+    "node --test scripts/gate-completion-deadlock.test.mjs",
+    "node --test scripts/gate-repair-completion.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "修 f-0020 的另一半：`completion.r5` 与 `completion.mutation` 在【没有 changedPaths】时拒绝（'no scan directories were declared' / 'no changed files, so there is nothing to mutate'）⇒ 与 changedPaths 组合成【双向死锁】",
+    "★ 实测（今天 5 次：t26/t28/t32/t40/t41）：「带 changedPaths ⇒ changedPaths 拒；不带 ⇒ completion 拒」⇒ 两条判据各自都对，合起来【没有任何合法输入】",
+    "★ 而 changedPaths 那一半【刚修好】（观察面从主树扩到「主树 ∪ 成员 worktree」，实测多看到 44 条路径）⇒ 现在要看的是：那个死锁【还在不在】",
+    "★ 第一步是【复现今天的死锁】：用一个真实的 worktree worker 场景（改动在 worktree、主树干净），申报真实路径 ⇒ 若现在通过了 ⇒ 死锁已解，如实报「已解」而不是硬修",
+    "★ 若仍未解 ⇒ 找出还剩哪一半在拒，并修它（修的方向：判据应当能区分「没能观察」与「真的没改」—— 前者是 unmeasured，后者才是 blocked）",
+    "★ 反向半边（不许退化成不把关）：申报一个【任何工作区都没有】的路径 ⇒ 必须仍被拒",
+    "定向突变能打红：把某个判据的 unmeasured 分支去掉 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "修 f-0020 的另一半：completion 门在没有 changedPaths 时拒绝，与 changedPaths 判据组合成双向死锁。★ 而第一步是复现——因为 changedPaths 那一半刚修好，死锁可能已经不在了；而\"确认它已解\"与\"硬修一个不存在的问题\"必须不同形。",
+   "dependencies": []
+  },
+  {
+   "id": "t45",
+   "subject": "丙：f-0028 的生产探针（成员进程是否嵌套 node --test）",
+   "kind": "verification",
+   "status": "claimed",
+   "inScope": [
+    "scripts/probe-member-process.test.mjs",
+    "scripts/verify-nested-runtime.mjs",
+    "docs/f-0028-probe.md"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/"
+   ],
+   "verify": [
+    "node --test scripts/probe-member-process.test.mjs",
+    "pnpm test:gates"
+   ],
+   "acceptance": [
+    "回答 f-0028 的最后一格：AgentTeams 的成员进程【在生产里】是否嵌套在 node --test 结构下",
+    "★ 背景（已实测）：嵌套 node --test 会被【静默跳过】—— 输出完全为空、exitCode=0、无报错；而决定性变量是 NODE_TEST_CONTEXT 的继承（带它 ⇒ 内层静默；env -u 它 ⇒ 内层正常）",
+    "★ 本任务要做的：用【成员进程那一侧】的路径读到那个环境变量 —— 候选路径：① 成员自己的 bash 子进程（它继承成员进程的环境）② 通过 agent_teams_* 工具的返回值把读数带出来（如 t34 对 deployment 做的）",
+    "★★ 关键要求：必须区分【观测到的】与【推断的】—— 若两条路径都读不到，如实报 unmeasured，并说清「为什么读不到」（而这本身是一条读数）",
+    "★ 只读侦察（不改 src/）：用一个探针脚本在成员进程里读 process.env.NODE_TEST_CONTEXT / execArgv / PPID 链，把读数落盘",
+    "★ 若实测为【会嵌套】⇒ 升级为 f-0020 级缺口（repair 恒 unmeasured ⇒ 那类任务永远无法收口），并给出修法（起子进程时剥掉那一格 —— 那条修法已被验证）",
+    "★ 若实测为【不嵌套】⇒ 关闭 f-0028 为「夹具的环境限制」，但仍建议做防御性剥离（理由：宿主可能变）",
+    "pnpm verify exit=0"
+   ],
+   "objective": "回答 f-0028 的最后一格：成员进程在生产里是否嵌套在 node --test 下。★ 而它只能从【成员进程那一侧】读到（captain 的 bash 起的是新进程、测不到；captain 的工具调用读不到 env）。",
+   "dependencies": []
+  },
+  {
+   "id": "t46",
+   "subject": "丙：语料夹具范式 —— 防「夹具全绿而真实语料恒红」",
+   "kind": "implementation",
+   "status": "in_progress",
+   "inScope": [
+    "scripts/gate-corpus-shape.test.mjs",
+    "scripts/fixtures/gate-corpus.json"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/"
+   ],
+   "verify": [
+    "node --test scripts/gate-corpus-shape.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把今天实测出的一个形态变成机制：**「夹具全绿」与「它在真实语料上成立」是两件事**",
+    "★ 实测（point-dev 在 t38 上）：它的 11 条臂全绿 —— 而那个实现在【全部 39 条真实任务】上 39/39 恒红。★ 因为夹具里【全是它自己造的输入】，没有一个来自 team.json",
+    "★ 本任务要建的是：一条【把真实语料当输入】的检查动作（不是新判据，而是一条可复用的夹具范式）",
+    "★ 具体形态：给每条 contract/completion 位置的判据，写一个【语料夹具】—— 输入取自 team.json 的真实任务（或等价的固定语料），断言「这条判据在真实语料上的分布」并把它钉住（例如：不许 39/39 全红、不许 0/39 触发）",
+    "★ 而它必须能抓住两类退化：① 恒红（对所有真实输入都说不好）② 恒不触发（对所有真实输入都说 ok）—— 两者都是「与它声称要判的东西无关」",
+    "★ 至少覆盖现有合约位置的两条判据（build-artifact-scope / verify-command）作为示范，并给出可复制的范式",
+    "定向突变能打红：把某条判据改成恒红 / 恒不触发 ⇒ 对应臂必须红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把「夹具全绿 ≠ 真实语料上成立」变成机制：建一条【语料夹具】范式，用 team.json 的真实任务当输入，断言判据在真实语料上的分布不许退化成恒红或恒不触发。★ 动机来自今天 t38 的实测：11 条自造输入的臂全绿，而实现在 39 条真实任务上 39/39 恒红。",
+   "dependencies": []
+  },
+  {
+   "id": "t47",
+   "subject": "丙：把台账 HTML 接进流程（它现在靠人记得跑）",
+   "kind": "integration",
+   "status": "in_progress",
+   "inScope": [
+    "package.json",
+    "scripts/frictions-html.mjs",
+    "scripts/frictions-html.test.mjs",
+    "docs/frictions.html"
+   ],
+   "outOfScope": [
+    "src/",
+    "lib/",
+    ".agent-teams/frictions/"
+   ],
+   "verify": [
+    "node scripts/frictions-html.mjs",
+    "node --test scripts/frictions-html.test.mjs",
+    "pnpm test:gates",
+    "pnpm verify"
+   ],
+   "acceptance": [
+    "把台账从「手写 JSON + 手动生成 HTML」变成一个【有自动环节】的通道：① 生成器接进 verify（每次全链跑完自动重新生成 HTML）② 而它必须【只读】JSON、不写回任何东西",
+    "★ 现状：scripts/frictions-html.mjs 已写好并可用（30 条台账 → 三维度 HTML），但【没有登记进任何命令】⇒ 它靠人记得跑",
+    "★★ 而这条与本队纪律同源：「一个没有调用方的修法，与没有修法在观测上完全相同」⇒ 而它是「一个靠人记得跑的工具，与没有那个工具在观测上完全相同」",
+    "★ 加进 package.json 的 verify 链（或一个独立的 verify:frictions），且【不许让它成为 verify 的失败点】—— 台账生成失败不该阻断代码验证（那会把「记录工具」变成「门禁」）",
+    "★ 三态：生成成功 / 生成失败但已告知 / 无法生成（台账目录不存在）—— 三者不同形",
+    "★ 而顺带收口：docs/frictions.html 应当【被提交】（它是给人读的产物）",
+    "定向突变能打红：让生成器写一个坏掉的输出 ⇒ 对应臂红",
+    "pnpm verify exit=0"
+   ],
+   "objective": "把台账 HTML 生成器【接进常规流程】，而不是靠人记得跑。★ 而它现在正是本队记账的那条形态的一个实例：工具写好了、能用，而没有调用方 ⇒ 与不存在在观测上相同。",
+   "dependencies": []
+  }
+ ]
+}
