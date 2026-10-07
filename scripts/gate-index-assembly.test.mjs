@@ -44,6 +44,8 @@ import { createGateRegistry, INSERTION_POINTS } from '../lib/gates/registry.js'
 import { toolsSource } from './tools-source.mjs'
 
 /** 本仓库根（夹具要读源文件，import 的是编译产物 —— 与现有 24 个测试同构）。 */
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => readFileSync(join(ROOT, relative), 'utf8')
 
@@ -206,6 +208,9 @@ function expectThrow(label, fn) {
   }
   throw new Error(`expected a throw, but it returned normally: ${label}`)
 }
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('臂 1 ★ 伪造臂：判据模块缺 gate ⇒ 装配校验当场抛错，并指名缺的是哪一件', async () => {
   const { asRegistration } = await import('../lib/gates/index.js')
@@ -951,6 +956,11 @@ test('臂 4b ★ 集成臂：核对机制现在是【软的】—— 而硬化�
    *   而它声明了 7 格 —— 这里只给 1 格 ⇒ 缺格是构造出来的，不是碰巧。
    */
   const thinContext = {
+    /**
+     * ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。
+     *   ★ 缺了它 r5 的 `appliesTo` 会返回 false ⇒ 本臂的前提（"这条判据真的跑了"）落空。
+     */
+    loadKindRequirements: () => TABLE,
     task: { kind: 'implementation' },
     wantsCompleted: true,
     taskNotTerminal: true,

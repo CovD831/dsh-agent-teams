@@ -41,6 +41,8 @@ import {
   checkRequires, auditRequires, readPath,
   createRequiresAuditPolicy, requiresModeFromEnv, ENFORCE_REQUIRES_ENV,
 } from '../lib/gates/requires.js'
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 
 /** 本仓库根（夹具读源码、跑 tsc；import 的是编译产物 —— 与仓库里 25 个测试同构）。 */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -68,6 +70,10 @@ function probe({ requires, appliesTo, verdict = { ok: true } } = {}) {
  *   一个恒不报的实现（例如核对恒返回 ok）会让这一臂与臂 2 同时绿 —— 而臂 2
  *   在那种实现下会红，所以两条必须一起读。
  */
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
+
+
 test('臂 1 ★ 对照臂：requires 满足 ⇒ 不报，且可读出"核对了 1 条"', async () => {
   const r = createGateRegistry()
   r.register(probe({ requires: ['task', 'task.id', 'update.changedPaths'] }))

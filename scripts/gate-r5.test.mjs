@@ -26,8 +26,12 @@
  */
 
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
-import { gate, appliesTo, id, point } from '../lib/gates/completion/r5.js'
+import { gate, appliesTo, id, parseKindRequirements, point } from '../lib/gates/completion/r5.js'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 收窄助手：把"这条断言期望哪一种裁决"写进断言本身（三态必须不同形）。 */
 function expectBlocked(v) {
@@ -74,6 +78,11 @@ function r5Exits(...tests) {
 
 function ctx(overrides = {}) {
   return {
+    /**
+     * ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。
+     *   本夹具用**真的那张表**（从盘上读），于是这些臂测的仍是真实行为。
+     */
+    loadKindRequirements: () => parseKindRequirements(JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'completion', 'kind-requirements.json'), 'utf8'))),
     wantsCompleted: true,
     taskNotTerminal: true,
     task: { id: 't9', kind: 'implementation', inScope: ['scripts/gate-r5.test.mjs'] },
@@ -294,10 +303,30 @@ test('臂 3d ★ 对照臂：声明里夹着非测试文件（实现文件）时
 /**
  * ── 判定谁该被这条判据管 ────────────────────────────────────────────────────
  */
-test('⑨ appliesTo：只有声明了新增测试的 implementation / repair 才被管', () => {
-  const base = { wantsCompleted: true, taskNotTerminal: true, task: { kind: 'implementation' }, update: { newTestFiles: ['scripts/a.test.mjs'] } }
+test('⑨ appliesTo：只有【表说它要 r5】且声明了新增测试的任务才被管', () => {
+  /**
+   * ★ t54：`base` 必须带上**表** —— 否则 `appliesTo` 问不出"这个 kind 要不要 r5"
+   *   ⇒ 它一律返回 false（沉默），而那是"没能测量"，不是"不需要"。
+   *   ★ 用**真的那张表**（从盘上读），于是本臂测的仍是真实行为。
+   */
+  const TABLE = parseKindRequirements(JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'completion', 'kind-requirements.json'), 'utf8')))
+  const base = {
+    loadKindRequirements: () => TABLE,
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    task: { kind: 'implementation' },
+    update: { newTestFiles: ['scripts/a.test.mjs'] },
+  }
   assert.equal(appliesTo(base), true)
-  assert.equal(appliesTo({ ...base, task: { kind: 'repair' } }), true)
+  /**
+   * ★ t54：`repair` 现在**不**要求 r5（表里有理由：判别证据是**既有夹具**，不是新测试）。
+   *   ⇒ 而这一格是本任务**刻意**改变的 —— 从"跟着 implementation 一起被管"
+   *     改成"按自己的理由不被管"。
+   */
+  assert.equal(
+    appliesTo({ ...base, task: { kind: 'repair' } }), false,
+    '★ t54：repair **不要求** r5 —— 它要的是既有夹具能判别（t31）',
+  )
   // ★ 别的类别本就不该填 newTestFiles；对它们做核对会把"本就不该填"误判成"漏报"
   for (const kind of ['work', 'review', 'requirements', 'verification', 'integration']) {
     assert.equal(appliesTo({ ...base, task: { kind } }), false, `${kind} 不该被 R5 管`)
@@ -329,7 +358,9 @@ test('⑨ appliesTo：只有声明了新增测试的 implementation / repair 才
  *   夹具只测了"该管的被管"，没测"不该管的不管"，缺陷就在那半边。
  */
 test('⑨b ★ 完成意图守卫：不是试图 completed / 已是终态 ⇒ 一律不求值（与三条兄弟判据同口径）', () => {
-  const base = { wantsCompleted: true, taskNotTerminal: true, task: { kind: 'implementation' }, update: { newTestFiles: ['scripts/a.test.mjs'] } }
+  /** ★ t54：带上表 —— 否则 kind 那一格先让 `appliesTo` 返回 false，而本臂测的是**另外两格**。 */
+  const TABLE9B = parseKindRequirements(JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'completion', 'kind-requirements.json'), 'utf8')))
+  const base = { loadKindRequirements: () => TABLE9B, wantsCompleted: true, taskNotTerminal: true, task: { kind: 'implementation' }, update: { newTestFiles: ['scripts/a.test.mjs'] } }
 
   /**
    * ★ 成员【刚开工】（in_progress）：没有任何完成裁决要复核。
@@ -388,11 +419,25 @@ test('⑪ 纯数据变换：判据不 import 任何 I/O，执行器只能由调�
    *   因为这一条真正防的是"判据自己去做 I/O 了"（`node:fs` / `node:child_process`），
    *   而放宽成前缀匹配会让 `../registry-io.ts` 这种东西悄悄进来。
    */
-  assert.deepEqual(imports, ['../registry.ts', '../requires.ts'], '★ 判据只许 import 注册表的裁决构造器与 requires 的声明类型')
+  /**
+   * ★ t54：多了 `./kind-requirements.ts` —— 而它与 `../requires.ts` **同一类**：
+   *   纯函数、无 I/O、无判据语义（见那个文件的文件头）。
+   *   ★ 而它**不是**一条判据：本判据与它是"用户与共享模块"，不是"判据与判据"。
+   */
+  assert.deepEqual(
+    imports, ['../registry.ts', '../requires.ts', './kind-requirements.ts'],
+    '★ 判据只许 import 注册表的裁决构造器、requires 的声明类型、以及共享的纯函数模块',
+  )
   assert.equal(/\bimport\s*\(/.test(source), false, '★ 动态 import 会绕过上面那条白名单')
   assert.equal(/\brequire\s*\(/.test(source), false)
   // 对照：没有执行器时它【说"我没测成"】，而不是"通过"
-  const verdict = await gate({ task: { kind: 'implementation' }, update: { newTestFiles: ['scripts/a.test.mjs'] }, scanDirs: ['scripts'] })
+  /**
+   * ★ t54：这一份 ctx 是**内联**的（不走上面的 helper）⇒ 也必须带表 ——
+   *   否则先触发的是"表没能被咨询"那条 unmeasured，
+   *   而本臂要证明的是"**没有执行器**时它说我没测成"。
+   */
+  const TABLE_11 = parseKindRequirements(JSON.parse(readFileSync(join(ROOT, 'src', 'gates', 'completion', 'kind-requirements.json'), 'utf8')))
+  const verdict = await gate({ loadKindRequirements: () => TABLE_11, task: { kind: 'implementation' }, update: { newTestFiles: ['scripts/a.test.mjs'] }, scanDirs: ['scripts'] })
   assert.equal(verdict.ok, false)
   assert.match(expectUnmeasured(verdict), /no revision runner was injected/)
 })

@@ -37,6 +37,8 @@ import assert from 'node:assert/strict'
 
 import { createGateRegistry } from '../lib/gates/registry.js'
 import { checkRequires } from '../lib/gates/requires.js'
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 
 import {
   requires as verifyRerunRequires, appliesTo as verifyRerunApplies,
@@ -78,6 +80,7 @@ const SUBJECTS = [
     executorGaps: ['execVerifyCommand'],
     /** 让 appliesTo 为真的最小 ctx：试图置 completed、非终态、声明了 verify。 */
     satisfying: {
+      loadKindRequirements: () => TABLE,
       wantsCompleted: true,
       taskNotTerminal: true,
       task: { id: 't4', verify: ['pnpm typecheck'] },
@@ -96,6 +99,7 @@ const SUBJECTS = [
      */
     executorGaps: ['runTestOnRevision', 'scanDirs', 'parentRevision'],
     satisfying: {
+      loadKindRequirements: () => TABLE,
       wantsCompleted: true,
       taskNotTerminal: true,
       task: { id: 't4', kind: 'implementation' },
@@ -116,6 +120,7 @@ const SUBJECTS = [
      */
     executorGaps: ['readFile', 'runTest', 'writeFile'],
     satisfying: {
+      loadKindRequirements: () => TABLE,
       wantsCompleted: true,
       taskNotTerminal: true,
       task: { id: 't4', kind: 'implementation' },
@@ -144,6 +149,7 @@ const SUBJECTS = [
      */
     executorGaps: ['baseline', 'coverage', 'execBacktestCommand'],
     satisfying: {
+      loadKindRequirements: () => TABLE,
       /**
        * ── ★★ t48：这一格此前**没有 kind** —— 而那正是缺陷的形状 ───────────────────
        *
@@ -206,6 +212,9 @@ function shallowClone(value) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 0：声明本身必须存在，且非空 —— 消灭"没声明"与"不需要"的同形
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('臂 0 ★ 四条判据都真的声明了 requires（不是缺席，也不是空数组）', () => {
   for (const subject of SUBJECTS) {

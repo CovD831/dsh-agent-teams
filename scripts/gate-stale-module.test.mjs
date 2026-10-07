@@ -41,6 +41,8 @@ import { fileURLToPath } from 'node:url'
 
 import { moduleFreshness, moduleFreshnessMessage } from '../lib/tools.js'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const STAMP = join(ROOT, 'lib', 'git-artifact-stamp.json')
 
@@ -59,6 +61,9 @@ function withStampOutput(output, run) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1（对照臂）：一致 ⇒ current，且**不阻止任何东西**
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('臂 1 ★ 对照臂：盘上与加载时一致 ⇒ current', () => {
   const freshness = moduleFreshness()

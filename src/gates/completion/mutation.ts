@@ -41,6 +41,13 @@
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
+/**
+ * ★ t54：从**非判据**的纯模块拿（不是从 `./r5.ts`）——
+ *   判据之间不许互相 import（`verify-gates-integration` ④ 的显式 allowlist），
+ *   而那条约束防的正是"一条判据调另一条"。
+ *   ★ 本文件与 r5 是**兄弟**，不是它的用户。
+ */
+import { gateRequirementFor, loadKindRequirementsOfHost, type KindRequirementsLoad } from './kind-requirements.ts'
 import type { CtxPaths } from '../requires.ts'
 import {
   classifyRun,
@@ -120,6 +127,14 @@ export interface MutationMirror {
 }
 
 export interface MutationContext {
+  /**
+   * ── ★★★ kind 需求表的**运行时**来源（t54）─────────────────────────────────────
+   *
+   * ★ 与 t53 的 `loadRules`、以及 r5 的同一格**并列同形**：全仓只有**一种**
+   *   "数据怎么被读到"的写法（数据在 src/gates/…/*.json + 一格注入 + 调用方每次读盘）。
+   * ★ **同步**：`appliesTo` 是同步契约，而 kind 守卫就住在那里。
+   */
+  loadKindRequirements?: () => KindRequirementsLoad
   task?: { id?: string; kind?: string; verify?: string[]; changedPaths?: string[] }
   update?: { status?: string; changedPaths?: string[] }
   wantsCompleted?: boolean
@@ -190,12 +205,36 @@ function unique<T>(items: readonly T[]): T[] {
  *   · 没有实现/修复类改动 ⇒ 没有可变异的东西（review/requirements 本就不写 changedPaths）。
  */
 export function appliesTo(ctx: MutationContext | undefined): boolean {
-  const kind = ctx?.task?.kind
-  if (kind !== 'implementation' && kind !== 'repair') return false
+  /**
+   * ── ★★★ kind 守卫从【硬编码】改成【问表】（t54）───────────────────────────────
+   *
+   * ★ 此前写死 `kind !== 'implementation' && kind !== 'repair'` ⇒ 而 `TASK_KINDS`
+   *   有 7 个 ⇒ 5 个 kind **完全没有完工门**（实测 29% 的任务）。
+   *   ★ 而那不是设计，是**默认**：门只认两个 kind，其余的它**不说话**。
+   *
+   * ★ 三态各有去处：`required` ⇒ 生效；`not-required` ⇒ 按**有理由的决定**闭嘴；
+   *   `unknown` ⇒ 仍不说话，但 `gate()` 会报 `unmeasured`（不静默通过）。
+   */
+  const requirement = gateRequirementFor(loadKindRequirementsOfHost(ctx), ctx?.task?.kind, id)
+  if (requirement.status !== 'required') return false
   return ctx?.wantsCompleted === true && ctx?.taskNotTerminal === true
 }
 
 export async function gate(ctx: MutationContext): Promise<GateVerdict> {
+  /**
+   * ── ★★★ 表不可用 ⇒ **不静默通过**（t54）───────────────────────────────────────
+   *
+   * ★ `appliesTo` 在表不可用时返回 `false`（门不说话），而那是**没能测量** ——
+   *   它与"这个 kind 有理由地不要求这条门"在读数上**完全同形**。
+   * ⇒ 所以在开火处再问一次表，让两者分得开（与 r5 逐字同一口径）。
+   */
+  const kindRequirement = gateRequirementFor(loadKindRequirementsOfHost(ctx), ctx?.task?.kind, id)
+  if (kindRequirement.status === 'unknown') {
+    return unmeasured(
+      `Mutation could not tell whether this task needs it (kind=${ctx?.task?.kind ?? 'unspecified'}): ${kindRequirement.why ?? 'the kind-requirements table could not be consulted'}. `
+      + `"the table could not be consulted" is NOT "this kind does not need Mutation"`,
+    )
+  }
   const readFileMaybe = ctx?.readFile
   const runTestMaybe = ctx?.runTest
   const writeFileMaybe = ctx?.writeFile

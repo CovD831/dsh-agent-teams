@@ -57,6 +57,8 @@ import { createTeamDir } from '../lib/state.js'
 // ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
 import { toolsSource } from './tools-source.mjs'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const cleanups = []
@@ -188,6 +190,9 @@ function logsText(warnings) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1 / 2（对照臂）：齐 ⇒ 不报；缺一格 ⇒ 恰好报那一格
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('★ 臂 1（对照臂）：输入面齐 ⇒ 核对不报 —— contract 位置上一条声明了真实路径的探针', async () => {
   /**

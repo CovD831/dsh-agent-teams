@@ -59,6 +59,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { toolsCode, toolsSource } from './tools-source.mjs'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** ★ 被测对象：从**编译产物**进（与仓库里 25 个测试同构），且只从 lib/ 进。 */
@@ -240,6 +242,9 @@ function gapWarnings(warnings) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1（验证①）：requires 真的能抓住"判据要的输入、调用方没给"吗
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路径的判据，在缺格时被读出缺哪一格', async () => {
   /**
@@ -987,6 +992,13 @@ test('★ 臂 6（⑤）：单独去掉 appliesTo 闸门 ⇒ 不适用的事件�
    *     而这一条正是防"把闸门写成恒假"的那一半。
    */
   const ungatedContext = {
+    /**
+     * ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。
+     *   ★ 这份 ctx 的 kind 是 `implementation`，而**三条门是否适用取决于表**：
+     *     缺了表它们一律 `appliesTo===false` ⇒ 本臂会读成"这个位置一条都不适用"
+     *     ⇒ 而那正是它下面断言要防的"什么都没测到"。
+     */
+    loadKindRequirements: () => TABLE,
     task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'], verify: ['node -e 0'] },
     update: { changedPaths: ['src/a.ts'], status: 'in_progress' },
     changedPaths: ['src/a.ts'],
@@ -1704,7 +1716,12 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
 
   /** 形态 A：`baseline` 与 `coverage` 都缺席（真实的 update_task 上就是这个形状）。 */
   const withoutBoth = {
-    /** ★ t48：闸门是**两个条件**（写域类 kind + changedPaths），缺了 kind 它正确地不适用。 */
+    /**
+     * ★ t48：闸门是**两个条件**（写域类 kind + changedPaths），缺了 kind 它正确地不适用。
+     * ★ t54：而 kind 那一格现在**问表** ⇒ 表也必须注入，否则它同样不适用 ——
+     *   而那会让本臂测的变成"没表"而不是"缺那两格"。
+     */
+    loadKindRequirements: () => TABLE,
     task: { id: 't1', kind: 'implementation' },
     baseline: undefined,
     coverage: undefined,

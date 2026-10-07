@@ -74,39 +74,38 @@
  */
 import { type GateVerdict } from '../registry.ts';
 import type { CtxPaths } from '../requires.ts';
+/**
+ * ── ★★ t54：kind 需求表已抽到**非判据**的纯模块 `./kind-requirements.ts` ──────────
+ *
+ * ★ 为什么（这是我自己撞到的约束）：本判据最初把校验器与类型**放在自己这里**，
+ *   然后让 `mutation.ts` / `backtest.ts` import 它 ——
+ *   而 `verify-gates-integration` ④ 有一条**显式 allowlist**，理由写得很清楚：
+ *
+ *     「真正要拦的是 `completion/r5.ts imports "./mutation.ts"`
+ *       这种**一条判据调另一条**。」
+ *
+ *   ⇒ ★ 而我做的正是那个形状。它会让**三条门互相耦合**：改 r5 的类型牵动另外两条。
+ *   ⇒ ★ 所以修法不是放宽 allowlist（那是**拆掉一条真实约束**），
+ *     而是让共享的东西住在**它不是判据**的地方 ——
+ *     与 `../requires.ts` 完全同一个先例（「它不 import 任何东西、
+ *     也不带一条判据的语义」，所以 allowlist 明确放行它）。
+ */
 export declare const id = "completion.r5";
 export declare const point = "completion";
 export declare const description = "\u628A\u65B0\u6D4B\u8BD5\u5728\u3010\u7236\u7248\u672C\u3011\uFF08worktree \u7684 base\uFF09\u4E0A\u8DD1\u4E00\u904D\uFF1A\u5B83\u5FC5\u987B\u5148\u7EA2\uFF1B\u518D\u5230\u4FEE\u590D\u7248\u672C\u4E0A\u5FC5\u987B\u7EFF\u3002\u7236\u7248\u672C\u62FF\u4E0D\u5230 \u21D2 unmeasured\uFF0C\u4E0D\u662F ok";
 /**
- * 只对【声明了新增测试】的【实现/修复】任务生效。
- *
- * ★ 两个条件的由来：
- *   · 只有 implementation/repair 的契约要求 changedPaths / 写域（与
- *     `dispatch.changed-paths` 同一条边界：对其余类别做核对会把"本就不该填"
- *     误判成"漏报"）；
- *   · 没声明新增测试 ⇒ 没有"新测试"这个对象，R5 无从谈起。
- *
- * ★ 这里【故意】不看 `newTestFiles` 是否为空：见 gate() 里的注释 ——
- *   "声明了但一个文件都没落"必须与"压根没声明"不同形。
- *
- * ── ★ 为什么必须有 `wantsCompleted` / `taskNotTerminal` 两个守卫（MEASURED）────
- *
- * 本判据此前只问 kind 与 `newTestFiles`，于是它在**每一次** implementation 更新上
- * 都会求值 —— 包括成员刚开工的那一次 `in_progress`。实测：
- *
- *     r5.appliesTo({ kind:'implementation', newTestFiles:[…], wantsCompleted:false }) ⇒ true
- *     而三条兄弟判据（verify-rerun / mutation / backtest）在同一 ctx 上 ⇒ false
- *
- * ⇒ 后果：一条"我开始干活了"的更新会被"红前绿后"审判并拒绝，而那时父版本与
- *   扫描范围根本还不存在。lifecycle-verify 实测断在 `:801`（正是那条 in_progress）。
- *
- * ★ 这个缺陷此前一直被掩盖着：注入面没接入 `newTestFiles` ⇒ 本判据恒 `skipped`。
- *   注入面一补齐它立刻显形。**"没被调用"不等于"没问题"。**
- *
- * ★ 为什么修在【判据侧】而不是让调用方各自记得只在该问的时候注入：
- *   调用方侧收口只挡住"那一次调用"，任何别的调用方仍会踩到同一个坑。三条兄弟
- *   判据都已经带着这两个守卫 —— **这是判据之间的不一致，属于判据自己的事**。
+ * ★ 而本文件**自己也要用**它们（`appliesTo` 的问表 + `gate()` 的表不可用分支）
+ *   ⇒ 除了 re-export，还要 import 进本模块的作用域。
  */
+import { gateRequirementFor, loadKindRequirementsOfHost, parseKindRequirements, type KindRequirement, type KindRequirements, type KindRequirementsLoad } from './kind-requirements.ts';
+/**
+ * ★ 还要 re-export：`tools` 层从**这里**拿 `parseKindRequirements`（它历史上就从这个模块拿），
+ *   而本判据是那个模块最自然的门面。
+ *   ★ 一条 import + 一条 re-export —— 而不是两条 `import … from` 同一处
+ *     （那会让按行扫描的臂读到两份）。
+ */
+export { gateRequirementFor, loadKindRequirementsOfHost, parseKindRequirements };
+export type { KindRequirement, KindRequirements, KindRequirementsLoad };
 export declare function appliesTo(ctx: R5Context | undefined): boolean;
 /**
  * ── 输入面声明（t4）───────────────────────────────────────────────────────────
@@ -141,6 +140,24 @@ export declare function appliesTo(ctx: R5Context | undefined): boolean;
 export declare const requires: CtxPaths<R5Context>[];
 /** 调用方对"哪些文件是新测试"的声明（会话事件折叠后的结果）。 */
 export interface R5Context {
+    /**
+     * ── ★★★ kind 需求表的**运行时**来源（t54）─────────────────────────────────────
+     *
+     * ★ 由调用方注入，且调用方**每次求值时读盘** —— 那正是"改表不必重载"成立的条件。
+     *
+     * ── ★★ 而它必须是**同步**的，这与 t53 的 `loadRules` 有一处关键差别 ──────────────
+     *
+     *   `registry` 的契约里 `appliesTo(context) => boolean` 是**同步**的
+     *   （它决定"这条判据说不说话"，必须在求值前判定）。
+     *   ★ 而 kind 守卫**恰恰住在 `appliesTo` 里** —— 所以这张表必须能在同步路径上拿到。
+     *
+     *   t53 的 `loadRules` 可以异步，因为 `verify-command` 的 `appliesTo` **不读它**
+     *   （它只在 `gate()` 里读）。本判据没有那个余地。
+     *
+     *   ⇒ 调用方用 `readFileSync` 读这份**极小**的表（几百字节），每次求值读一次、不缓存。
+     *     ★ 而"不缓存"这一条与 t53 逐字一致：缓存会让"改表"在下一次进程重启前不生效。
+     */
+    loadKindRequirements?: () => KindRequirementsLoad;
     task?: {
         id?: string;
         kind?: string;

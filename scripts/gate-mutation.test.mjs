@@ -48,6 +48,8 @@ import { promisify } from 'node:util'
 import { gate, appliesTo, id, point, DEFAULT_MIN_KILL_RATE } from '../lib/gates/completion/mutation.js'
 import { parseTestSummary } from '../lib/mutation.js'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const run = promisify(execFile)
 
 /**
@@ -342,6 +344,7 @@ function allLines() {
 function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...rest } = {}) {
   const suitePath = suite === 'hollow' ? hollowPath : rigorousPath
   return {
+    loadKindRequirements: () => TABLE,
     task: { id: 't-fixture', kind: 'implementation' },
     wantsCompleted: true,
     taskNotTerminal: true,
@@ -386,6 +389,8 @@ function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1 ★ 伪造臂：装饰性套件 ⇒ blocked，且必须报出存活数与覆盖范围
 // ─────────────────────────────────────────────────────────────────────────────
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('臂 1 ★ 伪造臂：装饰性测试（变异体全部存活）⇒ blocked，并报出存活数与覆盖范围', async () => {
   const verdict = await gate(context({ suite: 'hollow' }))
@@ -588,14 +593,21 @@ test('臂 3b 对照臂：沙箱里的 SUT 在测量后被【逐字节还原】',
   assert.equal(readFileSync(sutPath, 'utf8'), sutSource, '★ 一次没还原的测量既不干净也不可信')
 })
 
-test('臂 3c 对照臂：appliesTo 的三个条件缺一不可', async () => {
-  assert.equal(appliesTo({ task: { kind: 'implementation' }, wantsCompleted: true, taskNotTerminal: true }), true)
+test('臂 3c 对照臂：appliesTo 的条件缺一不可（★ t54：kind 那一格现在问表）', async () => {
+  /**
+   * ★ t54：内联 ctx 也要带表 —— 否则 kind 那一格先让 `appliesTo` 返回 false，
+   *   而本臂测的是**另外两格**（wantsCompleted / taskNotTerminal）。
+   */
+  const at = (kind, wantsCompleted, taskNotTerminal) => appliesTo({
+    loadKindRequirements: () => TABLE, task: { kind }, wantsCompleted, taskNotTerminal,
+  })
+  assert.equal(at('implementation', true, true), true)
   // 终态补证据（issue159）不是新的完成裁决 ⇒ 不生效
-  assert.equal(appliesTo({ task: { kind: 'implementation' }, wantsCompleted: true, taskNotTerminal: false }), false)
-  // review/requirements 不写 changedPaths ⇒ 没有可变异的东西
-  assert.equal(appliesTo({ task: { kind: 'review' }, wantsCompleted: true, taskNotTerminal: true }), false)
+  assert.equal(at('implementation', true, false), false)
+  // review 不写 changedPaths ⇒ 没有可变异的东西（★ 而 t54 之前它靠"kind 不在名单里"被挡下）
+  assert.equal(at('review', true, true), false)
   // 中间状态没有裁决要复核
-  assert.equal(appliesTo({ task: { kind: 'implementation' }, wantsCompleted: false, taskNotTerminal: true }), false)
+  assert.equal(at('implementation', false, true), false)
 })
 
 test('臂 3d 判据元数据：id / point 与注册表的插入点一致', () => {

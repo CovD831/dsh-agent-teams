@@ -67,6 +67,8 @@ import { createTeamDir } from '../lib/state.js'
 // ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
 import { toolsSource } from './tools-source.mjs'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const cleanups = []
@@ -424,6 +426,9 @@ const PATCHED_SITES = [
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 0（前置）：本文件跑在**已构建**的产物上，且探针真的进了核对层
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('★ 臂 0（前置）：探针真的被 `gateModuleViews()` 看见 —— 否则后面每条臂都在测空气', () => {
   /**

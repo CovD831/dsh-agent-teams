@@ -76,6 +76,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const cleanups = []
@@ -721,6 +723,9 @@ function surfaceFor(siteKey, result) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1/2/3：都齐 ⇒ 字段在场 + incomplete: 0（★ 不是缺席）
 // ─────────────────────────────────────────────────────────────────────────────
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('★ 臂 1：contract 位置【都齐】⇒ input_surface 在场且 incomplete: 0（不是缺席）', async () => {
   /**

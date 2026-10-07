@@ -33,6 +33,8 @@ import assert from 'node:assert/strict'
 import { buildRegistry, registry, INSERTION_POINTS } from '../lib/gates/index.js'
 
 /** 每种裁决的【形状】—— 三态不同形的机械判据。 */
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 function shapeOf(verdict) {
   if (verdict === null || typeof verdict !== 'object') return `non-object:${JSON.stringify(verdict)}`
   if (verdict.ok === true) return 'ok'
@@ -90,6 +92,13 @@ function fullyInjectedDispatchCtx() {
 /** 一个"什么都注入"的 completion ctx（四条判据都能测）。 */
 function fullyInjectedCompletionCtx() {
   return {
+    /**
+     * ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。
+     *   ★ "fully injected" 这个名字现在**必须**包含它，否则名不副实：
+     *     缺了它，三条门全走 `appliesTo === false` ⇒ 位置级读成 skipped
+     *     ⇒ 与"注入齐全"同形（而那正是 t54 要消灭的形态）。
+     */
+    loadKindRequirements: () => TABLE,
     wantsCompleted: true,
     taskNotTerminal: true,
     task: {
@@ -154,6 +163,9 @@ function fullyInjectedRuntimeCtx() {
   }
 }
 
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
+
 test('① 接线：dispatch 位置的两条判据都会被 evaluate 跑到（不是 skipped、不是缺席）', async () => {
   const evaluation = await registry.evaluate('dispatch', fullyInjectedDispatchCtx())
   for (const id of ['dispatch.changed-paths', 'dispatch.worktree']) {
@@ -216,6 +228,7 @@ test('① 接线：注册清单里每条判据都能在它自己的位置上被�
 test('② verify-rerun 三臂：伪造 ⇒ blocked / 无执行器 ⇒ unmeasured / 重跑一致 ⇒ ok', async () => {
   const { gate } = await import('../lib/gates/completion/verify-rerun.js')
   const base = () => ({
+    loadKindRequirements: () => TABLE,
     wantsCompleted: true,
     taskNotTerminal: true,
     task: { id: 't1', verify: ['node --test x.mjs'] },
@@ -268,6 +281,7 @@ test('② changed-paths 三臂：虚报 ⇒ blocked / 无观察 ⇒ unmeasured /
 test('② worktree 三臂：没到达 ⇒ blocked / 读不到 ⇒ unmeasured / 到达且没落主树 ⇒ ok', async () => {
   const { gate } = await import('../lib/gates/dispatch/worktree.js')
   const base = () => ({
+    loadKindRequirements: () => TABLE,
     task: { id: 't1', kind: 'implementation' },
     update: { changedPaths: ['src/a.ts'] },
     worktreePath: '/tmp/wt-t1',
@@ -309,6 +323,7 @@ test('② worktree 三臂：没到达 ⇒ blocked / 读不到 ⇒ unmeasured / �
 test('② r5 三臂：新测试在父版本也绿 ⇒ blocked / 没有父版本 ⇒ unmeasured / 父红修复绿 ⇒ ok', async () => {
   const { gate } = await import('../lib/gates/completion/r5.js')
   const base = () => ({
+    loadKindRequirements: () => TABLE,
     wantsCompleted: true,
     taskNotTerminal: true,
     task: { id: 't1', kind: 'implementation', inScope: ['scripts/'] },
@@ -349,6 +364,7 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
   const suiteText = "import test from 'node:test'\nimport { hi } from '../src/a.ts'\ntest('x', () => { hi('hello') })\n"
 
   const base = () => ({
+    loadKindRequirements: () => TABLE,
     wantsCompleted: true,
     taskNotTerminal: true,
     task: { id: 't1', kind: 'implementation', changedPaths: ['src/a.ts'] },
@@ -425,6 +441,8 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
 test('② backtest 三臂：全量红 ⇒ blocked / 没有基准 ⇒ unmeasured / 基准绿且全量绿 ⇒ ok', async () => {
   const { gate } = await import('../lib/gates/completion/backtest.js')
   const base = () => ({
+    /** ★ t54：表必须注入 —— 否则三条门全 `appliesTo===false`，而本臂测的是"它拦不拦得住伪造"。 */
+    loadKindRequirements: () => TABLE,
     task: { id: 't1', kind: 'implementation', inScope: ['src/'] },
     update: { changedPaths: ['src/a.ts'] },
     changedPaths: ['src/a.ts'],
@@ -552,6 +570,13 @@ test('③ ★ 真实路径：tools.ts 注入的 ctx 缺执行器时，返回 unm
     wantsCompleted: true,
     taskNotTerminal: true,
     execVerifyCommand: async () => 0,
+    /**
+     * ★ t54：这一份模拟的是"**生产路径当下注入的那几格**"。
+     *   ★ 而 t54 之后，生产路径**多注入了一格**（kind 需求表）——
+     *     所以这个模拟也必须跟上，否则它模拟的是一条**已经不存在的**生产路径
+     *     （门会因为"表读不到"而沉默，而那不是本臂要测的"缺执行器"）。
+     */
+    loadKindRequirements: () => TABLE,
   }
 
   const evaluation = await registry.evaluate('completion', toolsCtx)
@@ -688,6 +713,23 @@ test('④ 每条判据只 import registry.ts（或另一个纯函数模块），
         || specifier === '../../requires.ts'
         || specifier === '../../mutation.ts'
         || specifier === '../../quality-gates.ts'
+        /**
+         * ── ★ t54：kind 需求表的**类型 + 校验器**（一个纯函数模块）──────────────
+         *
+         * ★ 加这一行**不是放宽**，而是与 `../requires.ts` **同一个先例**：
+         *   它在 `src/gates/` 下、**不是判据**、被所有判据 import，
+         *   而它「不 import 任何东西、也不带一条判据的语义」。
+         *
+         * ★★ 为什么必须让它存在：三条门（r5 / mutation / backtest）**共同需要**
+         *   那张表的类型与校验器。而若把它放在其中一条判据里、再让另外两条 import 它，
+         *   那**正是**这条禁令要拦的形状（"一条判据调另一条"），
+         *   而它会让三条门**互相耦合**：改一头的类型牵动另外两头。
+         *
+         * ⇒ 所以这一行放行的是一个**共享的纯函数模块**，而不是一条判据。
+         *   ★ 拦"判据之间互相调用"的能力**一个字都没变**：
+         *     仍然不许出现 `completion/r5.ts imports "./mutation.ts"`。
+         */
+        || specifier === './kind-requirements.ts'
       if (!allowed) offenders.push(`${rel} imports "${specifier}"`)
     }
   }

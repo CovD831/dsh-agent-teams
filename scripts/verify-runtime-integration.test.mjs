@@ -64,6 +64,8 @@ import { registerAgentTeamsTools, runtimeGateLogSnapshot, resetWaitRecords } fro
 import { registry, INSERTION_POINTS } from '../lib/gates/index.js'
 import { createTeamDir, readTeam, withTeamLock, writeTeam } from '../lib/state.js'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const CAPTAIN_SESSION = 'captain-session'
 const INTERVAL = 10 * 60_000
 const cleanups = []
@@ -274,6 +276,9 @@ async function dispatchedTask(workspace) {
 //   而 `runtime.liveness` 只认事件名 `runtime-liveness` ⇒ 其余五个事件的读数
 //   是 `evaluated: 0` 且 `registered: 1`：**位置不空，而这一轮没有适用**。
 //   那本身是一条必须能读到的信息（"没检查" ≠ "检查通过了"）。
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('① 调用点 member-dispatched：真实的 kickTeam 真的把 runtime 判据求值到了', async () => {
   const workspace = track(mkdtempSync(join(tmpdir(), 'v3-dispatch-')))

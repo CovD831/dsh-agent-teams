@@ -41,6 +41,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gate, appliesTo, id, point } from '../lib/gates/completion/backtest.js'
 import { toolsSource } from './tools-source.mjs'
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 
 /** 收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形。 */
 function expectBlocked(v) {
@@ -113,6 +115,7 @@ function execFrom(exits) {
 /** 一个上下文：改动 src/math.ts，基准绿。 */
 function ctx(overrides = {}) {
   return {
+    loadKindRequirements: () => TABLE,
     task: { id: 't11', kind: 'implementation' },
     update: { changedPaths: ['src/math.ts'] },
     changedPaths: ['src/math.ts'],
@@ -127,6 +130,8 @@ function ctx(overrides = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1：伪造臂 —— 判据应该拦住的东西
 // ─────────────────────────────────────────────────────────────────────────────
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('臂 1 ★ 伪造臂：基准不绿 ⇒ 拒绝，理由必须说清是【无法归因】', async () => {
   const verdict = await gate(ctx({
@@ -398,11 +403,15 @@ test('⑩ appliesTo：只有【声明了改动文件的实现/修复】任务才
    *   ⇒ 它们把那个缺陷**当成了正确行为**并钉住了它。
    *   ★ 形态：**夹具可以为缺陷背书** —— 只要它照着实现写，而不是照着注释写。
    */
-  const impl = { task: { kind: 'implementation' }, changedPaths: ['src/a.ts'] }
-  const repair = { task: { kind: 'repair' }, update: { changedPaths: ['src/a.ts'] } }
+  /**
+   * ★ t54：这一份内联 ctx 也必须带**表** —— 否则 kind 那一格问不出答案，
+   *   而 `appliesTo` 会返回 false（沉默），本臂测的就不是"改动集"那一格了。
+   */
+  const impl = { loadKindRequirements: () => TABLE, task: { kind: 'implementation' }, changedPaths: ['src/a.ts'] }
+  const repair = { loadKindRequirements: () => TABLE, task: { kind: 'repair' }, update: { changedPaths: ['src/a.ts'] } }
   assert.equal(appliesTo(impl), true)
   assert.equal(appliesTo(repair), true)
-  assert.equal(appliesTo({ task: { kind: 'implementation' }, changedPaths: [] }), false, '★ 空的改动集不是"改动集"')
+  assert.equal(appliesTo({ loadKindRequirements: () => TABLE, task: { kind: 'implementation' }, changedPaths: [] }), false, '★ 空的改动集不是"改动集"')
 
   /**
    * ★ 三格守卫各自的半边（缺一即无法分辨）：
@@ -410,10 +419,34 @@ test('⑩ appliesTo：只有【声明了改动文件的实现/修复】任务才
    *   · kind 缺席（= work）⇒ 不生效
    *   · 没有 task 整格 ⇒ 不生效
    */
+  /**
+   * ── ★★ t54：这一格的口径**换过了**，而换的理由本身是结论 ────────────────────
+   *
+   * MEASURED（t48）：那时断言的是「**非写域类 kind 一律不生效**」——
+   *   因为当时的守卫是写死的两个 kind（implementation / repair）。
+   *
+   * ★ 而 t54 把那张名单移进数据表，并对每个 kind **逐个**做了决定。
+   *   其中 `integration` 的决定是 **要 backtest**，理由是：
+   *
+   *     「它搬运并重接**已经各自验过**的零件 ⇒ 有意思的问题不是『有没有新测试』
+   *       （没有新行为），而是『接起来有没有把单独跑通的东西弄坏』——
+        那正是 backtest 的问题。」
+   *
+   * ⇒ 所以这里现在断言 `true`，而**不是**"一律不生效"。
+   *   ★ 而它**没有**放宽：`requirements` / `work` 仍然不生效（见下），
+   *     而那两个是**有理由的不要求**（表里有 `because`）。
+   */
   assert.equal(
-    appliesTo({ task: { kind: 'integration' }, update: { changedPaths: ['src/a.ts'] } }), false,
-    '★ 非写域类 kind 不生效 —— 它们的契约不要求 changedPaths，被审判就是恒交不出终态',
+    appliesTo({ loadKindRequirements: () => TABLE, task: { kind: 'integration' }, update: { changedPaths: ['src/a.ts'] } }), true,
+    '★ t54：integration **要** backtest —— 它的失败模式正是"接起来弄坏了单跑通的零件"',
   )
+  /** ★ 而确实"有理由地不要求"的那两个仍然不生效（否则上面那条只是"恒 true"）。 */
+  for (const kind of ['requirements', 'work']) {
+    assert.equal(
+      appliesTo({ loadKindRequirements: () => TABLE, task: { kind }, update: { changedPaths: ['src/a.ts'] } }), false,
+      `★ ${kind} 有理由地不要求 backtest（表里有 because）`,
+    )
+  }
   assert.equal(appliesTo({ task: {}, changedPaths: ['src/a.ts'] }), false, '★ kind 缺席 = work')
   assert.equal(appliesTo({ changedPaths: ['src/a.ts'] }), false, '★ 没有 task ⇒ 不生效')
   assert.equal(appliesTo({}), false)

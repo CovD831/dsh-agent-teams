@@ -70,6 +70,13 @@
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
+/**
+ * ★ t54：从**非判据**的纯模块拿（不是从 `./r5.ts`）——
+ *   判据之间不许互相 import（`verify-gates-integration` ④ 的显式 allowlist），
+ *   而那条约束防的正是"一条判据调另一条"。
+ *   ★ 本文件与 r5 是**兄弟**，不是它的用户。
+ */
+import { gateRequirementFor, loadKindRequirementsOfHost, type KindRequirementsLoad } from './kind-requirements.ts'
 import type { CtxPaths } from '../requires.ts'
 
 export const id = 'completion.backtest'
@@ -144,6 +151,14 @@ export const requires: CtxPaths<BacktestContext>[] = [
 export type ExecCommand = (command: string) => Promise<number>
 
 export interface BacktestContext {
+  /**
+   * ── ★★★ kind 需求表的**运行时**来源（t54）─────────────────────────────────────
+   *
+   * ★ 与 t53 的 `loadRules`、以及 r5 的同一格**并列同形**：全仓只有**一种**
+   *   "数据怎么被读到"的写法（数据在 src/gates/…/*.json + 一格注入 + 调用方每次读盘）。
+   * ★ **同步**：`appliesTo` 是同步契约，而 kind 守卫就住在那里。
+   */
+  loadKindRequirements?: () => KindRequirementsLoad
   task?: { id?: string; kind?: string; inScope?: string[] }
   update?: { changedPaths?: string[] }
   /** ★ 本次改动涉及的文件（workspace 相对）。空数组 = 没声明，判据据此 unmeasured。 */
@@ -191,9 +206,11 @@ interface CoverageInput {
 
 /** `appliesTo` 关心的字段：只知道形状，不依赖具体类型。 */
 type BacktestAppliesContext = {
-  task?: { kind?: unknown }
+  task?: { kind?: string }
   changedPaths?: unknown
   update?: { changedPaths?: unknown }
+  /** ★ t54：kind 需求表的运行时来源（同步 —— `appliesTo` 是同步契约）。 */
+  loadKindRequirements?: () => KindRequirementsLoad
 } | undefined
 
 /**
@@ -243,8 +260,18 @@ export function appliesTo(ctx: BacktestAppliesContext): boolean {
    *   写成同一条语句是为了让普查臂能用**同一条口径**核对三条 ——
    *   三处写不同的写法会让"它们一致"这件事退回人眼审查。
    */
-  const kind = ctx?.task?.kind
-  if (kind !== 'implementation' && kind !== 'repair') return false
+  /**
+   * ── ★★★ kind 守卫从【硬编码】改成【问表】（t54）───────────────────────────────
+   *
+   * ★ 此前写死 `kind !== 'implementation' && kind !== 'repair'` ⇒ 而 `TASK_KINDS`
+   *   有 7 个 ⇒ 5 个 kind **完全没有完工门**（实测 29% 的任务）。
+   *   ★ 而那不是设计，是**默认**：门只认两个 kind，其余的它**不说话**。
+   *
+   * ★ 三态各有去处：`required` ⇒ 生效；`not-required` ⇒ 按**有理由的决定**闭嘴；
+   *   `unknown` ⇒ 仍不说话，但 `gate()` 会报 `unmeasured`（不静默通过）。
+   */
+  const requirement = gateRequirementFor(loadKindRequirementsOfHost(ctx), ctx?.task?.kind, id)
+  if (requirement.status !== 'required') return false
   /** ★ 守卫二：声明了改动文件（回测无从选测时不说 unmeasured，而是不适用）。 */
   const fromUpdate = ctx?.update?.changedPaths
   const fromCtx = ctx?.changedPaths
@@ -349,6 +376,20 @@ async function runCommand(
 }
 
 export async function gate(ctx: BacktestContext): Promise<GateVerdict> {
+  /**
+   * ── ★★★ 表不可用 ⇒ **不静默通过**（t54）───────────────────────────────────────
+   *
+   * ★ `appliesTo` 在表不可用时返回 `false`（门不说话），而那是**没能测量** ——
+   *   它与"这个 kind 有理由地不要求这条门"在读数上**完全同形**。
+   * ⇒ 所以在开火处再问一次表，让两者分得开（与 r5 逐字同一口径）。
+   */
+  const kindRequirement = gateRequirementFor(loadKindRequirementsOfHost(ctx), ctx?.task?.kind, id)
+  if (kindRequirement.status === 'unknown') {
+    return unmeasured(
+      `Backtest could not tell whether this task needs it (kind=${ctx?.task?.kind ?? 'unspecified'}): ${kindRequirement.why ?? 'the kind-requirements table could not be consulted'}. `
+      + `"the table could not be consulted" is NOT "this kind does not need Backtest"`,
+    )
+  }
   const changed = (Array.isArray(ctx?.changedPaths) ? ctx.changedPaths : ctx?.update?.changedPaths) ?? []
 
   /**

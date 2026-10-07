@@ -44,6 +44,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 import * as backtest from '../lib/gates/completion/backtest.js'
 import * as mutation from '../lib/gates/completion/mutation.js'
 import * as r5 from '../lib/gates/completion/r5.js'
@@ -51,6 +52,14 @@ import * as verifyRerun from '../lib/gates/completion/verify-rerun.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const COMPLETION_DIR = join(ROOT, 'src', 'gates', 'completion')
+
+/**
+ * ★ t54：真的那张表 —— 本文件的臂既用**它**做缺省，也用它证明"改表 ⇒ 行为变"。
+ *   ★ 从**盘上**读（与生产同一条数据），而不是手搓一份替身。
+ */
+function loadKindRequirementsForFixture() {
+  return parseKindRequirements(JSON.parse(readFileSync(join(COMPLETION_DIR, 'kind-requirements.json'), 'utf8')))
+}
 
 /**
  * ── 这一族的口径（**最重要的一格**）────────────────────────────────────────────
@@ -106,7 +115,16 @@ test('★★ 臂 1（普查臂）：凡 `appliesTo` 读 `changedPaths` 的判据
    *
    * ⇒ 新增一条读 changedPaths 而没有 kind 守卫的判据 ⇒ **本臂红**。
    */
-  const sources = readdirSync(COMPLETION_DIR).filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts'))
+  /**
+   * ★ t54：**排除非判据的纯模块** —— `kind-requirements.ts` 住在这个目录里，
+   *   而它**不是判据**（它没有 `appliesTo`/`gate`，它与 `../requires.ts` 同类）。
+   *   ★ 不排除它，本臂会把"共享模块没有 appliesTo"报成缺陷。
+   *   ⇒ 判据的**判别式**仍然是"它有 `appliesTo`"（下面那句断言），
+   *     而这里的过滤只是把明显不是判据的文件先摘掉。
+   */
+  const NON_GATE_MODULES = new Set(['kind-requirements.ts'])
+  const sources = readdirSync(COMPLETION_DIR)
+    .filter((name) => name.endsWith('.ts') && !name.endsWith('.d.ts') && !NON_GATE_MODULES.has(name))
   assert.ok(sources.length > 0, '★ 判据目录必须扫得到文件 —— 否则本臂在空集合上恒真')
 
   const kindSensitive = []
@@ -156,47 +174,55 @@ test('★★ 臂 1（普查臂）：凡 `appliesTo` 读 `changedPaths` 的判据
 // 臂 2（★ 一致性臂）：同族三条的守卫口径必须**逐字一致**
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★ 臂 2（一致性臂）：同族三条的 kind 守卫写法必须完全相同', () => {
+test('★★ 臂 2（★ 一致性臂，t54 改造）：同族三条都【问表】—— 而不是各自写死名单', () => {
   /**
-   * ── 为什么要断言"写法相同"而不只是"行为相同" ──────────────────────────────────
+   * ── ★★ 这一臂的判法在 t54 被**换过**，而换的理由本身是结论 ────────────────────
    *
-   * MEASURED：这条缺陷的成因就是**三条各写各的**。
-   *   ⇒ 只断言"行为一致"，下一次有人写第三种写法（例如
-   *     `if (!['implementation','repair'].includes(kind))`）时，
-   *     它在**当时**行为相同，而它把"一致"退回了**人眼审查**。
+   * MEASURED（t48）：它此前断言三条的 kind 守卫**逐字相同**
+   *   （`if (kind !== 'implementation' && kind !== 'repair') return false`），
+   *   因为"三条各写各的"正是那次缺陷的成因。
    *
-   * ★ 口径：三条必须含**同一行**守卫语句（逐字）。它是可机械核对的，
-   *   而"三个不同写法碰巧行为相同"是不可机械核对的。
+   * ★ 而 t54 把那张名单**移进了数据表** ⇒ 三条现在都写 `gateRequirementFor(…)`，
+   *   而"逐字相同"这条断言因此**必然红** —— 它红得对：形状真的变了。
+   *
+   * ⇒ 判法换成**更强的**那条：三条都必须**问表**（`gateRequirementFor`），
+   *   且都**不许**再出现写死的 kind 名单。
+   *   ★ 这比"三处写法相同"更强：写法相同只保证它们此刻一致，
+   *     而"都问同一张表"保证它们**由同一个来源决定**（表改了三条一起改）。
    */
-  const GUARD = "if (kind !== 'implementation' && kind !== 'repair') return false"
   const family = ['backtest.ts', 'r5.ts', 'mutation.ts']
-  const missing = []
+  const notAsking = []
+  const stillHardcoded = []
   for (const name of family) {
     const source = readFileSync(join(COMPLETION_DIR, name), 'utf8')
     const body = /export function appliesTo[\s\S]*?\n}/.exec(source)
-    if (body === null || !body[0].includes(GUARD)) missing.push(name)
+    assert.ok(body !== null, `★ ${name} 里找不到 appliesTo`)
+    if (!body[0].includes('gateRequirementFor(')) notAsking.push(name)
+    /**
+     * ★ 而写死的名单必须**gone** —— 否则两条来源并存，而它们会在下一次分叉。
+     *
+     * ★ **剥掉注释再查**：这些文件的注释里**刻意**引用了那条旧写法
+     *   （说明"此前是什么、为什么改"），而它们不是代码。
+     *   ⇒ 不剥注释的话，本臂会把"诚实地记下历史"报成"仍然硬编码"。
+     */
+    const code = body[0]
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').filter((line) => !/^\s*\/\//.test(line)).join('\n')
+    if (/kind !== 'implementation' && kind !== 'repair'/.test(code)) stillHardcoded.push(name)
   }
+  assert.deepEqual(notAsking, [], `★ 这一族（${family.join(' / ')}）的 kind 守卫必须**问表**（gateRequirementFor）`)
   assert.deepEqual(
-    missing, [],
-    `★ 这一族（${family.join(' / ')}）的 kind 守卫必须逐字相同 —— 这三条各写各的正是缺陷的成因。`
-    + ` 缺守卫或写法不同的：${missing.join(', ')}`,
+    stillHardcoded, [],
+    '★ 这些文件里仍留着写死的 kind 名单 ⇒ 表与硬编码**两条来源并存**，而它们会在下一次分叉',
   )
 
-  /**
-   * ★ 反向半边：这一族**恰好**是这三条 —— 而 `verify-rerun` **不在**其中。
-   *   它在设计上对所有 kind 生效（它重跑契约声明的 verify 命令，那是每类任务的义务）。
-   *   ⇒ 把它算进来会让本文件要求它加一条**不该有**的守卫。
-   */
-  const rerunBody = /export function appliesTo[\s\S]*?\n}/.exec(readFileSync(join(COMPLETION_DIR, 'verify-rerun.ts'), 'utf8'))
+  /** ★ 反向半边：这一族**恰好**是这三条 —— `verify-rerun` 有意不守 kind。 */
+  const rerun = readFileSync(join(COMPLETION_DIR, 'verify-rerun.ts'), 'utf8')
+  const rerunBody = /export function appliesTo[\s\S]*?\n}/.exec(rerun)
   assert.ok(rerunBody !== null)
   assert.equal(
-    rerunBody[0].includes(GUARD), false,
-    '★ verify-rerun **有意**不守 kind（它重跑 verify，是每类任务的义务）——'
-    + '若它出现了这条守卫，说明有人为了迎合普查臂改错了它',
-  )
-  assert.equal(
-    verifyRerun.appliesTo(fullContext('integration')), true,
-    '★ 而它行为上也确实对 integration 生效 —— 它与那三条**不同族**',
+    rerunBody[0].includes('gateRequirementFor('), false,
+    '★ verify-rerun **有意**对所有 kind 生效（它重跑 verify，是每类任务的义务）',
   )
 })
 
@@ -221,10 +247,19 @@ test('★ 臂 3（诱导复现）：诚实申报 changedPaths 的非写域任务
     + ' baseline 对这类任务不存在 ⇒ 审判它就是让它恒交不出终态',
   )
 
-  /** ★ 而反向半边：同类形状的 **repair** 任务必须**仍然**被审判（没有过度收紧）。 */
+  /**
+   * ★ 而反向半边：**repair** 仍然被审判（没有过度收紧）。
+   *   ★ t54：这一格现在需要**表** —— 因为 kind 守卫改成问表了，
+   *     不注入表就等价于"没能测量"（门不说话），而那不是"过度收紧"。
+   */
+  const table = loadKindRequirementsForFixture()
   assert.equal(
-    backtest.appliesTo({ ...honestIntegration, task: { kind: 'repair' } }), true,
+    backtest.appliesTo({ ...honestIntegration, loadKindRequirements: () => table, task: { kind: 'repair' } }), true,
     '★ repair 申报了 changedPaths ⇒ 必须仍然生效（否则这一臂对"恒 false 的实现"没有分辨力）',
+  )
+  /** ★ 而 implementation 也必须生效（表里那三样最大的那一条）。 */
+  assert.equal(
+    backtest.appliesTo({ ...honestIntegration, loadKindRequirements: () => table, task: { kind: 'implementation' } }), true,
   )
 })
 

@@ -78,6 +78,8 @@ import { spawnSync } from 'node:child_process'
 import { repairCompletionVerdict, repairEvidenceFiles } from '../lib/quality-gates.js'
 import * as r5 from '../lib/gates/completion/r5.js'
 
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SOURCE = join(ROOT, 'src', 'quality-gates.ts')
 const BUILT_GATE = join(ROOT, 'lib', 'quality-gates.js')
@@ -98,6 +100,11 @@ async function evaluateCompletion(ctx) {
 /** 真实路径上，没有可判证据时 `discriminatingFiles` 是 undefined ⇒ 键缺席。 */
 function worktreeWorkerCtx({ newTestFiles } = {}) {
   return {
+    /**
+     * ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。
+     *   缺了它三条门都问不出"这个 kind 要不要我"，而那是「没能测量」，不是本臂要测的东西。
+     */
+    loadKindRequirements: () => TABLE,
     task: { id: 't44', kind: 'repair', inScope: [IMPL, FIXTURE], changedPaths: [IMPL, FIXTURE] },
     update: {
       status: 'completed',
@@ -118,6 +125,9 @@ const r5Unmeasured = (evaluation) => (evaluation.unmeasured ?? '').includes('[co
 // ═════════════════════════════════════════════════════════════════════════════
 // 第一半：复现 —— 逐条问"还剩哪一道门在拒"
 // ═════════════════════════════════════════════════════════════════════════════
+
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
 
 test('★★ 复现 A：没有可判证据、键【缺席】（今天的真实形态）⇒ r5 不阻断 —— 这半【已解】', async () => {
   /**
@@ -149,23 +159,46 @@ test('★★ 复现 B：有可判证据（注入夹具）⇒ r5 真的跑，且�
   )
 })
 
-test('★★ 复现 C：空数组 ⇒ r5 【重新】出现在 unmeasured —— 这是仍在的那一半', async () => {
+test('★★ 复现 C（★ t54 后**已改口径**）：repair + 空数组**不再**进 r5 —— 而 implementation 仍然进', async () => {
   /**
-   * ★ 这一条是**复现的主菜**：它逐字记录"死锁的另一半还在，而且它的形状是空数组"。
+   * ── ★★ 这一条的口径在 t54 之后**反过来了**，而那个反转是本任务最实质的一个后果 ──
    *
-   *   空数组 ⇒ `r5.appliesTo` 为真（只问 `Array.isArray`）⇒ 进 ③ 支 ⇒ 恒 unmeasured。
+   * MEASURED（t48/t27 记录的那条死锁）：`repair` + `newTestFiles: []`
+   *   ⇒ `r5.appliesTo` 为真 ⇒ 进那一支 ⇒ **恒 unmeasured** ⇒ 恒交不出终态。
+   *   而今天 16 个任务里绝大多数是 repair ⇒ 那是无人值守最大的那类阻断。
    *
-   * ★ 与 A 的对照是本文件最值钱的一组读数：
-   *     A（缺席）⇒ 跳过、不阻断
-   *     C（空数组）⇒ 开火、恒拒
-   *   ⇒ **空数组比没有数组更坏**。
+   * ★ 而 t54 把 kind 守卫移进数据表，并对 `repair` 做了**明写的决定**：
+   *
+   *     repair 要 mutation + backtest，**不要 r5**
+   *     理由：「修复类的判别证据是【既有夹具】改变判决（t31 已建）；
+   *            在这里要求新测试会把成员推向写**装饰性的**测试」
+   *
+   * ⇒ ★ 于是**那条死锁路径在 repair 上不可达了** ——
+   *   不是"修好了那一支"，而是"repair 根本不进那条路"。
+   *
+   * ★ 而**机制本身仍在**：`implementation` + 空数组照样会走到 r5（表说它要 r5）。
+   *   ⇒ 所以下面**两半都要断言**：不然后半句会变成"死锁被悄悄修掉了"的错觉。
    */
-  const evaluation = await evaluateCompletion(worktreeWorkerCtx({ newTestFiles: [] }))
+  const repairEval = await evaluateCompletion(worktreeWorkerCtx({ newTestFiles: [] }))
   assert.equal(
-    r5Unmeasured(evaluation), true,
-    '★ 空数组仍然让 r5 开火并恒拒 —— 这一半就是本任务要收的尾',
+    r5Unmeasured(repairEval), false,
+    '★ t54：repair 不再进 r5 ⇒ 那一支不再被它踩到（而死锁的机制本身没有被删）',
   )
-  assert.match(String(evaluation.unmeasured), /none of the 0 reported file\(s\)/, '★ 逐字记下它的措辞')
+
+  /**
+   * ★★ 而**死锁的机制仍在** —— 换一个表说"要 r5"的 kind，同一种输入仍走进那一支。
+   *   ★ 缺了这一半，上面那条断言在"r5 被整个删掉"的实现上也成立。
+   */
+  const implCtx = { ...worktreeWorkerCtx({ newTestFiles: [] }), task: { id: 't44', kind: 'implementation', inScope: [IMPL, FIXTURE], changedPaths: [IMPL, FIXTURE] } }
+  const implEval = await evaluateCompletion(implCtx)
+  assert.equal(
+    r5Unmeasured(implEval), true,
+    '★ 死锁的**机制**仍在：表说要 r5 的 kind + 空数组 ⇒ 仍然开火并恒拒',
+  )
+  assert.match(
+    String(implEval.unmeasured), /none of the 0 reported file\(s\)/,
+    '★ 逐字记下它的措辞（那一句就是死锁的读数）',
+  )
 })
 
 test('★★ 复现 C2：那一格是【可达的】—— 只改非测试文件的 repair 就会走到它', async () => {

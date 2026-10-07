@@ -69,6 +69,13 @@
  * 于是"只跑了 3 个测试却说全量绿"与"真的全量绿"不同形。
  */
 import { type GateVerdict } from '../registry.ts';
+/**
+ * ★ t54：从**非判据**的纯模块拿（不是从 `./r5.ts`）——
+ *   判据之间不许互相 import（`verify-gates-integration` ④ 的显式 allowlist），
+ *   而那条约束防的正是"一条判据调另一条"。
+ *   ★ 本文件与 r5 是**兄弟**，不是它的用户。
+ */
+import { type KindRequirementsLoad } from './kind-requirements.ts';
 import type { CtxPaths } from '../requires.ts';
 export declare const id = "completion.backtest";
 export declare const point = "completion";
@@ -130,6 +137,14 @@ export declare const requires: CtxPaths<BacktestContext>[];
 /** 跑一次命令，返回退出码。与 `completion.verify-rerun` 同一个注入形状。 */
 export type ExecCommand = (command: string) => Promise<number>;
 export interface BacktestContext {
+    /**
+     * ── ★★★ kind 需求表的**运行时**来源（t54）─────────────────────────────────────
+     *
+     * ★ 与 t53 的 `loadRules`、以及 r5 的同一格**并列同形**：全仓只有**一种**
+     *   "数据怎么被读到"的写法（数据在 src/gates/…/*.json + 一格注入 + 调用方每次读盘）。
+     * ★ **同步**：`appliesTo` 是同步契约，而 kind 守卫就住在那里。
+     */
+    loadKindRequirements?: () => KindRequirementsLoad;
     task?: {
         id?: string;
         kind?: string;
@@ -179,12 +194,14 @@ interface CoverageInput {
 /** `appliesTo` 关心的字段：只知道形状，不依赖具体类型。 */
 type BacktestAppliesContext = {
     task?: {
-        kind?: unknown;
+        kind?: string;
     };
     changedPaths?: unknown;
     update?: {
         changedPaths?: unknown;
     };
+    /** ★ t54：kind 需求表的运行时来源（同步 —— `appliesTo` 是同步契约）。 */
+    loadKindRequirements?: () => KindRequirementsLoad;
 } | undefined;
 /**
  * 只对【声明了改动文件】的【实现/修复】任务生效。

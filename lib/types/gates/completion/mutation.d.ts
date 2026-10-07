@@ -40,6 +40,13 @@
  * 这条同样适用于 L3 的契约违反体 —— 定义里的锚点必须落在这个范围内。
  */
 import { type GateVerdict } from '../registry.ts';
+/**
+ * ★ t54：从**非判据**的纯模块拿（不是从 `./r5.ts`）——
+ *   判据之间不许互相 import（`verify-gates-integration` ④ 的显式 allowlist），
+ *   而那条约束防的正是"一条判据调另一条"。
+ *   ★ 本文件与 r5 是**兄弟**，不是它的用户。
+ */
+import { type KindRequirementsLoad } from './kind-requirements.ts';
 import type { CtxPaths } from '../requires.ts';
 import { type InvariantDefinition, type MutantRun, type MutationOperator, type SuiteTarget } from '../../mutation.ts';
 export declare const id = "completion.mutation";
@@ -87,6 +94,14 @@ export interface MutationMirror {
     readonly mirrorPath: string;
 }
 export interface MutationContext {
+    /**
+     * ── ★★★ kind 需求表的**运行时**来源（t54）─────────────────────────────────────
+     *
+     * ★ 与 t53 的 `loadRules`、以及 r5 的同一格**并列同形**：全仓只有**一种**
+     *   "数据怎么被读到"的写法（数据在 src/gates/…/*.json + 一格注入 + 调用方每次读盘）。
+     * ★ **同步**：`appliesTo` 是同步契约，而 kind 守卫就住在那里。
+     */
+    loadKindRequirements?: () => KindRequirementsLoad;
     task?: {
         id?: string;
         kind?: string;

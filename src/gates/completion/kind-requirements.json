@@ -1,0 +1,56 @@
+{
+  "_comment": "── 完工门的【kind 需求表】（t54）──────────────────────────────【这里放的是表，不是逻辑】。三条门（r5 / mutation / backtest）每次求值时读它 ⇒ 改这个文件不需要重载插件。★ 而「怎么用这张表判」留在代码里 —— 一个能表达逻辑的数据文件会变成不可测的解释器。",
+  "schema": 1,
+  "_why": "为什么要有这张表（MEASURED）：那三条门此前各自写死 kind !== implementation && kind !== repair ⇒ 而 TASK_KINDS 有 7 个 ⇒ 5 个 kind 完全没有完工门。★ 而那【不是设计】—— 没有任何地方说 verification 类任务不需要新测试，它只是【默认】。⇒ 表把默认变成决定：每一个 kind 都要明写它要什么，或明写它为什么不要。量化：今天 51 个真实任务里 15 个（29%）属于无门的 kind。",
+  "_requiredGates": "每个 kind 要求哪些门。★ 空数组【必须】配一条 because —— 「不要求」是一个决定，而它要有理由；没有理由的空数组就是默认。★ 而【表里没有这个 kind】是另一回事：那是没能测量，门必须报 unmeasured（不是沉默）。",
+  "kinds": [
+    {
+      "kind": "implementation",
+      "requiredGates": [
+        "completion.r5",
+        "completion.mutation",
+        "completion.backtest"
+      ],
+      "because": "new behaviour needs a new test (r5: it must be red before and green after), that test must actually discriminate (mutation), and the change must not break what was working (backtest). This is the status quo, stated."
+    },
+    {
+      "kind": "repair",
+      "requiredGates": [
+        "completion.mutation",
+        "completion.backtest"
+      ],
+      "because": "a repair's discriminating evidence is an EXISTING fixture that changes verdict (t31 established this); demanding new tests here would push members towards writing decorative ones. Mutation stays because it is what proves the discriminating fixture really discriminates; backtest stays because a repair is still a change."
+    },
+    {
+      "kind": "verification",
+      "requiredGates": [
+        "completion.r5"
+      ],
+      "because": "a verification task adds no behaviour, so there is nothing new for r5/mutation to discriminate — requiring them would be requiring a test of a test. But it DOES run the suite, and a verification whose claimed result disagrees with a backtest is exactly the failure this class must not have. Not required: r5 (no new behaviour to pin), mutation (its subject is code, not a verdict)."
+    },
+    {
+      "kind": "review",
+      "requiredGates": [
+        "completion.backtest"
+      ],
+      "because": "same shape as verification — the deliverable is a judgement, so there is no new behaviour for r5/mutation to pin. backtest stays for the same reason: a review that ran things must not have broken them. ★ And a review's real quality bar (did it find anything, was it independent) is not something these three gates can ask — pretending otherwise would be a gate that checks the wrong thing. That gap is honestly left open here rather than papered over."
+    },
+    {
+      "kind": "requirements",
+      "requiredGates": [],
+      "because": "a requirements task produces prose. There is no behaviour to pin (r5), no code for a mutation to survive, and — in the common case — nothing executable to break. ★ But this is an empty array WITH a reason, not a default: if a requirements task ever does touch executable surface, that is a contract/scope question (declared paths), not a completion-gate question. Keeping it empty deliberately: a gate that cannot fail for the right reason trains people to ignore it."
+    },
+    {
+      "kind": "integration",
+      "requiredGates": [
+        "completion.backtest"
+      ],
+      "because": "integration moves and rewires existing, already-tested parts — so the interesting question is not whether there is a new test (there is no new behaviour) but whether wiring them together broke something that worked alone. That is exactly backtest's question. Not required: r5 (no new behaviour to be red-then-green), mutation (the parts were already mutation-tested where they were written)."
+    },
+    {
+      "kind": "work",
+      "requiredGates": [],
+      "because": "work is the kind whose contract deliberately does not require a verify list or an inScope at all (see contract.build-artifact-scope). Asking r5/mutation/backtest of it would demand evidence that its own contract never asked it to produce. ★ Empty WITH a reason: if a task needs completion gates, that is a signal it should have been filed as a quality kind — and that is a task-shaping decision, made visible here rather than silently enforced."
+    }
+  ]
+}

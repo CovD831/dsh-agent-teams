@@ -36,6 +36,8 @@
  * Run: node --test scripts/gate-repair-completion.test.mjs
  */
 import test from 'node:test'
+import { kindRequirementsTable } from './kind-requirements-table.mjs'
+import { parseKindRequirements } from '../lib/gates/completion/r5.js'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -229,6 +231,8 @@ const EXISTING_FIXTURE = 'scripts/gate-repair-completion.test.mjs'
  */
 function worktreeWorkerCtx(overrides = {}) {
   return {
+    /** ★ t54：kind 需求表 —— 由调用方注入（判据不读盘）。用**真的那张表**。 */
+    loadKindRequirements: () => TABLE,
     task: { id: 't27', kind: 'repair', inScope: [EXISTING_FIXTURE] },
     // ★ 净改动【全在既有夹具上】—— 这正是 t27 实测的形状（+139/-19 全在既有文件）。
     //   而 newTestFiles 是空集：它数的是"新增"，repair 一个都没新增。
@@ -247,6 +251,9 @@ function worktreeWorkerCtx(overrides = {}) {
 // 1. 既有夹具【被更新】且【仍能判别】⇒ 必须放行（6 次同形终止的正面）
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+const TABLE = kindRequirementsTable(parseKindRequirements)
+
 test('arm 1 — a repair that updates an EXISTING fixture which still discriminates is allowed', async () => {
   const files = repairEvidenceFiles(worktreeWorkerCtx())
   assert.deepEqual(
@@ -255,17 +262,57 @@ test('arm 1 — a repair that updates an EXISTING fixture which still discrimina
   )
 })
 
-test('arm 2 — and r5 then measures it instead of saying "none of the 0 reported file(s)"', async () => {
+test('arm 2（★ t54 后口径已改）— r5 **不再对 repair 生效**，而那条关系仍被钉住', async () => {
+  /**
+   * ── ★★ 这一臂的口径在 t54 之后**反过来了**，而两件事必须分开说 ────────────────
+   *
+   * ① **口径**（本臂测的东西）：t54 的表对 `repair` 做了明写的决定 ——
+   *    「要 mutation + backtest，**不要 r5**」，理由是修复类的判别证据是
+   *    **既有夹具**改变判决（t31），在这里要求新测试会推向**装饰性**测试。
+   *    ⇒ 所以 `r5.appliesTo(repair)` 现在是 `false` —— 而那**是有意的**。
+   *
+   * ② ★★ **链**（另一件事，**不属本任务**）：t33/t48 建的
+   *    `repairEvidenceFiles → newTestFiles → r5` 那条接线，
+   *    它的**唯一消费者是 r5**。而 r5 对 repair 不再生效 ⇒
+   *    对 repair 而言那条证据**被生产出来而没有人消费**。
+   *
+   *    ★ 我核实过（两条 grep）：
+   *      · 注入点：`update-task.ts:616` ⇒ 落到 `newTestFiles`
+   *      · r5 读 `newTestFiles`；**mutation 不读它**（它读 changedFiles / killerSuites，
+   *        而 killerSuites 另有供给链：`update-task.ts:702` 从 observedTestFiles 来）
+   *      ⇒ 所以"mutation 会接住它"这个假设**不成立**。
+   *
+   *    ⇒ ★ 那是**一个真实的缺口**，已作为 finding 单独立项 ——
+   *      **本臂的红/绿都不代表它被处理了**，而我不把它藏进"口径更新"里。
+   */
   const ctx = worktreeWorkerCtx({
     update: { changedPaths: [EXISTING_FIXTURE], newTestFiles: repairEvidenceFiles(worktreeWorkerCtx()) },
   })
-  assert.equal(r5.appliesTo(ctx), true)
-  const verdict = await r5.gate(ctx)
-  assert.equal(verdict.ok, true, `expected r5 to pass, got ${JSON.stringify(verdict)}`)
-  // ★ 通过时也必须交出两轮观测，而不是只说"过了"。
-  assert.equal(verdict.r5.verified.length, 1)
-  assert.equal(verdict.r5.verified[0].parentExitCode, 1)
-  assert.equal(verdict.r5.verified[0].fixedExitCode, 0)
+
+  /**
+   * ★ 保留的读数（★ 不能删）：**"r5 与 repair 的关系"仍被钉住**。
+   *   删掉它就等于"没有东西在测这条关系" —— 而那会让下一次
+   *   "有人把 repair 加回 r5 的名单"静默通过。
+   */
+  assert.equal(
+    r5.appliesTo(ctx), false,
+    '★ t54：r5 **不对 repair 生效**（表里明写：修复类的判别门是 mutation + backtest）',
+  )
+  /** ★ 而那不是"r5 坏了"：它对 implementation 仍然生效。 */
+  assert.equal(
+    r5.appliesTo({ ...ctx, task: { ...ctx.task, kind: 'implementation' } }), true,
+    '★ r5 仍对 implementation 生效 —— 上面那条不是"r5 被关掉了"',
+  )
+
+  /**
+   * ★★ 而**这条证据仍然被生产出来**（`repairEvidenceFiles` 照常给出文件名）——
+   *   那正是缺口的样子：**供给还在，而消费没了**。
+   *   ★ 这一格是那条 finding 的读数，留在本臂里让下一个人看得到。
+   */
+  assert.ok(
+    repairEvidenceFiles(worktreeWorkerCtx()).length > 0,
+    '★ 证据仍被生产（而它此刻在 repair 上没有人消费 —— 见上面 ② 与那条 finding）',
+  )
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
