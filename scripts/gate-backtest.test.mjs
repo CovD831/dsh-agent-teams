@@ -40,6 +40,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gate, appliesTo, id, point } from '../lib/gates/completion/backtest.js'
+import { toolsSource } from './tools-source.mjs'
 
 /** 收窄助手：把"期望哪一种裁决"写进断言本身，于是三态在测试里也不同形。 */
 function expectBlocked(v) {
@@ -555,7 +556,13 @@ test('★ t18 臂 3（★ 落盘臂）：父版本必须【落进耐久态】，
   const { readFileSync } = await import('node:fs')
   const { join, dirname } = await import('node:path')
   const { fileURLToPath } = await import('node:url')
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'tools.ts'), 'utf8')
+  /**
+   * ★★ 2026-10-07（t39 拆分之后的收口）：从硬读 src/tools.ts 换成 toolsSource()。
+   *   拆分后"把父版本写进耐久态"与"读它的地方"分别落在 src/tools/*.ts 的工具模块里；
+   *   硬读单一文件会找不到它们，而本臂会红成"缺陷原样存在"的样子 ——
+   *   ★ 即：读数装置读旧位置，与缺陷真的还在，在症状上同形。
+   */
+  const source = toolsSource()
 
   assert.match(
     source, /persistTaskBaseRevision/,

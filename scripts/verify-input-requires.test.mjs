@@ -57,6 +57,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { toolsCode, toolsSource } from './tools-source.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -771,9 +772,14 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
  *   而虚高的读数会让真正漏接的那一处藏起来。
  */
 function sourceWiredPoints() {
-  const code = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '')
+  /**
+   * ★★ 2026-10-07（t39 拆分之后的收口）：换成 toolsCode()。
+   *   拆分后输入面核对散在 src/tools/*.ts 的各个工具模块里；硬读 src/tools.ts
+   *   会得到一个**空集合** —— 而"空集合上每个都合格"是恒真的，
+   *   所以它表现为一条"必须有内容"的断言红，而不是静默通过。
+   *   ★ 那条"必须有内容"的断言正是为此而写的，而它今天兑现了。
+   */
+  const code = toolsCode()
   return [...new Set([...code.matchAll(/inputSurfaceOf\('(\w+)'/g)].map((match) => match[1]))].sort()
 }
 
@@ -1773,7 +1779,11 @@ test('★ 臂 9（⑦）：completion.backtest 报出的 baseline / coverage —
    *   不是接线事故。⇒ 这正是"它报的不是误报"的另一半证据：
    *   缺的是**条件格**，而判据把条件格缺席读成 `unmeasured`（设计如此）。
    */
-  const source = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  /**
+   * ★★ 2026-10-07（t39 拆分之后的收口）：同样换成 toolsSource()。
+   *   拆分后那两格的条件注入落在 src/tools/update-task.ts —— 硬读单一文件会找不到它们。
+   */
+  const source = toolsSource()
   /**
    * ★ 逐格对拍（本臂第一版把 `coverage` 的名字写死了，实测打回）：
    *   `baseline` 的条件注入写的是 `...baseline === undefined ? {} : { baseline }`，
@@ -1873,7 +1883,20 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
     registrySource, /checkRequires\(reg, context/,
     '★ 注册表求值时用的 ctx 必须与核对用的是同一个 `context` 形参 —— 一份 ctx 只读一次',
   )
-  const toolsSource = readFileSync(join(ROOT, 'src', 'tools.ts'), 'utf8')
+  /**
+   * ★★ 2026-10-07（t39 拆分之后的收口）：从 readFileSync('src/tools.ts') 换成 toolsSource()。
+   *
+   * t39 把 15 个工具的实现从 src/tools.ts 搬进了 src/tools/*.ts —— 而本臂当时仍硬读
+   * 那一个文件，于是在拆分后【找不到】它要的那些特征串，四条臂一起红。
+   *
+   * ★ 而它红的形状很危险：它看起来像"有人把拆分改坏了"（臂 9/10 的名字都指向
+   *   baseline / 输入面核对），而真相是【读数装置读的是旧位置】。
+   *   这与 t39 修的那 15 条夹具是同一类，而这一条当时被漏掉了。
+   *
+   * ⇒ 用 tools-source.mjs 的统一口径（它把所有工具源码拼成一份、每块仍连续完整）
+   *   ⇒ 夹具的解析逻辑一行都不用改。
+   */
+  const toolsSourceText = toolsSource()
   /**
    * ── ★ 五处调用点：**核对与求值必须读同一份 ctx 表达式** ────────────────────────
    *
@@ -1888,10 +1911,10 @@ test('★ 臂 10：五处调用点的输入面核对在【求值之前】—— 
    *   ★ 而"剥注释"这件事本身由下面那条**注释样本**断言钉住 —— 一个连注释
    *     都数进去的读数会让真正漏接的那一处藏起来（虚高的读数与"没测到"同形）。
    */
-  const codeLines = toolsSource.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+  const codeLines = toolsSourceText.split('\n').filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
   const code = codeLines.join('\n')
   assert.ok(
-    toolsSource.includes("registry.evaluate('completion', …)"),
+    toolsSourceText.includes("registry.evaluate('completion', …)"),
     '★ 前置：源里确实有"注释里提到求值调用"的样本 —— 没有它，本臂的"剥注释"就是一句空话'
   )
 
