@@ -305,6 +305,145 @@ export function workspaceAndWorktreeChangedPaths(workspace: string): string[] | 
 }
 
 /**
+ * ── ★★★ worktree 的【基线过期】：我的检出比主干旧吗（t80）───────────────────────
+ *
+ * ── 它修的是什么（两个成员各自撞到，而两次都不是他们的错）────────────────────
+ *
+ *   · t72：检出里【没有 t69 的修复】⇒ 它读到 **28 条红**，而主树只有 **4 条**
+ *   · t70：检出里【没有 t69 修的那个"空理由"】⇒ 它报了一条【已经修好】的缺口
+ *
+ *   ⇒ 两次都是"切分支的时点早于某个修复"，而两次都让成员在**不存在的问题**上花时间。
+ *
+ * ── ★★ 而这不是偶发，是本仓的常态（MEASURED，2026-10-08）──────────────────────
+ *
+ *     task-t13 61 个提交落后 · task-t14 61 · task-t16 60 · task-t19 56
+ *     task-t24 44 · task-t25 53 · task-t26 53 · task-t27 52
+ *
+ *   ⇒ ★ 一个落后 61 个提交的检出，会读到一整套**已经不存在**的失败。
+ *
+ * ── ★★ 形态（与本队那条归纳同源）──────────────────────────────────────────────
+ *
+ *   **worktree 相对主干的时序，没有任何东西在读。**
+ *
+ *   ★ 它与"已提交但未并入主树那一段在观察面里不存在"同族 —— 同一个量的两个方向：
+ *     ① 让**过时**可读（本函数）：我的基线比主干旧吗
+ *     ② 让**已提交**可见（另一个任务）：我提交了而主干还没有的算不算改动
+ *   ⇒ 共同形态：**worktree 与主干之间的【差】，没有任何东西在看。**
+ *
+ * ── ★★ 为什么读 `HEAD..main`，而**不是** `git diff main...HEAD`（实测）───────────
+ *
+ *   在一个真实的落后 worktree（task-t13，落后 61）上实测：
+ *
+ *       git diff --name-only main...HEAD   ⇒  **0 个文件**   ← 看不到过期！
+ *       git diff --name-only main..HEAD    ⇒  219 个文件     ← 方向是反的
+ *       git rev-list --count HEAD..main    ⇒  61              ← 这才是过期量
+ *
+ *   ★ 三点式问的是「**本分支**相对分叉点加了什么」——
+ *     而落后的 worktree 往往**一个字都没提交**（它在脏工作树里干活）⇒ 它报 0。
+ *     ⇒ 那个 0 与"完全同步"的 0【同形】，所以它看不见过期。
+ *   ★ 两点式方向相反：它列的是"主干有而我没有"的改动 ⇒
+ *     把它塞进**观察面**会把**别人的**改动算成本次任务的改动
+ *     （而那正是 `dispatch.changed-paths` 要防的事）。
+ *
+ *   ⇒ ★ 两者混用一个名字会答错。而过期的正确读数是 `HEAD..main` ——
+ *     它属于**这里**（一条可读的读数），**不属于**观察面。
+ *
+ * ── ★★ 三态，且三者不同形 ──────────────────────────────────────────────────────
+ *
+ *   `current`     —— 差 0 个提交（基线就是主干尖端）
+ *   `behind`      —— 落后 N 个（★ 附 N 与主干尖端）
+ *   `undecidable` —— 读不到（不是仓库 / 没有 HEAD / 没有主干引用）
+ *
+ *   ★ 前两者都"读到了"，第三者"没读到" —— 补救动作不同：
+ *     behind ⇒ 重切分支或并入主干；undecidable ⇒ 去把 git 接上。
+ *   ★ 而 `undecidable` **绝不**读成 `current`（本队记账最久的那条合流）。
+ */
+export type BaselineFreshness =
+  | { status: 'current'; behind: 0; trunk: string; head: string }
+  | { status: 'behind'; behind: number; trunk: string; head: string }
+  | { status: 'undecidable'; reason: string }
+
+/** 主干引用的候选，按顺序取第一个读得到的。★ 本地优先于远端追踪。 */
+const TRUNK_REFS = ['main', 'origin/main', 'master', 'origin/master'] as const
+
+/** 在某个目录里跑一条 git 命令；失败 ⇒ `undefined`（**不是**空串）。 */
+function gitOut(cwd: string, args: readonly string[]): string | undefined {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 读一个工作区的基线是否落后于主干。
+ *
+ * @param workspace - 那个**检出目录**（worktree 或主工作区都适用）。
+ *   ★ 主工作区传进来是正常的：它相对主干也可能落后（少见，但口径一致）。
+ * @returns 三态读数。★ 每个取值自带它需要的字段，调用方不必再问一次 git。
+ */
+export function worktreeBaselineFreshness(workspace: string): BaselineFreshness {
+  const head = gitOut(workspace, ['rev-parse', 'HEAD'])
+  if (head === undefined) {
+    return {
+      status: 'undecidable',
+      reason: `HEAD could not be read in ${workspace} (not a git repository, or no commit yet)`,
+    }
+  }
+  /**
+   * ★ 主干尖端：逐个候选试。
+   *   ★ 一个都读不到 ⇒ **undecidable**，而不是"是最新的" ——
+   *     没有主干就**无从比较**，而"无从比较"与"比过了、一样"是两件事。
+   */
+  let trunk: string | undefined
+  for (const ref of TRUNK_REFS) {
+    const resolved = gitOut(workspace, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+    if (resolved !== undefined) { trunk = resolved; break }
+  }
+  if (trunk === undefined) {
+    return {
+      status: 'undecidable',
+      reason: `no trunk reference (${TRUNK_REFS.join(' / ')}) could be resolved in ${workspace}, `
+        + 'so how far this checkout is behind could not be measured',
+    }
+  }
+  /**
+   * ★ 落后数 = **主干有而我没有**的提交数（`HEAD..main`）。
+   *   ★ 只要计数：路径列表属于"哪些文件变了"，而那是**观察面**的问题，不是这一格的。
+   *   ★ 而它因此**不含**"我自己提交了什么" —— 两个量必须分开（臂 6）。
+   */
+  const counted = gitOut(workspace, ['rev-list', '--count', `HEAD..${trunk}`])
+  const behind = counted === undefined ? undefined : Number.parseInt(counted, 10)
+  if (behind === undefined || !Number.isSafeInteger(behind) || behind < 0) {
+    return { status: 'undecidable', reason: `the commit distance to the trunk could not be counted in ${workspace}` }
+  }
+  return behind === 0
+    ? { status: 'current', behind: 0, trunk, head }
+    : { status: 'behind', behind, trunk, head }
+}
+
+/**
+ * 把那个读数说成一句人话。
+ *
+ * ★ 而它必须说清【后果】，不只说数字：
+ *   "落后 3 个提交"仍然要人去猜这意味着什么 —— 而后果是具体的
+ *   （**你会读到已经不存在的缺口**，t72/t70 各撞一次）。
+ */
+export function describeBaselineFreshness(freshness: BaselineFreshness): string {
+  if (freshness.status === 'current') {
+    return 'this checkout is at the trunk tip, so the failures it reports are the failures that exist'
+  }
+  if (freshness.status === 'behind') {
+    return `this checkout is ${freshness.behind} commit(s) BEHIND the trunk (${freshness.trunk.slice(0, 12)}…), `
+      + `at ${freshness.head.slice(0, 12)}… — fixes made after it was cut are NOT here, so some of what it reports `
+      + 'may already have been fixed (t72 read 28 reds where the trunk had 4; t70 reported a gap that was already closed); '
+      + 're-cut from the trunk, or merge it, before trusting what this checkout says is broken'
+  }
+  return `whether this checkout is behind the trunk could NOT be determined (${freshness.reason}) — `
+    + 'that is "not measured", not "up to date"'
+}
+
+/**
  * ── ★★★ 观察面 + **它到底看了几棵树**（t59 / j-0007）──────────────────────────────
  *
  * ── 它修的是什么失效 ──────────────────────────────────────────────────────────

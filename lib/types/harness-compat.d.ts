@@ -147,6 +147,90 @@ export declare function gitChangedPaths(workspace: string): string[] | undefined
  */
 export declare function workspaceAndWorktreeChangedPaths(workspace: string): string[] | undefined;
 /**
+ * ── ★★★ worktree 的【基线过期】：我的检出比主干旧吗（t80）───────────────────────
+ *
+ * ── 它修的是什么（两个成员各自撞到，而两次都不是他们的错）────────────────────
+ *
+ *   · t72：检出里【没有 t69 的修复】⇒ 它读到 **28 条红**，而主树只有 **4 条**
+ *   · t70：检出里【没有 t69 修的那个"空理由"】⇒ 它报了一条【已经修好】的缺口
+ *
+ *   ⇒ 两次都是"切分支的时点早于某个修复"，而两次都让成员在**不存在的问题**上花时间。
+ *
+ * ── ★★ 而这不是偶发，是本仓的常态（MEASURED，2026-10-08）──────────────────────
+ *
+ *     task-t13 61 个提交落后 · task-t14 61 · task-t16 60 · task-t19 56
+ *     task-t24 44 · task-t25 53 · task-t26 53 · task-t27 52
+ *
+ *   ⇒ ★ 一个落后 61 个提交的检出，会读到一整套**已经不存在**的失败。
+ *
+ * ── ★★ 形态（与本队那条归纳同源）──────────────────────────────────────────────
+ *
+ *   **worktree 相对主干的时序，没有任何东西在读。**
+ *
+ *   ★ 它与"已提交但未并入主树那一段在观察面里不存在"同族 —— 同一个量的两个方向：
+ *     ① 让**过时**可读（本函数）：我的基线比主干旧吗
+ *     ② 让**已提交**可见（另一个任务）：我提交了而主干还没有的算不算改动
+ *   ⇒ 共同形态：**worktree 与主干之间的【差】，没有任何东西在看。**
+ *
+ * ── ★★ 为什么读 `HEAD..main`，而**不是** `git diff main...HEAD`（实测）───────────
+ *
+ *   在一个真实的落后 worktree（task-t13，落后 61）上实测：
+ *
+ *       git diff --name-only main...HEAD   ⇒  **0 个文件**   ← 看不到过期！
+ *       git diff --name-only main..HEAD    ⇒  219 个文件     ← 方向是反的
+ *       git rev-list --count HEAD..main    ⇒  61              ← 这才是过期量
+ *
+ *   ★ 三点式问的是「**本分支**相对分叉点加了什么」——
+ *     而落后的 worktree 往往**一个字都没提交**（它在脏工作树里干活）⇒ 它报 0。
+ *     ⇒ 那个 0 与"完全同步"的 0【同形】，所以它看不见过期。
+ *   ★ 两点式方向相反：它列的是"主干有而我没有"的改动 ⇒
+ *     把它塞进**观察面**会把**别人的**改动算成本次任务的改动
+ *     （而那正是 `dispatch.changed-paths` 要防的事）。
+ *
+ *   ⇒ ★ 两者混用一个名字会答错。而过期的正确读数是 `HEAD..main` ——
+ *     它属于**这里**（一条可读的读数），**不属于**观察面。
+ *
+ * ── ★★ 三态，且三者不同形 ──────────────────────────────────────────────────────
+ *
+ *   `current`     —— 差 0 个提交（基线就是主干尖端）
+ *   `behind`      —— 落后 N 个（★ 附 N 与主干尖端）
+ *   `undecidable` —— 读不到（不是仓库 / 没有 HEAD / 没有主干引用）
+ *
+ *   ★ 前两者都"读到了"，第三者"没读到" —— 补救动作不同：
+ *     behind ⇒ 重切分支或并入主干；undecidable ⇒ 去把 git 接上。
+ *   ★ 而 `undecidable` **绝不**读成 `current`（本队记账最久的那条合流）。
+ */
+export type BaselineFreshness = {
+    status: 'current';
+    behind: 0;
+    trunk: string;
+    head: string;
+} | {
+    status: 'behind';
+    behind: number;
+    trunk: string;
+    head: string;
+} | {
+    status: 'undecidable';
+    reason: string;
+};
+/**
+ * 读一个工作区的基线是否落后于主干。
+ *
+ * @param workspace - 那个**检出目录**（worktree 或主工作区都适用）。
+ *   ★ 主工作区传进来是正常的：它相对主干也可能落后（少见，但口径一致）。
+ * @returns 三态读数。★ 每个取值自带它需要的字段，调用方不必再问一次 git。
+ */
+export declare function worktreeBaselineFreshness(workspace: string): BaselineFreshness;
+/**
+ * 把那个读数说成一句人话。
+ *
+ * ★ 而它必须说清【后果】，不只说数字：
+ *   "落后 3 个提交"仍然要人去猜这意味着什么 —— 而后果是具体的
+ *   （**你会读到已经不存在的缺口**，t72/t70 各撞一次）。
+ */
+export declare function describeBaselineFreshness(freshness: BaselineFreshness): string;
+/**
  * ── ★★★ 观察面 + **它到底看了几棵树**（t59 / j-0007）──────────────────────────────
  *
  * ── 它修的是什么失效 ──────────────────────────────────────────────────────────
