@@ -1246,6 +1246,34 @@
               },
               "status": {
                 "type": "string"
+              },
+              "worktree": {
+                "additionalProperties": false,
+                "properties": {
+                  "behind": {
+                    "type": "number"
+                  },
+                  "head": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "trunk": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "status",
+                  "message"
+                ],
+                "type": "object"
               }
             },
             "required": [

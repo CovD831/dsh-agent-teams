@@ -11,6 +11,11 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
 import { memberActivity } from '../members.ts'
+/**
+ * ★★ t84：检出那一支的读数（t80 建的），接到 `deployment.worktree`。
+ *   ★ 它与 `moduleFreshness`（进程那一支）**并列而不合并** —— 见下面那段长注释。
+ */
+import { describeBaselineFreshness, worktreeBaselineFreshness } from '../harness-compat.ts'
 import { CAPTAIN_KEY, acknowledgeMailbox, buildCoverageMatrix, canDeclareDelivery, describeQualityLoop, taskKindOf, withTeamLock } from '../state.ts'
 import { AgentTeamsRuntime, renderStatus } from './shared/entities.ts'
 /**
@@ -230,6 +235,33 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
                 stale_why: { type: 'string' },
                 /** ★ 落后于哪个提交（只在 commit 维真的落后时在场）。 */
                 behind: { type: 'string' },
+                /**
+                 * ── ★★★ t84：**检出**那一支 —— 与上面那一支并列，不合并 ──────────────
+                 *
+                 *   上面问「**这个进程**手里的是旧代码吗」；这里问「**这个检出**比主干旧吗」。
+                 *   ★ 两者独立，而补救动作不同（重启 vs 重切分支）。
+                 *
+                 * ★ 而它**嵌一层**是因为名字冲突：上面那个 `behind` 是 **string**（一个 hash），
+                 *   这里的是 **number**（一个计数）。摊平会让读的人拿错。
+                 */
+                worktree: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    /** ★ 三态之一：`current` / `behind` / `undecidable`。 */
+                    status: { type: 'string', required: true },
+                    /** ★ 落后几个提交（**计数**，只在 `behind` 时在场）。 */
+                    behind: { type: 'number' },
+                    /** 主干的尖端（`current` / `behind` 时在场）—— 人可据此核对。 */
+                    trunk: { type: 'string' },
+                    /** 本检出的 HEAD。 */
+                    head: { type: 'string' },
+                    /** 未能测量时的成因（`undecidable` 时在场）。 */
+                    reason: { type: 'string' },
+                    /** ★ 一句人话（含后果与补救动作）。 */
+                    message: { type: 'string', required: true },
+                  },
+                },
               },
             },
             ...diagnosticFields({ runtimeGates: true }),
@@ -586,6 +618,58 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               on_disk: freshness.onDisk,
               ...freshness.status !== 'stale' ? {} : { stale_why: freshness.why },
               ...freshness.status !== 'stale' || freshness.behind === undefined ? {} : { behind: freshness.behind },
+              /**
+               * ── ★★★ t84：检出那一支（**与进程那一支并列，而不是合并**）───────────────
+               *
+               * ── 它回答的是另一个问句 ────────────────────────────────────────────────
+               *
+               *   上面那一支问：「**这个进程**手里的是旧代码吗」（主体 = 进程）
+               *   这一支问    ：「**这个检出**比主干旧吗」      （主体 = 目录）
+               *
+               *   ★ 两者**独立**（MEASURED：同一时刻同时读，进程 stale 而检出 current）。
+               *     ⇒ 合并会让"我该重启"与"我该重切分支"**同形** ——
+               *       而那两个补救动作完全不同。
+               *
+               * ── ★★ 为什么嵌一层，而不是把字段摊平 ──────────────────────────────────
+               *
+               *   两处都有一个叫 `behind` 的字段，而**类型不同**：
+               *
+               *     `deployment.behind`          ⇒ **string**（那个 hash：我在哪构建的）
+               *     `deployment.worktree.behind` ⇒ **number**（落后几个提交）
+               *
+               *   ⇒ ★ 摊平会让读的人拿错 —— 那是本队记账的
+               *     「守卫检查了另一个同名的东西」的近亲。嵌一层让两个 behind 各有归属。
+               *
+               * ── ★★ 为什么接【这一格】而不新开一条通路 ──────────────────────────────
+               *
+               *   t34 的先例在这里同样成立：`status` 是【每次收口后必然被读】的出口，
+               *   而"我这个检出旧不旧"恰恰是**每个 worktree worker 收口时**最需要知道的事
+               *   （t72 读到 28 条红而主树 4 条 · t70 报了一条已修好的缺口 —— 都栽在它上面）。
+               *
+               *   ★ 而不新开一格的理由是决定性的：本队那条纪律 ——
+               *     **一个没有人读的读数，与没有那个读数在观测上完全相同。**
+               *     新开一格可能永远没人读；扩一个**已经在被读**的格子不会。
+               *
+               *   ★ 而它**不**走 t76/t83 那条"由调用方注入"的路 —— 那是给**判据**读的
+               *     （判据不读盘），而这一格是给**人和成员**读的。两个方向，两个出口。
+               */
+              worktree: (() => {
+                const baseline = worktreeBaselineFreshness(workspace)
+                if (baseline.status === 'undecidable') {
+                  return {
+                    status: baseline.status,
+                    reason: baseline.reason,
+                    message: describeBaselineFreshness(baseline),
+                  }
+                }
+                return {
+                  status: baseline.status,
+                  behind: baseline.behind,
+                  trunk: baseline.trunk,
+                  head: baseline.head,
+                  message: describeBaselineFreshness(baseline),
+                }
+              })(),
             }
           })(),
           members,
