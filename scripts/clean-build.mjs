@@ -135,7 +135,23 @@ async function carryForwardTscdownArtifacts() {
   for (const name of CARRIED_FORWARD) {
     const from = join(buildOutput, name)
     const to = join(stagingOutput, name)
-    if (await exists(from)) await copyFile(from, to)
+    /**
+     * ★★ MEASURED（2026-10-08 00:22）：`exists` 检查通过之后、`copyFile` 之前，
+     *   那个文件可能已经被**另一次并发构建**删掉 ⇒ ENOENT 而整个 build 崩。
+     *
+     * ⇒ 那正是本任务要消灭的那个竞态，只是它换了一个位置：
+     *   从"读的人在 rm 窗口里读"变成"copy 的人在 rm 窗口里 copy"。
+     *
+     * ★ 修法：把缺失当成**正常情形**（这一段本来就是"有就搬、没有就算了"）——
+     *   而不是让一个可选产物把整个构建打掉。
+     *   ★ 而它不改语义：搬不到就只意味着这一版的 client.js 少一瞬，
+     *     而 tsdown 紧接着就会把它写出来。
+     */
+    try {
+      if (await exists(from)) await copyFile(from, to)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
   }
 }
 
