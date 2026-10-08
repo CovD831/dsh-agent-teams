@@ -40,6 +40,8 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+/** ★ t86：统一口径（t39 建立）—— 见那条断言处的长注释。 */
+import { toolsSource } from './tools-source.mjs'
 
 const { gate } = await import('../lib/gates/dispatch/changed-paths.js')
 const { gitChangedPaths, observeWorkspaces } = await import('../lib/harness-compat.js')
@@ -395,7 +397,18 @@ test('★★★ 臂 7 接线臂：调用点喂进来的观察面【必须】是 
   const { fileURLToPath } = await import('node:url')
   const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-  const caller = readFileSync(join(root, 'src', 'tools', 'update-task.ts'), 'utf8')
+  /**
+   * ── ★★★ t86：读数面换成 t39 的**统一口径** ──────────────────────────────────
+   *
+   * MEASURED：本行此前硬读 `src/tools/update-task.ts`。而 t70 把那个文件拆了 ——
+   * ★ 这两条断言要找的两行现在住在 **`src/tools/update-task/dispatch.ts:108/114`**。
+   *
+   * ★ `toolsSource()` 是 **`src/tools/**` 的递归** ⇒ 自动涵盖拆分后的新文件
+   *   ⇒ 下面三条断言**原样通过**（它们问的东西一个字没变）。
+   * ★★ 而**不许**改成硬读 `dispatch.ts`：那会把"同一件事"钉死在某个文件里，
+   *   下一次拆分又会失效 —— 而那正是本任务的反向半边禁掉的。
+   */
+  const caller = toolsSource()
 
   assert.match(
     caller, /gitChangedPaths:\s*observed\?\.paths/,

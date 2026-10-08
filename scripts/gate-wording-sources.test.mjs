@@ -59,6 +59,23 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ── ★★★ t86：读数面换成 t39 的**统一口径** ────────────────────────────────────
+ *
+ * MEASURED：本文件此前 `readFileSync(join(ROOT, 'src/tools/update-task.ts'))`
+ * 去找 `observedWorkspaces:` 的赋值点。而 t70 把 update-task.ts 拆了 ——
+ * ★ 那一行的赋值点现在住在 **`src/tools/update-task/dispatch.ts:114`**。
+ *
+ * ★ 而 `toolsSource()` 是 **`src/tools/**` 的递归** ⇒ 它自动涵盖拆分后的新文件。
+ *   ⇒ 换面之后那条断言**原样通过**（它问的东西一个字没变：
+ *     "那个赋值点的右边有没有来源"）—— 这正是 t39 修那 15 个夹具时的同一手法。
+ *
+ * ★★ 而**不许**改成 `readFileSync('…/update-task/dispatch.ts')`：
+ *   那会把"同一件事"钉死在**某一个文件里**，而下一次拆分又会失效
+ *   （那正是 t39 之所以建立统一口径的原因，也是本任务的反向半边）。
+ */
+import { toolsSource } from './tools-source.mjs'
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 递归收集 `src/` 下的全部 TypeScript 源码。 */
@@ -416,7 +433,8 @@ test('★★ 臂 5a：实例①（t56）—— `ctx.observedWorkspaces` 的赋�
    *   而那个值本身恒 undefined"（`observedWorkspaces: alwaysUndefined`）。
    *   ⇒ 两者在下游**同形**（都是 `?? 1` 恒取 1），所以都要被挡住。
    */
-  const source = readFileSync(join(ROOT, 'src/tools/update-task.ts'), 'utf8')
+  /** ★ t86：统一口径（见文件头）—— 不再钉在 update-task.ts 上。 */
+  const source = toolsSource()
   const line = source.split('\n').find((l) => /observedWorkspaces\s*:/.test(l) && !/\?:/.test(l))
   assert.notEqual(line, undefined, '★ 必须找到那一行的赋值点')
 
