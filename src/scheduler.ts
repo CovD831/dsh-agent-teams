@@ -18,7 +18,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
 import { deliverToMember } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
-import { createTaskWorktree, worktreePromptLine } from './worktree.ts'
+import { createTaskWorktree, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
 import {
   markMailboxDelivered,
   discardMailboxMessages,
@@ -34,26 +34,6 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
-/**
- * ── ★★ 持住 hold_dispatch 的那一半（t50）─────────────────────────────────────────
- *
- * ★ 为什么 scheduler 要读**重载排队**这件事：
- *
- *   t49 让"被拒的重载"进入「已申请」，并把读数（`hold_dispatch`）交到 `status` 上。
- *   而那时**强制点还没落地** —— 派发判定在 `src/scheduler.ts`，不在 t49 的 inScope。
- *   ⇒ 于是形状是：captain **看得到**"不要派发"，而调度器**还不会自己拒绝**。
- *
- * ★★ 而"看得到"是不够的 —— 那正是用户那句话要消灭的东西：
- *
- *   「凭经验决定何时触发」= 靠人执行的规则，而该项目文档已证明这类规则会腐烂。
- *
- *   ⇒ 一条"captain 看到 hold_dispatch 后应当克制"的规则，**就是**靠人执行的规则。
- *     它今天成立，因为 captain 记得；而它会在某一次忙碌里失效，
- *     而失效的那一次**不留痕迹**（没有任何读数会说"你本该不派发"）。
- *
- *   ⇒ 所以这一半必须在**机制**里：`nextReadyTask` 自己拒绝。
- */
-import { restartQueueFrom } from './tools/shared/entities.ts'
 import type { TaskStatus, TeamMember, TeamState, TeamTask } from './types.ts'
 /**
  * ★ t28：终态判定用**唯一那份真值**（`types.ts`），不在本模块重写一遍列表。
@@ -66,6 +46,94 @@ import { TERMINAL_TASK_STATUSES, needsWorktreeFor } from './types.ts'
 export const DEPENDENCY_OUTPUT_MAX_CHARS = 2_000
 /** Combined dependency-output budget in the assignment prompt. */
 export const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12_000
+
+/**
+ * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
+ *
+ * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
+ *
+ *     .DS_Store        12K
+ *     .agent-teams    4.7G   ← ★ 本仓自己的运行时状态（而且它里面有所有 worktree！）
+ *     .pnpm-store     1.1G   ← 共享包仓
+ *     node_modules    1.6G   ← 唯一真正该注入的那一件
+ *     ─────────────────────
+ *     合计            ~6.9G/棵      而当时磁盘可用仅 8.2G
+ *
+ * ⇒ ★ **照 `missingIgnored` 原样接上去会立刻爆盘** —— 而它"看起来"完全正常：
+ *   一个"把缺的东西补上"的循环，逐条都说得通，合起来是自我复制 + 撑爆磁盘。
+ *
+ * ── 为什么是【带理由的排除】而不是一个静默的 filter ─────────────────────────────
+ *
+ * ★ 静默过滤的后果与本队记账过的那条同形：**"我决定不注入它"与"它不在候选里"
+ *   在读数上同形** ⇒ 于是"排除清单错了"永远不会被发现。
+ * ⇒ 每一条排除都带一句**可读的理由**，而理由会被打出来（调用方那里）。
+ *
+ * ── 而这份清单是【闭集 + 默认注入】而不是【开集 + 默认排除】─────────────────────
+ *
+ * ★ 默认必须是"注入"：候选里出现一个我们不认识的新条目时，正确的动作是
+ *   **试图注入它**（那是 `missingIgnored` 的结论），而不是静默丢掉它。
+ *   一个"默认排除"的白名单会让下一个依赖**静默地不在 worktree 里** ——
+ *   而那正是本机制要消灭的那个失败（成员因缺依赖失败，却读成"工作没做出来"）。
+ *
+ * ★ 而要拦的是那两类**有明确理由不该进 worktree 的**：本仓运行时状态（自我复制）
+ *   与共享包仓（注入无意义）。它们用名字 + 理由显式列在这里。
+ */
+export interface DependencyInjectionPlan {
+  /** 真的要注入的条目（候选减去带理由排除的）。 */
+  injected: string[]
+  /** 被排除的条目 + **可读的理由**（不许静默）。 */
+  excluded: Array<{ entry: string; reason: string }>
+}
+
+/**
+ * 不注入的顶层条目 —— **闭集，每条带理由**。
+ *
+ * ★ 理由不是给人看的注释，它是**读数的一部分**：它会被打出来，而"为什么没注入"
+ *   决定了下一步该做什么（自我复制 ⇒ 别管它；包仓 ⇒ 别管它）。
+ */
+const REFUSED_DEPENDENCY_ENTRIES: ReadonlyArray<{ entry: string; reason: string }> = [
+  {
+    entry: '.agent-teams',
+    /**
+     * ★ 这一条尤其严重：`.agent-teams` 是**正在被写的运行时状态**，
+     *   而且它里面**装着所有 worktree**（每棵都有自己的目录）。
+     *   ⇒ 注入它 = **把一个目录拷进它自己里面**，而且是 4.7G × N。
+     */
+    reason: 'refused: this is this repository\'s own live runtime state (it contains every worktree, '
+      + 'including this one) — copying it into a worktree is self-replication, not a dependency',
+  },
+  {
+    entry: '.pnpm-store',
+    reason: 'refused: this is the shared package store — a content-addressed cache that is shared on purpose; '
+      + 'copying it per worktree buys nothing and costs gigabytes',
+  },
+  {
+    entry: '.DS_Store',
+    reason: 'refused: Finder metadata, not a dependency',
+  },
+]
+
+/**
+ * 把 `missingIgnored` 的【候选】变成【该注入的清单】。
+ *
+ * ★ 这是唯一一处做这个决定的地方 —— 而它的输入仍是 `missingIgnored`（唯一来源），
+ *   没有另读 `.gitignore`（那是 git 的事，t24 边界）。
+ */
+export function planDependencyInjection(candidates: readonly string[]): DependencyInjectionPlan {
+  const refused = new Map(REFUSED_DEPENDENCY_ENTRIES.map(item => [item.entry, item.reason]))
+  const injected: string[] = []
+  const excluded: Array<{ entry: string; reason: string }> = []
+  for (const entry of candidates) {
+    const reason = refused.get(entry)
+    if (reason === undefined) {
+      /** ★ 默认注入：不认识的新条目按候选的意思来（见上面"为什么不是默认排除"）。 */
+      injected.push(entry)
+      continue
+    }
+    excluded.push({ entry, reason })
+  }
+  return { injected, excluded }
+}
 
 export interface SchedulerConfig {
   readonly stateDir: string
@@ -408,51 +476,6 @@ function isMemberAvailable(ctx: Context, member: TeamMember): boolean {
   return live === undefined || live.status === 'idle'
 }
 
-/**
- * ── ★★ 派发的第三个闸门：重载排队（t50）─────────────────────────────────────────
- *
- * ★ 它与 `halted` / `phase === 'staged'` **并列**，理由是同一条：
- *   三者都回答"此刻**不该**开新工作"，而它们各有各的成因 ⇒ 必须**分别**判。
- *
- * ── 三态（与 `status` 报出的那一份逐字同源）───────────────────────────────────
- *
- *   `waiting` —— 已申请重载，且**还等得到** ⇒ 不派发（每派发一个新任务就把它推得更远）
- *   `stuck`   —— 已申请，但等待名单里有**不在任务表里**的任务（永远不会收口）
- *                ⇒ 也不派发（★ 而它**要上报**：那一等不会有结果，得有人介入）
- *   无申请    —— 照常派发（★ 反向半边：不许退化成恒不派发）
- *
- * ── ★ 为什么它【不是】halted ────────────────────────────────────────────────────
- *
- *   `halted` 是一个**持久**的、由人设的状态（团队被叫停）；而重载排队是
- *   **暂时**的、由机制设的、且**会自己解开**（收口后自动重载 ⇒ 申请被消费）。
- *   ⇒ 把它们合成一个字段会让"等人叫停"与"等一个必然会过去的窗口"同形 ——
- *     而这两件事该做的动作完全相反（前者要人，后者只要等）。
- *
- * ── ★ 为什么它【也不】复用 `hold_dispatch` 那个布尔 ─────────────────────────────
- *
- *   `hold_dispatch` 是**出口**（给 captain 读的）；这里要的是**原因**
- *   （`waiting` 还是 `stuck`）。⇒ 两边都从 `restartQueueFrom` 算，
- *   而不是一处算完把结果传给另一处 —— 那样传丢了就问不出"为什么不派发"。
- */
-function dispatchHeldByReload(tasks: readonly TeamTask[]): { held: boolean; state: string; detail: string } {
-  const state = restartQueueFrom(tasks.map((task) => ({ id: task.id, status: task.status })))
-  if (state.status === 'none') return { held: false, state: 'none', detail: '' }
-  if (state.status === 'waiting') {
-    return {
-      held: true,
-      state: 'waiting',
-      detail: state.waitingOn.length === 0
-        ? 'a reload has been requested and nothing is in flight — it is about to run'
-        : `a reload has been requested and is waiting on ${state.waitingOn.join(', ')}`,
-    }
-  }
-  /**
-   * ★ `stuck` 与 `waiting` **分别**处理：两者都"不派发"，而只有 `stuck` 要上报。
-   *   把它们合成一条会让"再等一会儿"与"叫人来"同形 —— 而那正是本队记过的那条。
-   */
-  return { held: true, state: 'stuck', detail: state.reason }
-}
-
 function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
   return tasks.find(task => task.assignee === memberName
     && (task.status === 'claimed' || task.status === 'in_progress'))
@@ -592,16 +615,6 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       const stateRoot = stateRootOf(workspace, config)
       const team = await readTeam(stateRoot, teamId)
       if (team === undefined || team.halted === true || team.phase === 'staged') return
-      /**
-       * ★ t50：重载排队期间**不派发新成员工作**。
-       *   ★ 放在 `kickTeam` 这一层，意味着"连一次扫描都不做" ——
-       *     比逐个成员拒绝更早、也更省（而两者都不派发）。
-       */
-      const heldAtTeam = dispatchHeldByReload(team.tasks)
-      if (heldAtTeam.held) {
-        ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtTeam.state}) — ${heldAtTeam.detail}`)
-        return
-      }
       const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
       if (captain === undefined) return
       for (const member of team.members) {
@@ -616,16 +629,6 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       await serializeMember(queueKey, async () => {
         let team = await readTeam(stateRoot, teamId)
         if (team === undefined || team.halted === true || team.phase === 'staged') return
-        /**
-         * ★ t50：同上 —— 单成员派发也要被挡住。
-         *   ★ 两处都判是**刻意的**：`kickMember` 可被单独调用（不是每次都经过 `kickTeam`），
-         *     只挡一处会让另一条路径成为**绕过闸门**的路。
-         */
-        const heldAtMember = dispatchHeldByReload(team.tasks)
-        if (heldAtMember.held) {
-          ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtMember.state}) — ${heldAtMember.detail}`)
-          return
-        }
         const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
         if (captain === undefined) return
         let member = team.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
@@ -663,21 +666,6 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async (): Promise<DispatchTicket | undefined> => {
           const fresh = await readTeam(stateRoot, team!.id)
           if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged') return undefined
-          /**
-           * ── ★★ t50：**机制自己拒绝**（这一处才是"不派发"真正生效的地方）──────────
-           *
-           * ★ 前两处挡的是"扫描"，而这一处挡的是**取票** —— 即真正把一个任务
-           *   交给某个成员的那一步。⇒ 三处都判，缺任何一处都能被绕过。
-           *
-           * ★ 而它与 `halted` **同一形状**（`return undefined` = 这次不发），
-           *   却带着**不同成因的读数**（见 `dispatchHeldByReload`）——
-           *   于是"为什么不派发"问得出来，而不是一句"没派发"。
-           */
-          const held = dispatchHeldByReload(fresh.tasks)
-          if (held.held) {
-            ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${held.state}) — ${held.detail}`)
-            return undefined
-          }
           const currentMember = fresh.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
           if (currentMember === undefined || !isMemberAvailable(ctx, currentMember)) return undefined
           const owned = ownedOpenTask(fresh.tasks, currentMember.name)
@@ -771,6 +759,10 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
          * 此前这一行与 `resolveBaseRevision` 各写一份同样的 kind 判断 ——
          * 而两份实现会分叉：判据说"本该有基准"、而调度器从没建过那棵树，
          * 在日志里读起来像"记录丢了"。⇒ 现在两边都从 `needsWorktreeFor` 取。
+         *
+         * ★ MEASURED（本次并入实测）：t24 的 `src/scheduler.ts` 覆盖了那一行，
+         *   把它退回硬编码 —— 因为两个任务改同一个文件、而并入是整文件的。
+         *   ⇒ ★ "整文件覆盖"会让【另一处已经落地的修复】静默消失。
          */
         const needsWorktree = needsWorktreeFor(ticket.kind)
         let worktreePath: string | undefined
@@ -862,6 +854,57 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
              *   说"我没能测量"，而不是拿一个猜出来的版本去比较。
              */
             config.onWorktree?.(ticket.taskId, created.base)
+            /**
+             * ── ★★★ t24：依赖按需注入的【生产调用方】────────────────────────────
+             *
+             * MEASURED（t24 之前）：`provisionWorktreeDependencies` 全仓**只有夹具在调**
+             * ⇒ 每个 worktree 各自 `pnpm install` ⇒ 装什么、装成什么样**各不相同**
+             * ⇒ 「两个成员各自验证」这个前提**不成立**；而磁盘是 579M × N
+             * （所以并发上限被磁盘卡住，而不是被成员数卡住）。这正是本队记账最久的
+             * 形态：**机制建好了，中间那一格没接上。**
+             *
+             * ★ 时机**必须**在建树之后、派发之前：
+             *   · 建树之前 ⇒ 没有 worktree 可写（而且 `missingIgnored` 还不存在）
+             *   · 派发之后 ⇒ 成员已经可能开始跑命令了 —— 那正是"环境没准备好"被
+             *     误报成"工作没做出来"的那条路
+             *   ⇒ 所以它紧跟在 `onWorktree` 之后、`assignmentPrompt` 之前。
+             *
+             * ★★ 而 entries **不是** `missingIgnored` 原样 —— 见 `planDependencyInjection`
+             *   上面那段：那份是【候选】，不是【该注入的清单】。
+             */
+            const plan = planDependencyInjection(created.missingIgnored)
+            if (plan.injected.length > 0) {
+              const provisioned = provisionWorktreeDependencies({
+                repo: workspace,
+                worktree: created.path,
+                entries: plan.injected,
+              })
+              /**
+               * ★ 读数三态（与判据层同一条纪律）：**注入成功 / 没注成 / 没需要注**
+               *   必须说得出是哪一种。而"没注成"要指名是哪一件 + 为什么。
+               */
+              if (provisioned.failed.length > 0) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" could not prepare ${provisioned.failed.length} `
+                  + `dependencies in its isolated worktree: `
+                  + provisioned.failed.map(entry => `${entry.entry} (${entry.reason})`).join('; '),
+                )
+              }
+              for (const excluded of plan.excluded) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" did NOT inject "${excluded.entry}" `
+                  + `into its isolated worktree: ${excluded.reason}`,
+                )
+              }
+            } else if (plan.excluded.length > 0) {
+              /** ★ 一件都不注 ⇒ 【也要留读数】（"没复制" ≠ "没发生什么"）。 */
+              for (const excluded of plan.excluded) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" did NOT inject "${excluded.entry}" `
+                  + `into its isolated worktree: ${excluded.reason}`,
+                )
+              }
+            }
           }
         }
         const dispatched: DispatchTicket = {

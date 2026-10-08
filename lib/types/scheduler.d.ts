@@ -18,6 +18,53 @@ import type { TaskStatus, TeamTask } from './types.ts';
 export declare const DEPENDENCY_OUTPUT_MAX_CHARS = 2000;
 /** Combined dependency-output budget in the assignment prompt. */
 export declare const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12000;
+/**
+ * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
+ *
+ * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
+ *
+ *     .DS_Store        12K
+ *     .agent-teams    4.7G   ← ★ 本仓自己的运行时状态（而且它里面有所有 worktree！）
+ *     .pnpm-store     1.1G   ← 共享包仓
+ *     node_modules    1.6G   ← 唯一真正该注入的那一件
+ *     ─────────────────────
+ *     合计            ~6.9G/棵      而当时磁盘可用仅 8.2G
+ *
+ * ⇒ ★ **照 `missingIgnored` 原样接上去会立刻爆盘** —— 而它"看起来"完全正常：
+ *   一个"把缺的东西补上"的循环，逐条都说得通，合起来是自我复制 + 撑爆磁盘。
+ *
+ * ── 为什么是【带理由的排除】而不是一个静默的 filter ─────────────────────────────
+ *
+ * ★ 静默过滤的后果与本队记账过的那条同形：**"我决定不注入它"与"它不在候选里"
+ *   在读数上同形** ⇒ 于是"排除清单错了"永远不会被发现。
+ * ⇒ 每一条排除都带一句**可读的理由**，而理由会被打出来（调用方那里）。
+ *
+ * ── 而这份清单是【闭集 + 默认注入】而不是【开集 + 默认排除】─────────────────────
+ *
+ * ★ 默认必须是"注入"：候选里出现一个我们不认识的新条目时，正确的动作是
+ *   **试图注入它**（那是 `missingIgnored` 的结论），而不是静默丢掉它。
+ *   一个"默认排除"的白名单会让下一个依赖**静默地不在 worktree 里** ——
+ *   而那正是本机制要消灭的那个失败（成员因缺依赖失败，却读成"工作没做出来"）。
+ *
+ * ★ 而要拦的是那两类**有明确理由不该进 worktree 的**：本仓运行时状态（自我复制）
+ *   与共享包仓（注入无意义）。它们用名字 + 理由显式列在这里。
+ */
+export interface DependencyInjectionPlan {
+    /** 真的要注入的条目（候选减去带理由排除的）。 */
+    injected: string[];
+    /** 被排除的条目 + **可读的理由**（不许静默）。 */
+    excluded: Array<{
+        entry: string;
+        reason: string;
+    }>;
+}
+/**
+ * 把 `missingIgnored` 的【候选】变成【该注入的清单】。
+ *
+ * ★ 这是唯一一处做这个决定的地方 —— 而它的输入仍是 `missingIgnored`（唯一来源），
+ *   没有另读 `.gitignore`（那是 git 的事，t24 边界）。
+ */
+export declare function planDependencyInjection(candidates: readonly string[]): DependencyInjectionPlan;
 export interface SchedulerConfig {
     readonly stateDir: string;
     readonly executionPrompt?: string;
