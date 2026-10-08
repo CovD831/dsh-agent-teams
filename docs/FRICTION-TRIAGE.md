@@ -163,6 +163,92 @@ auto-recorded   ⇒ ★ 不要求回填  判据拒绝那一下**自动记的**�
 自动条目**仍然**带 `resolution`（"当时还没修"是事实），只是那个 `resolution` 没有 `state` ——
 而分诊器现在**看得懂这个缺省**。⇒ 它们仍能在 HTML 里读、仍能被判据扫。
 
+### ★★★ t95：从"它说值得做"到"有人能立刻开始做"
+
+用户原话（这一节存在的理由）：
+
+> 「卡点和经验的分类、派发我们不是都做了吗…怎么每次都要来问我，
+>   没感受到有自动派发部分」
+
+★ 核实之后：**分类是自动的**，而「从分类到建任务」之间是 captain 的**手动一步**。
+⇒ 缺的不是分类，是**那一格的可执行性**。
+
+```sh
+node scripts/friction-triage.mjs --dispatchable            # 只列现在就能建的
+node scripts/friction-triage.mjs --emit-task <id>          # 一条完整契约
+node scripts/friction-triage.mjs --dispatchable --json     # 机器可读
+node scripts/friction-triage.mjs --dispatchable --team <dir>  # 团队状态（默认 .agent-teams/planning-loop）
+```
+
+#### 「可执行」的确切标准
+
+★ 不是"信息够多了"，而是**能直接喂给 `agent_teams_create_task`** ——
+而那意味着必填项一个不缺（对照 `create-task.ts` 的 schema 读出来的，不是猜的）：
+
+```
+subject       必填（非空）
+kind          质量类必须有 contract（objective + acceptance）
+objective     质量类必填
+acceptance    质量类必填
+verify        implementation / repair 必填
+inScope       本队口径：只列源文件（lib/ 由 build 生成）
+```
+
+★ 而 `gate` / `fixture-helper` 是**产物的形状**（t65 的口径），不是 `create_task`
+认得的类别 ⇒ 逐个映射，且映射**有理由**：两者都映成 `implementation`
+（要写代码、要验收），**不是** `work`（那是"没有质量门"的类别）。
+
+#### 三态（不得合并）
+
+```
+ready        现在就能建（to-dispatch + 写域空闲 + 有成员空闲 + 契约完整）
+cannot-emit  ★ 契约生成不出来（**附缺什么**）—— 与"被挡"不同形：前者补信息，后者等写域
+（blocked 的那些**不在这份清单里**，只作为计数出现）
+```
+
+#### ★★★ 派工建议必须带【可核的理由】
+
+「不给理由的建议，与一条『请自己挑』在观测上同形。」
+
+三问，而每一问都有一个**读数**：
+
+```
+① 为什么是这个成员 ⇒ 他**既往任务声明过的写域**与本条写域重叠几条
+   ★ 那是"专长匹配"的可核形式 —— 它与**角色标签**不同形：角色是声明，写域是做过的事
+② 为什么现在       ⇒ 他 status==='idle'（**此刻**），而这条的写域**没人占**
+③ 为什么不给别人   ⇒ 逐人给出：重叠比他少 / 此刻不空闲
+```
+
+实测（当前台账）：
+
+```
+── j-0002 ──
+  agent_teams_create_task({"subject":"判据：「尾斜杠对照对」…","kind":"implementation","assignee":"admission-dev"})
+  assignee : admission-dev —— 理由：
+      · 空闲成员 5/6（point-dev, absorb-dev, admission-dev, verifier6, integrator6）
+      · ★ 履历重叠 12 条（可核：t8:src/gates/admission/admission.ts · t8:scripts/gate-admission.test.mjs …）
+      · 为什么是现在：这条的写域**没人占**
+      为什么不给别人：
+        - point-dev：他的重叠（7 条）少于 admission-dev（12 条）
+        - verifier6：他的重叠（4 条）少于 admission-dev（12 条）
+        …
+```
+
+★★ **而匹配不上时不硬凑**：如实说「没有谁的既往写域碰得上它 ——
+所以这条建议只是"谁现在空闲"，不是"谁擅长它"」。
+★ 一个"总能挑出一个人"的实现看起来更好用，而它在没人匹配时**会撒谎**。
+
+★★★ 而**团队读不到**是第三格，与"没人空闲"**不同形**：
+
+```
+读不到团队状态   ⇒ "我没能看"（补救：修那格读数 / 补 --team）
+读到了、没成员   ⇒ "这份状态里没有人"
+读到了、都忙     ⇒ "没有空闲成员"（补救：等人腾出来）
+```
+
+★ 把第一格说成第三格，正是本队在避的那个形态：
+**把基础设施工况伪装成关于数据的结论。**
+
 ### ★★ 顺序是判据本身（反向半边）
 
 ```

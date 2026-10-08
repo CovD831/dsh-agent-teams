@@ -166,6 +166,19 @@ export function proposalForJudgement(candidate, triage) {
     subject: `判据：${shorten(candidate?.claim ?? '', 60)}`,
     objective: candidate?.claim ?? '',
     inScope: inScopeCandidatesFor(triage),
+    /**
+     * ── ★★★ t95：`create_task` 对质量类要求 `acceptance` 与 `verify` ─────────────
+     *
+     * ★ 而它们**不是凑数的**：那两格是从**这条判决自己的判据**推出来的 ——
+     *   一条判据的验收就是"它真的能判那件事"，而它的验证命令就是**它自己的夹具**。
+     *   ⇒ 一条判据**没有夹具**就不该被建出去（那正是"建了一个没人检查的任务"）。
+     */
+    acceptance: [
+      `★ 这条判据必须能对某个输入返回真/假（否则它只是纪律，不该建）`,
+      `★ 它必须【能判出】${shorten(candidate?.claim ?? '', 60)} 的反面（一次定向突变能让它红）`,
+      '★ 三态不同形：判不了 / 判了通过 / 判了拒绝 —— 不许把"没测到"并进"通过"',
+    ],
+    verify: ['pnpm build', 'pnpm typecheck', 'pnpm test:gates'],
     /** ★ 写域是**候选**（要 captain 定），而这一句说清它凭什么 —— 别让它看起来像已定。 */
     scopeBasis: '粗写域（判据的产物落 scripts/ 与 src/gates/）—— 具体到哪个文件要 captain 定，'
       + '因为 claim 是散文，推不出可靠路径；编一个比粗的更坏',
@@ -319,6 +332,15 @@ export function proposalForFriction(record) {
     subject: `修卡点 ${record?.id ?? '?'}：${shorten(record?.title ?? '', 60)}`,
     objective: record?.title ?? '',
     inScope: typeof component === 'string' && component !== '' ? [component] : [],
+    /**
+     * ★ 卡点类提案的验收是"那个卡点**不再发生**"，而它的可核形式是
+     *   **那个位置的读数据有变化** —— 不是"我改了点东西"。
+     */
+    acceptance: [
+      `★ ${record?.id ?? '那条卡点'} 不再复现：那个位置上的读数必须能证明它变了`,
+      '★ 而"改了但没测"不算修好：修复要能用一次定向突变打红它',
+    ],
+    verify: ['pnpm build', 'pnpm test:gates'],
     because: verdict.why,
   }
 }
@@ -613,6 +635,314 @@ export function render(report) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ⑦ ★★★ 缺口 B：把提案变成**可直接执行**的派发指令（t95）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 它补的是什么（用户原话，而这是它的正解）──────────────────────────────────
+ *
+ * > 「卡点和经验的分类、派发我们不是都做了吗…怎么每次都要来问我，
+ * >   没感受到有自动派发部分」
+ *
+ * ★ 核实之后：**分类是自动的**，而「从分类到建任务」之间是 captain 的**手动一步**。
+ *   ⇒ 缺的不是分类，是**那一格的可执行性**。
+ *
+ * ── ★★★ 而"可执行"的确切标准：能直接喂给 `agent_teams_create_task` ──────────────
+ *
+ * 那意味着**必填项一个不缺**（从 `create_task` 的 schema 读出来的，不是猜的）：
+ *
+ *     subject      必填（非空）
+ *     kind         质量类必须有 contract（objective + acceptance）
+ *     objective    质量类必填
+ *     acceptance   质量类必填
+ *     verify       implementation / repair 必填
+ *     inScope      本队口径：只列**源文件**（`lib/` 由 build 生成）
+ *
+ * ★ 而缺任何一项时**不猜**：如实报 `cannot-emit` 并说出**缺什么** ——
+ *   那是第三态，与"可派 / 不可派"不同形。
+ */
+export const EXECUTABLE_KINDS = Object.freeze(['work', 'requirements', 'implementation', 'verification', 'review', 'repair', 'integration'])
+
+/** 需要 `objective` + `acceptance` 的那些 kind（质量类）。 */
+export const QUALITY_KINDS = Object.freeze(['requirements', 'implementation', 'verification', 'review', 'repair', 'integration'])
+/** 需要 `verify` 的那些 kind。 */
+export const VERIFY_REQUIRED_KINDS = Object.freeze(['implementation', 'repair'])
+
+/**
+ * ── 把一个提案变成**一份完整的任务契约** ────────────────────────────────────────
+ *
+ * @returns `{ status: 'executable', contract, assignee, reasons }`
+ *        或 `{ status: 'cannot-emit', missing: [...] }`  ← ★ 第三态
+ *
+ * ★ 而"缺什么"是**逐项列出来的**，不是一句"信息不足"：
+ *   读的人要能直接去补那一项，而不是再来问一次。
+ */
+export function emitTaskContract(proposal, options = {}) {
+  const { members = [], tasks = [], now = Date.now(), unreadable } = options
+  const missing = []
+
+  const subject = typeof proposal?.subject === 'string' ? proposal.subject.trim() : ''
+  if (subject === '') missing.push('subject（create_task 必填且非空）')
+
+  const objective = typeof proposal?.objective === 'string' ? proposal.objective.trim() : ''
+  const kind = typeof proposal?.kind === 'string' ? proposal.kind : undefined
+  /**
+   * ── ★★ 产物形状 ⇒ `create_task` 的 kind ─────────────────────────────────────────
+   *
+   * `gate` 与 `fixture-helper` 是**产物的形状**（t65 的口径），而它们都不是
+   * `create_task` 认得的类别。⇒ 映射要逐个说清理由：
+   *
+   *   `gate`            ⇒ **implementation**（要写一条判据 + 它的夹具，要验收）
+   *   `fixture-helper`  ⇒ **implementation**（要写一个夹具辅助库，同样要验收）
+   *
+   * ★ 而**不是** `work`：`work` 是"没有质量门"的类别，而这两者都有产物要验收。
+   *   映成 `work` 会让那些判据**没有验收标准**就建出去 ——
+   *   而那正是本队记账过的"建了一个没人检查的任务"。
+   *
+   * ★ 映射认得的形状**不算缺**；而一个既不认得、也不在 `EXECUTABLE_KINDS` 里的
+   *   ⇒ 如实报缺（**不猜**：猜一个 kind 会让建出来的任务类别是假的）。
+   */
+  const SHAPE_TO_KIND = { gate: 'implementation', 'fixture-helper': 'implementation' }
+  const createKind = kind !== undefined && SHAPE_TO_KIND[kind] !== undefined ? SHAPE_TO_KIND[kind] : kind
+  if (kind === undefined) missing.push('kind（提案没给出任务类别）')
+  else if (createKind === undefined || !EXECUTABLE_KINDS.includes(createKind)) {
+    missing.push(`kind（"${kind}" 不是 create_task 认得的类别，也不在已知的产物形状里）`)
+  }
+  const acceptance = Array.isArray(proposal?.acceptance) ? proposal.acceptance : []
+  if (createKind !== undefined && QUALITY_KINDS.includes(createKind) && acceptance.length === 0) {
+    missing.push(`acceptance（kind=${createKind} 是质量类，create_task 要求非空）`)
+  }
+  if (createKind !== undefined && QUALITY_KINDS.includes(createKind) && objective === '') {
+    missing.push(`objective（kind=${createKind} 是质量类，create_task 要求非空）`)
+  }
+
+  const verify = Array.isArray(proposal?.verify) ? proposal.verify : []
+  if (createKind !== undefined && VERIFY_REQUIRED_KINDS.includes(createKind) && verify.length === 0) {
+    missing.push(`verify（kind=${createKind} 要求给出验证命令）`)
+  }
+
+  const inScope = Array.isArray(proposal?.inScope) ? [...proposal.inScope] : []
+  if (inScope.length === 0) missing.push('inScope（没有写域 ⇒ 建出来的任务没人能判断改动范围）')
+
+  if (missing.length > 0) return { status: 'cannot-emit', sourceId: proposal?.sourceId, missing }
+
+  /**
+   * ★ `outOfScope` 是**从 inScope 反推**的：本队口径里 `lib/**` 由 build 生成
+   *   ⇒ 一个声明了 `src/**` 的任务**必须**同时声明它不许手改 `lib/**`
+   *   （那是 `contract.build-artifact-scope` 那条判据的口径）。
+   */
+  const outOfScope = Array.isArray(proposal?.outOfScope) && proposal.outOfScope.length > 0
+    ? [...proposal.outOfScope]
+    : (inScope.some((scope) => scope === 'src' || scope.startsWith('src/')) ? ['lib/'] : [])
+
+  const assignee = recommendAssignee(proposal, { members, tasks, now, unreadable })
+
+  return {
+    status: 'executable',
+    sourceId: proposal?.sourceId,
+    contract: {
+      subject,
+      description: proposal?.because ?? '',
+      kind: createKind,
+      objective,
+      inScope,
+      ...outOfScope.length === 0 ? {} : { outOfScope },
+      ...acceptance.length === 0 ? {} : { acceptance },
+      ...verify.length === 0 ? {} : { verify },
+      ...assignee.member === undefined ? {} : { assignee: assignee.member },
+    },
+    /** ★★ 派工建议**连同它的理由**一起给出（见 `recommendAssignee`）。 */
+    assignee,
+  }
+}
+
+/**
+ * ── ★★★ 派工建议 —— 而它必须给出【可核的理由】────────────────────────────────────
+ *
+ * 契约原文：「不给理由的建议，与一条『请自己挑』在观测上同形。」
+ *
+ * ⇒ 三问，而每一问都有一个**可核的读数**（不是形容词）：
+ *
+ *   ① **为什么是这个成员** ⇒ 他的**既往写域**与这条任务的写域**重不重叠**。
+ *      ★ 那是可核的：`team.json` 里他做过的任务的 `inScope` 是**事实**，
+ *        不是"我觉得他擅长这个"。
+ *   ② **为什么现在** ⇒ 他 `status === 'idle'`（**此刻**空闲），而写域**没人占**。
+ *   ③ **为什么这条而不是那条** ⇒ 它在清单里的位置 + 是否解锁了别的条目。
+ *
+ * ★★ 而**匹配不上时不硬凑**：给 `member: undefined` 并说清"没有谁的履历碰得上它"——
+ *   那比"随便挑一个空闲的"诚实，而后者正是契约点名要避免的。
+ */
+export function recommendAssignee(proposal, { members = [], tasks = [], now = Date.now(), unreadable } = {}) {
+  const reasons = []
+  const scopes = Array.isArray(proposal?.inScope) ? proposal.inScope : []
+
+  /**
+   * ── ★★★ 第一格：**团队读不到** —— 而那与"没人空闲"完全不同形 ──────────────────
+   *
+   * MEASURED（t95 第一版）：团队读不到时我原来答的是"没有空闲成员（0 人…）"
+   * ⇒ 那把它伪装成了"我看了，确实没人" —— 而事实是**我没能看**。
+   * ★ 两者的补救动作相反：一个去等人腾出来，一个去修那格读数（或补 `--team`）。
+   * ★ 与全库那条纪律同形：「我没能读」与「读了、是空的」不同形。
+   */
+  if (unreadable !== undefined) {
+    return {
+      member: undefined,
+      /** ★ 它**不说**"谁空闲"（那是编的）；它说清"我没能看"。 */
+      reasons: [
+        `★ **我没能读到团队状态**（${unreadable}）⇒ 派工建议**无法给出**`
+        + '—— 那不是"没人空闲"，是"我没有可核的依据"。',
+        '★ 而那正是本队在避的那个形态：**把基础设施工况伪装成关于数据的结论。**',
+      ],
+      whyNot: {},
+      unreadable: true,
+    }
+  }
+
+  /** ① 谁此刻空闲。★ 而"空闲"是**读到的状态**，不是假设。 */
+  const idle = members.filter((member) => member?.status === 'idle')
+  const busy = members.filter((member) => member?.status !== 'idle')
+  if (members.length === 0) {
+    /**
+     * ★ 团队**读到了，而里面一个人都没有** —— 与上一格不同形（那是"读不到"）。
+     *   ⇒ 如实说"这份团队状态里没有成员"，而不是"大家都忙"。
+     */
+    return {
+      member: undefined,
+      reasons: ['★ 团队状态**读到了**，而里面**没有成员** ⇒ 无从建议（★ 那与"读不到"不同形）'],
+      whyNot: {},
+    }
+  }
+  if (idle.length === 0) {
+    return {
+      member: undefined,
+      reasons: [`没有空闲成员（${members.length} 人全部在不 idle 的状态）⇒ **现在不该派**，等人腾出来`],
+      whyNot: {},
+    }
+  }
+  reasons.push(`空闲成员 ${idle.length}/${members.length}（${idle.map((m) => m.name).join(', ')}）`)
+
+  /**
+   * ② 每个候选的**履历重叠度** = 他在既往任务里声明过的写域，与本条写域重叠几次。
+   *   ★ 那是"专长匹配"的可核形式 —— 而它与"角色标签"不同形：
+   *     角色是**声明**，既往写域是**做过的事**。
+   */
+  const scored = idle.map((member) => {
+    const past = tasks.filter((task) => task?.assignee === member.name)
+    const overlaps = []
+    for (const task of past) {
+      for (const scope of task.inScope ?? []) {
+        if (scopesOverlap([scope], scopes)) overlaps.push(`${task.id}:${scope}`)
+      }
+    }
+    return { member, overlaps, pastCount: past.length }
+  })
+  scored.sort((a, b) => b.overlaps.length - a.overlaps.length || b.pastCount - a.pastCount)
+
+  const best = scored[0]
+  const whyNot = {}
+  for (const candidate of scored.slice(1)) {
+    whyNot[candidate.member.name] = candidate.overlaps.length === 0
+      ? `他的既往写域（${candidate.pastCount} 个任务）与这条**不重叠**`
+      : `他的重叠（${candidate.overlaps.length} 条）少于 ${best.member.name}（${best.overlaps.length} 条）`
+  }
+  for (const member of busy) whyNot[member.name] = `★ 此刻不空闲（status=${member.status}）`
+
+  if (best.overlaps.length > 0) {
+    reasons.push(
+      `★ 履历重叠 ${best.overlaps.length} 条（可核：${best.overlaps.slice(0, 3).join(' · ')}）`
+      + '—— 他的**既往任务声明过同一片写域**，那是“专长匹配”的可核形式（不是角色标签）',
+    )
+  } else {
+    /**
+     * ★★ **匹配不上时如实说** —— 而这是本函数最要紧的一格。
+     *   契约点名要避免的正是"随便一个空闲的"：那与"请自己挑"在观测上同形。
+     */
+    reasons.push(
+      '★★ **没有谁的既往写域碰得上它** —— 所以这条建议只是"谁现在空闲"，'
+      + '而不是"谁擅长它"。★ 若这条要人，请在派的时候补一句为什么是他。',
+    )
+  }
+  reasons.push(`为什么是现在：这条的写域**没人占**（否则它根本不在这份清单里）`)
+
+  return {
+    member: best.member.name,
+    reasons,
+    whyNot,
+    /** ★ 便于机器读：重叠条数与它是否**真的**匹配得上。 */
+    groundedInTrackRecord: best.overlaps.length > 0,
+  }
+}
+
+/**
+ * ── ★★ `--dispatchable`：只列**现在就能建**的 ──────────────────────────────────
+ *
+ * 契约：「② 是给 captain **一句话就能执行**的东西，而不是要他再判断一次。」
+ *
+ * ── 三态（而三者不许合并）─────────────────────────────────────────────────────
+ *
+ *     `ready`        现在就能建（to-dispatch + 写域空闲 + 有成员空闲 + 契约完整）
+ *     `cannot-emit`  ★ **契约生成不出来**（附缺什么）—— 那与"被挡"不同：
+ *                    前者要补信息，后者要等写域
+ *     （`blocked` 的那些**根本不在这份清单里**，它们由 `--json` 的 blocked 格给出）
+ */
+export function dispatchable(report, options = {}) {
+  const ready = []
+  const cannotEmit = []
+  for (const proposal of report?.toDispatch ?? []) {
+    /** ★ `options.unreadable` 必须**透传**到建议里（否则它会退化成"没人空闲"）。 */
+    const emitted = emitTaskContract(proposal, options)
+    if (emitted.status === 'executable') ready.push({ proposal, ...emitted })
+    else cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
+  }
+  return {
+    ready,
+    cannotEmit,
+    /** ★ 而那一格是**读数**：被挡的有几条（它们不在这份清单里，而读的人要知道有多少）。 */
+    blockedCount: (report?.blocked ?? []).length,
+  }
+}
+
+/** `--dispatchable` 的人话形态。★ 它必须**一句话就能照做**。 */
+export function renderDispatchable(result) {
+  const lines = []
+  lines.push(`★ 现在就能建（${result.ready.length}）—— 每一条都带完整契约与派工理由`)
+  if (result.ready.length === 0) lines.push('  （无）')
+  for (const entry of result.ready) {
+    const c = entry.contract
+    lines.push('', `── ${entry.sourceId} ──`)
+    lines.push(`  agent_teams_create_task(${JSON.stringify({
+      subject: c.subject,
+      kind: c.kind,
+      assignee: c.assignee,
+    }, null, 0)})`)
+    lines.push(`  subject    : ${c.subject}`)
+    lines.push(`  kind       : ${c.kind}`)
+    lines.push(`  objective  : ${shorten(c.objective, 100)}`)
+    lines.push(`  inScope    : ${JSON.stringify(c.inScope)}`)
+    if (c.outOfScope !== undefined) lines.push(`  outOfScope : ${JSON.stringify(c.outOfScope)}`)
+    if (c.acceptance !== undefined) for (const a of c.acceptance) lines.push(`  acceptance : ${a}`)
+    if (c.verify !== undefined) for (const v of c.verify) lines.push(`  verify     : ${v}`)
+    lines.push(`  assignee   : ${c.assignee ?? '(不指派)'} —— 理由：`)
+    for (const reason of entry.assignee.reasons) lines.push(`      · ${reason}`)
+    if (Object.keys(entry.assignee.whyNot).length > 0) {
+      lines.push('      为什么不给别人：')
+      for (const [name, why] of Object.entries(entry.assignee.whyNot)) lines.push(`        - ${name}：${why}`)
+    }
+  }
+  if (result.cannotEmit.length > 0) {
+    lines.push('', `── ★ 契约生成不出来（${result.cannotEmit.length}）—— 缺什么写在下面 ──`)
+    for (const entry of result.cannotEmit) {
+      lines.push(`  · ${entry.sourceId}`)
+      for (const item of entry.missing) lines.push(`      缺：${item}`)
+    }
+  }
+  if (result.blockedCount > 0) {
+    lines.push('', `（另有 ${result.blockedCount} 条被写域挡着 —— 用 --json 看 blocked 那一格）`)
+  }
+  return lines.join('\n')
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CLI
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -629,6 +959,60 @@ if (invokedDirectly) {
     frictionsDir: argValue(argv, '--frictions', '.agent-teams/frictions'),
     judgementsDir: argValue(argv, '--judgements', '.agent-teams/judgements'),
   })
-  if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+  /**
+   * ── ★★★ t95：`--team <stateRoot>` —— 派工建议要读**成员与既往任务** ────────────
+   *
+   * ★ 缺省指向 `.agent-teams/planning-loop`。★ 而**读不到时如实说**
+   *   （见 `loadTeamForDispatch`）—— 那会让建议退化成"谁空闲"，
+   *   而"我读不到你的团队"与"没人匹配得上"必须不同形。
+   */
+  const teamState = loadTeamForDispatch(argValue(argv, '--team', '.agent-teams/planning-loop'))
+
+  /** ★ `--dispatchable`：只列**现在就能建**的（附完整契约 + 派工理由）。 */
+  if (argv.includes('--dispatchable')) {
+    const result = dispatchable(report, teamState)
+    if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+    else process.stdout.write(`${renderDispatchable(result)}\n`)
+  } else if (argv.includes('--emit-task')) {
+    /**
+     * ★ `--emit-task <id>`：一份**可直接喂给 create_task** 的完整契约。
+     *   ★ 读不到那个 id ⇒ 如实报（**不猜**、也不给一份空契约）。
+     */
+    const wanted = argValue(argv, '--emit-task', undefined)
+    const proposal = [...report.toDispatch, ...report.blocked].find((entry) => entry.sourceId === wanted)
+    if (proposal === undefined) {
+      process.stdout.write(`★ 找不到 "${String(wanted)}" —— 它既不在待派里，也不在被挡里。\n`
+        + `  （已看过的：${[...report.toDispatch, ...report.blocked].map((e) => e.sourceId).join(', ') || '(空)'}）\n`)
+      process.exitCode = 1
+    } else {
+      const emitted = emitTaskContract(proposal, teamState)
+      if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(emitted, null, 2)}\n`)
+      else if (emitted.status === 'executable') {
+        process.stdout.write(`${JSON.stringify(emitted.contract, null, 2)}\n`)
+        process.stdout.write(`\n★ 派工理由：\n${emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
+      } else {
+        process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${emitted.missing.map((m) => `  · ${m}`).join('\n')}\n`)
+      }
+    }
+  } else if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
   else process.stdout.write(`${render(report)}\n`)
+}
+
+/**
+ * 读团队状态（成员 + 既往任务）—— 而**读不到时如实说**。
+ *
+ * ★ 三态：
+ *   `{ members, tasks, unreadable: undefined }`  —— 读到了
+ *   `{ members: [], tasks: [], unreadable: '<原因>' }` —— ★ 读不到
+ * ⇒ 而下游要能分开它们：读不到时那条建议必须说"我读不到你的团队"，
+ *   而**不是**"没人匹配得上"（后者是"我看了，确实没有"）。
+ */
+export function loadTeamForDispatch(root) {
+  const read = readJsonDir(root === undefined ? undefined : join(root))
+  if (read === undefined) return { members: [], tasks: [], unreadable: `团队状态读不到（${String(root)}/team.json）` }
+  const team = read.records.find((record) => Array.isArray(record?.members) && Array.isArray(record?.tasks))
+  if (team === undefined) {
+    return { members: [], tasks: [], unreadable: `团队状态里没有 members/tasks 两格（${String(root)}）` }
+  }
+  return { members: team.members, tasks: team.tasks, unreadable: undefined }
 }

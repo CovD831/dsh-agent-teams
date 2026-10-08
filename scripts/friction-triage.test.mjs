@@ -47,6 +47,11 @@ import {
   JUDGEMENT_VERDICTS,
   /** ★ t91：自动记录与待回填的分格（含那条可见的回退）。 */
   titleRejectionOrigin,
+  /** ★ t95（缺口 B）：可执行的派发指令。 */
+  emitTaskContract,
+  recommendAssignee,
+  dispatchable,
+  renderDispatchable,
   /** ★ t78：这三个现在从 t65 那边 re-export（臂 6 断言**同一性**）。 */
   looksAssertive,
   inputKindOf,
@@ -491,7 +496,33 @@ test('★★★ 臂 5：它**不建任务**、**不写盘** —— 只产出提�
   const source = readFileSync(TOOL, 'utf8')
   assert.doesNotMatch(source, /from '\.\.\/lib\//u, '★ 不许 import 产品代码（那是写盘/建任务的能力所在）')
   assert.doesNotMatch(source, /\bwriteFileSync\b/u, '★ 工具本身不写盘')
-  assert.doesNotMatch(source, /agent_teams_\w+/u, '★ 不许出现任何工具调用名 —— 它只产出提案')
+  /**
+   * ── ★★★ t95：这一条原来是 `doesNotMatch(source, /agent_teams_\w+/)` ─────────────
+   *
+   * 它的**意图**是"它不调用任何工具，只产出提案"。而 t95 之后这个工具**打印**
+   * 建议的调用（`agent_teams_create_task({…})` 那一行是**给人看/给 captain 复制**的），
+   * ⇒ 那条宽断言把"提到那个名字"与"调用那个工具"**合成了一件事**。
+   *
+   * ★ 而它是本队记账过的那种错：**断言检查的是名字，而不是那件事。**
+   *   （"守卫检查了另一个同名的东西"）
+   *
+   * ── 修法：断言**真的性质**（三条，各自可核）────────────────────────────────────
+   *   ① 不 import 任何**能建任务/写盘**的东西（产品代码）
+   *   ② 不 import 工具的注册面（`@deepseek-ai/dsh-tools` 之类）
+   *   ③ 出现 `agent_teams_*` 的地方**必须是字符串或注释**，不是调用
+   */
+  assert.doesNotMatch(source, /from '@[\w/-]+'/u, '★ 不许 import 工具 SDK —— 那才有注册/调用能力')
+  /** ★ ③ 逐行核：含 `agent_teams_` 的行必须是**注释或模板字符串**，不是可执行的调用。 */
+  const offending = source.split('\n')
+    .map((line, index) => ({ line: line.trim(), index: index + 1 }))
+    .filter((entry) => /agent_teams_\w+/u.test(entry.line))
+    .filter((entry) => !/^(\*|\/\/|\/\*)/u.test(entry.line))
+    .filter((entry) => !/`/u.test(entry.line) && !/'/u.test(entry.line) && !/"/u.test(entry.line))
+  assert.deepEqual(
+    offending, [],
+    '★ 含 `agent_teams_*` 的行必须落在**注释或字符串**里 —— 一个真的调用会让它出现在代码里：'
+    + JSON.stringify(offending),
+  )
 
   /** ★ 而跑一次之后，输入目录必须**逐字节不变**。 */
   const l = ledger({ frictions: [friction('f-open', 'open')], judgements: [] })
@@ -668,6 +699,8 @@ const NEEDLE_NO_ACTION = `  if (state === 'fixed') return { action: 'no-action',
 const NEEDLE_BLOCKED = `    blocked.push({`
 /** ★★★ 突变 C 的针脚（t91）：把**自动记录**并进待回填（= 本任务修之前的样子）。 */
 const NEEDLE_AUTO_SPLIT = `  const titleFallback = titleRejectionOrigin(record)`
+/** ★★★ 突变 D 的针脚（t95）：把 **blocked** 也算进 dispatchable。 */
+const NEEDLE_DISPATCHABLE = `  for (const proposal of report?.toDispatch ?? []) {`
 
 test('★★★ 定向突变 A：把 `no-action` 并进 `to-dispatch` ⇒ 臂 2 必须红', async (t) => {
   /**
@@ -850,4 +883,231 @@ test('★★★ 定向突变 C：把「自动记录」并回「待回填」⇒ �
 
 test('★★ 二次对照（t91）：突变 C 的针脚在源码里真的存在', () => {
   assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_AUTO_SPLIT), true, '★ 突变 C 的针脚必须逐字存在')
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 臂 10（★★★ t95 / 缺口 B）：从"它说值得做"到"有人能立刻开始做"
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** 一份**完整**的提案（可执行的那一种）。 */
+const executableProposal = (extra = {}) => ({
+  source: 'judgement', sourceId: 'j-x', kind: 'implementation',
+  subject: '判据：某事必须不同形', objective: '那条判据要能对某个输入返回真/假',
+  inScope: ['scripts/', 'src/gates/'], acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  because: 'judgement-triage 判它 gate',
+  ...extra,
+})
+
+const team = (members, tasks = []) => ({ members, tasks, unreadable: undefined })
+
+test('★★★ 臂 10：`emitTaskContract` 产出的契约**含齐** `create_task` 的必填项', () => {
+  /**
+   * ── 而"含齐"是**对着 create_task 的 schema** 说的，不是我觉得够了 ────────────────
+   *
+   * MEASURED（从 `src/tools/create-task.ts` 读的）：`subject` 必填；
+   * 质量类要 `objective` + `acceptance`；`implementation`/`repair` 要 `verify`。
+   */
+  const emitted = emitTaskContract(executableProposal(), team([{ name: 'a', status: 'idle' }]))
+  assert.equal(emitted.status, 'executable')
+  const c = emitted.contract
+  for (const field of ['subject', 'kind', 'objective', 'inScope', 'acceptance', 'verify']) {
+    assert.ok(c[field] !== undefined && String(c[field]).length > 0, `★ 契约必须带 "${field}"`)
+  }
+  /** ★ 而 `lib/` 必须进 outOfScope（本队口径：它由 build 生成）。 */
+  assert.deepEqual(c.outOfScope, ['lib/',], '★ 声明了 src/ ⇒ 必须同时声明不许手改 lib/')
+})
+
+test('★★★ 臂 10b：**契约生成不出来**是第三态 —— ★ 附"缺什么"，且与"被挡"不同形', () => {
+  /**
+   * 契约原文：「★ 三态不同形：可派 / 不可派（附被谁挡）/ **无法生成契约**（附缺什么）」
+   *
+   * ★ 而"缺什么"必须**逐项列出来**：一句"信息不足"会让读的人再来问一次，
+   *   而那正是本任务要消掉的那一步。
+   */
+  const noAcceptance = emitTaskContract(executableProposal({ acceptance: [] }), team([{ name: 'a', status: 'idle' }]))
+  assert.equal(noAcceptance.status, 'cannot-emit', '★ 缺必填项 ⇒ 第三态')
+  assert.notEqual(noAcceptance.status, 'blocked', '★ 它与"被写域挡"不同形')
+  assert.ok(
+    noAcceptance.missing.some((item) => item.includes('acceptance')),
+    '★ 必须**指名**缺的是哪一项',
+  )
+  /** ★ 而一个认不出的 kind ⇒ 确切地说出来（不猜一个）。 */
+  const weirdKind = emitTaskContract(executableProposal({ kind: 'nonsense' }), team([{ name: 'a', status: 'idle' }]))
+  assert.equal(weirdKind.status, 'cannot-emit')
+  assert.ok(weirdKind.missing.some((item) => item.includes('kind')), '★ 说出是 kind 那一项')
+})
+
+test('★★★ 臂 10c：派工建议**带可核的理由** —— 而且理由是「既往写域重叠」那个事实', () => {
+  /**
+   * 契约原文：「★★★ 而派工建议必须给出【可核的理由】：为什么是这个成员
+   *            （专长匹配？上下文在手？而不是「随便一个空闲的」）…
+   *            ⇒ 不给理由的建议，与一条「请自己挑」在观测上同形。」
+   */
+  const picked = recommendAssignee(executableProposal(), team(
+    [{ name: 'expert', status: 'idle' }, { name: 'other', status: 'idle' }],
+    [
+      { id: 't1', assignee: 'expert', inScope: ['scripts/gate-x.test.mjs'] },
+      { id: 't2', assignee: 'other', inScope: ['docs/README.md'] },
+    ],
+  ))
+  assert.equal(picked.member, 'expert', '★ 履历碰得上写域的那个')
+  assert.equal(picked.groundedInTrackRecord, true, '★ 而"碰得上"这件事必须是个**读数**')
+  assert.ok(picked.reasons.some((r) => /履历重叠/u.test(r)), '★ 理由要说清"凭什么是他"')
+  /** ★ 而"为什么不给别人"也必须在 —— 只给结论的话读的人要自己去比。 */
+  assert.equal(picked.whyNot.other !== undefined, true, '★ 要说清**为什么不是别人**')
+  assert.ok(picked.reasons.some((r) => /为什么是现在/u.test(r)), '★ 以及"为什么现在"')
+})
+
+test('★★★ 臂 10d：**匹配不上时不硬凑** —— 如实说"那只是谁空闲，不是谁擅长"', () => {
+  /**
+   * ★ 而这一格是契约点名要避免的那个东西：「随便一个空闲的」。
+   *   一个"总能挑出一个人"的实现在臂 10c 上完全绿 —— 而它在没人匹配时**会撒谎**。
+   */
+  const picked = recommendAssignee(executableProposal(), team(
+    [{ name: 'a', status: 'idle' }],
+    [{ id: 't1', assignee: 'a', inScope: ['docs/完全不相干.md'] }],
+  ))
+  assert.equal(picked.groundedInTrackRecord, false, '★ 履历碰不上 ⇒ 那个读数必须是 false')
+  assert.ok(
+    picked.reasons.some((r) => /没有谁的既往写域碰得上/u.test(r)),
+    '★★ 必须**说出来** —— 否则那条建议读起来像"他擅长它"，而它其实只是"他闲着"',
+  )
+})
+
+test('★★★ 臂 10e：团队读不到 ≠ 没人空闲（★ 三态不同形）', () => {
+  /**
+   * ★ MEASURED（t95 第一版）：团队读不到时我原来答的是"没有空闲成员（0 人…）"——
+   *   那把它伪装成了"我看了，确实没人"，而事实是**我没能看**。
+   * ★ 两者的补救动作相反：一个等腾出来，一个去修那格读数。
+   */
+  const blind = recommendAssignee(executableProposal(), { members: [], tasks: [], unreadable: '团队状态读不到（/x）' })
+  assert.equal(blind.unreadable, true)
+  assert.ok(blind.reasons.some((r) => /我没能读到团队状态/u.test(r)), '★ 要说清"我没能看"')
+  assert.ok(
+    !blind.reasons.some((r) => /没有空闲成员/u.test(r)),
+    '★★ 不许把它说成"没人空闲" —— 那正是"把基础设施工况伪装成关于数据的结论"',
+  )
+
+  /** ★ 而"读到了、里面没有成员"是**第三格**（与上面两格都不同形）。 */
+  const empty = recommendAssignee(executableProposal(), team([]))
+  assert.equal(empty.unreadable, undefined)
+  assert.ok(empty.reasons.some((r) => /没有成员/u.test(r)), '★ 读到了、空的 ⇒ 说"没有成员"')
+
+  /** ★ 而"读到了、都忙"是我最初那一格。 */
+  const allBusy = recommendAssignee(executableProposal(), team([{ name: 'a', status: 'working' }]))
+  assert.ok(allBusy.reasons.some((r) => /没有空闲成员/u.test(r)), '★ 都忙 ⇒ 说"没有空闲成员"')
+})
+
+test('★★★ 臂 10f：反向半边 —— `dispatchable` **只**收 to-dispatch（不许混进 blocked / no-action）', () => {
+  /**
+   * 契约原文：「★ 反向半边：不许把 blocked 的算进 dispatchable；
+   *            不许把 no-action 的算进去。」
+   *
+   * ★ 而这条臂与 t72 的臂 1/1b 是**同一族**（那条测"blocked 不许并进 toDispatch"）——
+   *   这一条测它的下游：即使 toDispatch 那一格是对的，`dispatchable` 也不许**自己**
+   *   再去读别的格。
+   */
+  const report = {
+    toDispatch: [executableProposal({ sourceId: 'ok' })],
+    blocked: [executableProposal({ sourceId: 'blocked-1' })],
+    noAction: [{ id: 'na-1' }],
+    autoRecorded: [],
+    unknown: [],
+  }
+  const result = dispatchable(report, team([{ name: 'a', status: 'idle' }]))
+  assert.deepEqual(result.ready.map((entry) => entry.sourceId), ['ok'], '★ 只收 to-dispatch')
+  assert.equal(result.blockedCount, 1, '★ 而 blocked 只作为**计数**出现，不作为可派项')
+  /** ★ 而人话输出里不许出现那条被挡的 id 作为"可建"。 */
+  const text = renderDispatchable(result)
+  assert.doesNotMatch(text.split('契约生成不出来')[0], /blocked-1/u, '★ 被挡的不许出现在"现在就能建"那一段')
+})
+
+test('★★ 臂 10g：`--dispatchable` 的人话输出**一句话就能照做**', () => {
+  const result = dispatchable(
+    { toDispatch: [executableProposal()], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }], [{ id: 't1', assignee: 'a', inScope: ['scripts/'] }]),
+  )
+  const text = renderDispatchable(result)
+  /** ★ 它必须给出一行**可复制的调用**（那是"可执行"的字面意思）。 */
+  assert.match(text, /agent_teams_create_task\(/u, '★ 要给出可直接照抄的调用')
+  assert.match(text, /assignee   : a/u, '★ 以及指派给谁')
+  assert.match(text, /理由：/u, '★ 以及理由')
+})
+
+test('★★★ 定向突变 D（t95）：把 **blocked** 也算进 `dispatchable` ⇒ 臂 10f 必须红', async (t) => {
+  /**
+   * 契约原文：「★ 定向突变能打红：把一条 blocked 的算进 dispatchable ⇒ 臂红
+   *            （那正是 t72 已有的臂 1/1b，保住它们）。」
+   *
+   * ★ 而那正是用户裁定"写域冲突就先别派"要避免的东西 ——
+   *   派出去的两条会改同一片文件。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_DISPATCHABLE,
+    `  for (const proposal of [...(report?.toDispatch ?? []), ...(report?.blocked ?? [])]) { // MUTANT: blocked is dispatched too`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=t95-blocked-dispatched')
+    const result = mutant.dispatchable({
+      toDispatch: [{ sourceId: 'ok', subject: 's', objective: 'o', kind: 'implementation', inScope: ['scripts/'], acceptance: ['a'], verify: ['v'] }],
+      blocked: [{ sourceId: 'blocked-1', subject: 's2', objective: 'o2', kind: 'implementation', inScope: ['scripts/'], acceptance: ['a'], verify: ['v'] }],
+    }, { members: [{ name: 'a', status: 'idle' }], tasks: [] })
+    /** ★ 这一条断言就是**臂 10f 的红**。 */
+    assert.deepEqual(
+      result.ready.map((entry) => entry.sourceId).sort(), ['blocked-1', 'ok'],
+      '★ 突变体把被挡的也列进"现在就能建" —— 臂 10f 就是靠这一条变红的',
+    )
+  })
+
+  const restored = await freshTool('mutation=t95-restored-dispatchable')
+  assert.deepEqual(
+    restored.dispatchable({
+      toDispatch: [{ sourceId: 'ok', subject: 's', objective: 'o', kind: 'work', inScope: ['scripts/'] }],
+      blocked: [{ sourceId: 'blocked-1', subject: 's2', objective: 'o2', kind: 'work', inScope: ['scripts/'] }],
+    }, { members: [{ name: 'a', status: 'idle' }], tasks: [] }).ready.map((e) => e.sourceId),
+    ['ok'],
+    '★ 还原之后只剩 to-dispatch 那一条',
+  )
+})
+
+test('★★ 二次对照（t95）：突变 D 的针脚在源码里真的存在', () => {
+  assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_DISPATCHABLE), true, '★ 突变 D 的针脚必须逐字存在')
+})
+
+test('★★★ 夹具自检（t95）：每一条突变臂用的 tag **必须唯一**', () => {
+  /**
+   * ── ★★★ MEASURED（t95，全跑时才现形）─────────────────────────────────────────
+   *
+   * 我新加的突变 D 用了 `'mutation=blocked-dispatched'` —— 而 t72 的突变 B **同名**。
+   * ⇒ Node 按 URL 缓存模块 ⇒ **D 拿到的是 B 加载过的那一份**（一个 t72 时代的实现）
+   * ⇒ D 的断言读到 `['ok']` 而不是 `['blocked-1','ok']` ⇒ **这条突变臂假红**
+   *   （而它在**单跑**时是绿的 —— 因为那时没有别人先加载过那个 tag）。
+   *
+   * ★★ 而那正是本队记账过的形态的近亲：**假面替真实路径挡了路** ——
+   *   这里"挡路"的是**缓存里那个装对了的旧模块**。
+   * ★ 而它特别阴：它只在**全跑**时红，于是读的人会去查产品代码。
+   *
+   * ⇒ 把"tag 必须唯一"写成可执行的断言：加一条新突变臂而忘了换 tag ⇒ 这里当场红。
+   */
+  const helperSource = readFileSync(fileURLToPath(import.meta.url), 'utf8')
+  const tags = [...helperSource.matchAll(/freshTool\('([^']+)'\)/gu)].map((match) => match[1])
+  const seen = new Map()
+  const duplicates = []
+  for (const tag of tags) {
+    if (seen.has(tag)) duplicates.push(tag)
+    seen.set(tag, true)
+  }
+  assert.deepEqual(
+    [...new Set(duplicates)], [],
+    '★ 这些 tag 被两条臂共用 ⇒ Node 会复用缓存里的那个模块实例 ⇒ **后一条臂会读到前一条的版本**'
+    + `（全跑时假红、单跑时绿）。当前重复：${JSON.stringify([...new Set(duplicates)])}`,
+  )
 })
