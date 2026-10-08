@@ -154,5 +154,70 @@ export declare function provisionWorktreeDependencies(options: ProvisionOptions)
 export declare function worktreePromptLine(path: string | undefined): string;
 /** 一个便于诊断的单行描述。 */
 export declare function describeWorktree(result: WorktreeResult): string;
+/**
+ * ── ★★★ 回收一个 worktree 是否安全：判据是「产物已被主树吸收」（t89）──────────────
+ *
+ * 用户原话：「不能每次都让我手动清理，得有一个自动清理的机制。」
+ *
+ * 上面那个 `provisionWorktreeDependencies` 是**装**，而这里补的是它的对面 ——
+ * **收**。而两半必须成对：只有装没有收，就是今晚的 4.6G。
+ *
+ * ── ★★ 判据**不是**「任务已终态」────────────────────────────────────────────────
+ *
+ *   ① 一个 worktree 在【它的产物并入主树之前】不能删 —— 否则那份工作就丢了。
+ *      ★ 今晚 t39 那次正是靠 worktree 找回的。
+ *   ② 成员常常需要【重跑一次】（例如收口时再跑护栏）——
+ *      若依赖已被清掉，那次重跑要重新 install，而那比保留更贵。
+ *
+ * ── ★★★ 而 `--is-ancestor` 【一条不够】—— 这是实测出来的 ────────────────────────
+ *
+ *   MEASURED（2026-10-08，本仓 50+ 个 worktree）：
+ *
+ *     `git merge-base --is-ancestor <wt HEAD> main` 成立 ⇒ **37 个**
+ *     ★ 而那 37 个里 **35 个有未提交的改动**；再往里查，**7 个**持有
+ *       【内容在整个历史里都不存在】的源码 —— `task-t64` 有 7 个源码文件
+ *       （68KB / 69KB 级）只存在于那里。
+ *
+ *   ⇒ ★ 只看它会删掉**唯一的那份产物**，而那正是本能力承诺不会发生的事。
+ *
+ * ── ★ 所以是**两个条件的合取** ─────────────────────────────────────────────────
+ *
+ *   (a) 已提交的：`--is-ancestor <wt HEAD> main`
+ *   (b) 未提交的：**每一个脏的源码文件的内容都能在历史里找到**
+ *       ★ 只算源码（`src/` `scripts/` `docs/`）—— `lib/` 是构建产物，每次 build
+ *         重生成，它脏不构成"唯一产物"。这个区分是实测逼出来的：
+ *         不做它，`task-t16` 会因为一个 stamp 文件被误判成"有唯一产物"。
+ */
+export type WorktreeReclaimability = {
+    status: 'reclaimable';
+    reason: 'absorbed';
+    behind: number | undefined;
+} | {
+    status: 'keep';
+    reason: 'not-absorbed' | 'unique-work';
+    behind: number | undefined;
+    detail: string;
+    orphaned?: string[];
+} | {
+    status: 'undecidable';
+    why: string;
+};
+/**
+ * 判一个 worktree 能不能回收。
+ *
+ * @param repo - 主仓库根。
+ * @param worktree - 那个检出目录。
+ * @param mainRef - 主干引用（默认 `main`）。
+ * @returns 三态。★ 三者**不同形**：可清的带 `reason: 'absorbed'`；
+ *   不可清的带 `reason` 与 `detail`（以及可能的 `orphaned`）；
+ *   判不了的带 `why`。没有任何两个共用同一组字段。
+ */
+export declare function judgeWorktreeReclaimable(options: {
+    repo: string;
+    worktree: string;
+    mainRef?: string;
+}): WorktreeReclaimability;
+/** 把那个判定说成一句人话。★ 三态各有各的措辞（不许同形）。 */
+export declare function describeReclaimability(verdict: WorktreeReclaimability): string;
 /** 读一个文件是否是 worktree 指针（诊断用；不判断存在性）。 */
 export declare function isWorktreePointer(file: string): boolean;

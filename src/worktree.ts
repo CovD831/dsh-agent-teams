@@ -308,6 +308,145 @@ export function describeWorktree(result: WorktreeResult): string {
   return `${result.path} @ ${result.base.slice(0, 12)}${ignored}`
 }
 
+/**
+ * ── ★★★ 回收一个 worktree 是否安全：判据是「产物已被主树吸收」（t89）──────────────
+ *
+ * 用户原话：「不能每次都让我手动清理，得有一个自动清理的机制。」
+ *
+ * 上面那个 `provisionWorktreeDependencies` 是**装**，而这里补的是它的对面 ——
+ * **收**。而两半必须成对：只有装没有收，就是今晚的 4.6G。
+ *
+ * ── ★★ 判据**不是**「任务已终态」────────────────────────────────────────────────
+ *
+ *   ① 一个 worktree 在【它的产物并入主树之前】不能删 —— 否则那份工作就丢了。
+ *      ★ 今晚 t39 那次正是靠 worktree 找回的。
+ *   ② 成员常常需要【重跑一次】（例如收口时再跑护栏）——
+ *      若依赖已被清掉，那次重跑要重新 install，而那比保留更贵。
+ *
+ * ── ★★★ 而 `--is-ancestor` 【一条不够】—— 这是实测出来的 ────────────────────────
+ *
+ *   MEASURED（2026-10-08，本仓 50+ 个 worktree）：
+ *
+ *     `git merge-base --is-ancestor <wt HEAD> main` 成立 ⇒ **37 个**
+ *     ★ 而那 37 个里 **35 个有未提交的改动**；再往里查，**7 个**持有
+ *       【内容在整个历史里都不存在】的源码 —— `task-t64` 有 7 个源码文件
+ *       （68KB / 69KB 级）只存在于那里。
+ *
+ *   ⇒ ★ 只看它会删掉**唯一的那份产物**，而那正是本能力承诺不会发生的事。
+ *
+ * ── ★ 所以是**两个条件的合取** ─────────────────────────────────────────────────
+ *
+ *   (a) 已提交的：`--is-ancestor <wt HEAD> main`
+ *   (b) 未提交的：**每一个脏的源码文件的内容都能在历史里找到**
+ *       ★ 只算源码（`src/` `scripts/` `docs/`）—— `lib/` 是构建产物，每次 build
+ *         重生成，它脏不构成"唯一产物"。这个区分是实测逼出来的：
+ *         不做它，`task-t16` 会因为一个 stamp 文件被误判成"有唯一产物"。
+ */
+export type WorktreeReclaimability =
+  | { status: 'reclaimable'; reason: 'absorbed'; behind: number | undefined }
+  | { status: 'keep'; reason: 'not-absorbed' | 'unique-work'; behind: number | undefined; detail: string; orphaned?: string[] }
+  | { status: 'undecidable'; why: string }
+
+/**
+ * 判一个 worktree 能不能回收。
+ *
+ * @param repo - 主仓库根。
+ * @param worktree - 那个检出目录。
+ * @param mainRef - 主干引用（默认 `main`）。
+ * @returns 三态。★ 三者**不同形**：可清的带 `reason: 'absorbed'`；
+ *   不可清的带 `reason` 与 `detail`（以及可能的 `orphaned`）；
+ *   判不了的带 `why`。没有任何两个共用同一组字段。
+ */
+export function judgeWorktreeReclaimable(options: {
+  repo: string
+  worktree: string
+  mainRef?: string
+}): WorktreeReclaimability {
+  const { repo, worktree, mainRef = 'main' } = options
+  const headResult = tryGit(worktree, ['rev-parse', 'HEAD'])
+  if (headResult.ok === false) {
+    return { status: 'undecidable', why: 'HEAD could not be read (not a git checkout, or no commit yet)' }
+  }
+  const head = headResult.value.trim()
+  const mainResult = tryGit(repo, ['rev-parse', '--verify', '--quiet', `${mainRef}^{commit}`])
+  if (mainResult.ok === false) {
+    return { status: 'undecidable', why: `the trunk ref "${mainRef}" could not be resolved in ${repo}` }
+  }
+  const mainHead = mainResult.value.trim()
+
+  /**
+   * ★ (a) 已提交的部分是否被吸收。
+   *   ★ 用退出码判，**不用输出** —— `--is-ancestor` 成功时**没有输出**
+   *     （空串），而 `tryGit` 对"退出 0、无输出"与"退出非 0"的区分
+   *     只能靠抛不抛错 ⇒ 所以要 `try/catch` 而不是比字符串。
+   *     ★ 若按输出判，`absorbed` 会恒为 **false** ⇒ 判据退化成**恒不删**
+   *       （而那正是反向半边禁止的）。
+   */
+  const absorbed = (() => {
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', head, mainHead], {
+        cwd: repo, stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      return true
+    } catch {
+      return false
+    }
+  })()
+
+  const behindResult = tryGit(repo, ['rev-list', '--count', `${head}..${mainHead}`])
+  const behind = behindResult.ok === false ? undefined : Number.parseInt(behindResult.value.trim(), 10)
+
+  /**
+   * ★★ (b) 未提交的部分有没有【唯一的产物】。
+   *   ★ `lib/` 不算：它是构建产物，每次 build 重生成。
+   */
+  const dirtyResult = tryGit(worktree, ['status', '--porcelain'])
+  const dirty = (dirtyResult.ok ? dirtyResult.value : '').split('\n').filter((line) => line.trim() !== '')
+  const dirtyPaths = dirty
+    .map((line) => line.slice(3).trim().replace(/^"|"$/g, ''))
+    .filter((path) => !path.startsWith('lib/') && !path.endsWith('git-artifact-stamp.json'))
+  const orphaned: string[] = []
+  for (const path of dirtyPaths) {
+    if (!existsSync(join(worktree, path))) continue
+    const blobResult = tryGit(worktree, ['hash-object', path])
+    if (blobResult.ok === false) continue
+    const foundResult = tryGit(repo, ['log', '--all', '--oneline', `--find-object=${blobResult.value.trim()}`])
+    if (foundResult.ok === false || foundResult.value.trim() === '') orphaned.push(path)
+  }
+
+  if (!absorbed) {
+    return {
+      status: 'keep',
+      reason: 'not-absorbed',
+      behind,
+      detail: `its HEAD (${head.slice(0, 12)}…) is not an ancestor of ${mainRef} `
+        + `(${mainHead.slice(0, 12)}…) — its committed work is not in the trunk yet`,
+    }
+  }
+  if (orphaned.length > 0) {
+    return {
+      status: 'keep',
+      reason: 'unique-work',
+      behind,
+      orphaned,
+      detail: `${orphaned.length} uncommitted source file(s) exist ONLY here — their content appears in no commit`
+        + ` (${orphaned.slice(0, 3).join(', ')}${orphaned.length > 3 ? ', …' : ''}); deleting this worktree would lose them`,
+    }
+  }
+  return { status: 'reclaimable', reason: 'absorbed', behind }
+}
+
+/** 把那个判定说成一句人话。★ 三态各有各的措辞（不许同形）。 */
+export function describeReclaimability(verdict: WorktreeReclaimability): string {
+  if (verdict.status === 'reclaimable') {
+    return `absorbed into the trunk${verdict.behind === undefined ? '' : ` (${verdict.behind} commit(s) behind)`} — safe to reclaim`
+  }
+  if (verdict.status === 'keep') {
+    return `${verdict.reason === 'unique-work' ? 'HELD: unique work' : 'HELD: not absorbed'} — ${verdict.detail}`
+  }
+  return `whether this worktree can be reclaimed could NOT be determined (${verdict.why}) — that is "not measured", not "safe to delete"`
+}
+
 /** 读一个文件是否是 worktree 指针（诊断用；不判断存在性）。 */
 export function isWorktreePointer(file: string): boolean {
   try {
