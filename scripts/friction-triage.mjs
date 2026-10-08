@@ -1297,6 +1297,145 @@ export function recommendAssignee(proposal, { members = [], tasks = [], now = Da
 }
 
 /**
+ * ── ★★★ t98：按面分档 —— 而它现在是【可复用的单一真值】────────────────────────────
+ *
+ * 用户原话（逐字）：
+ *
+ *   「1. 小货的处理：如果判断出来不需要我来做裁决，你就可以自己去走那条自动路。
+ *     生成完内容后，审一遍，找机会就可以直接派了。
+ *    2. 大货的处理：大货是不应该直接派的。需要我裁决的就留下来，等问完我的意见、
+ *     裁决完之后，你再生成、审查，然后才能派货。因为我们之前做的是那种原子化拆解的
+ *       审查（或者说是门禁），所以派出的不应该有大活。」
+ *
+ * ⇒ ★ 所以 `dispatchable` 的准入条件从两条变成【三条】：
+ *
+ *     ① `to-dispatch`（值得做）   ② 审查通过（带 `reviewed`）   ③ ★ 分档是**小档**
+ *
+ * ★★ 而 ③ 的实现放在**这里**，而不是放在 `plan-review-tier.test.mjs` 里 ——
+ *   理由是**单一真值**：那条判据的装置与这条判据的准入必须读**同一份**分档，
+ *   否则两份会分叉（而分叉之后，"判据说它大、而派发池把它放出去了"在日志里同形）。
+ *
+ * ★ 所以 `plan-review-tier.test.mjs` 从这个文件 **import** 那条函数 ——
+ *   它是 t93 判据的装置，而这里用它来守门。**一处实现，两处使用。**
+ */
+export const TIER = {
+  small: 'small',
+  large: 'large',
+  unmeasurable: 'unmeasurable',
+}
+
+/** 会新建或重组一个目录的写法：`src/foo/` —— 以斜杠结尾。 */
+const DIRECTORY_ENTRY = /\/\s*$/
+
+/**
+ * 要求"重组/搬运已有代码"的动词。
+ *
+ * ★ 判据**不是**"objective 里出现了这些字"，而是
+ *   「出现这些字 **且** 要搬的东西**已经存在**」——
+ *   后者是可判定的（问文件系统），而前者只是措辞。
+ */
+const REORG_VERB = /拆|搬|重组|抽取|迁移|合并|split|extract|move|merge/i
+
+/** `inScope` 里指向源码的文件条目（不含目录条目）。 */
+function tierSourceFiles(inScope) {
+  return inScope.filter((path) => /^src\//.test(path) && !DIRECTORY_ENTRY.test(path))
+}
+
+/** `inScope` 里的**目录条目**（= 会新建/重组一个目录）。 */
+function tierDirectoryEntries(inScope) {
+  return inScope.filter((path) => /^src\//.test(path) && DIRECTORY_ENTRY.test(path))
+}
+
+/** 缺省的存在性判断（真实磁盘，相对本脚本所在处）。 */
+function defaultTierExists(relativePath) {
+  try {
+    return existsSync(new URL(`../${relativePath}`, import.meta.url))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * ── 分档（三条信号，而它们**不是同一条**）─────────────────────────────────────────
+ *
+ *   A：`inScope` 跨**多个现有源码文件**     ← t54（6 个文件、跨两组）
+ *   B：`inScope` 含**目录条目**            ← t70（`src/tools/update-task/`）
+ *   C：重组词 **且** 要搬的东西**已存在**    ← t39 / t30
+ *
+ * ★ 数的是 `src/` 下的文件，**不是 `inScope` 的条目数** ——
+ *   契约指名的小档正例 t88 有 3 个文件而零个 `src/`（它不碰生产接线）。
+ *
+ * @param contract - 任何带 `inScope` / `objective` 的对象（提案或任务都行）
+ * @param options.exists - 判断"那个文件现在在不在"（注入，便于夹具不依赖真实磁盘）
+ */
+export function tierOf(contract, { exists = defaultTierExists } = {}) {
+  const inScope = Array.isArray(contract?.inScope) ? contract.inScope.map(String) : undefined
+  const objective = typeof contract?.objective === 'string' ? contract.objective : ''
+
+  /** ★ 前提：没有 inScope ⇒ 判不了（它是判据唯一的输入）。 */
+  if (inScope === undefined) {
+    return { tier: TIER.unmeasurable, why: 'the contract carries no inScope, so its surface cannot be read at all', signals: {} }
+  }
+  /** ★ 空 inScope 也一样：它没说改什么（而"没说"不是"很小"）。 */
+  if (inScope.length === 0) {
+    return { tier: TIER.unmeasurable, why: 'inScope is present but empty — an empty scope is not a small surface, it is an unstated one', signals: {} }
+  }
+
+  const files = tierSourceFiles(inScope)
+  const dirs = tierDirectoryEntries(inScope)
+  const existing = files.filter((path) => { try { return exists(path) } catch { return false } })
+
+  const signals = {
+    /** A：跨多个现有源码文件。 */
+    multipleFiles: files.length >= 2,
+    /**
+     * ── B：含**一个还不存在的**目录条目 ⇒ 它会【新建】一个目录 ──────────────────
+     *
+     * ★★ 这里我第一版写宽了，而它当场打红了**两条已有的臂**（MEASURED，本任务）：
+     *   第一版的条件是"含任何目录条目"—— 于是默认夹具的
+     *   `inScope: ['scripts/', 'src/gates/']` 被判成大档，因为 `src/gates/` 以斜杠结尾。
+     *   ★ 而 `src/gates/` 是一个**已经存在**的目录：进它下面写文件**不是"重组"**。
+     *
+     * ⇒ 正确的口径：那个目录**此刻还不存在**（`!exists(dir)`）。
+     *   ★ 而那正是 t70 的形状：`src/tools/update-task/` 是**要新建的**
+     *     （拆分的目标），而 `src/gates/` 本来就在。
+     *   ⇒ ★ "会新建一个目录"与"往一个现成目录里写文件"是**两件事**，
+     *     而只有前者意味着搬运风险。
+     */
+    restructuresDirectory: dirs.filter((path) => { try { return !exists(path) } catch { return false } }).length > 0,
+    /** C：要求重组，**且**要搬的东西**已经存在**（那才是"搬运已有代码"）。 */
+    movesExistingCode: REORG_VERB.test(objective) && existing.length >= 1,
+  }
+
+  if (signals.multipleFiles || signals.restructuresDirectory || signals.movesExistingCode) {
+    const reasons = []
+    if (signals.multipleFiles) reasons.push(`it spans ${files.length} existing source files`)
+    if (signals.restructuresDirectory) reasons.push(`it declares directory entr(ies) ${dirs.join(', ')} — it creates or restructures a directory`)
+    if (signals.movesExistingCode) reasons.push('its objective asks to split/move/restructure and the things to be moved are already in its scope')
+    return {
+      tier: TIER.large,
+      why: reasons.join('; '),
+      /** ★ 而它要的是**哪一种**审查 —— 那是分档的输出。 */
+      review: 'plan-review',
+      reviewWhy: 'its risk is not in the edit itself but in the split: what gets moved and what gets left behind',
+      signals,
+      /** ★★ 而它【卡在哪一问上】—— 用户裁决时需要知道它大在哪，不许只给一个"大"字。 */
+      blockingQuestion: reasons[0],
+      /** ★ 而拆解的实质是：这条大活得先被拆到原子级，才可能进派发池。 */
+      nextStep: 'decompose',
+    }
+  }
+
+  return {
+    tier: TIER.small,
+    why: `a single existing source file (${files.join(', ') || 'none'}) with no directory entry and no move of existing code`,
+    review: 'adversarial-review',
+    reviewWhy: 'getting it wrong cannot affect anything else — one file, no rewiring',
+    signals,
+  }
+}
+
+/**
  * ── ★★ `--dispatchable`：只列**现在就能建**的 ──────────────────────────────────
  *
  * 契约：「② 是给 captain **一句话就能执行**的东西，而不是要他再判断一次。」
@@ -1312,27 +1451,90 @@ export function dispatchable(report, options = {}) {
   const ready = []
   const cannotEmit = []
   const rejected = []
+  /**
+   * ── ★★★ t98：第三态 —— 「等人裁决」（而它**是一个队列，不是一个错误**）───────────
+   *
+   * 用户原话：「大货是不应该直接派的。需要我裁决的就留下来，等问完我的意见、
+   *   裁决完之后，你再生成、审查，然后才能派货。因为我们之前做的是那种原子化
+   *   拆解的审查（或者说是门禁），**所以派出的不应该有大活**。」
+   *
+   * ⇒ ★ 判成大档的提案**不进 `ready`**，而是进这里，且每条**带上它大在哪**。
+   */
+  const awaitingRuling = []
+  /** ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked。 */
+  const notReadyBecause = { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
+
   for (const proposal of report?.toDispatch ?? []) {
+    /**
+     * ── ★★★ t98：准入的**第三条** —— 分档必须是小档（原子级）─────────────────────
+     *
+     * ★ 放在 `emitReviewedContract` **之前**：因为一条大活的正确处置不是"再审一遍"
+     *   （它审过也是大的），而是**先拆解**。⇒ 先分档能省掉一次无意义的生成+审查。
+     *
+     * ★★ 而它**必须是三条都要**（契约点名的）：
+     *     ① to-dispatch（值得做 —— 走到这里就已经满足，它来自 `report.toDispatch`）
+     *     ② 审查通过（带 `reviewed` —— `emitReviewedContract` 给）
+     *     ③ 分档是小档（原子级 —— 本行给）
+     */
+    const tier = tierOf(proposal, options)
+
+    if (tier.tier === TIER.large) {
+      awaitingRuling.push({
+        proposal,
+        sourceId: proposal.sourceId,
+        subject: proposal.subject,
+        inScope: proposal.inScope,
+        /** ★ 用户裁决时需要知道它**大在哪** —— 不许只给一个"大"字。 */
+        whyLarge: tier.why,
+        /** ★ 而它**卡在哪一问上**（那一句就是用户要回答的）。 */
+        blockingQuestion: tier.blockingQuestion,
+        /** ★ 而下一步是【拆解】，不是【再生成】。 */
+        nextStep: tier.nextStep,
+        signals: tier.signals,
+      })
+      notReadyBecause.large += 1
+      continue
+    }
+    /**
+     * ★ 而 `unmeasurable`（`inScope` 缺席或为空）**不进派发池** ——
+     *   它既不是"小档"也不是"大档"，而"判不了"绝不许并进"可派"。
+     *   ★ 而它与"大档"的处置不同：大档要**裁决**，它要**补信息**。
+     */
+    if (tier.tier === TIER.unmeasurable) {
+      cannotEmit.push({ sourceId: proposal.sourceId, missing: [tier.why], becauseTier: tier.tier })
+      notReadyBecause.contractIncomplete += 1
+      continue
+    }
+
     /**
      * ── ★★★ t97：`--dispatchable` 走**带审查**的那条路 ─────────────────────────
      * 用户原话：「在自动生成的时候就可以去做了…带一个『已审查』的字段」
      * ⇒ 生成与审查是**一步**，不是两步。
      */
     const emitted = emitReviewedContract(proposal, options)
-    if (emitted.status === 'executable') ready.push({ proposal, ...emitted })
-    else if (emitted.status === 'rejected') rejected.push({ sourceId: proposal.sourceId, because: emitted.rejectedBecause, review: emitted.review })
-    else cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
+    if (emitted.status === 'executable') ready.push({ proposal, tier, ...emitted })
+    else if (emitted.status === 'rejected') {
+      rejected.push({ sourceId: proposal.sourceId, because: emitted.rejectedBecause, review: emitted.review })
+      notReadyBecause.notReviewed += 1
+    } else {
+      cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
+      notReadyBecause.contractIncomplete += 1
+    }
   }
   return {
     /**
-     * ★★ 三态（而三者不许合并 —— 契约点名的那一条）：
-     *   `ready`（审过了）/ `rejected`（审了没过）/ `cannotEmit`（契约就不完整）
+     * ★★ 四态（而它们不许合并 —— 契约点名的那一条）：
+     *   `ready`（三条都满足）/ `awaitingRuling`（★ 大档，等人裁决）
+     *   / `rejected`（审了没过）/ `cannotEmit`（契约就不完整）
      */
     rejected,
     ready,
+    awaitingRuling,
     cannotEmit,
     /** ★ 而那一格是**读数**：被挡的有几条（它们不在这份清单里，而读的人要知道有多少）。 */
     blockedCount: (report?.blocked ?? []).length,
+    /** ★ 分栏报：每一条**为什么**没进 ready（而不是一个笼统的 blocked）。 */
+    notReadyBecause,
   }
 }
 
@@ -1363,6 +1565,25 @@ export function renderDispatchable(result) {
       for (const [name, why] of Object.entries(entry.assignee.whyNot)) lines.push(`        - ${name}：${why}`)
     }
   }
+  /**
+   * ── ★★★ t98：等人裁决的队列（而它是一个**队列**，不是错误）────────────────────────
+   *
+   * 用户原话：「大货是不应该直接派的。需要我裁决的就留下来，等问完我的意见、裁决完之后…」
+   *
+   * ★ 所以这一栏的措辞是【要人回答的问题】，而不是【失败】：
+   *   它开头说"等你裁决"，而每一条给出「它大在哪」与「卡在哪一问上」。
+   */
+  if (result.awaitingRuling.length > 0) {
+    lines.push('', `── ★ 等人裁决（${result.awaitingRuling.length}）—— 大活不直接派，先拆解 ──`)
+    lines.push('   ★ 它们**不是**错误，是一个队列：每条下面那一问就是需要你回答的东西。')
+    for (const entry of result.awaitingRuling) {
+      lines.push('', `  · [${entry.sourceId}] ${shorten(entry.subject ?? '', 70)}`)
+      lines.push(`      它大在哪：${entry.whyLarge}`)
+      lines.push(`      ★ 卡在哪一问：${entry.blockingQuestion}`)
+      lines.push(`      下一步：${entry.nextStep === 'decompose' ? '拆解成原子活（拆完再审才可能进派发池）' : entry.nextStep}`)
+      lines.push(`      写域：${(entry.inScope ?? []).join(', ') || '(未声明)'}`)
+    }
+  }
   if (result.cannotEmit.length > 0) {
     lines.push('', `── ★ 契约生成不出来（${result.cannotEmit.length}）—— 缺什么写在下面 ──`)
     for (const entry of result.cannotEmit) {
@@ -1373,6 +1594,17 @@ export function renderDispatchable(result) {
   if (result.blockedCount > 0) {
     lines.push('', `（另有 ${result.blockedCount} 条被写域挡着 —— 用 --json 看 blocked 那一格）`)
   }
+  /**
+   * ★★ 分栏报：每一条**为什么**没进 ready —— 而不是一个笼统的 blocked。
+   *   （契约点名：「缺任何一条都不进 dispatchable，而每条缺什么要【分栏报】」）
+   */
+  const columns = result.notReadyBecause ?? {}
+  lines.push(
+    '',
+    `★ 分栏（为什么没进"现在就能建"）：`
+    + `大档等人裁决 ${columns.large ?? 0} · 审查没过 ${columns.notReviewed ?? 0}`
+    + ` · 契约不全 ${columns.contractIncomplete ?? 0} · 写域被挡 ${result.blockedCount}`,
+  )
   return lines.join('\n')
 }
 

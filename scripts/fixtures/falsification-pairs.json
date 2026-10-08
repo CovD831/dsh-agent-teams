@@ -1,0 +1,45 @@
+{
+  "_comment": "── j-0002 的对照对（t77）────【同一件工作的两种写法必须同裁】。★ 每条判据一条，而每一条要给出一对输入 —— 两边做的事完全相同，只是写法不同。",
+  "_why": "为什么要有它（MEASURED，t43 已验过一次）：task-atomicity 断言「inScope 里有目录条目 ⇒ 会新建目录 ⇒ 不原子」，而它的实现只做 path.trim().endsWith('/')。⇒ 于是 ['src/a.ts'] ⇒ ok 而 ['src/'] ⇒ blocked —— ★ 而那两边做的是同一件事（都在 src/ 下干活），而后者信息更少却判定更确定。★ 即：那个判据判的不是「工作」，而是「写法」。",
+  "_shape": "形状：通用夹具 + 每条判据手工提供一对。★ 「同裁」是可机械化的（跑两次、比裁决）；★ 而「构造哪一对」不可机械化 —— 它需要理解那个判据在判什么。⇒ 所以对照对写在数据里，而同裁断言写在夹具里。",
+  "_three_states": "三态（不得合并）：· same = 同裁 ⇒ 合格 · diverges = 不同裁 ⇒ ★ 判据判的是写法（这是要报的缺陷） · cannot-construct = 无法构造对照对 ⇒ ★ 必须附理由（而不是悄悄跳过）",
+  "_proof_of_same_work": "反向半边：每条对照对必须自证两边是同一件工作。★ 否则「同裁」可以靠两边做的事本来就不同来伪造。⇒ 每条 pair 给出 sameWorkBecause；而夹具会断言它非空、且断言两种写法确实不同（否则测的是恒等式）。",
+  "pairs": [
+    {
+      "gateId": "contract.task-atomicity",
+      "comment": "★ j-0002 的原始实例（t43 验证过）。",
+      "writingA": {
+        "inScope": [
+          "src/registry.ts",
+          "src/index.ts"
+        ]
+      },
+      "writingB": {
+        "inScope": [
+          "src/registry.ts",
+          "src/index.ts",
+          "src/"
+        ]
+      },
+      "sameWorkBecause": "两者都改 src/ 下那两个文件；B 只是在清单里额外写了一条它已经在里面工作的目录 —— 而那指的是同一批文件。",
+      "expectation": "diverges"
+    },
+    {
+      "gateId": "contract.task-atomicity",
+      "comment": "★ 同一件工作的第二种写法。",
+      "writingA": {
+        "inScope": [
+          "src/registry.ts"
+        ]
+      },
+      "writingB": {
+        "inScope": [
+          "src/registry.ts",
+          "src/"
+        ]
+      },
+      "sameWorkBecause": "两者都在 src/ 下干活；B 说的是整个 src/ 而 A 说的是 src/ 下的一个文件 —— 而两者指的是同一个目录。",
+      "expectation": "diverges"
+    }
+  ]
+}

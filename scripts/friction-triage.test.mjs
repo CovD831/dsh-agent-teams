@@ -1377,3 +1377,174 @@ test('★★★ 定向突变 F（t97）：把 `unmeasured` 并进 `passed` ⇒ �
 test('★★ 二次对照（t97）：突变 E/F 的针脚在源码里真的存在', () => {
   assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_REVIEW_OUTCOME), true, '★ 针脚必须逐字存在')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t98 ★★★ 大活不直接派：分档是派发的第三条准入
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 用户原话（本组臂的由来）────────────────────────────────────────────────────
+ *
+ *   「1. 小货的处理：如果判断出来不需要我来做裁决，你就可以自己去走那条自动路。
+ *     生成完内容后，审一遍，找机会就可以直接派了。
+ *    2. 大货的处理：大货是不应该直接派的。需要我裁决的就留下来，等问完我的意见、
+ *      裁决完之后，你再生成、审查，然后才能派货。因为我们之前做的是那种原子化
+ *      拆解的审查（或者说是门禁），**所以派出的不应该有大活**。」
+ *
+ * ⇒ ★ `dispatchable` 的准入从两条变成【三条都要】：
+ *     ① to-dispatch（值得做）  ② 审查通过（带 reviewed）  ③ ★ 分档是**小档**
+ */
+
+test('★★★ 臂 T98a：判成大档的任务**不许**出现在 dispatchable 的 ready 里', () => {
+  /**
+   * ★ 一条大活与一条小活放进同一个 `toDispatch`：
+   *   小活 ⇒ ready；大活 ⇒ **awaitingRuling**（而它**不在** ready 里）。
+   */
+  const large = executableProposal({
+    sourceId: 'large-1',
+    inScope: ['src/a.ts', 'src/b.ts'],
+    objective: '把这两处合起来改',
+  })
+  const small = executableProposal({ sourceId: 'small-1', inScope: ['src/a.ts'], objective: '改一行' })
+
+  const result = dispatchable(
+    { toDispatch: [large, small], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+
+  console.log(`    ℹ ready: ${JSON.stringify(result.ready.map((e) => e.sourceId))}`)
+  console.log(`    ℹ awaitingRuling: ${JSON.stringify(result.awaitingRuling.map((e) => e.sourceId))}`)
+
+  assert.deepEqual(result.ready.map((e) => e.sourceId), ['small-1'], '★ 只有小档能进 ready')
+  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), ['large-1'], '★ 大档必须进等人裁决的队列')
+  /** ★ 而它**绝不许**同时出现在 ready 里（那是本任务要防的那件事）。 */
+  assert.equal(
+    result.ready.some((e) => e.sourceId === 'large-1'), false,
+    '★ 一条大档进了 dispatchable —— 「派出的不应该有大活」',
+  )
+})
+
+test('★★★ 臂 T98b：大活必须说得出【它大在哪】与【卡在哪一问上】—— 不许只给一个"大"字', () => {
+  /**
+   * ★ 用户裁决时需要知道它大在哪（是写域跨了多文件？还是要重组已有代码？还是前置不明？）
+   *   ⇒ 所以队列里每一条都要带**理由**与**那一问**。
+   */
+  const result = dispatchable(
+    {
+      toDispatch: [executableProposal({ sourceId: 'large-multi', inScope: ['src/a.ts', 'src/b.ts'], objective: 'x' })],
+      blocked: [], noAction: [], autoRecorded: [], unknown: [],
+    },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  const entry = result.awaitingRuling[0]
+  assert.notEqual(entry, undefined, '★ 那条大活没进队列')
+  assert.match(entry.whyLarge, /spans 2 existing source files/u, '★ 必须说得出它大在哪')
+  assert.equal(typeof entry.blockingQuestion, 'string', '★ 必须带"卡在哪一问"')
+  assert.ok(entry.blockingQuestion.length > 10, '★ 那一问不能是一句空话')
+  assert.equal(entry.nextStep, 'decompose', '★ 而下一步是【拆解】，不是【再生成】')
+
+  /** ★ 而人话输出里那两行必须都在（否则读的人只看到一个"大"字）。 */
+  const text = renderDispatchable(result)
+  assert.match(text, /它大在哪：/u, '★ 人话输出必须给出"它大在哪"')
+  assert.match(text, /★ 卡在哪一问：/u, '★ 以及"卡在哪一问"')
+})
+
+test('★★★ 臂 T98c：三种处置**不同形**（可派 / 等人裁决 / 不可派）', () => {
+  /**
+   * ★ 契约：「三种不得合并。★ 而「等人裁决」是一个【队列】，不是错误。」
+   *
+   * ⇒ 本臂逐个构造三种，并断言它们落在**三个不同的格**里。
+   */
+  const small = executableProposal({ sourceId: 'ok', inScope: ['src/a.ts'], objective: '改一行' })
+  const large = executableProposal({ sourceId: 'big', inScope: ['src/a.ts', 'src/b.ts'], objective: 'x' })
+  /** ★ 第三种："不可派" —— 这里用"契约不完整"（缺 acceptance）来代表它。 */
+  const incomplete = executableProposal({ sourceId: 'inc', inScope: ['src/c.ts'], objective: 'y', acceptance: [] })
+
+  const result = dispatchable(
+    { toDispatch: [small, large, incomplete], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  console.log(`    ℹ ready ${JSON.stringify(result.ready.map((e) => e.sourceId))}`
+    + ` · awaitingRuling ${JSON.stringify(result.awaitingRuling.map((e) => e.sourceId))}`
+    + ` · cannotEmit ${JSON.stringify(result.cannotEmit.map((e) => e.sourceId))}`)
+
+  assert.deepEqual(result.ready.map((e) => e.sourceId), ['ok'])
+  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), ['big'])
+  assert.deepEqual(result.cannotEmit.map((e) => e.sourceId), ['inc'])
+  /** ★ 三格两两不相交（逐对断言，不循环）。 */
+  const sets = [result.ready, result.awaitingRuling, result.cannotEmit].map((list) => new Set(list.map((e) => e.sourceId)))
+  for (const id of sets[0]) {
+    assert.equal(sets[1].has(id), false, `★ ${id} 同时出现在 ready 与 awaitingRuling`)
+    assert.equal(sets[2].has(id), false, `★ ${id} 同时出现在 ready 与 cannotEmit`)
+  }
+  for (const id of sets[1]) assert.equal(sets[2].has(id), false, `★ ${id} 同时出现在 awaitingRuling 与 cannotEmit`)
+})
+
+test('★★ 臂 T98d：**分栏报** —— 每条为什么没进 ready，而不是一个笼统的 blocked', () => {
+  /**
+   * ★ 契约：「缺任何一条都不进 dispatchable，而每条缺什么要【分栏报】。」
+   */
+  const result = dispatchable(
+    {
+      toDispatch: [
+        executableProposal({ sourceId: 'big', inScope: ['src/a.ts', 'src/b.ts'], objective: 'x' }),
+        executableProposal({ sourceId: 'inc', inScope: ['src/c.ts'], objective: 'y', acceptance: [] }),
+      ],
+      blocked: [executableProposal({ sourceId: 'blocked-1' })],
+      noAction: [], autoRecorded: [], unknown: [],
+    },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  console.log(`    ℹ notReadyBecause = ${JSON.stringify(result.notReadyBecause)}`)
+  assert.equal(result.notReadyBecause.large, 1, '★ "大档"那一栏要数出来')
+  assert.equal(result.notReadyBecause.contractIncomplete, 1, '★ "契约不全"那一栏也要数出来')
+  assert.equal(result.blockedCount, 1, '★ 写域被挡是另一栏')
+
+  /** ★ 而人话输出里那**一栏一行**必须在场。 */
+  const text = renderDispatchable(result)
+  assert.match(text, /分栏（为什么没进/u, '★ 必须分栏报')
+  assert.match(text, /大档等人裁决 1/u, '★ 大档那一栏的计数必须可读')
+})
+
+test('★★ 臂 T98e：反向半边 —— 不许把小档判成大档（那会让裁决变成形式）', () => {
+  /**
+   * ★ 契约：「不许把所有东西都判成大档（那会让队列爆掉、派发停摆）——
+   *          也不许把小档判成大档（那会让裁决变成形式）。」
+   *
+   * ⇒ 本臂用**单文件、无目录条目、无可搬的东西**的形状，断言它进 ready。
+   */
+  const small = executableProposal({
+    sourceId: 'small-1', inScope: ['src/a.ts'],
+    /** ★ 带一个"拆"字，**而它没有可搬的东西**（`src/a.ts` 未必存在）——
+     *    所以措辞不许把它抬成大档。 */
+    objective: '把这个函数拆成两半',
+  })
+  const result = dispatchable(
+    { toDispatch: [small], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }], [{ id: 't1', assignee: 'a', inScope: ['scripts/'] }]),
+  )
+  assert.deepEqual(
+    result.ready.map((e) => e.sourceId), ['small-1'],
+    '★ 一条单文件活被判成了大档 —— 那会让每一条活都进裁决队列，而裁决会因此变成形式',
+  )
+  assert.equal(result.awaitingRuling.length, 0, '★ 队列不许收它')
+})
+
+test('★★ 臂 T98f：`unmeasurable` 既不许进 ready，也不许混进"等人裁决"', () => {
+  /**
+   * ★ `inScope` 缺席/为空 ⇒ 分档**判不了** ⇒ 它既不是小档也不是大档。
+   *   ★ 而它与大档的处置**不同**：大档要**裁决**，它要**补信息**。
+   *
+   * ★ 而这条臂防的是"把不可判并进可判"——本队记过的那种合流。
+   */
+  const noScope = executableProposal({ sourceId: 'unknown-1', inScope: [], objective: 'z' })
+  const result = dispatchable(
+    { toDispatch: [noScope], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  console.log(`    ℹ ready ${result.ready.length} · awaitingRuling ${result.awaitingRuling.length} · cannotEmit ${result.cannotEmit.length}`)
+  assert.equal(result.ready.length, 0, '★ "判不了"绝不许并进"可派"')
+  assert.equal(result.awaitingRuling.length, 0, '★ 也不许并进"等人裁决"——它要补的是信息，不是裁决')
+  assert.equal(result.cannotEmit.length, 1, '★ 它落在"契约不完整"那一格（缺的是 inScope）')
+  assert.equal(result.notReadyBecause.contractIncomplete, 1)
+})
