@@ -358,7 +358,45 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             updateGate: dispatchGates,
             wantsCompleted: args.status === 'completed',
           }, clock)
-          if (dispatchGates.ok === false) {
+          /**
+           * ── ★★ t14：三态，且 `skippedAll` 是判据 —— 与 `delivery.ts:118-130` 逐字同形 ──
+           *
+           * MEASURED（t13 实测撞上）：`ok:false` 有**两种**成因，而本处此前只读
+           * `ok === false` 就拒绝 ⇒ 全跳过那一支落进 `blockers.join('; ')` ⇒
+           * `[]` 拼出空串 ⇒ **抛出一句没有谓语的拒绝**：
+           *
+           *     update_task rejected:            ← ★ 拒绝后面是空的
+           *
+           * ★ 而成因是 t58 把全跳过从 `ok:true` 翻成了 `ok:false`（那是对的：
+           *   "没被检查"不该读成"通过了"）。但**调用方**把它读成了"被拒绝" ——
+           *   于是每一次「这个位置这一轮没有适用判据」（**正常情形**）都变成了假拒绝。
+           *
+           * ⇒ 正确的形状不是"把空串填上内容"，而是**整个拒绝逻辑都不进**：
+           *   一个安全约束**不触发**时，应当放行并留下"它没被检查"的痕迹，
+           *   而不是拒绝一切（`delivery.ts:96-100` 记的正是同一条）。
+           *
+           *     notChecked = ok:false && skippedAll 在场  ⇒ **放行** + warn（不拒绝）
+           *     ok:true                                    ⇒ 放行，不告警
+           *     blockers / unmeasured                      ⇒ 拒绝（下面的分支不变）
+           *
+           * ★ `unmeasured`（判据跑了、说测不了）**仍然拒绝** —— 它与全跳过的差别是
+           *   `evaluated`：① 是 0（一条都没跑），`unmeasured` 是 >= 1。两者不同形。
+           *
+           * ★ 为什么判据用 `skippedAll` 而不是 `evaluated === 0`：后者在**空位置**
+           *   （`registered === 0`）上也成立，而那是"这里本来就没有判据"，是正常情形。
+           *   `skippedAll` 才是注册表**显式**说的"这一步没被检查"。
+           */
+          const dispatchNotChecked = dispatchGates.ok === false && dispatchGates.skippedAll !== undefined
+          if (dispatchNotChecked) {
+            ctx.logger.warn(`agent-teams: update_task reached the dispatch gate with nothing evaluated (${dispatchGates.registered} registered, all skipped); the dispatch step was NOT checked — allowing it through, because "not checked" is not "refused"`)
+          }
+          /**
+           * ★★★ 拒绝逻辑整体包进 `!dispatchNotChecked &&`。
+           *   ★ 而 `frictionMessage` 与 `recordFriction(...)` **在里面**：它们记的是
+           *     「**卡点**」，而成因必须是**一次真实的拒绝**。留在外面会让"没被检查"
+           *     以 friction 的名义被记成一次卡点 —— 那会把假拒绝搬到台账里再犯一次。
+           */
+          if (!dispatchNotChecked && dispatchGates.ok === false) {
             /**
              * ★★ t22：在卡点发生的此刻记账（含 ctx 快照 + 事件定位 + 机制状态）。
              *   与 contract 那处同一条纪律：**旁路、不改裁决、失败只写 warn**。
@@ -638,22 +676,33 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           /**
            * ── ★ t13 的运行时出口：有判据、却一条都没跑 ────────────────────────────
            *
-           * `evaluated === 0 && registered > 0` 意味着这一轮**没有任何判据真的检查过**
-           * 这个完成动作，而 `ok` 仍为 true。**只告警、不拒绝** —— 拒绝会把"这个位置
-           * 这一轮没有适用判据"（正常情形）变成流程卡死，那正是 t13 明确要求保住的边界。
-           * 但它必须【可读】：否则一次静默全跳过只有 `ok: true` 留给读日志的人。
+           * ★★ t14：这条告警**已被下面的 `completionNotChecked` 取代** —— 见那里。
+           *   它此前用 `evaluated === 0 && registered > 0`，而那正是 t14 要消灭的那个
+           *   判据的"近似版"：它与 `skippedAll` 在**生产路径上**等价，但**在空位置以外的
+           *   场合不同形**（`registered === 0` 时它也成立，而那是正常情形）。
+           *   ★ 两条告警并存会让同一件事报两遍 —— 而"这两条日志说的是不是同一件事"
+           *     就变成一个要读两处才能回答的问题（`delivery.ts:132-137` 记的是同一条）。
            */
-          if (completionGates.evaluated === 0 && completionGates.registered > 0) {
-            ctx.logger.warn(
-              `agent-teams: update_task for task "${task.id}" reached completion with no gate evaluated (${completionGates.registered} registered, all skipped); this step was not checked`,
-            )
+          /**
+           * ── ★★ t14：三态，且 `skippedAll` 是判据 —— 与 `delivery.ts:118-130` 逐字同形 ──
+           *
+           * 理由与 dispatch 那一处**逐字相同**（见那里的长注释）：`ok:false` 有两种成因，
+           * 而"没被检查"必须**放行 + 留痕**，不是把空串填上内容再拒绝。
+           * ★ 两处逐字同形是刻意的：同一个事实在两个出口上用两句话，它们会随下一次
+           *   改动分叉，而分叉后的两次读数在断言层面同形。
+           */
+          const completionNotChecked = completionGates.ok === false && completionGates.skippedAll !== undefined
+          if (completionNotChecked) {
+            ctx.logger.warn(`agent-teams: update_task for task "${task.id}" reached completion with nothing evaluated (${completionGates.registered} registered, all skipped); the completion step was NOT checked — allowing it through, because "not checked" is not "refused"`)
           }
           /**
            * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬），放在拒绝逻辑**之前**是因为
            *   它与下面三个分支讲的不是同一件事，而"这次完成本来会被拒"与"这次完成
            *   的输入面没接完"必须都能读到 —— 只读到前者会让人以为是判据的结论。
-           *   与 t13 那条（`evaluated === 0`）也**不同形**：那是"判据一条都没跑"，
-           *   这是"判据跑了、而它要的某一格调用方没交"。
+           *   ★ t14：原来那句「与 t13 那条（`evaluated === 0`）不同形」的对照**已失效** ——
+           *     t13 那条告警已并入上面的 `completionNotChecked`，现在它与**这一条**比：
+           *     那是"判据一条都没跑"（且**已放行**），这是"判据跑了、而它要的某一格
+           *     调用方没交"。两者仍然不同形。
            *
            * ★★ t3：这条日志**保留**（给人看）；结构化出口本体在下面返回值的
            *   `input_surface` 里（`completionInputSurface`）。两条并存。
@@ -663,7 +712,12 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               `agent-teams: update_task for task "${task.id}" reached completion with an unfinished input surface (recorded, not rejected): ${completionInputSurface.missing.join('; ')}`,
             )
           }
-          if (completionGates.ok === false) {
+          /**
+           * ★★★ 拒绝逻辑整体包进 `!completionNotChecked &&`。
+           *   与 dispatch 那处同一条纪律：`frictionMessage` 与 `recordFriction(...)`
+           *   **在里面** —— 它们记的是「卡点」，而成因必须是一次**真实的拒绝**。
+           */
+          if (!completionNotChecked && completionGates.ok === false) {
             /**
              * ★★ t22：在卡点发生的此刻记账。★ 这一处尤其重要 —— 本轮被它拦住的
              *   次数最多（三道完工门），而事后补的材料恰恰读不出"当时缺的是哪一格"。
