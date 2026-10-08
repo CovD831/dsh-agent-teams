@@ -252,23 +252,61 @@ test('臂 1 ★★★ 抓到 t84 那个真实实例：写死的 `..×4` 只在�
   const here = dirname(file)
 
   const candidates = pathConstants(source)
-  const hardcoded = candidates.filter((entry) => entry.parentSegments === 4 && entry.selfRelative)
+  const hardcoded = candidates.filter((entry) => entry.parentSegments === 4 && entry.selfRelative && !entry.hasUpwardSearch)
 
   console.log(`    ℹ ${relative(ROOT, file)} 里抽到 ${candidates.length} 条路径常量，其中写死 4 层的有 ${hardcoded.length} 条`)
-  assert.ok(
-    hardcoded.length > 0,
-    '★ 找不到那条写死 4 层的路径常量 —— 若它已被改成向上查找，请把本臂改指新的等价实例，而不是删掉',
-  )
 
-  for (const candidate of hardcoded) {
+  /**
+   * ── ★★★ 本臂已经**兑现**了（判据抓到 → 实例被修）─────────────────────────────────
+   *
+   * 本臂第一版断言的是一条**真的在盘上**的写死 `..×4`（`:364`）。
+   * ★ 而在 t85 收口之后、captain 于 2026-10-08 **把它修掉了** —— 修法的注释里逐字写着
+   *   「MEASURED（t85 的判据抓出来的，captain 2026-10-08 修）」。
+   *
+   * ⇒ ★ 所以本臂不能再断言"那条写死的常量存在"（那现在是一条**假的**断言 ——
+   *   它会让整条判据在**它成功之后**变红，而那是最贵的红）。
+   *   改成断言**那件事的结果**：那一处现在是"**发现的**"量（向上查找）。
+   *
+   * ★ 而第一版的 failure 消息里**已经预告了这次改动**：
+   *   「若它已被改成向上查找，请把本臂改指新的等价实例，而不是删掉」
+   *   ⇒ 这正是它现在做的事 —— 本臂**没有**被删掉，它换了对象。
+   */
+  const upward = candidates.filter((entry) => entry.hasUpwardSearch)
+  assert.ok(
+    upward.length > 0,
+    '★ 那一份里既没有写死 4 层的、也没有向上查找的 —— 本臂的两个对象都不见了。'
+    + '★ 请复核 `worktree-baseline-freshness.test.mjs` 的根路径是怎么算的。',
+  )
+  for (const candidate of upward) {
     const verdict = verdictOf(candidate, here, file)
     console.log(`    ℹ :${candidate.line} ⇒ ${verdict.verdict}｜${verdict.why.slice(0, 100)}`)
     assert.equal(
-      verdict.verdict, VERDICT.bound,
-      '★ 写死 4 层的路径常量没有被判成 depth-bound —— 那是 t84 那个真实实例的形状。\n'
-      + `   源码：${candidate.text}`,
+      verdict.verdict, VERDICT.independent,
+      '★ 那一份里的根路径没有被判成 depth-independent —— 而它现在是"发现的"量（向上查找）',
     )
   }
+  console.log('    ℹ ★ 本臂的对象已从"盘上写死的那条"换成"盘上修好之后的那条"')
+
+  /**
+   * ── ★★ 而"写死层数"这一类的**分辨力**仍然要钉住 ────────────────────────────────
+   *
+   * ★ 用 t84 那条的**原话**作为合成输入 —— 因为它已经不在盘上了（被修了），
+   *   而它是一条**真实历史**。★ 判据的语料应当可追溯到真事，而不是我编一个形状。
+   */
+  const synthetic = {
+    line: 0,
+    text: `const root = join(here, '..', '..', '..', '..')`,
+    parentSegments: 4,
+    selfRelative: true,
+    hasUpwardSearch: false,
+  }
+  const verdict = verdictOf(synthetic, here, file)
+  console.log(`    ℹ 合成的写死 4 层（t84 那条的原话）⇒ ${verdict.verdict}`)
+  assert.equal(
+    verdict.verdict, VERDICT.bound,
+    '★ 写死 4 层的路径常量没有被判成 depth-bound —— 那正是 t84 那个真实实例的形状。\n'
+    + `   源码：${synthetic.text}`,
+  )
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -511,13 +549,23 @@ test('臂 5 ★★ 定向突变：把向上查找改成写死层数 ⇒ 读数�
   console.log(`    ℹ 向上查找 ⇒ ${before.verdict}`)
 
   /**
-   * ★ 而"写死层数"那一版**也真的在盘上**（同一个文件的另一处，:364）。
-   *   ⇒ 于是本臂的两个版本都取自盘上，而不是我编的。
+   * ★★ 而"写死层数"那一版**已经不在盘上了** —— captain 在 2026-10-08 把它修掉了
+   *   （修法的注释里引用了本判据）。⇒ 于是它的**历史原话**由臂 1 保管，
+   *   而本臂从那里取它，而不是期望盘上还有一条。
+   *
+   * ★ 这一处记录的是**判据与被测对象的关系**：当判据成功之后，它的语料会消失 ——
+   *   而"语料消失"与"判据坏了"在读数上同形（两者都是"找不到对象"）。
+   *   ⇒ 所以本臂明确区分：**对象取自盘上（向上查找）** vs **取自历史（写死层数）**。
    */
-  const hardcoded = pathConstants(source).filter((entry) => entry.parentSegments === 4 && entry.selfRelative && !entry.hasUpwardSearch)
-  assert.ok(hardcoded.length > 0, '★ 盘上找不到写死层数的那一处 —— 两个版本缺一个')
-  const after = verdictOf(hardcoded[0], here, file)
-  console.log(`    ℹ 写死 4 层 ⇒ ${after.verdict}`)
+  const historicalHardcoded = {
+    line: 0,
+    text: `const root = join(here, '..', '..', '..', '..')`,
+    parentSegments: 4,
+    selfRelative: true,
+    hasUpwardSearch: false,
+  }
+  const after = verdictOf(historicalHardcoded, here, file)
+  console.log(`    ℹ 写死 4 层（t84 的历史原话）⇒ ${after.verdict}`)
 
   assert.equal(before.verdict, VERDICT.independent, '★ 向上查找必须判 independent')
   assert.equal(after.verdict, VERDICT.bound, '★ 写死层数必须判 bound')
