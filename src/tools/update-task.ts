@@ -129,7 +129,7 @@ import { readFileSync } from 'node:fs'
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
-import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
+import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
 import { wireCompletion } from './update-task/completion.ts'
@@ -365,23 +365,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              */
             const frictionMessage = dispatchGates.unmeasured !== undefined
               ? `update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`
-              : dispatchGates.blockers.length > 0
-                ? `update_task rejected: ${dispatchGates.blockers.join('; ')}`
-                /**
-                 * ── ★★★ t92：第三态 —— 位置**没能检查这一步**（判据全被闸门挡住）。
-                 *
-                 * ★ 而这一支是 t70 的拆分【丢掉】的（t69 修的"空理由"缺陷）——
-                 *   逐符号核对：`skippedAll` 在拆分前于本文件 2 次（代码级），拆分后 0 次。
-                 *
-                 * ★ 而它为什么必须在这里：
-                 *   一个 `ok:false` 而 `blockers:[]` 且 `unmeasured:undefined` 的裁决
-                 *   会让上面那条 `??` 之前的写法产出**空尾**（`update_task rejected: `）——
-                 *   而空尾与"拒绝没有原因"同形，读的人会去猜。
-                 *   ⇒ `skippedAll` 缺席时兜一句总得说的话 —— **绝不产出空尾**。
-                 *     一个空的拒绝理由会让读的人以为"拒绝没有原因"，而那与
-                 *     "原因没被写出来"是两件事，且后者的补救动作是改这条出口。
-                 */
-                : `update_task rejected: ${dispatchGates.skippedAll ?? `the dispatch gate refused but stated no reason (${dispatchGates.registered} registered, ${dispatchGates.evaluated} evaluated)`}`
+              : `update_task rejected: ${dispatchGates.blockers.join('; ')}`
             void recordFriction({
               stateRoot,
               point: 'dispatch',
@@ -392,6 +376,17 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               taskId: task.id,
               teamId: team.id,
               tool: 'agent_teams_update_task',
+              /**
+               * ★★★ t91：这条是**自动记录**的 —— 本分支就是拒绝路径。
+               *   ⇒ 它没有 resolution.state 是设计如此（判据拒绝的那一下没人做过决定）。
+               *   ★ 而声明它让分诊器把它从「台账待回填」里分出去 ——
+               *     否则那个数字把"不需要回填"与"还没回填"算成同一类。
+               */
+              auto: {
+                tool: 'agent_teams_update_task',
+                point: 'dispatch',
+                ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
+              },
               ...dispatchGates.unmeasured === undefined ? {} : { couldNotObserve: [String(dispatchGates.unmeasured)] },
             }).then((id) => {
               if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the dispatch gate (${frictionMessage})`)
@@ -686,6 +681,17 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               taskId: task.id,
               teamId: team.id,
               tool: 'agent_teams_update_task',
+              /**
+               * ★★★ t91：这条是**自动记录**的 —— 本分支就是拒绝路径。
+               *   ⇒ 它没有 resolution.state 是设计如此（判据拒绝的那一下没人做过决定）。
+               *   ★ 而声明它让分诊器把它从「台账待回填」里分出去 ——
+               *     否则那个数字把"不需要回填"与"还没回填"算成同一类。
+               */
+              auto: {
+                tool: 'agent_teams_update_task',
+                point: 'completion',
+                ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
+              },
               ...completionGates.unmeasured === undefined ? {} : { couldNotObserve: [String(completionGates.unmeasured)] },
             }).then((id) => {
               if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the completion gate (${frictionMessage})`)

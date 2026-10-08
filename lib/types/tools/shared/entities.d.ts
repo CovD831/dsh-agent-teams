@@ -503,7 +503,52 @@ export interface FrictionCapture {
      *   缺席 ⇒ 由 `recordFriction` 现读一次（生产路径不必显式传）。
      */
     moduleFreshness?: ModuleFreshness;
+    /**
+     * ── ★★★ t91：这条卡点是【自动记录】的还是**人**记的 ─────────────────────────────
+     *
+     * MEASURED（t91 实测当前台账）：209 条里 **165 条是自动记录的拒绝**
+     * （`update_task rejected…` / `create_task rejected…`），而它们**没有 resolution 是设计如此** ——
+     * 自动记录发生在"判据拒绝那一下"，那时没有任何人做过决定。
+     *
+     * ★★ 而分诊器此前把它们算进「台账待回填」⇒ 那个数字是 **174**，
+     *   而真正需要人看的是 **9**（人工记录且没有 state）。
+     *   ⇒ 一个读数把两类东西算成同一类：**"不需要回填"与"还没回填"在它眼里同形。**
+     *
+     * ── ★ 为什么它是【调用方显式声明】的，而不是在这里猜 ──────────────────────────
+     *
+     * 本条的唯一调用方是拒绝路径（`throwWithSurface` 那两级），那里**知道**
+     * 自己是不是一次自动拒绝。⇒ 由它声明；而 `recordFriction` **不替它猜** ——
+     * 猜错的后果是单向的：**它会把人工记录算成"不需要回填"**，
+     * 而那正是本任务要消掉的那个误导（只是方向反过来）。
+     *
+     * ★ 缺省 = 人工记录：一个"忘了声明"的自动条目会落回待回填（**显眼**），
+     *   而不会伪装成"不需要人管"（**隐形**）。⇒ 错的那一侧选可见的那一侧。
+     */
+    auto?: FrictionAutoOrigin;
 }
+/**
+ * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
+ * 而读台账的人接下来要问的是「**是哪条判据**把它拒了」。
+ */
+export interface FrictionAutoOrigin {
+    /** 触发这条记录的工具（`agent_teams_update_task` / …）。 */
+    tool: string;
+    /** 卡点位置（`completion` / `dispatch` / `contract` / …）。 */
+    point: string;
+    /**
+     * ★ 拒绝原文里的**判据 id**（`completion.backtest` 那一类），读得出来时才写。
+     *   读不出来 ⇒ 缺席（**不猜**：编一个 id 会让"这条是谁拒的"变成一条假事实）。
+     */
+    gate?: string;
+}
+/**
+ * ── ★ 从拒绝原文里读出【是哪条判据】拒的 ────────────────────────────────────────
+ *
+ * 拒绝原文里判据 id 的形态是 `[… ]`（实测：`update_task rejected: [dispatch.changed-paths] "…"`）。
+ * ★ 读不出来 ⇒ `undefined`（**不猜**）—— 编一个 id 会让"这条是谁拒的"变成一条**假事实**，
+ *   而假的归因比没有归因坏：读的人会照着它去查那条判据。
+ */
+export declare function gateIdFromMessage(message: string): string | undefined;
 export declare function toReplayableSnapshot(value: unknown, depth?: number, seen?: WeakSet<object>): unknown;
 /**
  * ── ★★★ 重放：把记录里的 ctx 还原成【能真的跑】的那一份（t79）────────────────────

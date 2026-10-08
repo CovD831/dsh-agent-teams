@@ -211,16 +211,95 @@ export function actionForFriction(record) {
   if (state === 'scheduled') return { action: 'no-action', why: `resolution.state = scheduled（已排进 ${String(record?.resolution?.task ?? '某个任务')}）` }
   if (state === 'open') return { action: 'candidate', why: 'resolution.state = open（真的还欠一个动作）' }
   /**
+   * ── ★★★ t91：**自动记录**与"还没回填"是两件事 ─────────────────────────────────
+   *
+   * MEASURED（t91 实测当前台账 209 条）：**165 条是自动记录的拒绝**
+   * （`update_task rejected…` / `create_task rejected…`），而它们**没有 `state` 是设计如此** ——
+   * 那条记录发生在"判据拒绝那一下"，那时没有任何人做过决定。
+   *
+   * ★★ 而本函数此前把它们与"人记了但还没回填"算进**同一格**（`unknown`）⇒
+   *   那个数字是 **174**，而真正需要人看的是 **9**。
+   *   ⇒ 一个读数把两类东西算成同一类：**"不需要回填"与"还没回填"在它眼里同形。**
+   *   ★ 那正是本队记账过的形态，只是这次它在**读数**里而不是在判据里。
+   *
+   * ── ★★ 为什么它排在四个 state 检查【之后】（那一格的位置是刻意的）───────────────
+   *
+   * 契约的反向半边：「不许把有待处理的自动条目也一并放过 ——
+   * 若某条自动记录**已经有 resolution**，它仍该按那个 resolution 走。」
+   * ⇒ 先看 `state`、再看 `auto`。
+   * ★ 而一个把顺序反过来的实现会在"自动记录被标成 `open`"时**漏掉一条真的待办** ——
+   *   那正是这条反向半边要挡的东西。
+   */
+  if (record?.auto !== undefined) {
+    const origin = record.auto
+    const source = typeof origin?.gate === 'string' && origin.gate !== ''
+      ? `${String(origin.point ?? '?')} 位置的 ${origin.gate}`
+      : String(origin?.point ?? '?')
+    return {
+      action: 'auto-recorded',
+      why: `自动记录的拒绝（${source}）—— 它没有 resolution.state **是设计如此**：`
+        + '记录发生在判据拒绝的那一下，那时没有人做过决定。★ 它**不要求人回填**。',
+    }
+  }
+  /**
+   * ── ★★ t91：`auto` 那格的**向后兼容** —— 而它是明写的回退，不是暗中的猜 ──────────
+   *
+   * MEASURED（t91）：`auto` 这个字段是**本轮才加的**，而台账里现存的
+   * **167 条自动记录是先于它写下的** ⇒ 它们没有那一格。
+   * ⇒ 若只看新字段，本任务的修复对**已有台账**完全无效（那个数字仍是 176）。
+   *
+   * ★ 所以这里有一个**明写的回退**：老记录的 `title` 以 `<tool> rejected` 开头。
+   *   实测分布：`update_task` 160 条 + `create_task` 7 条 —— 而它们**全部**是拒绝路径写的。
+   *
+   * ── ★★★ 而它是一条**代理读数**，所以我把它写成一格可清理的东西 ──────────────────
+   *
+   * ★ 本队记账过 j-0003：「代理读数在它所代理的东西没变时也会变」。
+   *   这里的代理是 **title 的字符串前缀**，被代理的是"这条记录是谁产生的"。
+   *   ★ 而它与真正的字段**不同源** ⇒ 它会随"有没有人改标题措辞"而漂移。
+   *   ⇒ 所以回退命中的条目**带一个可读的标记**（`via: 'title-fallback'`），
+   *     而那让我们能回答"还有多少条在吃回退"—— 那个数字降到 0 时，这段就该删。
+   *
+   * ★★ 而它**不与真字段合流**：`auto` 在场时优先用它（上面的分支），
+   *   回退只在**没有** `auto` 时生效。⇒ 一个新记录绝不会被标题前缀误判。
+   */
+  const titleFallback = titleRejectionOrigin(record)
+  if (titleFallback !== undefined) {
+    return {
+      action: 'auto-recorded',
+      via: 'title-fallback',
+      why: `自动记录的拒绝（${titleFallback}，★ 由 title 前缀认出 —— 这条记录写于 auto 字段之前）—— `
+        + '它没有 resolution.state **是设计如此**。★ 它**不要求人回填**。',
+    }
+  }
+  /**
    * ★ 没有 `resolution` / 状态不认识 ⇒ **`unknown`**（第四态）。
    *   ★ 而它**不是** `no-action`（那会把它藏起来），也**不是** `candidate`
    *     （那会把没验证过的当作待办）。⇒ 它是它自己：**台账需要回填**。
+   *   ★★ 而它现在**只**覆盖"真的需要人看的"那一类：**人记的、而没有 state**。
    */
   return {
     action: 'unknown',
     why: state === undefined
-      ? 'no resolution.state was recorded — this is "the ledger was not backfilled", not "this still needs action"'
+      ? 'no resolution.state was recorded, and this is not an auto-recorded rejection — '
+        + 'so this is "the ledger was not backfilled", not "this still needs action"'
       : `resolution.state = "${String(state)}" is not one this tool knows, so whether it needs action could not be judged`,
   }
+}
+
+/**
+ * 从 `title` 前缀认出"这是一条自动记录的拒绝"。
+ *
+ * ★ 形态：`update_task rejected: …` / `create_task rejected: …`
+ *   —— 那是 `recordFriction` 的调用方在拒绝路径上拼的那句话。
+ *
+ * ★ 而它**只认它认得的工具名**（不是任何 `\w+ rejected`）：宽了会把
+ *   某条人工写的、恰好那样开头的记录也算成自动的 —— 而那正是本任务要消掉的
+ *   那个误导（只是方向反过来）。⇒ 名单是明写的、短的、可核的。
+ */
+export function titleRejectionOrigin(record) {
+  const title = typeof record?.title === 'string' ? record.title : ''
+  const match = /^(agent_teams_\w+|update_task|create_task|claim_task|reassign_task|message_member) rejected\b/u.exec(title)
+  return match?.[1]
 }
 
 /**
@@ -416,6 +495,17 @@ export function triage({ frictionsDir, judgementsDir, occupied = [] } = {}) {
 
   /** `no-action` 的两类，分开数（★ 理由不同 ⇒ 读数不同形）。 */
   const noAction = frictionActions.filter(({ verdict }) => verdict.action === 'no-action')
+  /**
+   * ── ★★★ t91：这两格**分开数**（而它们此前是一格）─────────────────────────────────
+   *
+   * `autoRecorded` = 自动记录的拒绝（**不要求人回填**）
+   * `unknown`      = 人记的、而没有 state（★ **真的需要人看**）
+   *
+   * ★ 合成一格时那个数字是 174，而实际需要人看的是 9 ——
+   *   一个读数把两类东西算成同一类，而它们的**补救动作相反**：
+   *   前者什么都不用做，后者要人去补一个 state。
+   */
+  const autoRecorded = frictionActions.filter(({ verdict }) => verdict.action === 'auto-recorded')
   const unknown = frictionActions.filter(({ verdict }) => verdict.action === 'unknown')
 
   return {
@@ -426,13 +516,22 @@ export function triage({ frictionsDir, judgementsDir, occupied = [] } = {}) {
       toDispatch: toDispatch.length,
       blocked: blocked.length,
       noAction: noAction.length,
+      autoRecorded: autoRecorded.length,
       unknown: unknown.length,
     },
     /** ★ 判决侧的分布：机械化的 / 只能诊断的 / 表达不出断言的 / 判不了的。 */
     judgementVerdicts,
     /** ★ 卡点侧：不需要行动的（已修/已排/已裁定）。 */
     noAction,
-    /** ★ 卡点侧：**台账需要回填**（没有 resolution 记录）—— 它是一条独立读数。 */
+    /** ★ 卡点侧：**自动记录**（不要求人回填）—— t91 从下面那一格里分出来的。 */
+    autoRecorded,
+    /**
+     * ★ 而其中有多少条是靠 **title 前缀回退**认出来的（写于 `auto` 字段之前）。
+     *   ★ 它是一条**代理读数**（见 `actionForFriction` 那段）⇒ 它的存量必须可见，
+     *     否则我们无法知道那段回退什么时候可以删。
+     */
+    autoRecordedViaFallback: autoRecorded.filter(({ verdict }) => verdict.via === 'title-fallback').length,
+    /** ★ 卡点侧：**台账需要回填**（人记的、而没有 state）—— 它是一条独立读数。 */
     unknown,
     toDispatch,
     blocked,
@@ -453,7 +552,17 @@ export function render(report) {
   const c = report.counts
   lines.push(
     `卡点 ${c.frictions} 条 · 判决 ${c.judgements} 条`,
-    `⇒ 待派 ${c.toDispatch} · 被写域挡 ${c.blocked} · 无需行动 ${c.noAction} · 台账待回填 ${c.unknown}`,
+    `⇒ 待派 ${c.toDispatch} · 被写域挡 ${c.blocked} · 无需行动 ${c.noAction}`,
+    /**
+     * ── ★★★ t91：那两格**分开印**（而它们此前合成一个"台账待回填"）───────────────
+     * ★ 合成一格时读的人会以为 174 条要他去补 —— 而其中 165 条**根本不需要人来管**。
+     */
+    `   ★ 台账待回填 ${c.unknown}（人记的、而没有 state —— 这些**真的需要人看**）`,
+    `   · 自动记录 ${c.autoRecorded}（判据拒绝的那一下记的，★ **不要求人回填**）`
+      + (report.autoRecordedViaFallback === 0
+        ? ''
+        : `\n     ★ 其中 ${report.autoRecordedViaFallback} 条是靠 **title 前缀**认出来的`
+          + '（它们写于 auto 字段之前）—— 那个数字降到 0 时，那段回退就可以删了'),
     '',
   )
   lines.push(`── 现在就能派（${c.toDispatch}）──`)
@@ -478,10 +587,27 @@ export function render(report) {
   lines.push('', `── 无需行动（${c.noAction}）──`)
   for (const entry of report.noAction.slice(0, 8)) lines.push(`  · ${entry.id}：${entry.verdict.why}`)
   if (report.noAction.length > 8) lines.push(`  …另有 ${report.noAction.length - 8} 条`)
-  lines.push('', `── ★ 台账待回填（${c.unknown}）：它们**不是**待办，是"没有 resolution 记录" ──`)
+  lines.push('', `── ★ 台账待回填（${c.unknown}）：人记的、而没有 resolution.state ──`)
   if (report.unknown.length > 0) {
-    lines.push(`  （这 ${report.unknown.length} 条混合了"真的还没处理"与"处理了但没回填"——`)
-    lines.push('    把它们当待办会让清单塞进几十条没人验证过的条目，而那正好抵消本工具的价值。）')
+    for (const entry of report.unknown.slice(0, 8)) lines.push(`  · ${entry.id}：${shorten(entry.title, 60)}`)
+    if (report.unknown.length > 8) lines.push(`  …另有 ${report.unknown.length - 8} 条`)
+    lines.push('  （这一格**只**收"人记的、而没有 state"。把它当待办会让清单塞进没人验证过的条目，）')
+    lines.push('  （而那正好抵消本工具的价值。区别于下面那一格 —— 那些**不用管**。）')
+  }
+  /**
+   * ★★★ t91：自动记录**单列一格**，而它必须**看得见**（否则读的人仍会以为它们等着他）。
+   *   ★ 而它**不逐条列**（165 条会把清单淹掉）：只给计数 + 一句"它们不要求回填"。
+   */
+  lines.push('', `── 自动记录（${c.autoRecorded}）：判据拒绝那一下记的，★ **不要求人回填** ──`)
+  if (report.autoRecorded.length > 0) {
+    const byGate = new Map()
+    for (const entry of report.autoRecorded) {
+      const key = entry.verdict.why.match(/位置的 ([\w.-]+)/u)?.[1] ?? '(未指名判据)'
+      byGate.set(key, (byGate.get(key) ?? 0) + 1)
+    }
+    const top = [...byGate.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)
+    for (const [gate, count] of top) lines.push(`  · ${gate}：${count} 条`)
+    if (byGate.size > 5) lines.push(`  …另有 ${byGate.size - 5} 条判据`)
   }
   return lines.join('\n')
 }

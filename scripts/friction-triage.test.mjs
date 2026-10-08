@@ -45,6 +45,8 @@ import {
   proposalForJudgement,
   proposalForFriction,
   JUDGEMENT_VERDICTS,
+  /** ★ t91：自动记录与待回填的分格（含那条可见的回退）。 */
+  titleRejectionOrigin,
   /** ★ t78：这三个现在从 t65 那边 re-export（臂 6 断言**同一性**）。 */
   looksAssertive,
   inputKindOf,
@@ -80,6 +82,117 @@ const friction = (id, state, extra = {}) => ({
 })
 
 const judgement = (id, claim) => ({ id, claim, status: 'adopted' })
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 臂 9（★★★ t91）：自动记录 ≠ 待回填
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('★★★ 臂 9：**自动记录**与「待回填」是两格 —— ★ 而它们此前被算成同一类', () => {
+  /**
+   * ── 这一格就是本任务的交付 ────────────────────────────────────────────────────
+   *
+   * MEASURED（t91 实测当前台账 203 条）：**167 条是自动记录的拒绝**，
+   * 而真正需要人看的是 **9**（人记的、而没有 state）。
+   * ★ 此前它们合成一格 ⇒ 报出 176 —— **一个误导的数字**：
+   *   它把"不需要回填"与"还没回填"算成同一类，而两者的补救动作相反
+   *   （前者什么都不用做，后者要人去补一个 state）。
+   */
+  const auto = actionForFriction({ id: 'f-a', title: 'update_task rejected: …', auto: { tool: 'agent_teams_update_task', point: 'completion', gate: 'completion.backtest' } })
+  assert.equal(auto.action, 'auto-recorded', '★ 带 auto 的 ⇒ 单独那一格')
+  assert.notEqual(auto.action, 'unknown', '★ 不许并进"待回填"')
+  assert.notEqual(auto.action, 'no-action', '★ 也不许并进"无需行动"（那是"处理过了"，与"不需要处理"不同）')
+
+  const manual = actionForFriction({ id: 'f-m', title: '夹具硬编码了行号', index: {} })
+  assert.equal(manual.action, 'unknown', '★ 人记的、没有 state ⇒ 待回填')
+
+  /** ★ 而两者的话必须**不同形**（合成一句会让读的人分不出要不要动手）。 */
+  assert.notEqual(auto.why, manual.why)
+  assert.match(auto.why, /不要求人回填/, '★ 自动那一格必须明说"不用人管"')
+})
+
+test('★★★ 臂 9b：反向半边 —— 自动记录**已有 resolution** 时仍按那个 resolution 走', () => {
+  /**
+   * 契约原文：「★ 反向半边：不许把有待处理的自动条目也一并放过 ——
+   *           若某条自动记录**已经有 resolution**，它仍该按那个 resolution 走。」
+   *
+   * ★ 而这条的**顺序**是判据本身：先看 `state`、再看 `auto`。
+   *   ⇒ 一个把顺序反过来的实现在下面第二条上会答 `auto-recorded`
+   *     ⇒ **漏掉一条真的待办**。
+   */
+  const autoFixed = { id: 'f', title: 'update_task rejected: …', auto: { tool: 't', point: 'completion' }, resolution: { state: 'fixed' } }
+  assert.equal(actionForFriction(autoFixed).action, 'no-action', '★ 自动 + fixed ⇒ 按 fixed 走（已修）')
+
+  const autoOpen = { id: 'f', title: 'update_task rejected: …', auto: { tool: 't', point: 'completion' }, resolution: { state: 'open' } }
+  assert.equal(
+    actionForFriction(autoOpen).action, 'candidate',
+    '★★ 自动 + open ⇒ **仍然是一条待办** —— 顺序反过来会让它被放过（漏掉一条真的待办）',
+  )
+})
+
+test('★★★ 臂 9c：`auto` 那格的**向后兼容**回退 —— 而它必须**可见**', () => {
+  /**
+   * MEASURED（t91）：`auto` 字段是本轮才加的，而台账里现存的 167 条自动记录
+   * **写于它之前** ⇒ 若只看新字段，本修复对已有台账**完全无效**（那个数字仍是 176）。
+   *
+   * ★ 所以有一条**明写的回退**（title 前缀 `<tool> rejected`）。
+   *   ★★ 而它是一条**代理读数**（j-0003：代理读数在它所代理的东西没变时也会变）——
+   *      所以命中的条目**带标记**（`via: 'title-fallback'`），而我们能读到"还有多少条在吃回退"。
+   */
+  const legacy = { id: 'f-old', title: 'update_task rejected: [completion.backtest] …', resolution: { blocking: false } }
+  const verdict = actionForFriction(legacy)
+  assert.equal(verdict.action, 'auto-recorded', '★ 老记录也要落那一格（否则本修复对已有台账无效）')
+  assert.equal(verdict.via, 'title-fallback', '★★ 而它必须**标出来**是回退认的 —— 否则那段回退什么时候能删就无从知道')
+  assert.match(verdict.why, /title 前缀/, '★ 理由里要说清它是怎么认出来的')
+
+  /** ★ 反向半边：**人工**的标题不该被认成自动的（否则方向反过来的同一个误导）。 */
+  assert.equal(
+    actionForFriction({ id: 'f-m', title: '夹具硬编码了行号', index: {} }).action, 'unknown',
+    '★ 一条人工记录不许被回退认成自动 —— 那会让"真的需要人看"被藏起来',
+  )
+  /** ★ 而**窄名单**：一个恰好以 `foo rejected` 开头的标题不该被认。 */
+  assert.equal(titleRejectionOrigin({ title: 'foo rejected: whatever' }), undefined)
+  assert.equal(titleRejectionOrigin({ title: 'update_task rejected: x' }), 'update_task')
+})
+
+test('★★ 臂 9d：那两格**分开计数**（合成一个数字正是本任务要消掉的）', () => {
+  const l = ledger({
+    frictions: [
+      { ...friction('f-auto', undefined), title: 'update_task rejected: x' },
+      { ...friction('f-manual', undefined), title: '人记的一条' },
+      friction('f-fixed', 'fixed'),
+    ],
+    judgements: [],
+  })
+  try {
+    const report = triage({ frictionsDir: l.fdir, judgementsDir: l.jdir })
+    assert.equal(report.counts.autoRecorded, 1, '★ 自动那一格')
+    assert.equal(report.counts.unknown, 1, '★ 待回填那一格')
+    assert.equal(report.counts.noAction, 1)
+    /** ★ 而人话清单里两个数字都要看得见（合成一句会让读的人以为 176 条都等着他）。 */
+    const text = render(report)
+    assert.match(text, /台账待回填 1/, '★ 待回填那个数字必须在')
+    assert.match(text, /自动记录 1/, '★ 而自动那一格也必须单列')
+  } finally {
+    l.cleanup()
+  }
+})
+
+test('★★ 臂 9e：自动条目的**内容一个字都不少**（只是不再要求人回填）', async () => {
+  /**
+   * 契约原文：「★★ 而它必须保住：自动条目的内容不能丢 —— 它们仍要能在 HTML 里读、
+   *            仍要能被判据扫。只是它们不再要求人给一个 resolution。」
+   *
+   * ★ 所以本任务是**加一格**（`auto`），**没有**动 `resolution` / `message` / `context`。
+   *   ⇒ 这一臂断言：自动记录**仍然**有 `resolution`（"当时还没修"是事实）、
+   *     仍然有 `title`，只是被分诊器**换了一格**读。
+   */
+  const record = { id: 'f', title: 'update_task rejected: [completion.backtest] x', resolution: { blocking: false, fix: 'unfixed: recorded at the moment it happened' }, observed: { verdict: { ok: false } } }
+  assert.equal(record.resolution.state, undefined, '★ 夹具自检：老的自动记录确实没有 state')
+  assert.equal(actionForFriction(record).action, 'auto-recorded')
+  /** ★ 而记录本身**没有被工具改动**（它是纯读的）—— 内容照旧可读。 */
+  assert.equal(record.title, 'update_task rejected: [completion.backtest] x')
+  assert.notEqual(record.resolution, undefined, '★ 那一格没有被删（删了会让"当时还没修"这个事实消失）')
+})
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 臂 1（三态臂）：三个动作不同形，且 blocked **说出被谁挡**
@@ -553,6 +666,8 @@ function withMutatedTool(mutatedSource, body) {
 const NEEDLE_NO_ACTION = `  if (state === 'fixed') return { action: 'no-action', why: 'resolution.state = fixed（已修）' }`
 /** 突变 B 的针脚：把 `blocked` 并进 `toDispatch`（"被挡的也照派"）。 */
 const NEEDLE_BLOCKED = `    blocked.push({`
+/** ★★★ 突变 C 的针脚（t91）：把**自动记录**并进待回填（= 本任务修之前的样子）。 */
+const NEEDLE_AUTO_SPLIT = `  const titleFallback = titleRejectionOrigin(record)`
 
 test('★★★ 定向突变 A：把 `no-action` 并进 `to-dispatch` ⇒ 臂 2 必须红', async (t) => {
   /**
@@ -688,4 +803,51 @@ test('★ 臂 7：CLI 三种模式都出读数', async () => {
   } finally {
     l.cleanup()
   }
+})
+
+test('★★★ 定向突变 C：把「自动记录」并回「待回填」⇒ 臂 9 必须红', async (t) => {
+  /**
+   * ── 这就是本任务修之前的样子 ─────────────────────────────────────────────────
+   *
+   * ★ 把那条回退去掉 ⇒ 老记录落回 `unknown` ⇒ 那个数字从 9 涨回 176。
+   *   ★ 而这正是本任务要消掉的那个误导。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_AUTO_SPLIT,
+    `  const titleFallback = undefined // MUTANT: auto records fall back into "needs backfill"
+  void titleRejectionOrigin`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=auto-merged-back')
+    /** ★ 这一条断言就是**臂 9 的红**：老记录（只有 title 前缀）不再被分出去。 */
+    assert.equal(
+      mutant.actionForFriction({ id: 'f-old', title: 'update_task rejected: x', resolution: {} }).action,
+      'unknown',
+      '★ 去掉回退之后自动记录落回"待回填" —— 臂 9/9c 就是靠这一条变红的',
+    )
+    /** ★ 而后果：那个数字涨回去。 */
+    assert.notEqual(
+      mutant.triage({ frictionsDir: '/nonexistent', judgementsDir: '/nonexistent' }).counts.autoRecorded,
+      undefined,
+    )
+  })
+
+  const restored = await freshTool('mutation=restored-auto')
+  assert.equal(
+    restored.actionForFriction({ id: 'f-old', title: 'update_task rejected: x', resolution: {} }).action,
+    'auto-recorded',
+    '★ 还原之后必须回到 auto-recorded',
+  )
+})
+
+test('★★ 二次对照（t91）：突变 C 的针脚在源码里真的存在', () => {
+  assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_AUTO_SPLIT), true, '★ 突变 C 的针脚必须逐字存在')
 })
