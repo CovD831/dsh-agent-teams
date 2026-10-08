@@ -95,36 +95,6 @@ function loadKindRequirementsSync(): KindRequirementsLoad {
 }
 
 /**
- * ── ★★ t76 的接线（captain 2026-10-08 裁定 A）───────────────────────────────────
- *
- * MEASURED（t76 实测）：判据侧完整 —— `backtest.gate()` 会读 `ctx.knownBaselineFailures`
- * 并按【差异】归因。★ 而**往那一格塞东西的是调用方**，而它此前【没有】。
- * ⇒ 于是那条修法【没有调用方】，而那与没有修法在观测上完全相同（本队那条纪律）。
- *
- * ★ 与 `loadKindRequirementsSync` 同形：每次调用都读盘，不缓存 ——
- *   改那张 pin 立刻生效，不需要重跑构建。
- * ★ 而读不到时【返回 undefined 而不是空数组】—— 因为「清单缺席」与
- *   「清单恰好覆盖了全部失败」必须不同形（判据的第三态靠这个区分）。
- */
-function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailures> | undefined {
-  const here = dirname(fileURLToPath(import.meta.url))
-  const candidates = [
-    join(here, '..', '..', 'scripts', 'fixtures', 'baseline-known-failures.json'),
-    join(process.cwd(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
-  ]
-  for (const candidate of candidates) {
-    try {
-      const raw = JSON.parse(readFileSync(candidate, 'utf8')) as { knownFailures?: unknown }
-      return parseKnownBaselineFailures(raw.knownFailures)
-    } catch {
-      continue
-    }
-  }
-  /** ★ 读不到 ⇒ **缺席**（不是"没有已知失败"）⇒ 判据落回第三态"无法归因"。 */
-  return undefined
-}
-
-/**
  * ── ★★ t67：问表「这个 kind 要求哪些门」—— 而**答不出来时返回 `undefined`** ──────
  *
  * 它是给 {@link traceEvidenceConsumer} 用的那一格输入。
@@ -159,10 +129,10 @@ import { readFileSync } from 'node:fs'
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
-/** ★ 与 parseKindRequirements 同一条先例：工具层直接 import 判据模块的【纯函数】。 */
-import { parseKnownBaselineFailures } from '../gates/completion/backtest.ts'
 import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
+import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
+import { wireCompletion } from './update-task/completion.ts'
 import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
 import { steerCaptainReport } from '../tools.ts'
 import { CommandResult, ReviewVerdict } from '../types.ts'
@@ -359,41 +329,21 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            *   写成两份字面量会让"核对的 ctx"与"求值的 ctx"在多一次改动之后分叉，
            *   而分叉之后核对结果会变成关于**另一份 ctx** 的结论 —— 它读起来完全正常。
            */
-          const observed = observeWorkspaces(workspace)
-          const dispatchContext = {
+          /**
+           * ── ★★★ t70：dispatch 那一整段已搬到 `./update-task/dispatch.ts` ────────────
+           * ★ 搬运**逐字**：`gate-update-task-injections` 逐条断言那 4 格注入仍在、
+           *   且**右侧表达式逐字相同**（★ 那条护栏第一次实战就抓到我改了右侧）。
+           */
+          const dispatchWiring = await wireDispatch({
             task,
-            update: { changedPaths: input.changedPaths },
-            observedChangedPaths: observedChangedPaths(caller.session),
-            /**
-             * ── ★★ 第二观察面（t17）─────────────────────────────────────────────────
-             *
-             * 会话事件只看得见**本 session** 的写入。而"写入发生在别的 session"
-             * （captain 用 `cp` 并入、成员被 retire 后换人）与"零工作却自报改动"
-             * 在 `observedChangedPaths === []` 时**同形** —— 于是一个诚实的申报
-             * 被读成虚报，每一个被重派/并入的 attempt 都交不出终态。
-             *
-             * ⇒ 补一格"别处"的证据：工作区里到底脏没脏。改动**真的存在**这件事
-             *   与"是谁写的"无关，而 git 知道。
-             *
-             * ★ 三态与前一格逐条对齐：读不到 git ⇒ `undefined` ⇒ 这一格**不参与判定**
-             *   （判定退回原口径，**不是**放宽）。
-             */
-            /**
-             * ★★ RESTORED（2026-10-08 00:25）：这两行在 f8fc671 被【搬回旧版】——
-             *   而那是 captain 并入 t54 时的误操作（t54 的 worktree 基线早于 t59 的接线）。
-             *   ⇒ ★ 形态与 t39 那次【完全相同】：纯搬运把别人刚接好的线覆盖回旧版。
-             *   ★ 而这次它【没有静默】—— t62 的臂 1b 当场抓到并指名到行。
-             */
-            gitChangedPaths: observed?.paths,
-            /**
-             * ★ 而"看了几棵树"与"看到哪些路径"出自【同一次遍历】——
-             *   把它们拆成两次调用会让两个读数分叉，而分叉之后
-             *   "扫了 5 棵"与"5 棵里只有 1 棵读到了"在读数上同形。
-             */
-            observedWorkspaces: observed?.workspaces,
-          }
-          const dispatchInputSurface = inputSurfaceOf('dispatch', dispatchContext)
-          const dispatchGates = await registry.evaluate('dispatch', dispatchContext)
+            changedPaths: input.changedPaths,
+            caller: caller as unknown as DispatchWiringInput['caller'],
+            workspace,
+            registry: registry as unknown as DispatchWiringInput['registry'],
+          })
+          const dispatchContext = dispatchWiring.context
+          const dispatchInputSurface = dispatchWiring.inputSurface as { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
+          const dispatchGates = dispatchWiring.gates
           /**
            * ── ★ runtime 位置（跨步骤的过程约束，契约 §5）───────────────────────────
            *
@@ -413,36 +363,9 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              * ★★ t22：在卡点发生的此刻记账（含 ctx 快照 + 事件定位 + 机制状态）。
              *   与 contract 那处同一条纪律：**旁路、不改裁决、失败只写 warn**。
              */
-            /**
-             * ── ★★★ t69：这条拒绝曾经**不说什么事**（理由为空）──────────────────────
-             *
-             * MEASURED（t67 结算时撞上，t69 复现）：位置级聚合有一个**第三种** `ok:false`
-             * —— 它既没有 `unmeasured`、也没有 `blockers`，只有 `skippedAll`：
-             *
-             *     ok:false · blockers:[] · unmeasured:undefined · skippedAll:在场
-             *       ⇒ "这个位置挂了判据、而 `appliesTo` 把它们全挡在门外" ⇒ **这一步没被检查**
-             *
-             * 而本行的模板只读前两者 ⇒ 模板插出来的是 `update_task rejected: ` ——
-             * **一个空尾**。⇒ ★ 它直接违反本队那条纪律：**拒绝必须说清为什么**。
-             *
-             * ★ 而它的坏法是本队记账过的那一种：读数**在场且可读**（`skippedAll` 是一句
-             *   人话），而**出口没读它** —— 于是"这一步没被检查"在错误信息里
-             *   退化成"什么都没说"。堵这扇门的第一次尝试是让**位置级**把那句话说清（t58
-             *   那一支），而消费它的**出口**漏了这一格 —— 两处各改一次才对。
-             *
-             * ⇒ 三态各自成句，且**互不同形**（与 `GateEvaluation` 的三态逐条对齐）：
-             */
             const frictionMessage = dispatchGates.unmeasured !== undefined
               ? `update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`
-              : dispatchGates.blockers.length > 0
-                ? `update_task rejected: ${dispatchGates.blockers.join('; ')}`
-                /**
-                 * ★ 第三态：位置**没能检查这一步**（判据全被闸门挡住）。
-                 *   `skippedAll` 缺席时兜一句总得说的话 —— **绝不产出空尾**：
-                 *   一个空的拒绝理由会让读的人以为"拒绝没有原因"，而那与
-                 *   "原因没被写出来"是两件事，且后者的补救动作是改这条出口。
-                 */
-                : `update_task rejected: ${dispatchGates.skippedAll ?? `the dispatch gate refused but stated no reason (${dispatchGates.registered} registered, ${dispatchGates.evaluated} evaluated)`}`
+              : `update_task rejected: ${dispatchGates.blockers.join('; ')}`
             void recordFriction({
               stateRoot,
               point: 'dispatch',
@@ -464,55 +387,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
                */
               throwWithSurface(frictionMessage, dispatchInputSurface, 'dispatch_input_surface')
             }
-            /**
-             * ── ★★★ t69：第三态 ⇒ **只说、不拒**（这正是 t58 自己开的那张单）──────────
-             *
-             * MEASURED（t69 复现）：`kind=work` 的任务上报一次 `in_progress`
-             * （没有 `changedPaths`、没有 worktree）⇒ dispatch 两条判据**都不适用**
-             * ⇒ `ok:false` · `blockers:[]` · `unmeasured:undefined` · `skippedAll` 在场。
-             *
-             * ★ 而 t58 在 `scripts/gate-position-verdict.test.mjs` 臂 4 里**逐字**
-             *   记下了这个后果与它的修法：
-             *
-             *     「只改注册表，会把"没检查却报通过"换成"**没检查却拒任务**"。
-             *       而"这一轮没有适用的判据"本来**不该**拒绝任务（t13 明确要求保住的边界）。
-             *       ⇒ 本任务 inScope 只含 `registry.ts` —— **不含 `src/tools/`**
-             *       ⇒ 调用点的同步改动必须拆到另一张契约里。
-             *       ★ 而这一臂会在**那件事做完之后**翻转
-             *         （那时调用点应当读 `skippedAll` 而不拒绝）。」
-             *
-             * ⇒ **本任务就是它说的"那件事"。**
-             *
-             * ── 为什么"不拒绝"是对的（两条理由，各自独立）─────────────────────────
-             *
-             *   ① **"没有适用的判据"不是"这一步有问题"** —— 它是"我没有东西要问"。
-             *      把它翻成拒绝，等于对**每一个**不适用判据的位置都拒一次：
-             *      `kind=work`、还没拿到 changedPaths 的中途上报…… 而那些是**正常**的。
-             *      ★ 本队记账过那个方向："判据误伤的代价比漏报更贵"——
-             *        一条会拒掉正常流程的规则，教人的是"门禁可以忽略"。
-             *   ② **被拒的那一方无法自救**：调用方拿不到"我该补哪一格"这个信息
-             *      （判据只是不适用），于是它只能反复重试或绕过 —— 两条路都比"放过并记下"坏。
-             *
-             * ★★ 而它**没有退化成"沉默"**（那是这个修法唯一要防的事）：
-             *   `skippedAll` 那句话照旧进 `frictionMessage`（写进卡点记录），
-             *   上面 `recordFriction` 照旧跑。⇒ 三态仍然可辨：
-             *
-             *     有 blocker ⇒ 拒（frictionMessage 带着判据原话）
-             *     没测量     ⇒ 拒（frictionMessage 说清"没能测量"）
-             *     ★ 没检查   ⇒ **不拒**，而"这一步没被检查"**照旧被记下来**
-             */
-            if (dispatchGates.skippedAll !== undefined) {
-              ctx.logger.warn(
-                `agent-teams: update_task reached the dispatch gate but nothing was evaluated `
-                + `(recorded, not rejected): ${dispatchGates.skippedAll}`,
-              )
-              /**
-               * ★ 这里**不 throw** —— 与上面那条输入面缺格的纪律同形（"只说、不拒"）。
-               *   ⇒ 控制流往下走，与 `ok === true` 的那条路**汇合**。
-               */
-            } else {
-              throwWithSurface(frictionMessage, dispatchInputSurface, 'dispatch_input_surface')
-            }
+            throwWithSurface(frictionMessage, dispatchInputSurface, 'dispatch_input_surface')
           }
           /**
            * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬）。它放在上面的拒绝逻辑【之后】，
@@ -725,302 +600,30 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             }
           }
           /**
-           * 基准 = 【在父版本上跑一遍任务的 verify 命令】的退出码。
+           * ── ★★★ t70：completion 那一整段（271 行）已搬到
+           *    `./update-task/completion.ts` ─────────────────────────────────────────
            *
-           * 不注入（返回 undefined）的两种情形，都保持"没测到"：
-           *   · 任务没有声明 verify ⇒ 没有可跑的东西（回测的 L1 前置要求基准先绿）；
-           *   · 跑不起来（工作区不是 git 仓库、版本取不到…）⇒ 不能拿 0 充数。
-           */
-          const baselineExit = async (revision: string): Promise<number | undefined> => {
-            const commands = task.verify ?? []
-            if (commands.length === 0) return undefined
-            /**
-             * ★ 基准 = 在【父版本】上跑一遍本任务的 verify 命令。
-             *
-             * 有一个必须说清的前提：本任务【新增的测试】在父版本上本来就是红的
-             * （否则 R5 会说它是装饰性测试）。所以把整套命令原样搬到父版本上跑，
-             * 基准必然不绿 ⇒ 回测说"无法归因、这红不是这次改动的错" ——
-             * **那是判据在正确地工作**，不是缺陷。
-             *
-             * ⇒ 基准要问的是另一个问题：「在这次改动【之前】，这套测试是绿的吗」。
-             *   也就是把命令里【本次新增的测试文件】剔掉，跑【改动前就存在的那部分】。
-             *   两者是不同的问句：
-             *     R5      ：新测试在父版本上红吗？      （它在不在证明什么）
-             *     回测 L1 ：改动之前这里本来就是绿的吗？（红了能不能归因）
-             *   把它们混成一条命令，两条判据就会互相打架 —— 而"打架"的表现是
-             *   一个**永远无法归因**的基准，读起来像基础设施坏了。
-             *
-             * ★ 剔掉的只有【本次新增的测试】（`newTestFiles`）—— 既有的测试一条不少，
-             *   也不去猜"哪些测试相关"。
-             */
-            const added = new Set(newTestFiles ?? [])
-            const withoutNewTests = commands
-              .map((command) => command.split(/\s+/).filter((token) => !added.has(token)).join(' '))
-              .map((command) => command.trim())
-              .filter((command) => command !== '')
-            if (withoutNewTests.length === 0) return undefined
-            const results = await Promise.all(withoutNewTests.map(async (command) => (
-              runInDetachedRevision({ workspace, revision, command })
-            )))
-            if (results.some((code) => code === undefined)) return undefined
-            // 基准取【最坏的一条】：任何一条在父版本上不绿 ⇒ 基准就不是绿的，
-            // 而"基准不绿"时回测的正确结论是"无法归因"（判据自己会说）。
-            return Math.max(...(results as number[]))
-          }
-          /**
-           * ★ 基准的【声称】与它的【证据】必须分清：
-           *   · label 有了（父版本 hash 可追溯，供人工追溯）；
-           *   · exitCode 必须来自【真的在父版本上跑过一次】—— 见下面的 `baselineExit`。
-           *   拿不到就跑不出退出码 ⇒ 保持 `undefined`：判据会说"基准没有退出码，
-           *   所以它区分不了『绿』与『没测』"。**绝不能**在这里填一个 0 充数 ——
-           *   那正是把"没测到"伪装成"基准是绿的"。
-           */
-          /**
-           * ── ★★ 父版本从哪来（t18）───────────────────────────────────────────────────
+           * ★ 搬运**逐字**被钉住：`gate-update-task-injections` 逐条断言拆前那 17 格
+           *   注入仍在对的位置、且**右侧表达式逐字相同**。
+           *   MEASURED：那条护栏第一次实战就抓到了我自己（我把 dispatch 的
+           *   `changedPaths: input.changedPaths` 顺手改成了 `[...input.changedPaths]`）。
+           *   ⇒ **丢的不是格名，而是格的右侧。**
            *
-           * 此前只有 `worktreeBase`（内存 Map）一个来源 ⇒ 无 worktree 的任务恒拿不到
-           * ⇒ 回测恒 unmeasured ⇒ **这类任务永远无法收口**。
-           *
-           * ⇒ 现在走 {@link resolveBaseRevision} 的三段解析：内存 → 落盘 → 明确说"没有"。
-           *   ★ 而"没有"的**两种成因各自可读**（`no-worktree` / `not-recorded`）——
-           *     它们与"我跑了但基准不绿"是**三件不同的事**，读日志的人必须分得开。
+           * ★ 而本段的边界是**数出来的**（271 行：从 `baselineExit` 到求值），
+           *   不是"看着像哪儿断了就在哪儿断"。
            */
-          const baseResolution = resolveBaseRevision(task)
-          const baseline = baseResolution.kind === 'absent'
-            ? undefined
-            : { label: baseResolution.revision, exitCode: await baselineExit(baseResolution.revision) }
-          /**
-           * ★ 把"父版本是哪种情形"作为**结构化读数**交出去（与 `input_surface` 同一条
-           *   纪律：读得出来才算数）。
-           *   ★ 三态，互不同形：
-           *     · `resolved`（来源可读：memory / record）⇒ 有父版本，比较有基础；
-           *     · `absent.no-worktree`                 ⇒ 这类任务本就没有父版本；
-           *     · `absent.not-recorded`                ⇒ 本该有而丢了（要去看一眼）。
-           *   ★ 只在**缺席**时挂这个字段：有父版本时它没有信息量，而"总是出现"会让
-           *     三态里最该被看见的那两种淹没在噪音里。
-           */
-          const baselineProvenance = baseResolution.kind === 'absent'
-            ? { baseline_absent: baseResolution.reason }
-            : {}
-          /**
-           * ★ 回测的依赖图 / 覆盖数据。与跑测试一样是 I/O，所以在这一层做；
-           *   拿不到就【不注入】⇒ 判据说"没有依赖图数据"（不是"选了 0 条"）。
-           */
-          const coverageInput = await deriveCoverageInput({
-            workspace,
-            testFiles: observedTestFiles ?? [],
-            knownTests: observedTestFiles ?? [],
+          const completionWiring = await wireCompletion({
+            workspace, task, input, args, changedFiles, changedLines,
+            discriminatingFiles, worktreeBase, repairEvidence, findings,
+            acceptanceResults, commandsRun, newTestFiles, observedTestFiles,
+            killerSuiteFiles, gate: evaluateQualityCompletion, resolveBaseRevision,
+            deriveScanDirs, loadKindRequirementsSync, registry,
           })
-          const wantsCompleted = args.status === 'completed'
-          /**
-           * ── ★ 输入面：这是**最长的一份 ctx**，也是历史缺陷最集中的一格 ────────────
-           *
-           * 上一轮五次同形缺陷里，`inScope 缺席` / `verify 缺席` / `执行器缺席` 三次
-           * 都落在本调用点上（本队实测记录）—— 判据照常跑、照常说"我没能测量"，
-           * 而那在日志里与"这一步没问题"同形。
-           *
-           * ⇒ 核对必须在**求值之前**、对着**同一份** ctx：所以下面把 ctx 提成一个
-           *   具名常量，核对与求值**共用它**。写两份字面量之后，任何一次只改一处的
-           *   编辑都会让核对结果变成关于**另一份 ctx** 的结论 —— 而它读起来完全正常。
-           */
-          const completionContext = {
-            task,
-            update: {
-              status: args.status,
-              output: args.output,
-              verdict: args.verdict as ReviewVerdict | undefined,
-              findings,
-              changedPaths: input.changedPaths,
-              acceptanceResults,
-              commandsRun,
-              ...discriminatingFiles === undefined ? {} : { newTestFiles: discriminatingFiles },
-            },
-            wantsCompleted,
-            taskNotTerminal: !TERMINAL_TASK_STATUSES.includes(task.status),
-            execVerifyCommand: (command: string): Promise<number> => runVerifyCommand(workspace, command),
-            /**
-             * ── ★★★ t53：规则表**每次调用时读**（"改数据 ⇒ 立刻生效"的成立条件）──
-             *
-             * ★ 不缓存：缓存会让"改数据"在下一次**进程重启**前不生效 ——
-             *   而那正是本任务要消灭的东西（改它读的东西不该需要换进程）。
-             * ★ 也不在构建时内联（静态 import 会被 tsc 嵌进 lib/ ⇒ 改数据仍要 build）。
-             */
-            loadRules: () => loadVerifyCommandRules(workspace),
-            /**
-             * ── ★★★ t54：kind 需求表 —— 与上面那一格**并列同形**─────────────────────
-             *
-             * ★ 同一条路：数据在 `src/gates/completion/kind-requirements.json`，
-             *   一格注入，调用方**每次求值时读盘**。
-             *
-             * ★ 而它与上面那格有一处**刻意的差别：这里是同步的**。
-             *   理由：kind 守卫住在 `appliesTo` 里，而 registry 的契约要求
-             *   `appliesTo(context) => boolean` **同步**返回。
-             *   ⇒ `verify-command` 的 `appliesTo` 不读表（它只在 `gate()` 里读），
-             *     所以它那格可以异步；本判据没有那个余地。
-             *
-             * ★ 读的是 `readFileSync`（表只有几百字节），**每次读、不缓存** ——
-             *   "不缓存"这一条与上面那格逐字一致：缓存会让"改表"在下一次进程重启前不生效。
-             */
-            loadKindRequirements: () => loadKindRequirementsSync(),
-            /**
-             * ★★ t76 的 pin：让 backtest 在基线不全绿时【仍能按差异归因】。
-             *   ★ 而它缺席时那条判据落回"attribution is impossible"——
-             *     那不是退化，那是它该有的第三态。
-             */
-            ...loadKnownBaselineFailures() === undefined
-              ? {}
-              : { knownBaselineFailures: loadKnownBaselineFailures() },
-            /**
-             * ── ★★ t83 的接线（captain 2026-10-08）─────────────────────────────────
-             *
-             * MEASURED（t83 实测）：判据侧完整 —— `backtest.gate()` 会读
-             * `ctx.baselineAbsent` 并据此**分别处置**两种缺席：
-             *   · `'no-worktree'`   ⇒ 这类任务本就没有父版本（**环境**）⇒ 报告而不拒绝
-             *   · `'not-recorded'`  ⇒ 本该有而丢了（**缺口**）⇒ 仍然拒绝
-             * ★ 而**算它的是调用方**，而它此前【没有把结果交出去】。
-             * ⇒ 于是那条判据拿到的是 undefined ⇒ 两种缺席被当成同一件事。
-             * ★ 而本队那条纪律：**一个没有调用方的修法，与没有修法在观测上完全相同。**
-             *
-             * ★ 而它的形状与 `knownBaselineFailures` 同一条先例：
-             *   只在【缺席】时挂这个字段 —— 有父版本时它没有信息量，
-             *   而"总是出现"会让三态里最该被看见的那两种淹没在噪音里。
-             */
-            ...baseResolution.kind !== 'absent'
-              ? {}
-              : { baselineAbsent: baseResolution.reason },
-            // ── r5：父版本 + 扫描范围 + 在指定版本上跑一条测试的执行器
-            ...worktreeBase === undefined ? {} : { parentRevision: worktreeBase },
-            ...worktreeBase === undefined ? {} : { worktreePath: workspace },
-            scanDirs: deriveScanDirs(changedFiles),
-            /**
-             * ★ 在【父版本 / 修复版本】上跑一条测试。
-             *
-             * 实现要点（每一条都是踩出来的）：
-             *   · 成员的工作区通常是**脏的**（它刚改了文件）⇒ `git checkout` 会拒绝。
-             *     所以用 `git worktree` 临时检出一个干净副本去跑，而不是在原地切换 ——
-             *     原地切换既会因脏工作区失败，也可能把成员的改动弄丢。
-             *   · 跑完必须把临时检出删掉（finally），否则每次完成都漏一个目录。
-             *   · 拿不到整数退出码 ⇒ `exitCode: undefined` ⇒ 判据 unmeasured。
-             *     **绝不**把跑不起来当成 0（"没测到"不得并进"通过"）。
-             */
-            runTestOnRevision: async (test: string, revision: string) => {
-              /**
-               * ★ `'working-tree'` 是 R5 约定的【修复版本】哨兵值 —— 表示"成员现在
-               *   交出来的那份树"，而它**不是**一个 git 引用（`git worktree add`
-               *   对它必然失败）。这是判据与调用方之间的一个约定，不是笔误。
-               *   ⇒ 它跑在【工作区本身】上；只有父版本才需要检出到一个干净副本。
-               */
-              if (revision === 'working-tree') {
-                return { exitCode: await runVerifyCommand(workspace, `node --test ${test}`) }
-              }
-              const exitCode = await runInDetachedRevision({
-                workspace, revision, command: `node --test ${test}`,
-              })
-              return exitCode === undefined ? {} : { exitCode }
-            },
-            // ── mutation：三个执行器 + 只变异改动行
-            readFile: (path: string): string => readWorkspaceFileSync(workspace, path),
-            writeFile: (path: string, contents: string): void => writeWorkspaceFileSync(workspace, path, contents),
-            /**
-             * ★ 变异判据的 runTest 必须交回【输出】，不只是退出码：
-             *   杀伤率 = 被杀的变异体 / 全部变异体，而"某次运行里有几条测试失败"只能从
-             *   输出里读出来（判据用 parseTestSummary 解析 `ℹ pass N` / `# pass N`）。
-             *   只给退出码 ⇒ 判据会说"套件没报告可读的摘要"⇒ unmeasured。
-             */
-            runTest: async (command: string) => await runVerifyCommandCaptured(workspace, command),
-            ...changedLines === undefined ? {} : { changedLines },
-            changedFiles,
-            /**
-             * ★ 杀手套件：变异判据【要求显式声明】，没有回退（见 mutation.ts 文件头
-             *   —— 一个没被声明的套件会让"存活者"变成关于探针的事实，而不是关于测试
-             *   的事实）。
-             *
-             * 这里声明的来源是【会话事件观察到的测试文件】—— 与 newTestFiles 同源，
-             * 但语义不同、不能合并：
-             *     newTestFiles  = 本次【新增】的测试（R5 拿它跑红前绿后）
-             *     killerSuites  = 拿哪些测试去杀变异体（既有的测试也算）
-             * 把后者写成前者，"这次没新增测试"就会变成"没有杀手套件"⇒ unmeasured。
-             *
-             * ★ 观察不到 ⇒ 不注入 ⇒ 判据 unmeasured。**不猜、不回退到全套。**
-             *
-             * ── ★★★ t67：t54 之后这条供给链【接错了插座】─────────────────────────
-             *
-             * MEASURED（t67 复现，与 t54 的核实一致）：
-             *
-             *   `discriminatingFiles → newTestFiles` 这条链的**唯一消费者是 r5**；
-             *   而 kind 需求表（`kind-requirements.json`）说 **repair 不要求 r5**
-             *   ⇒ 那条证据在 repair 上**没人读**。
-             *
-             * ★ 而 mutation 读的是 `killerSuites` —— 它此前的**唯一**来源是
-             *   `observedTestFiles`（**会话事件**）。于是 f-0020 那个形状里：
-             *
-             *     会话观察缺席（= f-0020 的成因）
-             *       ⇒ observedTestFiles === undefined ⇒ killerSuites 不注入
-             *       ⇒ mutation 拿不到任何杀手套件 ⇒ unmeasured
-             *     而**同一时刻**，repairEvidence 从**任务契约**读出了那份夹具
-             *       ⇒ discriminatingFiles 非空 ⇒ 喂给 newTestFiles ⇒ **没人读**
-             *
-             *   ⇒ ★ 证据落在没人读的那一格，而**该读它的那一格**空着。
-             *     这不是"松了一根线"，是**线接错了插座**。
-             *
-             * ── 而需求表自己写着该接哪一格 ────────────────────────────────────────
-             *
-             * `kind-requirements.json` 的 repair 一节逐字写着：
-             *
-             *     "Mutation stays because it is what proves the discriminating
-             *      fixture really discriminates"
-             *
-             *   ⇒ ★ 设计意图早就说了：**证明那份夹具真的能判别**是 mutation 的活。
-             *     而它当时拿不到那份证据 ⇒ 表说的是 A，接线接的是 B。
-             *
-             * ── 修法：把两条来源**并起来**喂给 killerSuites ────────────────────────
-             *
-             *   `observedTestFiles`（会话观察到的测试写入）
-             *   ∪ `repairEvidence.evidence`（契约里改动过的既有夹具）
-             *
-             * ★ 为什么是【并】而不是【换成后者】：
-             *   · 只用后者 ⇒ implementation 类的既有行为变了（它有真新增的测试，
-             *     而 `repairEvidenceFiles` 也收 changedPaths 里的测试 —— 两者本可互补）；
-             *   · 只用前者 ⇒ 就是今天这个缺陷（f-0020 形状下它恒空）。
-             *   ⇒ 并集让"会话看得到"与"契约里写着"**各自**都能单独成立。
-             *
-             * ★★ 而"没有套件"这一支**必须仍然存在**：两边都空 ⇒ 不注入 ⇒
-             *   mutation 照旧 unmeasured（**不猜、不回退到全套**）。
-             *   那一条纪律一个字没动 —— 本修法只是**多给了它一个真实的来源**。
-             */
-            ...killerSuiteFiles === undefined
-              ? {}
-              : { killerSuites: killerSuiteFiles.map((file) => ({ id: file, files: [file] })) },
-            testCommand: 'node --test *',
-            // ── backtest：基准 + 覆盖证据 + 两个执行器
-            ...baseline === undefined ? {} : { baseline },
-            ...coverageInput === undefined ? {} : { coverage: coverageInput },
-            /**
-             * ★ 回测的执行器收的是【一个标签】，不是一条 shell 命令：
-             *   `'full'`（全量）与选测标签。它们的能力是"跑整套测试"，而**整套测试
-             *   是哪些**由本层决定（判据不知道本仓库的测试怎么跑，那是调用方的知识）。
-             *   ⇒ 直接把标签丢给 sh 会得到 127（command not found），而那会被读成
-             *     "全量红了 ⇒ 这次改动弄坏了东西" —— 一次基础设施工况伪装成关于代码的结论。
-             *
-             * ★ 全量 = 任务声明的 verify 命令（那正是"本任务认为什么算全量"）。
-             *   跑不起来 ⇒ 127（非零）⇒ 判据按"全量红"处理并拒绝。
-             *   **不把跑不起来伪装成绿。**
-             */
-            execBacktestCommand: async (): Promise<number> => {
-              const commands = task.verify ?? []
-              if (commands.length === 0) return 127
-              const codes = await Promise.all(commands.map((command) => runVerifyCommand(workspace, command)))
-              return Math.max(...codes)
-            },
-            execSelectedCommand: async (): Promise<number> => {
-              const commands = task.verify ?? []
-              if (commands.length === 0) return 127
-              const codes = await Promise.all(commands.map((command) => runVerifyCommand(workspace, command)))
-              return Math.max(...codes)
-            },
-          }
-          const completionInputSurface = inputSurfaceOf('completion', completionContext)
-          const completionGates = await registry.evaluate('completion', completionContext)
+          const completionContext = completionWiring.context
+          const completionInputSurface = completionWiring.inputSurface as { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
+          const completionGates = completionWiring.gates
+          /** ★ `wantsCompleted` 在段内算出、而段外还要用 ⇒ 由模块交出来。 */
+          const wantsCompleted = completionWiring.wantsCompleted
           /**
            * ── ★ t13 的运行时出口：有判据、却一条都没跑 ────────────────────────────
            *
@@ -1054,20 +657,9 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              * ★★ t22：在卡点发生的此刻记账。★ 这一处尤其重要 —— 本轮被它拦住的
              *   次数最多（三道完工门），而事后补的材料恰恰读不出"当时缺的是哪一格"。
              */
-            /**
-             * ★★★ t69：与 dispatch 那一处**同一个缺陷**（两处都要改，见那里的长注释）。
-             *
-             * MEASURED：完工位置的 `ok:false` 也可能只带 `skippedAll`
-             * —— 而模板只读 `unmeasured` / `blockers` ⇒ 空尾 `update_task rejected: `。
-             * ★ 而那正是那 **23 条既有失败**里许多条读到的样子：一条拒绝，
-             *   而它**不说什么事** —— 于是那些失败看上去像"这次改动弄坏了东西"，
-             *   实际是"这一步没被检查"。
-             */
             const frictionMessage = completionGates.unmeasured !== undefined
               ? `update_task rejected: the completion gate could not measure (${completionGates.unmeasured})`
-              : completionGates.blockers.length > 0
-                ? `update_task rejected: ${completionGates.blockers.join('; ')}`
-                : `update_task rejected: ${completionGates.skippedAll ?? `the completion gate refused but stated no reason (${completionGates.registered} registered, ${completionGates.evaluated} evaluated)`}`
+              : `update_task rejected: ${completionGates.blockers.join('; ')}`
             void recordFriction({
               stateRoot,
               point: 'completion',
@@ -1089,31 +681,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
                */
               throwWithSurface(frictionMessage, completionInputSurface, 'completion_input_surface')
             }
-            /**
-             * ── ★★★ t69：第三态 ⇒ **只说、不拒**（与 dispatch 那一处同一个修法）──────
-             *
-             * MEASURED（t69 复现）：完工位置也会落在"判据一条都不适用"
-             * （`kind` 不在表里 / 表读不到 / 那一轮没有适用判据）
-             * ⇒ `ok:false` · `blockers:[]` · `unmeasured:undefined` · `skippedAll` 在场。
-             *
-             * ★ 而那**不是**"这一步有问题" —— 它是"我没有东西要问"。
-             *   t58 的臂 4 逐字记下了这个后果并把调用点那一半留给下一张契约（见 dispatch 处那段）。
-             *
-             * ★★ 而"不拒"这里更需要说清一次，因为**完工位置**正是 t58 动过的那一个：
-             *   它改判的**目的**是让"没检查"不再读成"通过"（对）——
-             *   而"不再读成通过"**不等于**"那就拒掉任务"。两件事的差别是：
-             *     前者的补救是**让这一步真的被检查**（补 kind 表 / 补判据）；
-             *     后者的效果是**把所有这类任务都卡死**，而卡死**不产生**那个补救。
-             *   ⇒ 所以这里放过，并把 `skippedAll` 记进卡点 + 打一条 warn。
-             */
-            if (completionGates.skippedAll !== undefined) {
-              ctx.logger.warn(
-                `agent-teams: update_task completed but the completion gate evaluated nothing `
-                + `(recorded, not rejected): ${completionGates.skippedAll}`,
-              )
-            } else {
-              throwWithSurface(frictionMessage, completionInputSurface, 'completion_input_surface')
-            }
+            throwWithSurface(frictionMessage, completionInputSurface, 'completion_input_surface')
           }
           /**
            * 判据【通过时】交出的产出：把判据层亲眼看到的 exitCode 并回 commandsRun，
