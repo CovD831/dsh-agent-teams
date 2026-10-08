@@ -361,7 +361,28 @@ test('★★★ 臂 8（真实读数臂）：对本仓的每一个 worktree 跑�
    *     本队为这件事付过一次学费（t39 的 pluginRoot 层数：×2 对、×3 错、×4 对）。
    */
   const here = dirname(fileURLToPath(import.meta.url))
-  const root = join(here, '..', '..', '..', '..')
+  /**
+   * ★★ MEASURED（t85 的判据抓出来的，captain 2026-10-08 修）：
+   *
+   * 这里此前是 `join(here, '..', '..', '..', '..')` —— 一个【决定的】量。
+   * ★ 而它只在恰好一种深度下对：main tree 里 here=<root>/scripts ⇒ ..×4 指向 /Users，
+   *   worktree 里 here=<root>/.agent-teams/worktrees/<id>/scripts ⇒ ..×4 恰好对。
+   * ★ 而它旁边就写着那次学费（"层数必须按它该回到哪里算，不是按看起来像几层"）——
+   *   而它仍然是一个写死的层数。
+   *
+   * ⇒ 改成【发现的】量：向上找到含 package.json 的那一层。
+   *   它不假设布局，它【问】布局 ⇒ 浅树深树都对。
+   */
+  const root = (() => {
+    let dir = here
+    for (let i = 0; i < 6; i += 1) {
+      try {
+        if (existsSync(join(dir, 'package.json'))) return dir
+      } catch { /* 继续上溯 */ }
+      dir = join(dir, '..')
+    }
+    throw new Error('cannot locate the repo root from ' + here)
+  })()
   const wtRoot = join(root, '.agent-teams', 'worktrees')
   if (!existsSync(wtRoot)) {
     // eslint-disable-next-line no-console
