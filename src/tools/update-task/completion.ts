@@ -37,6 +37,44 @@ import { inputSurfaceOf, deriveCoverageInput, deriveScanDirs } from '../shared/e
 import { resolveBaseRevision, readWorkspaceFileSync, runVerifyCommand, runVerifyCommandCaptured, writeWorkspaceFileSync, loadVerifyCommandRules, runInDetachedRevision } from '../shared/entities.ts'
 import { TERMINAL_TASK_STATUSES, type ReviewVerdict } from '../../types.ts'
 import type { GateEvaluation } from '../../gates/registry.ts'
+import { parseKnownBaselineFailures } from '../../gates/completion/backtest.ts'
+import { dirname, join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+/**
+ * ── ★★★ t92：这一格是 t70 的拆分【丢掉】的那条接线（t76 的修复）───────────────────
+ *
+ * MEASURED（逐符号核对）：`parseKnownBaselineFailures` 在拆分前于
+ * `src/tools/update-task.ts` 出现 3 次，拆分后在整个调用方面 **0 次**
+ * （而判据侧仍在 `backtest.ts` 里）。
+ * ⇒ 于是「判据在，而调用方不再喂它」—— 那与 t41/t83 是同一族。
+ *
+ * ★ 而它丢得**不留痕迹**：`gate-backtest-baseline` 的臂 12 一直在指名测它，
+ *   而那条红被读成了"夹具读旧位置" ⇒ 真回退与"读错位置"在失败清单里同形。
+ *
+ * ★ 与 `loadKindRequirementsSync` 同形：每次调用都读盘，不缓存 ——
+ *   改那张 pin 立刻生效，不需要重跑构建。
+ * ★ 而读不到时【返回 undefined 而不是空数组】—— 因为「清单缺席」与
+ *   「清单恰好覆盖了全部失败」必须不同形（判据的第三态靠这个区分）。
+ */
+function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailures> | undefined {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    join(here, '..', '..', 'scripts', 'fixtures', 'baseline-known-failures.json'),
+    join(process.cwd(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const raw = JSON.parse(readFileSync(candidate, 'utf8')) as { knownFailures?: unknown }
+      return parseKnownBaselineFailures(raw.knownFailures)
+    } catch {
+      continue
+    }
+  }
+  /** ★ 读不到 ⇒ **缺席**（不是"没有已知失败"）⇒ 判据落回第三态"无法归因"。 */
+  return undefined
+}
 
 /** completion 位置需要的、来自调用方的输入（★ 名字与拆前同形，见文件头）。 */
 export interface CompletionWiringInput {
@@ -346,6 +384,23 @@ const completionContext = {
   testCommand: 'node --test *',
   // ── backtest：基准 + 覆盖证据 + 两个执行器
   ...baseline === undefined ? {} : { baseline },
+  /**
+   * ── ★★★ t92：这两格是 t70 的拆分丢掉的（t76 与 t83 的修复）─────────────────────
+   *
+   * ★ 判据侧完整（`backtest.gate()` 会读它们），而**往这两格塞东西的是调用方** ——
+   *   而那正是被搬没了的地方。⇒ 「判据在，而调用方不再喂它」。
+   *
+   * ★ 而两者的形状与既有先例逐条同形：
+   *   · `knownBaselineFailures` ⇒ **只在有值时挂**（`undefined` 与 `[]` 不同形：
+   *      前者是"清单缺席"，后者是"清单说没有已知失败"）
+   *   · `baselineAbsent`        ⇒ **只在缺席时挂** —— 有父版本时它没有信息量，
+   *      而"总是出现"会让三态里最该被看见的那两种淹没在噪音里
+   */
+  ...(() => {
+    const known = loadKnownBaselineFailures()
+    return known === undefined ? {} : { knownBaselineFailures: known }
+  })(),
+  ...baseResolution.kind === 'absent' ? { baselineAbsent: baseResolution.reason } : {},
   ...coverageInput === undefined ? {} : { coverage: coverageInput },
   /**
    * ★ 回测的执行器收的是【一个标签】，不是一条 shell 命令：
