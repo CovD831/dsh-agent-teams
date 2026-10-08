@@ -58,6 +58,36 @@ import { fileURLToPath } from 'node:url'
  * ★ 而读不到时【返回 undefined 而不是空数组】—— 因为「清单缺席」与
  *   「清单恰好覆盖了全部失败」必须不同形（判据的第三态靠这个区分）。
  */
+/**
+ * ── ★★★ t23：那只 `catch { continue }` 把"接错了"读成了"没找到" ────────────────
+ *
+ * MEASURED（t23 复现，与本任务的正面/反面/反半边三条臂逐字对应）：
+ *
+ *     ① 装载器传数组、判据又解一层  ⇒ 恒抛 ⇒ 被这里吞掉 ⇒ `undefined`
+ *     ② ★ **"清单在场且合法"也落 `undefined`** —— 与"文件不存在"【同形】
+ *
+ *   ⇒ ★ 后果：判据永远看到「清单缺席」⇒ 永远走第三态「无法归因」⇒
+ *     **清单做多少条都没用**（18 条与 0 条在判据眼里同形）。
+ *
+ * ── 修法：三态必须在这里就分开，而不是靠一个 `catch` 合并 ──────────────────────
+ *
+ *   `readFileSync` 的失败与"文件读到了但内容坏了"是**两件不同的事**：
+ *
+ *     · 文件**不存在**（ENOENT）        ⇒ 这一棵候选树没有清单 ⇒ **试下一个**（正常）
+ *     · 文件在、而**读/解析/判据拒收**失败 ⇒ ★ **不许静默** —— 那是"接错了"，
+ *                                            与"它不在这儿"的**补救动作相反**
+ *
+ *   ★ 而"试下一个候选"这条语义必须保住：这是一个**候选列表**（两处路径），
+ *     第一个不存在是正常的，不能因此报错。⇒ 只有【ENOENT】才 `continue`。
+ *
+ *   ★ 为什么判 `error.code === 'ENOENT'` 而不是"捕获一切"：
+ *     `ENOENT` 是**这一件事的机械名字**，而它是内核给的，不是我猜的。
+ */
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null
+    && (error as { code?: unknown }).code === 'ENOENT'
+}
+
 function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailures> | undefined {
   const here = dirname(fileURLToPath(import.meta.url))
   const candidates = [
@@ -65,14 +95,30 @@ function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailur
     join(process.cwd(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
   ]
   for (const candidate of candidates) {
+    let text: string
     try {
-      const raw = JSON.parse(readFileSync(candidate, 'utf8')) as { knownFailures?: unknown }
-      return parseKnownBaselineFailures(raw.knownFailures)
-    } catch {
-      continue
+      text = readFileSync(candidate, 'utf8')
+    } catch (error) {
+      /** ★ 只有"这个候选不存在"才轮到下一个 —— 别的失败一律不许静默。 */
+      if (isMissingFileError(error)) continue
+      throw new Error(`known baseline failures: could not read ${candidate}: ${String(error)}`)
     }
+    /**
+     * ★ t23：**解一层，且只解一层**。
+     *   `parseKnownBaselineFailures` 接受的是**整份清单对象**（`{ knownFailures: [...] }`），
+     *   所以这里传 `raw` 而不是 `raw.knownFailures` —— 后者会让判据再解一层 ⇒ 恒抛。
+     *   ⇒ 两端口径**唯一**：解层住在判据侧（那里也校验形状），调用方只负责把文件读进来。
+     */
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch (error) {
+      throw new Error(`known baseline failures: ${candidate} is not valid JSON: ${String(error)}`)
+    }
+    /** ★ 判据拒收（形状坏了）⇒ 让它抛出去，**不吞** —— 那正是 `backtest.ts:192` 的意图。 */
+    return parseKnownBaselineFailures(raw)
   }
-  /** ★ 读不到 ⇒ **缺席**（不是"没有已知失败"）⇒ 判据落回第三态"无法归因"。 */
+  /** ★ 两个候选都**不存在** ⇒ 这才是"清单缺席"（不是"没有已知失败"）⇒ 判据落回第三态。 */
   return undefined
 }
 

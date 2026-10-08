@@ -139,6 +139,7 @@ export type BaseRevisionResolution = {
 export declare function resolveBaseRevision(task: {
     id: string;
     attempt?: number;
+    kind?: string;
 }): BaseRevisionResolution;
 export declare function runInDetachedRevision(options: {
     workspace: string;
