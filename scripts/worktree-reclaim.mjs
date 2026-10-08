@@ -82,6 +82,26 @@ import { existsSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSyn
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ── ★★★ t25：判定这件事**只有一份真值**，而它是 `src/worktree.ts` 那一条 ─────────
+ *
+ * MEASURED（本任务的由来）：`judgeWorktreeReclaimable` 与 `describeReclaimability`
+ * 在 `src/worktree.ts` 里写好了、导出了，而**全仓零调用方**（`gate-producer-consumer`
+ * 的普查点名，captain 独立复跑）—— 本脚本自己**又实现了一遍**同样的问题。
+ *
+ * ⇒ ★★ 而它的后果真的发生了：`--apply` 删掉了 32 个 worktree，
+ *   而那份**权威实现从未被执行过一次**（它没被接线，也没被比对过）。
+ *   ★ 一条没接线、也没被比对过的判据，与一条不存在的判据，
+ *     在"删掉东西"这件事上**没有区别**。
+ *
+ * ── 为什么走 `../lib/`（与 `scripts/*.test.mjs` 一致）──────────────────────────
+ *   `lib/` 才是运行时/脚本真正加载的那一份编译产物（`docs/SOURCE-READING-CONVENTION.md`）。
+ *   ★ 而 `import` 的是**函数本身**（同一个引用），不是"再写一遍同样的判断" ——
+ *     本文件里**不留**那份实现的副本（契约逐字：不许把它改成脚本的私有副本，
+ *     那只是把重复换个位置，而"谁是真值"仍然只有一份）。
+ */
+import { judgeWorktreeReclaimable, describeReclaimability } from '../lib/worktree.js'
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
@@ -136,89 +156,57 @@ function git(cwd, args) {
 /**
  * 一个 worktree 的回收判定。
  *
+ * ── ★★★ t25：这个函数**不再自己判断** ─────────────────────────────────────────────
+ *
+ * 它现在只做三件**本脚本特有**的事，而"能不能回收"那件事**交给权威实现**：
+ *
+ *   ① 调 `judgeWorktreeReclaimable`（`src/worktree.ts:360`）—— **唯一的真值**；
+ *   ② 把它的三态**原样透传**（`reclaimable` / `keep` / `undecidable` 各自的字段一个不改）；
+ *   ③ 补上**本脚本才知道**的那几格：`worktree`（路径）、`layers`（依赖那一层）、
+ *      `bytes`（由上层填）、以及 `describeReclaimability` 给的人话。
+ *
+ * ── ★ 为什么 `layers` 不进权威实现 ──────────────────────────────────────────────
+ *   它是**删除策略**（"依赖那一层要不要也删"），不是"能不能删" ——
+ *   而"能不能删"才是那条判据回答的问题。把策略塞进判据会让两件事同形。
+ *
+ * ── ★★ 三态照旧**不同形**，且 `undecidable` 绝不当成 `reclaimable` ──────────────
+ *   权威实现已经保证三者字段互不共用（见 `WorktreeReclaimability`），
+ *   本函数**不再二次判断** —— 一次判断两处实现，正是本任务要消灭的东西。
+ *
  * @returns `{ status: 'reclaimable'|'keep'|'undecidable', ... }`
- *   ★ 三态**不同形**：可清的带 `layers`；不可清的带 `reason` 与它的证据；
- *     判不了的带 `why`。三者没有任何两个共用同一组字段。
  */
 export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits = DEFAULT_STALE_COMMITS, budget }) {
-  const head = git(worktree, ['rev-parse', 'HEAD'])
-  if (head === undefined) {
-    return { status: 'undecidable', worktree, why: 'HEAD could not be read (not a git checkout, or no commit yet)' }
-  }
-  const mainHead = git(repo, ['rev-parse', '--verify', '--quiet', `${mainRef}^{commit}`])
-  if (mainHead === undefined) {
-    return { status: 'undecidable', worktree, why: `the trunk ref "${mainRef}" could not be resolved in ${repo}` }
-  }
+  /**
+   * ★ 权威裁决 —— **同一个函数引用**，不是"再写一遍同样的判断"。
+   */
+  const verdict = judgeWorktreeReclaimable({ repo, worktree, mainRef })
 
   /**
-   * ★ (a) 已提交的部分是否被吸收。
-   *   `--is-ancestor` 退出 0 ⇒ 这个 worktree 的 HEAD 在主干的历史里。
+   * ★ `undecidable` ⇒ **原样交出去**，且**不**补任何"可清"的字段。
+   *   它判不了 ≠ 它可以清（契约逐字钉住这一条）。
    */
-  const absorbed = (() => {
-    try {
-      execFileSync('git', ['merge-base', '--is-ancestor', head, mainHead], {
-        cwd: repo, stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      return true
-    } catch {
-      return false
-    }
-  })()
-
-  /** 落后主干的提交数 —— 依赖那一层的门槛，也用作"差多少"的读数。 */
-  const behindText = git(repo, ['rev-list', '--count', `${head}..${mainHead}`])
-  const behind = behindText === undefined ? undefined : Number.parseInt(behindText, 10)
-
-  /**
-   * ★★ (b) 未提交的部分有没有【唯一的产物】。
-   *
-   *   MEASURED：只看 (a) 会删掉 7 份唯一的源码（见文件头）。
-   *   ⇒ 逐个数每个脏的**源码**文件的内容是不是在历史里。
-   *   ★ `lib/` 不算：它是构建产物，每次 build 重生成。
-   */
-  const dirty = (git(worktree, ['status', '--porcelain']) ?? '').split('\n').filter((line) => line.trim() !== '')
-  const dirtyPaths = dirty.map((line) => line.slice(3).trim().replace(/^"|"$/g, ''))
-  const sourceDirty = dirtyPaths.filter((path) => !path.startsWith('lib/') && !path.endsWith('git-artifact-stamp.json'))
-  const orphaned = []
-  for (const path of sourceDirty) {
-    const full = join(worktree, path)
-    if (!existsSync(full)) continue
-    const blob = git(worktree, ['hash-object', path])
-    if (blob === undefined) continue
-    /** ★ 内容在**任何**提交里出现过吗 —— 出现过 ⇒ 它不是唯一的那一份。 */
-    const found = git(repo, ['log', '--all', '--oneline', `--find-object=${blob}`])
-    if (found === undefined || found === '') orphaned.push(path)
+  if (verdict.status === 'undecidable') {
+    return { status: 'undecidable', worktree, why: verdict.why, reason: describeReclaimability(verdict) }
   }
-
-  /** ── 判定的顺序：先答"能不能清"，再答"清哪一层" ──────────────────────────────── */
-  if (!absorbed) {
+  if (verdict.status === 'keep') {
     return {
       status: 'keep',
       worktree,
-      reason: 'not-absorbed',
-      behind,
-      detail: `its HEAD (${head.slice(0, 12)}…) is not an ancestor of ${mainRef} `
-        + `(${mainHead.slice(0, 12)}…) — its committed work is not in the trunk yet`
-        + (behind === undefined ? '' : `, and it is ${behind} commit(s) behind it`),
-    }
-  }
-  if (orphaned.length > 0) {
-    return {
-      status: 'keep',
-      worktree,
-      reason: 'unique-work',
-      orphaned,
-      behind,
-      detail: `${orphaned.length} uncommitted source file(s) exist ONLY here — their content appears in no commit `
-        + `(${orphaned.slice(0, 3).join(', ')}${orphaned.length > 3 ? ', …' : ''}); deleting this worktree would lose them`,
+      reason: verdict.reason,
+      behind: verdict.behind,
+      detail: verdict.detail,
+      /** ★ 只有 `unique-work` 才有这一格（权威的两种 keep **不同形**，这里保持）。 */
+      ...verdict.orphaned === undefined ? {} : { orphaned: verdict.orphaned },
+      /** ★ 人读的那一句 —— 由 `describeReclaimability` 给（它是零消费的另一条）。 */
+      human: describeReclaimability(verdict),
     }
   }
 
   /**
-   * ★ 可清 —— 而**两层各自独立**：一个 worktree 可能依赖该清而整体该留
-   *   （例如它刚落后 25 个提交、而产物已吸收 → 两层都可清；
-   *    或它落后 3 个提交而产物已吸收 → 依赖还新，但整体可清）。
+   * ── 可清 —— 而**两层各自独立**：一个 worktree 可能依赖该清而整体该留 ────────────
+   *   （★ 这一格是**删除策略**，本脚本特有，所以它留在这里。）
    */
+  const behind = verdict.behind
   const layers = []
   const hasDeps = existsSync(join(worktree, 'node_modules'))
   if (hasDeps && behind !== undefined && behind >= staleCommits) {
@@ -229,9 +217,17 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
   }
   layers.push({
     layer: 'worktree',
-    why: `HEAD (${head.slice(0, 12)}…) is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
+    why: `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
   })
-  return { status: 'reclaimable', worktree, layers, behind, hasDeps }
+  return {
+    status: 'reclaimable',
+    worktree,
+    layers,
+    behind,
+    hasDeps,
+    reason: verdict.reason,
+    human: describeReclaimability(verdict),
+  }
 }
 
 /** 目录占用的近似字节数（`du -sk` 一位小数够用；读不到 ⇒ `undefined`）。 */

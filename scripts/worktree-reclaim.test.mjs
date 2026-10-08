@@ -402,3 +402,247 @@ test('★★★ 臂 13（真实读数臂）：对本仓跑一次干跑，如实�
   assert.ok(result.scanned > 0, '★ 目录在就必须真的扫到 worktree')
   assert.equal(result.removed.length, 0, '★★ 这一臂是干跑 —— 绝不许删任何东西')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ t25：判定只有一份真值 —— 脚本【调用】权威实现，而不是自己再实现一遍
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一节防的是什么（MEASURED，本任务的由来）───────────────────────────────────
+ *
+ * `judgeWorktreeReclaimable` 与 `describeReclaimability` 在 `src/worktree.ts` 里
+ * 写好了、导出了，而**全仓零调用方**（`gate-producer-consumer` 普查点名）。
+ * 而本脚本自己又实现了一遍同样的问题。
+ *
+ * ⇒ ★★ 后果真的发生了：`--apply` 删掉 32 个 worktree，
+ *   而那份**权威实现从未被执行过一次**。
+ *   **一条没接线、也没被比对过的判据，与一条不存在的判据，
+ *   在"删掉东西"这件事上没有区别。**
+ *
+ * ⇒ 所以下面这几臂钉的是**接线与一致**，不是"哪份更对"：
+ *     · 臂 T25-1：脚本**调用**权威实现（同一条真值），而不是留一份内联副本
+ *     · 臂 T25-2（★对照臂）：两份判断在同一批真实树上**逐条一致**
+ *     · 臂 T25-3：`undecidable` **绝不**被当成 `reclaimable`
+ *     · 臂 T25-4：`describeReclaimability` 也被执行（零消费的另一条）
+ */
+
+test('★ 臂 T25-1：脚本【调用】judgeWorktreeReclaimable —— 而不是留一份内联副本', async () => {
+  /**
+   * ── 这条臂怎么是【可判定】的（而不是"读源码看着像"）─────────────────────────
+   *
+   * ★ 用**同一个函数引用**去核：脚本判出来的三态，必须与直接调权威实现得到的**逐字段相同**。
+   *   ⇒ 一个"又实现了一遍"的脚本，会在**任何一个**权威实现改过语义的地方当场分叉
+   *     —— 而那时这条臂红，那正是我们要的。
+   *
+   * ★★ 而更强的一半：**把权威实现换掉**（monkey-patch 不可能，因为 import 是静态的）
+   *   ⇒ 所以改用**可观测的等价**：两条路径的返回值深度相等。
+   *   一个内联副本在**当前样本上**可能与权威一致（那正是这次没造成损失的原因），
+   *   但它【会在权威改动时分叉】—— 而下面臂 T25-2 用**同一批树**钉住"现在就一致"。
+   */
+  const { judgeWorktreeReclaimable } = await import('../lib/worktree.js')
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-t25-1')
+    f.commit('two')
+
+    const fromScript = judgeWorktree({ repo: f.repo, worktree: wt })
+    const fromAuthority = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+
+    /** ★ 裁决那一格必须逐字相同 —— 它是"能不能删"。 */
+    assert.equal(
+      fromScript.status, fromAuthority.status,
+      `★ 脚本的裁决与权威实现必须相同（这就是"一份真值"的可执行形式）。脚本=${fromScript.status} 权威=${fromAuthority.status}`,
+    )
+    /** ★ 而 `keep` 的成因也必须相同（两种 keep 不同形，混了会让补救动作指错）。 */
+    if (fromAuthority.status === 'keep') {
+      assert.equal(fromScript.reason, fromAuthority.reason, '★ keep 的 reason 必须同源')
+    }
+    /** ★ `behind` 是同一个读数（它进 `layers` 的门槛）。 */
+    assert.equal(fromScript.behind, fromAuthority.behind, '★ behind 必须同源')
+  } finally {
+    f.done()
+  }
+})
+
+test('★★ 臂 T25-2（★对照臂）：两份判断在【同一个真实树上】逐条一致', async () => {
+  /**
+   * ── 为什么"一致"才是这一臂要钉的东西（契约逐字）─────────────────────────────
+   *
+   * > 「因为"两份实现"的问题不是"哪份对"，
+   * >   而是【没有任何东西会发现它们分叉】。」
+   *
+   * ★ 所以这里**不去判谁对** —— 它判的是 **两份在同一批真实输入上给出同一结论**。
+   *   分叉 ⇒ 红。而那正是"没有任何东西会发现分叉"这句话的**可执行形式**。
+   *
+   * ★★ 样本的选取是**刻意的**（否则这条臂会在"全是可清"的样本上恒真）：
+   *   造出三态**各自的**真实实例，逐条比对 —— 一个只在某一态上分叉的实现
+   *   会在只含另一态的样本上蒙混过去。
+   */
+  const { judgeWorktreeReclaimable } = await import('../lib/worktree.js')
+  const f = fixture()
+  try {
+    const base = f.head()
+
+    /** ① reclaimable：检出停在已被主干吸收的提交、且没有唯一产物。 */
+    const absorbed = f.worktreeAt(base, 'task-absorbed')
+    f.commit('two')
+
+    /**
+     * ② keep / not-absorbed：检出带着**主干没有的**提交。
+     * ★ MEASURED（本臂第一版写错了）：先在 repo 里 commit、再让 worktree 检出它 ——
+     *   那会让 main **也**前进到同一个提交 ⇒ HEAD 成了 main 的祖先 ⇒ 判成 reclaimable。
+     *   ⇒ 正确的造法是**在那个检出里**提交（主干看不到它）。
+     */
+    const ahead = f.worktreeAt(base, 'task-ahead')
+    writeFileSync(join(ahead, 'src', 'ahead.ts'), 'export const ahead = 1\n')
+    git(ahead, ['add', '-A'])
+    git(ahead, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'work only in the worktree'])
+
+    /** ③ keep / unique-work：检出一个已被吸收的提交，但工作区有一份**历史里没有**的源码。 */
+    const unique = f.worktreeAt(base, 'task-unique')
+    writeFileSync(join(unique, 'src', 'only-here.ts'), `export const only = '${Math.random()}'\n`)
+
+    /** ④ undecidable：一个不是 git 检出的目录。 */
+    const notGit = mkdtempSync(join(tmpdir(), 't25-notgit-'))
+
+    const cases = [
+      { label: 'absorbed', worktree: absorbed, expect: 'reclaimable' },
+      { label: 'ahead', worktree: ahead, expect: 'keep' },
+      { label: 'unique', worktree: unique, expect: 'keep' },
+      { label: 'not-a-checkout', worktree: notGit, expect: 'undecidable' },
+    ]
+
+    const compared = []
+    for (const item of cases) {
+      const a = judgeWorktree({ repo: f.repo, worktree: item.worktree })
+      const b = judgeWorktreeReclaimable({ repo: f.repo, worktree: item.worktree })
+      /**
+       * ★ 逐条比对三格：`status`（裁决）、`reason`（成因）、`behind`（读数）。
+       *   ★ 不比 `detail` 的措辞：那是**人读的话**，两份各说各的不会让"删错东西"发生。
+       *     而"哪一格会真的导致删错"是 `status` —— 所以它必须逐字相同。
+       */
+      assert.equal(a.status, b.status, `★ [${item.label}] 两份的 status 必须相同：脚本=${a.status} 权威=${b.status}`)
+      assert.equal(a.status, item.expect, `★ [${item.label}] 前置：这一格本该是 ${item.expect}，实测 ${a.status}`)
+      if (b.status === 'keep') assert.equal(a.reason, b.reason, `★ [${item.label}] keep 的 reason 必须相同`)
+      if (b.status !== 'undecidable') assert.equal(a.behind, b.behind, `★ [${item.label}] behind 必须相同`)
+      compared.push(`${item.label}=${a.status}`)
+    }
+
+    /** ★ 三态**都被覆盖到**（否则这条对照臂在"只有一态"的样本上恒真）。 */
+    const seen = new Set(compared.map((entry) => entry.split('=')[1]))
+    assert.deepEqual(
+      [...seen].sort(), ['keep', 'reclaimable', 'undecidable'],
+      `★ 样本必须覆盖三态（否则"一致"没有分辨力）。实测：${compared.join(' · ')}`,
+    )
+    rmSync(notGit, { recursive: true, force: true })
+  } finally {
+    f.done()
+  }
+})
+
+test('★★ 臂 T25-3：undecidable【绝不】被当成 reclaimable（判不了 ≠ 可清）', async () => {
+  /**
+   * ★ 契约逐字：「`undecidable` 绝不当成 `reclaimable`（判不了 ≠ 可清）」。
+   *
+   * ★★ 而这在**删除路径**上是生死之别：`undecidable` 一旦被读成可清，
+   *   脚本就会去 `rmSync` 一棵**它根本没判断过**的树 —— 而那正是本任务要防的事。
+   * ⇒ 所以这里不只断言"状态对"，还断言**它没有带任何"可清"的字段**。
+   */
+  const notGit = mkdtempSync(join(tmpdir(), 't25-undec-'))
+  try {
+    const verdict = judgeWorktree({ repo: notGit, worktree: notGit })
+    assert.equal(verdict.status, 'undecidable', JSON.stringify(verdict))
+    /** ★ 三态不同形：判不了的两格是 `why` 与人话，**不是** `layers`。 */
+    assert.equal(verdict.layers, undefined, '★ undecidable 不许带 layers —— 那会让它读起来像"可清"')
+    assert.equal(typeof verdict.why, 'string', '★ undecidable 必须说清【为什么判不了】')
+    assert.ok(verdict.why.length > 0)
+    /** ★ 而人话必须明说"这是没测到，不是可以删"。 */
+    assert.match(
+      verdict.reason, /NOT be determined|not measured|safe to delete/i,
+      `★ undecidable 的人话必须把"没测到"与"可以删"分开。实测：${verdict.reason}`,
+    )
+  } finally {
+    rmSync(notGit, { recursive: true, force: true })
+  }
+})
+
+test('★ 臂 T25-4：describeReclaimability 被【执行】到（它是零消费的另一条）', async () => {
+  /**
+   * ★ 契约：「`describeReclaimability` 也被调用（它现在是零消费另一条）
+   *   —— 用于输出里那条人读的理由」。
+   *
+   * ★★ 而"被调用"必须是**可观测**的：所以这里断言脚本给出的 `human` 一格
+   *   **逐字等于**直接调 `describeReclaimability` 的结果 —— 同一个来源，
+   *   不是"另写一句意思差不多的话"（两处各写一遍就会分叉，而分叉之后
+   *   "同一件事有两句话"在下游同形）。
+   */
+  const { describeReclaimability, judgeWorktreeReclaimable } = await import('../lib/worktree.js')
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-t25-4')
+    f.commit('two')
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    const authority = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.human, describeReclaimability(authority),
+      '★ 脚本里那条人话必须【逐字】来自 describeReclaimability（不是另写一句）',
+    )
+    assert.ok(typeof verdict.human === 'string' && verdict.human.length > 0)
+
+    /** ★ 而三个状态的人话必须**互不同形**（否则读的人分不出该做什么）。 */
+    const notGit = mkdtempSync(join(tmpdir(), 't25-human-'))
+    const texts = new Set([
+      describeReclaimability(authority),
+      describeReclaimability(judgeWorktreeReclaimable({ repo: f.repo, worktree: notGit })),
+    ])
+    assert.equal(texts.size, 2, '★ 两个人读的理由必须不同形（同形会让补救动作指错）')
+    rmSync(notGit, { recursive: true, force: true })
+  } finally {
+    f.done()
+  }
+})
+
+test('★ 臂 T25-5：三态**不同形**（没有两个共用同一组字段）', async () => {
+  /**
+   * ★ 契约：「三态透传：`reclaimable` / `keep`（带 reason 与 detail）/
+   *   `undecidable`（带 why）」。
+   *
+   * ★★ 为什么"不同形"是**必要**的：`reclaimable` 是**删除的准入**。
+   *   若 `undecidable` 与它共用字段，下游任何一处读那个字段的代码都会**误删**。
+   *   ⇒ 所以这里断言三者的 `Reclaimability` 字段集**两两不同**。
+   */
+  const { judgeWorktreeReclaimable } = await import('../lib/worktree.js')
+  const f = fixture()
+  try {
+    const base = f.head()
+    const absorbed = f.worktreeAt(base, 'task-t25-5a')
+    f.commit('two')
+    /** ★ 同臂 T25-2 的教训：要在**检出里**提交，主干才看不到它。 */
+    const ahead = f.worktreeAt(base, 'task-t25-5b')
+    writeFileSync(join(ahead, 'src', 'ahead.ts'), 'export const ahead = 1\n')
+    git(ahead, ['add', '-A'])
+    git(ahead, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'work only in the worktree'])
+
+    const shapes = {
+      reclaimable: judgeWorktreeReclaimable({ repo: f.repo, worktree: absorbed }),
+      keep: judgeWorktreeReclaimable({ repo: f.repo, worktree: ahead }),
+      undecidable: judgeWorktreeReclaimable({ repo: f.repo, worktree: mkdtempSync(join(tmpdir(), 't25-shape-')) }),
+    }
+    assert.equal(shapes.reclaimable.status, 'reclaimable')
+    assert.equal(shapes.keep.status, 'keep')
+    assert.equal(shapes.undecidable.status, 'undecidable')
+
+    /** ★ `reclaimable` **不带** `why` / `detail`；`undecidable` **不带** `reason` / `behind`。 */
+    assert.equal('why' in shapes.reclaimable, false, '★ reclaimable 不许带 why（那是"判不了"的字段）')
+    assert.equal('layers' in shapes.undecidable, false, '★ undecidable 不许带 layers')
+    assert.equal('reason' in shapes.undecidable, false, '★ undecidable 的成因字段是 why，不是 reason')
+    assert.equal('behind' in shapes.undecidable, false, '★ undecidable 不许带 behind 读数')
+    /** ★ `keep` 必须有 `detail`（它是"为什么留着"的证据，读的人要能去核）。 */
+    assert.equal(typeof shapes.keep.detail, 'string', '★ keep 必须带 detail')
+  } finally {
+    f.done()
+  }
+})
