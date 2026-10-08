@@ -85,7 +85,41 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
          * ★★ t3：两处拒绝都改成 `throwWithSurface` —— 被拒的宣告里，
          *   "是交付本身不允许"与"是这个位置的输入面没接完"必须**同时读得到**。
          */
-        if (evaluation.ok === false || deliveryCheck.ok === false) {
+        /**
+         * ── ★★★ t64：先区分「没检查」与「真的被拒」─────────────────────────────────
+         *
+         * MEASURED（t58 第一半之后，本任务的实测）：
+         *
+         *     `registry.evaluate('delivery', {})` ⇒ `ok:false` + `skippedAll` 在场
+         *       （该位置挂了 2 条判据，而这一轮一条都没适用）
+         *     ⇒ 而下面那一行读 `ok === false` 就拒 ⇒ **把"没检查"变成了"假拒绝"**。
+         *
+         * ★ 而基线（t58 之前）这里是 `ok:true`（放行）——
+         *   所以这是 t58 带来的**新**后果，而它是**不可接受**的：
+         *   一个安全约束**不触发**时，正确的形状不是「拒绝一切」，而是
+         *   「放行，并留下它没被检查的痕迹」。
+         *
+         * ── 三态（契约要求：三者不同形）──────────────────────────────────────────
+         *
+         *     ① 没检查（`ok:false` + `skippedAll`）    ⇒ **放行** + 告警（不拒绝）
+         *     ② 检查了而通过（`ok:true`）              ⇒ 放行，不告警
+         *     ③ 检查了而拒绝（blockers / unmeasured）  ⇒ 拒绝（下面的分支不变）
+         *
+         * ★ 而 `unmeasured`（判据跑了、说它测不了）**仍然拒绝** ——
+         *   那是既有语义，本任务不动它。它与①的差别是 `evaluated`：① 是
+         *   `evaluated === 0`（一条都没跑），`unmeasured` 是 `evaluated >= 1`。
+         *   ⇒ 两者**不同形**，而这条区分由注册表保证（t58 第一半）。
+         *
+         * ★ 为什么用 `skippedAll` 而不是 `evaluated === 0` 作为判据：
+         *   `skippedAll` 是注册表**显式**产出的那个说明（"这一步没被检查"）；
+         *   而 `evaluated === 0` 在空位置（`registered === 0`）上也成立 ——
+         *   那时它是"这里本来就没有判据"，是正常情形。⇒ 用前者更精确。
+         */
+        const notChecked = evaluation.ok === false && evaluation.skippedAll !== undefined
+        if (notChecked) {
+          ctx.logger.warn(`agent-teams: declare_delivery reached the delivery gate with nothing evaluated (${evaluation.registered} registered, all skipped); delivery was NOT checked — allowing it through, because "not checked" is not "refused"`)
+        }
+        if (!notChecked && (evaluation.ok === false || deliveryCheck.ok === false)) {
           if (evaluation.unmeasured !== undefined) {
             throwWithSurface(`declare_delivery rejected: the delivery gate could not measure (${evaluation.unmeasured})`, deliveryInputSurface)
           }
@@ -94,9 +128,14 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
             ...evaluation.blockers,
           ].join('; ')}`, deliveryInputSurface)
         }
-        if (evaluation.evaluated === 0 && evaluation.registered > 0) {
-          ctx.logger.warn(`agent-teams: declare_delivery reached the delivery gate with no gate evaluated (${evaluation.registered} registered, all skipped); delivery was not checked`)
-        }
+        /**
+         * ★ t64：这条告警**上移进了 `notChecked` 分支**（见上面那段）。
+         *   ★ 合并而不是保留两处：同一件事报两遍会让"这两条日志说的是不是同一件事"
+         *     变成一个要读两处才能回答的问题 —— 而它们是同一件事。
+         *   ★ 而措辞变了：新的一句把**判定**也说出来（"allowing it through,
+         *     because not-checked is not refused"），旧的那句只说"was not checked"。
+         *     ⇒ 一个只说"没检查"而裁决却是"拒绝"的告警，正是 t64 要修的那个矛盾。
+         */
         /**
          * ★★ t3：这条日志**保留**（给人看）；结构化出口在下面返回值的 `input_surface`。
          */
