@@ -60,7 +60,7 @@ import type { TaskStatus, TeamMember, TeamState, TeamTask } from './types.ts'
  *   「哪些状态是终态」是一条会变的规则；两份拷贝会漂移 —— 而漂移的那一天，
  *   scheduler 与 state 会对同一个任务给出相反的答案，且两者读起来都很正常。
  */
-import { TERMINAL_TASK_STATUSES } from './types.ts'
+import { TERMINAL_TASK_STATUSES, needsWorktreeFor } from './types.ts'
 
 /** Per-dependency output cap in the assignment prompt. */
 export const DEPENDENCY_OUTPUT_MAX_CHARS = 2_000
@@ -765,7 +765,14 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
          *   地方干活"的前置条件，不是可选装饰。此前"warn 后继续"的写法把隔离
          *   变成了提示 —— 成员在共享工作区干活，而没有任何一步会拒绝它。
          */
-        const needsWorktree = ticket.kind === 'implementation' || ticket.kind === 'repair'
+        /**
+         * ★★ 真值来自 `types.ts`（t20 建的单一来源），不在这里再写一份。
+         *
+         * 此前这一行与 `resolveBaseRevision` 各写一份同样的 kind 判断 ——
+         * 而两份实现会分叉：判据说"本该有基准"、而调度器从没建过那棵树，
+         * 在日志里读起来像"记录丢了"。⇒ 现在两边都从 `needsWorktreeFor` 取。
+         */
+        const needsWorktree = needsWorktreeFor(ticket.kind)
         let worktreePath: string | undefined
         let worktreeMissingIgnored: readonly string[] | undefined
         let worktreeUnavailable: string | undefined
