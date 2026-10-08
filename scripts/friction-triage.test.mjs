@@ -52,6 +52,15 @@ import {
   recommendAssignee,
   dispatchable,
   renderDispatchable,
+  /** ★ t97：审查前移到生成那一刻。 */
+  adversarialReview,
+  emitReviewedContract,
+  narrowScope,
+  slugFromClaim,
+  slugFromId,
+  reviewStateOf,
+  looksTautological,
+  REVIEW_CHECKS,
   /** ★ t78：这三个现在从 t65 那边 re-export（臂 6 断言**同一性**）。 */
   looksAssertive,
   inputKindOf,
@@ -701,6 +710,8 @@ const NEEDLE_BLOCKED = `    blocked.push({`
 const NEEDLE_AUTO_SPLIT = `  const titleFallback = titleRejectionOrigin(record)`
 /** ★★★ 突变 D 的针脚（t95）：把 **blocked** 也算进 dispatchable。 */
 const NEEDLE_DISPATCHABLE = `  for (const proposal of report?.toDispatch ?? []) {`
+/** ★★★ 突变 E 的针脚（t97）：把**审不过的**也盖上 reviewed。 */
+const NEEDLE_REVIEW_OUTCOME = `  const outcome = failed.length > 0 ? 'rejected' : unmeasured.length > 0 ? 'needs-review' : 'passed'`
 
 test('★★★ 定向突变 A：把 `no-action` 并进 `to-dispatch` ⇒ 臂 2 必须红', async (t) => {
   /**
@@ -1068,10 +1079,22 @@ test('★★★ 定向突变 D（t95）：把 **blocked** 也算进 `dispatchabl
   })
 
   const restored = await freshTool('mutation=t95-restored-dispatchable')
+  /**
+   * ★★ MEASURED（t97）：这一份夹具原先是 `kind:'work'` + 没有 acceptance。
+   *   而 t97 之后 `dispatchable` 走**带审查**的那条路 ⇒ 缺 acceptance 那一问落 `fail`
+   *   ⇒ 它连 `ready` 都进不去（`rejected`）。
+   *   ★ 而那是**对的**（"没有 acceptance ⇒ 建出去也没人判它做没做对"），
+   *     不是本突变要测的东西 ⇒ 夹具补上 acceptance。
+   */
+  const withAcceptance = (id) => ({
+    sourceId: id, subject: 's', objective: 'o', kind: 'implementation',
+    inScope: ['scripts/gate-j-0001.test.mjs', 'src/gates/index.ts'],
+    acceptance: ['★ 它必须能对某个输入返回真/假'], verify: ['pnpm test:gates'],
+  })
   assert.deepEqual(
     restored.dispatchable({
-      toDispatch: [{ sourceId: 'ok', subject: 's', objective: 'o', kind: 'work', inScope: ['scripts/'] }],
-      blocked: [{ sourceId: 'blocked-1', subject: 's2', objective: 'o2', kind: 'work', inScope: ['scripts/'] }],
+      toDispatch: [withAcceptance('ok')],
+      blocked: [withAcceptance('blocked-1')],
     }, { members: [{ name: 'a', status: 'idle' }], tasks: [] }).ready.map((e) => e.sourceId),
     ['ok'],
     '★ 还原之后只剩 to-dispatch 那一条',
@@ -1110,4 +1133,247 @@ test('★★★ 夹具自检（t95）：每一条突变臂用的 tag **必须唯
     '★ 这些 tag 被两条臂共用 ⇒ Node 会复用缓存里的那个模块实例 ⇒ **后一条臂会读到前一条的版本**'
     + `（全跑时假红、单跑时绿）。当前重复：${JSON.stringify([...new Set(duplicates)])}`,
   )
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 臂 11（★★★ t97）：审查前移到生成那一刻
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** 一份**写域已收窄**的提案（生成时就能被审的那种）。 */
+const reviewedProposal = (extra = {}) => ({
+  source: 'judgement', sourceId: 'j-0099', kind: 'gate',
+  subject: '判据：某事必须不同形', objective: '当某个字段缺席时，那个位置必须报出来 —— 而两者必须不同形',
+  inScope: ['scripts/gate-j-0099.test.mjs', 'src/gates/index.ts'],
+  acceptance: ['★ 它必须能对某个输入返回真/假'], verify: ['pnpm test:gates'],
+  because: 'x', ...extra,
+})
+
+test('★★★ 臂 11：审过的契约**带 `reviewed`**，而它逐条写着五问的结果', () => {
+  /**
+   * 用户原话：「生成完的任务，可以带一个『已审查』的字段。」
+   * ★ 而"带了"不够 —— 它必须**逐条写着五问的结果**，否则那一格只是"我审过了"这句话。
+   */
+  const emitted = emitReviewedContract(reviewedProposal(), { members: [{ name: 'a', status: 'idle' }], tasks: [] })
+  assert.equal(emitted.status, 'executable')
+  assert.notEqual(emitted.contract.reviewed, undefined, '★ 审过了 ⇒ 契约里有 reviewed')
+  assert.equal(emitted.contract.reviewed.by, 'adversarial')
+  assert.equal(emitted.contract.reviewed.checks.length, REVIEW_CHECKS.length, '★ 五问逐条都要在场')
+  for (const id of ['scope', 'prerequisite', 'move', 'acceptance', 'boundary']) {
+    assert.ok(emitted.contract.reviewed.checks.some((c) => c.id === id), `★ 缺了第 "${id}" 问`)
+  }
+})
+
+test('★★★ 臂 11b：**审不过 ⇒ 不产出可派契约**，而是退回并**指名哪一问**', () => {
+  /**
+   * 契约原文：「不通过 ⇒ 不产出可派契约，而是产出退回理由并**指名哪一问没过**。」
+   *
+   * ★ 一句"审查没通过"与"没有审查"在观测上同形 —— 读的人不知道要改什么。
+   */
+  /**
+   * ★ 夹具自检（t97 实测抓出来）：第一版我拿「acceptance 为空」当这一条的例子，
+   *   而**空 acceptance 在 t95 那一层就被挡了**（`cannot-emit`）⇒ 审查根本轮不到。
+   *   ★ 所以这里用一个**只有审查能抓**的毛病：一条**恒真**的 acceptance。
+   */
+  const rejected = emitReviewedContract(
+    reviewedProposal({ acceptance: ['★★ 它必须有非空的 acceptance'] }), { members: [], tasks: [] },
+  )
+  assert.equal(rejected.status, 'rejected', '★ 验收那一问没过 ⇒ 退回')
+  assert.equal(rejected.contract, undefined, '★★ **不产出可派契约**')
+  assert.ok(rejected.rejectedBecause.some((r) => r.startsWith('acceptance：')), '★ 指名是哪一问')
+})
+
+test('★★★ 臂 11c：三态不同形 —— reviewed / needs-review / rejected', () => {
+  /**
+   * 契约原文：「★ 三态不同形：reviewed（盖章）/ needs-review（没走自动生成那条路）/
+   *            rejected（审了而没过）⇒ 三种不得合并。
+   *            ★ 而 needs-review 不是错误 —— 它是『这条路没走自动生成』的正常状态。」
+   */
+  /** ① 盖章 */
+  const passed = emitReviewedContract(reviewedProposal(), { members: [], tasks: [] })
+  assert.equal(passed.review.outcome, 'passed')
+  assert.equal(reviewStateOf(passed.contract).state, 'reviewed')
+
+  /** ② needs-review：**没走自动生成那条路** —— 一份手工拟的契约（没有 reviewed 那一格）。 */
+  const manual = { subject: 's', kind: 'work', inScope: ['docs/x.md'] }
+  const state = reviewStateOf(manual)
+  assert.equal(state.state, 'needs-review', '★ 不带 reviewed ⇒ 必须先审一遍')
+  assert.match(state.why, /不是错误/u, '★ 而它必须说清"那不是错误"（否则读的人会去修一个不存在的问题）')
+
+  /** ③ rejected（★ 用只有审查能抓的那个毛病 —— 见臂 11b 的夹具自检）*/
+  const rejected = emitReviewedContract(
+    reviewedProposal({ acceptance: ['★★ 它必须有非空的 acceptance'] }), { members: [], tasks: [] },
+  )
+  assert.equal(rejected.status, 'rejected')
+  assert.notEqual(rejected.status, 'executable', '★ "审了没过"与"审过了"不同形')
+})
+
+test('★★★ 臂 11d：反向半边 —— **问不出答案不许并进通过**（`unmeasured` 不落盖章）', () => {
+  /**
+   * 契约原文：「★★ 反向半边：不许把所有东西都判 reviewed（那等于没审）——
+   *            问不出答案的必须落到 needs-review 或 rejected，不许并进 reviewed
+   *            （那是把没测到并进通过）。」
+   *
+   * ★★ 而这一格是本文件里**最贵**的一条：一个"总能盖章"的实现在臂 11 上完全绿。
+   */
+  /** ★★ ① 收窄**推不出来**（卡点侧）⇒ 那一问落 `unmeasured` ⇒ needs-review，**不盖章**。 */
+  const coarseEmit = emitReviewedContract(
+    { source: 'friction', sourceId: 'f-1', kind: 'repair', subject: 's', objective: 'o',
+      inScope: ['comp.x'], acceptance: ['★ x'], verify: ['pnpm test:gates'], because: 'y' },
+    { members: [], tasks: [] },
+  )
+  assert.equal(coarseEmit.scope.status, 'coarse', '★ 夹具自检：这条的写域推不出来')
+  assert.equal(coarseEmit.review.outcome, 'needs-review', '★ 问不出来 ⇒ needs-review')
+  assert.equal(coarseEmit.contract.reviewed, undefined, '★★★ 问不出来 ⇒ **契约里不许有 reviewed**')
+
+  /** ★ ② 而**目录级**写域（即使没经过收窄）也是同一格。 */
+  const coarse = adversarialReview({ inScope: ['scripts/'], acceptance: ['★ 能红'], verify: ['pnpm test:gates'] })
+  assert.equal(coarse.outcome, 'needs-review', '★ 写域问不出来 ⇒ needs-review，**不盖章**')
+  assert.ok(coarse.unmeasuredIds.includes('scope'))
+
+  /**
+   * ★ 而"越界"那一问在**没有具体产物路径**时同样是 `unmeasured`
+   *   （不是"不冲突" —— 那是把判不了读成没问题）。
+   */
+  const noPaths = adversarialReview({ inScope: ['scripts/'], outOfScope: ['lib/'], acceptance: ['★ x'], verify: [] })
+  assert.ok(noPaths.unmeasuredIds.includes('boundary'), '★ 没有具体产物 ⇒ 越界那一问也判不了')
+})
+
+test('★★★ 臂 11e：五问各自**真的会红**（不是装饰性的清单）', () => {
+  /**
+   * ★ 一个把五问都写成 `return pass` 的实现在臂 11 上也绿。
+   *   ⇒ 逐问造一个**它会抓住的**毛病，断言那一问落 `fail`。
+   */
+  const cases = [
+    ['scope', { inScope: [], acceptance: ['x'], verify: [] }, '没有任何写域'],
+    ['acceptance', { inScope: ['a.ts'], acceptance: ['★★ 它必须有非空的文件'], verify: [] }, '恒真'],
+    ['move', { inScope: ['a.ts'], acceptance: ['x'], verify: [], movesFiles: true }, '没有核对手段'],
+    ['boundary', { inScope: ['lib/x.js'], outOfScope: ['lib/'], acceptance: ['x'], verify: [] }, '永远做不完'],
+    ['prerequisite', { inScope: ['a.ts'], acceptance: ['x'], verify: [], prerequisiteAbsent: '它要的那条判据还没落地' }, '还没落地'],
+  ]
+  for (const [id, contract, needle] of cases) {
+    const review = adversarialReview(contract)
+    const check = review.checks.find((c) => c.id === id)
+    assert.equal(check.verdict, 'fail', `★ "${id}" 问必须能抓住这个毛病`)
+    assert.match(check.why, new RegExp(needle, 'u'), `★ 而理由要说清是什么毛病`)
+    assert.equal(review.outcome, 'rejected', '★ 有 fail ⇒ rejected')
+  }
+})
+
+test('★★★ 臂 11f：`looksTautological` 只认**结构上恒真**的，不是"我觉得不够具体"', () => {
+  /**
+   * ★ 宽了会把好断言判红（而那会让审查变成一个必须绕过的障碍）；
+   *   窄了会让恒真的漏过去（t94 的"恰好落一栏"就是它）。
+   */
+  assert.equal(looksTautological('★★ 它必须有非空的 acceptance'), true)
+  assert.equal(looksTautological('★ 那个文件必须存在'), true)
+  assert.equal(looksTautological('★ 一次定向突变能让它红'), false, '★ 这条**可判真假**')
+  assert.equal(looksTautological('★ 三态不同形：判不了 / 通过 / 拒绝'), false)
+})
+
+test('★★★ 臂 11g：写域收窄 —— 而"推不出来"时**如实标 coarse**（不编）', () => {
+  /**
+   * 契约原文：「让契约的 inScope 收窄到它实际会产出的文件
+   *            （若推不出来 ⇒ ★ 如实标 coarse，并说明为什么）。」
+   */
+  /** ① 判决侧 ⇒ 收窄到**两个具体文件**（不再有目录级的格子）。 */
+  const narrowed = narrowScope(reviewedProposal(), {})
+  assert.equal(narrowed.status, 'narrowed')
+  assert.equal(narrowed.inScope.some((s) => s.endsWith('/')), false, '★ 收窄后**不许**再有目录级写域')
+  assert.ok(narrowed.inScope.includes('scripts/gate-j-0099.test.mjs'), '★ 而产物那个文件必须在')
+
+  /** ② ★ 卡点侧推不出来 ⇒ `coarse`，且**说明为什么**。 */
+  const coarse = narrowScope({ source: 'friction', sourceId: 'f-1', inScope: ['comp.x'] }, {})
+  assert.equal(coarse.status, 'coarse')
+  assert.match(coarse.why, /编.*没有依据|没有依据/u, '★ 必须说清"为什么不推一个具体的"')
+
+  /** ③ ★ 一个**不像判决 id** 的 sourceId ⇒ 也推不出来（不许硬凑）。 */
+  const weird = narrowScope({ source: 'judgement', sourceId: 'whatever', inScope: ['scripts/'], objective: '中文散文' }, {})
+  assert.equal(weird.status, 'coarse')
+})
+
+test('★★★ 臂 11h：slug 的两个来源，而**不猜**的那个方向也要钉住', () => {
+  /**
+   * ★ ① claim 里的英文标识符 ⇒ 它讲的**就是那个东西**。
+   * ★ ② 判决 id ⇒ 一条判决一个夹具文件是本仓库的**命名约定**（可核，不是编的）。
+   * ★ ③ 两者都没有 ⇒ `undefined`（**不猜**：音译一个中文短语就是编）。
+   */
+  assert.equal(slugFromClaim('`changed-paths` 那一格必须与 worktree 观察面同源'), 'changed-paths')
+  assert.equal(slugFromClaim('gate-index-assembly 的清单必须覆盖新文件'), 'gate-index-assembly')
+  assert.equal(slugFromClaim('「尾斜杠对照对」—— 用两种写法把形状检查与真判断分开'), undefined, '★ 中文散文 ⇒ 不音译')
+  assert.equal(slugFromId('j-0002'), 'j-0002')
+  assert.equal(slugFromId('whatever'), undefined, '★ 不是判决 id 的形状 ⇒ 不认')
+})
+
+test('★★★ 定向突变 E（t97）：把**审不过的**也判成 passed ⇒ 臂 11b/11c/11e 必须红', async (t) => {
+  /**
+   * 契约原文：「★ 定向突变能打红：**把一条审不过的契约盖上 reviewed** ⇒ 臂红。」
+   * ★ 而那正是"审查变成了盖章仪式"那个失效形态。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_REVIEW_OUTCOME,
+    "  const outcome = 'passed' // MUTANT: everything passes review",
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=t97-review-always-passes')
+    /** ★ 这一条断言就是**臂 11b/11c/11e 的红**。 */
+    assert.equal(
+      mutant.adversarialReview({ inScope: [], acceptance: ['x'], verify: [] }).outcome, 'passed',
+      '★ 突变体把恒真的 acceptance / 空写域也判过 —— 臂 11e 就是靠这一条变红的',
+    )
+  })
+  const restored = await freshTool('mutation=t97-restored-review')
+  assert.equal(
+    restored.adversarialReview({ inScope: [], acceptance: ['x'], verify: [] }).outcome, 'rejected',
+    '★ 还原后必须回到 rejected',
+  )
+})
+
+test('★★★ 定向突变 F（t97）：把 `unmeasured` 并进 `passed` ⇒ 臂 11d 必须红', async (t) => {
+  /**
+   * 契约原文：「把一条 **needs-review** 并进 reviewed ⇒ 臂红」
+   * ★★ 那正是本队那条最贵的纪律在**这一个出口上**的落点：**把没测到并进通过。**
+   *
+   * ★ 而这个突变要改**两处** `unmeasured`（写域那一问 + 越界那一问）——
+   *   只改一处的话第三态还在，那就**没测到这条臂**（夹具自检抓过一次）。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original
+    .replaceAll(NEEDLE_REVIEW_OUTCOME, "  const outcome = 'passed' // MUTANT: unmeasured is folded into passed")
+    /**
+     * ★ 而"写域"那一问的 verdict 是从 `scopeVerdict` 算出来的（**不是**一个 `'unmeasured'` 字面量）
+     *   ⇒ 必须**一起改那一行**，否则第三态还在，而这个突变就没测到那条臂
+     *   （MEASURED：第一版只改了字面量那一处，于是 `scope` 仍答 unmeasured ⇒ 这条臂假红）。
+     */
+    .replaceAll("      verdict: coarse.length === 0 ? 'pass' : 'unmeasured',",
+               "      verdict: 'pass', // MUTANT: the scope question never says unmeasured")
+    .replaceAll("      verdict: 'unmeasured',", "      verdict: 'pass', // MUTANT: this question never says unmeasured")
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=t97-unmeasured-into-passed')
+    const review = mutant.adversarialReview({ inScope: ['scripts/'], acceptance: ['★ 能红'], verify: [] })
+    assert.equal(review.outcome, 'passed', '★ 突变体把"问不出来"并进了"通过" —— 臂 11d 就是靠这一条变红的')
+    assert.deepEqual(review.unmeasuredIds, [], '★ 第三态整个消失了')
+  })
+  const restored = await freshTool('mutation=t97-restored-unmeasured')
+  assert.equal(
+    restored.adversarialReview({ inScope: ['scripts/'], acceptance: ['★ 能红'], verify: [] }).outcome,
+    'needs-review',
+    '★ 还原后必须回到 needs-review',
+  )
+})
+
+test('★★ 二次对照（t97）：突变 E/F 的针脚在源码里真的存在', () => {
+  assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_REVIEW_OUTCOME), true, '★ 针脚必须逐字存在')
 })

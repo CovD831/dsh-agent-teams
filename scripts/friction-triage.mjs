@@ -635,6 +635,429 @@ export function render(report) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ⑧ ★★★ t97：写域收窄 —— 而"收窄"本身要可核
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 它修的是什么（MEASURED，captain 当场撞到）─────────────────────────────────
+ *
+ * 分诊器此前给的写域是**粗的**：`['scripts/', 'src/gates/']`。
+ * ★ 而它让两条**本来无关**的任务**互斥** —— t96 与 t97 撞了，而 captain 只能手动
+ *   amend t96 的写域。
+ *
+ * ★★ 而 t72 当时给的理由是对的：**claim 是人话散文，推不出可靠路径**。
+ *   一个"编出来的具体文件"比粗写域坏得多 —— 编的会让两条真冲突的同时被派出去。
+ *
+ * ── ★★★ 而现在【信息够了】：那件事**知道自己会产出什么** ────────────────────────
+ *
+ * 一条判据的产物在**本仓库的约定**里是可推的（实测：`scripts/gate-*.test.mjs`
+ * 一条判据一个夹具文件，而 slug 来自它讲的那件事）：
+ *
+ *     判决的 claim  ⇒  slug 由它里面的**英文标识符**归一化而来
+ *     ⇒ `scripts/gate-<slug>.test.mjs`
+ *
+ * ★ 而**推导不出来的**（claim 里挑不出可靠的 slug）⇒ 如实标 `coarse`
+ *   **并说明为什么** —— 不许硬推一个"具体文件"。
+ *
+ * ★★ 三态（而它们不许合并）：
+ *
+ *     `narrowed`  —— 推出来了，附**为什么是这个文件**
+ *     `coarse`    —— ★ 推不出来，如实标粗**并说清理由**（补救：人来收窄）
+ *     `none`      —— 这个提案**不产出文件**
+ */
+export function narrowScope(proposal, options = {}) {
+  const broad = Array.isArray(proposal?.inScope) ? proposal.inScope : []
+  if (broad.length === 0) {
+    return { status: 'none', inScope: [], why: '这个提案没有写域（它不产出文件）' }
+  }
+  /**
+   * ★ 只有**判决侧**的提案能收窄到具体文件 —— 因为只有它的产物有命名约定。
+   *   ★ 卡点侧改的是"某个组件"（那一格本身就是它知道的全部）⇒ **如实标 coarse**。
+   */
+  if (proposal?.source !== 'judgement') {
+    return {
+      status: 'coarse',
+      inScope: broad,
+      why: '卡点侧只知道"哪个组件"，而组件的具体文件要人去读那个卡点 —— '
+        + '★ 推一个具体文件会编出一个没有依据的写域（那比粗的更坏）',
+    }
+  }
+
+  /**
+   * ── ★★★ 而 slug 有**两个来源**，而它们的可靠性不同 ──────────────────────────────
+   *
+   *   ① claim 里的英文标识符 ⇒ 它讲的**就是那个东西**（最可靠）
+   *   ② 判决自己的 id（`j-00NN`）⇒ ★ 那**不是编的**：它是这条判决在台账里的稳定标识，
+   *      而"一条判决一个夹具文件"是本仓库的**命名约定**，不是我的猜测。
+   *
+   * ★★ 而为什么需要 ②（MEASURED）：真实台账里的 claim **全是中文散文**
+   *   （实测 j-0001…j-0011 一条都挑不出英文 slug）⇒ 只用 ① 会让收窄**永不生效**，
+   *   而那意味着 t96/t97 那种互斥**一次都不会被修掉**。
+   *
+   * ★★★ 而 ② 与"编一个具体文件"的区别在哪里（那正是 t72 禁止的东西）：
+   *
+   *     编的写域     —— 我说"它大概会改 foo.ts"，而**没有依据**
+   *     ② 这个写域   —— 按**本仓库的命名约定**，这条判决的产物就是 `gate-j-00NN.test.mjs`
+   *                    ⇒ 它是**可核的**：交付时若那个文件叫别的名字，那是一次偏差
+   *                      （而偏差**看得见**，因为它与契约写的不一样）
+   *
+   * ★ 所以 ② 只在**约定确实存在**时使用（判决侧、且 slug 是 `j-00NN` 形状）。
+   */
+  const slug = slugFromClaim(proposal?.objective ?? '') ?? slugFromId(proposal?.sourceId)
+  if (slug === undefined) {
+    return {
+      status: 'coarse',
+      inScope: broad,
+      why: 'claim 是散文、而这条提案的 id 也不是判决 id 那样的稳定标识 ⇒ 如实标粗。'
+        + '★ 不许编一个具体文件：编的写域会让两条真冲突的任务同时被派出去',
+    }
+  }
+  /**
+   * ★ 收窄成**两个格子**：判据本体（它的夹具）与它要注册进的那一格。
+   *   ★ 而 `src/gates/` 保留 —— 因为一条判据**要注册进去**，
+   *     而把注册表排除在外会让"它的产物"与"它的接线"分开（那是本队记账过的形态）。
+   */
+  return {
+    status: 'narrowed',
+    inScope: [`scripts/gate-${slug}.test.mjs`, 'src/gates/index.ts'],
+    why: `收窄到**两个具体文件**：它实际会产出的那一个夹具（scripts/gate-${slug}.test.mjs），`
+      + '以及它必须登记进去的那一格（src/gates/index.ts）。'
+      + '★ 前者是本仓库的约定（一条判据一个夹具文件）；'
+      + '★ 后者是实测的（那个文件是一张**手工维护的 import 清单** ⇒ 新判据不登记就没装上去）。'
+      + '★★ 而它们都**不是目录** —— 那正是 t96/t97 互斥的成因（目录级写域让两条无关任务互斥）',
+    slug,
+  }
+}
+
+/**
+ * 从一个 claim 里挑出**可靠的 slug** —— 而挑不出来就返回 `undefined`（**不猜**）。
+ *
+ * ★ 它只认**英文标识符形状**的词：那是本仓库 slug 的真实来源
+ *   （实测 `scripts/gate-changed-paths.test.mjs` ← 它的主题词）。
+ *   ★ 中文短语**不做音译**：音译出来的 slug 是编的，而编的比粗的更坏。
+ */
+export function slugFromClaim(claim) {
+  if (typeof claim !== 'string') return undefined
+  /** ① 反引号里的标识符（最可靠）。 */
+  for (const match of claim.matchAll(/`([A-Za-z][\w-]{2,})`/gu)) {
+    const slug = normalizeSlug(match[1])
+    if (slug !== undefined) return slug
+  }
+  /** ② 裸的英文标识符（`foo-bar` / `foo.bar` / `foo_bar`）。 */
+  for (const match of claim.matchAll(/\b([a-z][a-z0-9]*(?:[-_.][a-z0-9]+)+)\b/gu)) {
+    const slug = normalizeSlug(match[1])
+    if (slug !== undefined) return slug
+  }
+  return undefined
+}
+
+/**
+ * 判决 id ⇒ slug。★ 只认 `j-NNNN` 那个形状（**窄**：宽了会把别的东西也算进来）。
+ *
+ * ★ 而它**不是编的**：一条判决一个夹具文件是本仓库的命名约定，
+ *   而判决 id 是它在台账里的稳定标识 ⇒ 那个文件名是**可核的**。
+ */
+export function slugFromId(id) {
+  const match = /^j-(\d{3,})$/u.exec(typeof id === 'string' ? id : '')
+  return match === null ? undefined : `j-${match[1]}`
+}
+
+/** 归一化：`foo.bar` / `foo_bar` ⇒ `foo-bar`。★ 太短的不算（一个三字母的词不是 slug）。 */
+function normalizeSlug(text) {
+  const slug = String(text).toLowerCase().replace(/[._]/gu, '-').replace(/-+/gu, '-').replace(/^-|-$/gu, '')
+  return slug.length >= 4 ? slug : undefined
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑨ ★★★ t97：对抗性审查 —— 前移到**生成的那一刻**
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 用户原话（这一节存在的全部理由）────────────────────────────────────────────
+ *
+ * > 「我觉得可能不用等到要派的时候再去做任务的对抗性审查，在自动生成的时候就可以去做了。
+ * >   生成完的任务，可以带一个『已审查』的字段。
+ * >   因为有的任务是自动生成的，有的任务是需要问过我之后再生成、再派发的。
+ * >   对于问过我、我裁决过的任务，在生成计划时就没有走自动生成的那一步，
+ * >   也就没有『已审查』的字段，那它就需要被审查一遍。
+ * >   但是，目前我们先只做一遍审查。」
+ *
+ * ── ★★★ 所以核心是一条【路由规则】，而字段就是判据 ──────────────────────────────
+ *
+ *     带 `reviewed`  ⇒ 放行（它在生成时已经审过）
+ *     不带         ⇒ ★ 必须先审一遍才能派
+ *   ★ 而"不带"**不是错误**：它是"这条路没走自动生成"的**正常状态**。
+ *
+ * ── 五问（每条都对着一次真实事故）───────────────────────────────────────────────
+ *
+ *   ① 写域：inScope 是否覆盖它要改的全部？（t54 漏了三个文件）
+ *   ② 前置：它依赖的东西在不在？（t58 拆成两半而第二半的前提不在）
+ *   ③ 搬运：若它要搬东西 ⇒ 有没有核对手段？（t70 丢 4 组接线 / t94 逐符号）
+ *   ④ 验收：acceptance 能不能判真假？会不会恒真？（t94 的"恰好落一栏"看不见哪一栏）
+ *   ⑤ 越界：outOfScope 是否挡住了它会碰到的东西？
+ *
+ * ★★ 而每一问的结论**三态**，不许合并：
+ *
+ *     `pass`        —— 看了，没问题
+ *     `fail`        —— 看了，有问题（★ 附**为什么**）
+ *     `unmeasured`  —— ★ **问不出答案**（附缺什么）
+ *
+ *   ⇒ ★★★ 而 `unmeasured` **绝不并进 `pass`**：那是本队那条最贵的纪律。
+ *     且它让整条审查落 `needs-review`（**不是**盖章）—— 见 `adversarialReview`。
+ */
+export const REVIEW_CHECKS = Object.freeze([
+  { id: 'scope', question: '写域：inScope 是否覆盖了它要改的全部？', accident: 't54 漏了三个文件' },
+  { id: 'prerequisite', question: '前置：它依赖的东西在不在？', accident: 't58 拆成两半而第二半的前提不在' },
+  { id: 'move', question: '搬运：若它要搬东西 ⇒ 有没有核对手段？', accident: 't70 丢 4 组接线 / t94 逐符号' },
+  { id: 'acceptance', question: '验收：acceptance 能不能判真假？会不会恒真？', accident: 't94 的"恰好落一栏"看不见哪一栏' },
+  { id: 'boundary', question: '越界：outOfScope 是否挡住了它会碰到的东西？', accident: '产物与接线分开会让接线无人负责' },
+])
+
+/**
+ * 跑一遍**对抗性审查**（五问）。
+ *
+ * @returns `{ outcome, checks, failedIds, unmeasuredIds }`
+ *   `outcome` = `passed` / `rejected` / `needs-review`
+ *
+ * ★ 而 `needs-review` 的判据是**至少有一问 `unmeasured`** 且**没有一问 `fail`**：
+ *   那是一句诚实的话 —— "我没能把它审明白" —— 而它与"审过了，没问题"不同形。
+ */
+export function adversarialReview(contract, scopeVerdict) {
+  const checks = []
+  const inScope = Array.isArray(contract?.inScope) ? contract.inScope : []
+  const outOfScope = Array.isArray(contract?.outOfScope) ? contract.outOfScope : []
+  const acceptance = Array.isArray(contract?.acceptance) ? contract.acceptance : []
+  const verify = Array.isArray(contract?.verify) ? contract.verify : []
+
+  /** ① 写域 —— ★★ 而它**先读收窄的结论**（见下） */
+  if (inScope.length === 0) {
+    checks.push({ id: 'scope', verdict: 'fail', why: '没有任何写域 ⇒ 它改什么没人管得住（t54 的形态）' })
+  } else if (scopeVerdict?.status === 'coarse') {
+    /**
+     * ── ★★★ MEASURED（t97 实测抓出来）：这一问此前**只看"结尾有没有 /"** ──────────
+     *
+     * 而 `['comp.x']`（卡点侧给的那一格）**不以 `/` 结尾** ⇒ 它被判 `pass`。
+     * ★★ 而那不是"写域是具体的" —— 它是"**我没能把它收窄**"（`narrowScope` 标了 coarse）。
+     *   ⇒ 只看结尾字符会把"我推不出来"读成"它是具体的" —— 而那是本队那条：
+     *     **代理读数在它所代理的东西没变时也会变**
+     *     （代理是"结尾有没有 /"，被代理的是"写域窄不窄"）。
+     *
+     * ⇒ 修法：**先读收窄那一格的结论**（它是权威），只在它缺席时才退回看结尾字符。
+     */
+    checks.push({
+      id: 'scope',
+      verdict: 'unmeasured',
+      why: `写域没能收窄到具体文件（${scopeVerdict.why}）⇒ "它要改的全部"问不出来。`
+        + '★ 而那不是"覆盖得够"，是"我判不了"',
+    })
+  } else {
+    const coarse = inScope.filter((scope) => scope.endsWith('/'))
+    checks.push({
+      id: 'scope',
+      verdict: coarse.length === 0 ? 'pass' : 'unmeasured',
+      why: coarse.length === 0
+        ? `写域是具体文件（${inScope.join(', ')}）⇒ 覆盖范围读得出来`
+        : `写域里有【目录级】的格子（${coarse.join(', ')}）⇒ 它可能改到目录下任何一个文件，`
+          + '而那正是 t96/t97 互斥的成因。★ 而"我推不出具体文件"是**问不出答案**，不是"没问题"',
+    })
+  }
+
+  /** ② 前置 */
+  if (contract?.prerequisiteAbsent !== undefined) {
+    checks.push({ id: 'prerequisite', verdict: 'fail', why: String(contract.prerequisiteAbsent) })
+  } else {
+    const declared = Array.isArray(contract?.dependencies) ? contract.dependencies : []
+    checks.push({
+      id: 'prerequisite',
+      verdict: 'pass',
+      why: declared.length === 0
+        ? '它不声明依赖 ⇒ 没有前置要查（★ 而那本身是一个**声明**，不是"我忘了查"）'
+        : `声明的依赖：${declared.join(', ')}`,
+    })
+  }
+
+  /** ③ 搬运 */
+  if (contract?.movesFiles === true) {
+    checks.push(verify.some((command) => /test|verify/iu.test(command))
+      ? { id: 'move', verdict: 'pass', why: '它要搬东西，而 verify 里有可重跑的核对 —— 那是 t94 要求的逐符号手段' }
+      : { id: 'move', verdict: 'fail', why: '它要搬东西，而 verify 里**没有核对手段**（t70 就是这样丢了 4 组接线）' })
+  } else {
+    checks.push({ id: 'move', verdict: 'pass', why: '它不搬文件 ⇒ 这一问不适用（★ 而"不适用"是看了之后的结论）' })
+  }
+
+  /** ④ 验收 */
+  const tautological = acceptance.filter(looksTautological)
+  if (acceptance.length === 0) {
+    checks.push({ id: 'acceptance', verdict: 'fail', why: '没有 acceptance ⇒ 建出去也没人判它做没做对' })
+  } else if (tautological.length > 0) {
+    checks.push({
+      id: 'acceptance',
+      verdict: 'fail',
+      why: `有一条 acceptance **恒真**（${shorten(tautological[0], 50)}）—— t94 的"恰好落一栏"就是它：`
+        + '它读起来像一条标准，而它对**任何**输入都成立',
+    })
+  } else {
+    checks.push({ id: 'acceptance', verdict: 'pass', why: `${acceptance.length} 条，且没有一条读起来是恒真的` })
+  }
+
+  /** ⑤ 越界 */
+  const generated = generatedPathsOf(contract)
+  const blocked = generated.filter((path) => outOfScope.some((scope) => scopesOverlap([scope], [path])))
+  if (blocked.length > 0) {
+    checks.push({
+      id: 'boundary',
+      verdict: 'fail',
+      why: `它会产出 ${blocked.join(', ')}，而那一格被自己的 outOfScope 挡住了 —— 那条任务永远做不完`,
+    })
+  } else if (generated.length === 0) {
+    /**
+     * ★★ 而这一格是 `unmeasured` 而**不是** `pass`：没有具体产物路径 ⇒
+     *   这一问**没法回答**（"越界"问的是"产物与 outOfScope 撞不撞"）。
+     *   ★ 把它算成"没问题"正是本队那条：**把没测到并进通过。**
+     */
+    checks.push({
+      id: 'boundary',
+      verdict: 'unmeasured',
+      why: `契约里没有**具体产物路径**（inScope 全是目录级）⇒ "产物与 outOfScope 撞不撞"问不出来。`
+        + `★ 而那不是"不冲突"，是"我判不了"（outOfScope: ${outOfScope.join(', ') || '空'}）`,
+    })
+  } else {
+    checks.push({
+      id: 'boundary',
+      verdict: 'pass',
+      why: `它的产物（${generated.join(', ')}）不与 outOfScope（${outOfScope.join(', ') || '空'}）冲突`,
+    })
+  }
+
+  /**
+   * ★★★ 总判：**一票否决 + 一票"我判不了"**
+   *   有 `fail`        ⇒ `rejected`（★ 并指名哪一问）
+   *   有 `unmeasured`  ⇒ ★ `needs-review`（**不盖章** —— 问不出来就不许并进通过）
+   *   全 `pass`        ⇒ `passed`
+   */
+  const failed = checks.filter((check) => check.verdict === 'fail')
+  const unmeasured = checks.filter((check) => check.verdict === 'unmeasured')
+  const outcome = failed.length > 0 ? 'rejected' : unmeasured.length > 0 ? 'needs-review' : 'passed'
+  return {
+    outcome,
+    checks,
+    failedIds: failed.map((check) => check.id),
+    unmeasuredIds: unmeasured.map((check) => check.id),
+  }
+}
+
+/** 一条 acceptance 读起来是不是**恒真**的（对任何输入都成立）。 */
+export function looksTautological(text) {
+  if (typeof text !== 'string') return false
+  /** ★ 只认"结构上恒真"的说法，而不是"我觉得不够具体"。 */
+  /**
+   * ★★ MEASURED（臂 11f 当场抓出来）：第一版写的是 `必须非空`（一个词），
+   *   而真实的恒真断言写的是「必须**有非空**的 acceptance」—— 中间隔了一个字
+   *   ⇒ 它**漏掉了**，而那正是"窄了会让恒真的漏过去"。
+   *
+   * ★ 修法：把"存在性"的说法写成**松一点**的几种形态，而**仍不碰**可判真假的那些
+   *   （"一次定向突变能让它红" / "三态不同形" 都必须落 false）。
+   */
+  return /(必须存在|必须.{0,3}存在|不能为空|必须.{0,3}非空|不该.{0,3}为空|要有.{0,4}文件|不能什么都没有|必须有一个|不得为空|至少.{0,4}一个)/u.test(text)
+}
+
+/** 从契约里读"它会产出什么"（可比的具体路径）。★ 读不出来 ⇒ `[]`（**不编**）。 */
+function generatedPathsOf(contract) {
+  const paths = []
+  for (const scope of Array.isArray(contract?.inScope) ? contract.inScope : []) {
+    if (!scope.endsWith('/')) paths.push(scope)
+  }
+  return paths
+}
+
+/**
+ * ── ★★★ 把审查**接进生成的每一步**（而不是生成之后一个可跳过的额外步骤）──────────
+ *
+ * @returns `{ status, contract?, review?, rejectedBecause?, scope }`
+ *
+ *     `status: 'executable'` + 契约带 `reviewed`  —— 审过了（★ 只有全 pass 才带）
+ *     `status: 'executable'` 而**不带** `reviewed` —— 有一问问不出来 ⇒ 落到 needs-review
+ *     `status: 'rejected'`   —— 审了而没过 ⇒ ★ **不产出可派契约**，产出退回理由
+ *     `status: 'cannot-emit'` —— 契约本身就不完整（t95 那一格，保持不变）
+ */
+export function emitReviewedContract(proposal, options = {}) {
+  const narrow = narrowScope(proposal, options)
+  const emitted = emitTaskContract({ ...proposal, inScope: narrow.inScope }, options)
+  if (emitted.status !== 'executable') return { ...emitted, scope: narrow }
+
+  const contract = { ...emitted.contract }
+  /** ★ 把**收窄的结论**交给审查 —— 否则它会把 coarse 读成细的（见那一格的长注释）。 */
+  const review = adversarialReview(contract, narrow)
+  if (review.outcome === 'rejected') {
+    return {
+      status: 'rejected',
+      sourceId: proposal?.sourceId,
+      scope: narrow,
+      assignee: emitted.assignee,
+      review,
+      /** ★ 退回理由**指名哪一问没过** —— 而不是一句"审查没通过"。 */
+      rejectedBecause: review.checks
+        .filter((check) => check.verdict === 'fail')
+        .map((check) => `${check.id}：${check.why}`),
+    }
+  }
+  /**
+   * ★★ `needs-review` 那一格**不盖章**：`reviewed` **不出现在契约里** ——
+   *   于是它落到那条路由的"不带 reviewed ⇒ 先审一遍"上。
+   *   ★ 而那正是"不许把没测到并进通过"在**契约形状**上的落点。
+   */
+  if (review.outcome === 'needs-review') {
+    return { status: 'executable', sourceId: proposal?.sourceId, scope: narrow, assignee: emitted.assignee, contract, review }
+  }
+  return {
+    status: 'executable',
+    sourceId: proposal?.sourceId,
+    scope: narrow,
+    assignee: emitted.assignee,
+    contract: {
+      ...contract,
+      /** ★★★ 那一格 —— 而 `checks` 逐条写着五问的结果（不是一句"已审查"）。 */
+      reviewed: {
+        at: new Date(options.now ?? Date.now()).toISOString(),
+        by: 'adversarial',
+        checks: review.checks.map((check) => ({ id: check.id, verdict: check.verdict, why: check.why })),
+      },
+    },
+    review,
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑩ ★★★ t97：路由 —— 带 `reviewed` 放行；不带 ⇒ 先审一遍
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 用户原话的机械化：「带 reviewed ⇒ 放行；不带 ⇒ 必须先审一遍才能派」。
+ *
+ * ★ 而"不带"**不是错误** —— 它是"这条路没走自动生成"的正常状态。
+ * ⇒ 三态，且不许合并：
+ *
+ *     `reviewed`      —— 盖章了（★ 附逐条 checks）
+ *     `needs-review`  —— ★ **没走自动生成那条路**，或审了而有一问问不出答案
+ *     `rejected`      —— 审了而**没过**（附哪一问）
+ */
+export function reviewStateOf(contract) {
+  if (contract?.reviewed !== undefined && typeof contract.reviewed === 'object') {
+    const checks = Array.isArray(contract.reviewed.checks) ? contract.reviewed.checks : []
+    return {
+      state: 'reviewed',
+      why: `在 ${String(contract.reviewed.at)} 由 ${String(contract.reviewed.by)} 审查通过，`
+        + `五问逐条：${checks.map((c) => `${c.id}=${c.verdict}`).join(' · ')}`,
+    }
+  }
+  return {
+    state: 'needs-review',
+    why: '★ 这条契约**没有 reviewed 那一格** ⇒ 它没走自动生成那条路（问过用户、用户裁决过的），'
+      + '或者生成时有一问问不出答案。⇒ **派之前必须先审一遍**。★ 而它**不是错误**。',
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ⑦ ★★★ 缺口 B：把提案变成**可直接执行**的派发指令（t95）
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -888,13 +1311,24 @@ export function recommendAssignee(proposal, { members = [], tasks = [], now = Da
 export function dispatchable(report, options = {}) {
   const ready = []
   const cannotEmit = []
+  const rejected = []
   for (const proposal of report?.toDispatch ?? []) {
-    /** ★ `options.unreadable` 必须**透传**到建议里（否则它会退化成"没人空闲"）。 */
-    const emitted = emitTaskContract(proposal, options)
+    /**
+     * ── ★★★ t97：`--dispatchable` 走**带审查**的那条路 ─────────────────────────
+     * 用户原话：「在自动生成的时候就可以去做了…带一个『已审查』的字段」
+     * ⇒ 生成与审查是**一步**，不是两步。
+     */
+    const emitted = emitReviewedContract(proposal, options)
     if (emitted.status === 'executable') ready.push({ proposal, ...emitted })
+    else if (emitted.status === 'rejected') rejected.push({ sourceId: proposal.sourceId, because: emitted.rejectedBecause, review: emitted.review })
     else cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
   }
   return {
+    /**
+     * ★★ 三态（而三者不许合并 —— 契约点名的那一条）：
+     *   `ready`（审过了）/ `rejected`（审了没过）/ `cannotEmit`（契约就不完整）
+     */
+    rejected,
     ready,
     cannotEmit,
     /** ★ 而那一格是**读数**：被挡的有几条（它们不在这份清单里，而读的人要知道有多少）。 */
@@ -985,11 +1419,20 @@ if (invokedDirectly) {
         + `  （已看过的：${[...report.toDispatch, ...report.blocked].map((e) => e.sourceId).join(', ') || '(空)'}）\n`)
       process.exitCode = 1
     } else {
-      const emitted = emitTaskContract(proposal, teamState)
+      /** ★★★ t97：`--emit-task` 也走**同一条**（生成即审查）。 */
+      const emitted = emitReviewedContract(proposal, teamState)
       if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(emitted, null, 2)}\n`)
       else if (emitted.status === 'executable') {
         process.stdout.write(`${JSON.stringify(emitted.contract, null, 2)}\n`)
+        process.stdout.write(`\n★ 审查（五问）：${emitted.review.outcome}\n`)
+        for (const check of emitted.review.checks) {
+          process.stdout.write(`  · ${check.id}=${check.verdict} —— ${check.why}\n`)
+        }
+        process.stdout.write(`\n★ 写域：${emitted.scope.status}\n  ${emitted.scope.why}\n`)
         process.stdout.write(`\n★ 派工理由：\n${emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
+      } else if (emitted.status === 'rejected') {
+        process.stdout.write(`★ 审查**没过** ⇒ 不产出可派契约。没过的问：\n`)
+        for (const reason of emitted.rejectedBecause) process.stdout.write(`  · ${reason}\n`)
       } else {
         process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${emitted.missing.map((m) => `  · ${m}`).join('\n')}\n`)
       }
