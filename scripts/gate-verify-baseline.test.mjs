@@ -22,7 +22,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -172,5 +172,39 @@ test('★★★ 臂 6：`failures` 必须【真的送达】判据 —— 而它�
     schema,
     /failures: \{ type: 'array'/,
     '★ ② schema 必须含 failures —— 而它是 t19 生效的必要一环，不是可选补充',
+  )
+})
+
+test('★★★ 臂 7：`localPluginRoot()` 推出来的根【真的能读到那个文件】', () => {
+  /**
+   * ── ★★★ 而这条臂的存在理由是一次真实的事故（2026-10-10）──────────────────────────
+   *
+   * 我为断一个环，把 `pluginRoot()` 本地化成了 `localPluginRoot()` ——
+   * ★ 而第一版**照抄了 `entities.pluginRoot` 的 4 层**：
+   * ```
+   *   entities.js      住在 lib/tools/shared/ ⇒ 4 层 = 仓库根
+   *   quality-gates.js 住在 lib/             ⇒ ★ 只需 2 层
+   * ```
+   * ⇒ ★ 而它的后果【不是报错】—— `baselinePin()` 读不到那个文件 ⇒ 返回 `undefined`
+   *   ⇒ 下游把"读不到基线"读成 **判不了** ⇒ ★ 于是 t19 那条判据永久 `undecidable`
+   *   ⇒ ★★ 而"我少算了两层"与"基线清单不存在"在读数上【同形】。
+   *
+   * ★ 所以本臂不钉"那个函数返回什么字符串"，而钉【它推出来的路径真的存在】——
+   *   一个不依赖层数、只依赖结果的判据。
+   */
+  const gates = readFileSync(join(ROOT, 'lib', 'quality-gates.js'), 'utf8')
+  const m = /const root\d* = .*?dirname\(dirname\(fileURLToPath\(import\.meta\.url\)\)\)/.exec(gates)
+    ?? /function localPluginRoot\(\)[^}]*dirname\(dirname\(fileURLToPath\(import\.meta\.url\)\)\)/.exec(gates)
+  assert.ok(m, '★ 前置：`localPluginRoot` 必须还在（若它被删/改名，本臂要跟着改）')
+
+  /**
+   * ★ 而"路径真的对"这件事，用**同一个表达式**在 lib/ 里求值一次最准 ——
+   *   而不是在夹具里重算（那会重复一份层数知识，而重复的那份会漂移）。
+   */
+  const fromLib = dirname(dirname(join(ROOT, 'lib', 'quality-gates.js')))
+  assert.equal(
+    existsSync(join(fromLib, 'scripts', 'fixtures', 'baseline-known-failures.json')),
+    true,
+    '★ 从 lib/ 算两层必须落到仓库根 —— 而它能真的读到基线清单（层数错的表现是"读不到"，不是报错）',
   )
 })
