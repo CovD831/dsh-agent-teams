@@ -337,46 +337,90 @@ test('★ 臂 8（闸门）：只对质量类任务说话 —— work 类不判�
 // 臂 9（元数据臂）：id / point 与注册表的插入点一致
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★★ 臂 9（★ 未接线臂，t38 最重要的形状）：它**刻意不在**装配清单里', async () => {
+test('★★ 臂 9（★ 接线臂，t4）：它**在**装配清单里 —— 而"接线"不再等于"会拒绝"', async () => {
   assert.equal(id, 'contract.task-atomicity')
   assert.equal(point, 'contract')
 
   /**
-   * ── ★★ 为什么这一臂断言的是"**不在**清单里" ────────────────────────────────────
+   * ── ★★★ 本臂改口了，而改口的理由必须写在这里（否则读的人会以为有人拆了一条约束）──
    *
-   * MEASURED（t38 实测，本任务最重要的结论）：
+   * 改前它断言的是「它**刻意不在**装配清单里」。那条断言在当时是**对的**，
+   * 而它描述的是【一个我们正在改变的决定】：
    *
-   *   ① 它**曾在真实语料上恒红**：第一版拿真实 39 条质量任务跑 ⇒ 39/39 blocked
-   *      （根因：verify 条数是仓库惯例的常数，见判据文件头）。
-   *   ② 修好之后语料上干净了（37 ok / 2 blocked，那 2 条正是已知不原子的）
-   *      —— ★ 但语料只有 **2 个正例**，而它们恰好都是"要新建目录"的
-   *      ⇒ "目录条目"与"不原子"在样本上**重合**，两个假设**无法分辨**。
-   *   ③ 而它有一条**真实的危害**：没有 verify/inScope 时它报 `unmeasured`，
-   *      而在这个插件里 **`unmeasured` 等于拒绝** ⇒ 一旦接线，
-   *      **没有 verify 的任务全部建不出来**（`pnpm verify` 的生命周期检查当场红）。
+   *   MEASURED（t38）：它曾在真实语料上恒红（39/39 blocked），修好后语料上干净，
+   *   而语料只有 **2 个正例** ⇒ "目录条目"与"不原子"在样本上重合，两个假设无法分辨。
+   *   ⇒ 按用户裁定（"先软后硬"）：那时**不接进清单**。
    *
-   * ⇒ 按用户裁定（"先软后硬"）：它是**诊断**，不是 blocker。**不接进清单。**
-   *   它的调用方是 `scripts/gate-task-atomicity-corpus.test.mjs` ——
-   *   那份夹具对**真实任务**跑它并输出读数，那才是它现在唯一能产出的价值：**攒语料**。
+   * ★★ 而 t4 接线时，它那条**真正的顾虑**被量清了，而它不是"别接线"：
    *
-   * ★ 反向半边（防恒真）：**直接 import 也必须能跑出裁决** ——
-   *   否则"不接线"会退化成"它根本没工作"，而两者在读数上同形
-   *   （本队记账：「一个没有调用方的修法，与没有修法在观测上完全相同」）。
+   *     ① `appliesTo` 为 true 的有**六类**（`QUALITY_KINDS`：requirements /
+   *        implementation / verification / review / repair / integration）；
+   *     ② 而契约层只强制**两类**要 inScope/verify（`WRITE_KINDS`：implementation / repair）；
+   *     ③ ⇒ ★ 于是 requirements / verification / review / integration 这**四类**
+   *        会走到 contract 位置 ⇒ 本判据报 `unmeasured` ⇒ 而**契约层把 unmeasured 当拒绝**
+   *        ⇒ **一个"有 verify 的 review 任务"会被拒**。
+   *
+   *   ⇒ ★ 所以危害是真的，而它的**根因不是这条判据，是【契约层把 `unmeasured` 当拒绝】**。
+   *     那正是本队那条：**「没能测量」并进「没通过」**。
+   *
+   * ★ 而本臂因此分成两半，而它们**必须不同形**：
+   *
+   *   A. **它接线了**（本任务交付，现在绿）
+   *   B. ★ **而"接线"不该等于"会拒绝"**（现在【红】—— 那是一条**待修读数**，
+   *      根因在契约层，归第二步那条任务修）
+   *
+   *   ⇒ ★★ 一条**有据的红**与一条**回归**必须不同形：本臂的红成因写在断言信息里，
+   *     而它会在第二步（契约层区分 unmeasured / blocked）落地后**自动转绿**。
    */
   const { registry } = await import('../lib/gates/index.js')
   const listed = registry.list().contract.map((entry) => entry.id)
   assert.equal(
-    listed.includes('contract.task-atomicity'), false,
-    `★ 它**刻意不在**装配清单里（它是诊断，不是 blocker；接线会让没有 verify 的任务全部建不出来）。`
+    listed.includes('contract.task-atomicity'), true,
+    `★★ 它必须在装配清单里 —— 此前它在盘上而一次都不会跑（那是本任务要消灭的缺口）。`
     + ` 实测 contract 位置：${JSON.stringify(listed)}`,
   )
 
-  /** ★ 而它**确实工作**：直接调用能给出裁决 —— 不接线 ≠ 没实现。 */
+  /** ★ 反向半边（防恒真）：**直接 import 也必须能跑出裁决** —— "接线"与"能工作"是两件事。 */
   const verdict = await gate(qualityCtx({
     verify: ['node --test scripts/a.test.mjs'],
     inScope: ['src/a.ts'],
   }))
-  assert.equal(verdict.ok, true, '★ 直接调用必须给出裁决 —— "没接线"不许退化成"没工作"')
+  assert.equal(verdict.ok, true, '★ 直接调用必须给出裁决 —— 接线不许退化成"它其实不工作"')
+
+  /**
+   * ── ★★★ B 半：**一个没有 inScope 的 review 任务，不许因为这条判据的 `unmeasured` 而被拒** ──
+   *
+   * MEASURED（t4 实测，两次独立）：
+   *
+   *     registry.evaluate('contract', { task: { kind: 'implementation', verify: ['true'] } })
+   *     ⇒ ok = false · unmeasured = YES
+   *
+   * ★ 而 `review` 这一类**过得了契约层**（`WRITE_KINDS` 不含它）⇒ 它会真的走到这里。
+   *
+   * ⇒ ★ 本断言【现在会红】，而那是一条**真的待修读数**：
+   *   成因是【契约层把 `unmeasured` 当拒绝】—— 那是「**没能测量**并进**没通过**」，
+   *   也是 `src/tools/delivery.ts` 早就定过口径的那一条
+   *   （"一个安全约束**不触发**时，应当放行并留下它没被检查的痕迹"，见那里 96-100 行）。
+   *
+   * ★★ 而与 `task-atomicity.ts` 本身无关：那条判据**诚实地**说了"我说不出"
+   *   （那是对的）—— 错的是**读它的人把"说不出"读成了"不行"**。
+   */
+  const reviewWithoutScope = await registry.evaluate('contract', {
+    task: { id: 't4-probe-review', kind: 'review', objective: 'probe: a review task with no inScope' },
+  })
+  assert.equal(
+    reviewWithoutScope.ok, true,
+    '★★★ 一个 `review` 任务（没有 inScope —— 而契约层**不要求**它有）走到 contract 位置时，'
+    + '**不许**因为 `contract.task-atomicity` 报 `unmeasured` 而被拒。\n'
+    + '    ⇒ 实测：`ok` = ' + String(reviewWithoutScope.ok)
+    + ' · `unmeasured` = ' + (reviewWithoutScope.unmeasured === undefined ? 'none' : 'YES')
+    + '\n    ⇒ ★ 这是一条【待修读数】，而它的根因是【契约层把 `unmeasured` 当拒绝】——'
+    + ' 即「**没能测量**并进**没通过**」。\n'
+    + '    ⇒ 它与该判据本身无关：判定诚实地说了"我说不出"（那是对的）；'
+    + '错的是**读它的人**把"说不出"读成了"不行"。\n'
+    + '    ⇒ 归第二步那条任务（让契约层像 `delivery.ts:96-100` 那样区分二者）；'
+    + '    那一步落地后本断言**自动转绿，本文件一个字都不用改**。',
+  )
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

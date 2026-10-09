@@ -137,6 +137,20 @@ const NEW_POSITION_GATES = [
    *   登记问的是"它装在哪个位置、会不会被求值"，而"裁决算不算数"是调用方的事。
    */
   { binding: 'runtimeLiveness', id: 'runtime.liveness', point: 'runtime' },
+  /**
+   * ── ★★★ t4（接线）：contract 位置的第三条 ───────────────────────────────────────
+   *
+   * 它此前【已在盘上、夹具也有，而一次都不会跑】—— `ALL_GATES` 里没有它
+   * ⇒ `registry.list().contract` 里读不到它 ⇒ 往那里挂的判据永远不会被求值。
+   * ★ 这与 `admission` 那三条是**同一个病**：「写了但没接线」。
+   *
+   * ★ 而它【一定会误报】（见该判据文件头），所以它自己写明要先进观察集：
+   *   ★★ 而"进观察集"的落点**不是装配点**，是那个**已经存在**的环境变量入口
+   *     （`AGENT_TEAMS_OBSERVE_GATES`）—— 臂 3e 钉住"装配点里没有第三句话"，
+   *     臂 3h 钉住"走 env 时它的裁决进 `observed.*` 而不是 `blockers`"。
+   *   ⇒ 而**登记表**这一行与观察无关：登记问的是"它装在哪个位置、会不会被求值"。
+   */
+  { binding: 'contractTaskAtomicity', id: 'contract.task-atomicity', point: 'contract' },
 ]
 
 /** 登记表里某条判据挂在哪。 */
@@ -932,7 +946,13 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
   )
   assert.deepEqual(
     census,
-    { admission: 0, contract: 2, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
+    /**
+     * ★ t4（接线）：`contract` 由 **2 → 3** —— 加的是 `contract.task-atomicity`。
+     *   ★ 而这条快照的**存在意义**正是"分布变了必须有人说得出为什么"：
+     *     那第三条此前**已在盘上而一次都不会跑**（`ALL_GATES` 里没有它），
+     *     所以这里的 2 曾经是"盘上有三条、注册表只有两条"的读数。
+     */
+    { admission: 0, contract: 3, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
     '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })
@@ -1458,4 +1478,189 @@ test('臂 4d ★ 集成臂：装配层交出的声明面就是注册表读到的
     '★ 装配层交出的声明面与注册表读到的那一份分叉了 —— 而分叉之后，核对会给出一个关于【另一份清单】的结论，读起来完全正常',
   )
   assert.ok(fromList.length > 0, '★ 集合相等在空集合上恒真 —— 注册表必须真的有判据')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3h（t4 接线）：新判据的**观察落点** = 环境变量，不是装配点 ─────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 本臂与臂 3e 是一对，而它们钉的是【两件不同的事】─────────────────────────
+ *
+ *   臂 3e  钉「装配点里**没有** `registry.observe(...)`」 —— 因为写在那里
+ *          （按 `src/gates/index.ts` 138-153 行那段实测过的理由）**观察期等于没有**
+ *   臂 3h  钉「而它**仍然能被观察**」 —— 走那个**已经存在**的入口，且**实测**它真的开火
+ *
+ * ★ 缺了本臂，3e 就成了一条"要求一件做不到的事"的规则（臂 3g 对 runtime 说过同一句话）。
+ *   而缺了 3e，本臂就会被读成"可以在装配点写 observe"。
+ *
+ * ★★ 本臂的对象是 `contract.task-atomicity` —— 它【一定会误报】，所以它自己写明要先进观察集。
+ *   ⇒ 而"进观察集"的落点由 captain 裁定为：**环境变量**（不是装配点，也不是新的注册表机制）。
+ */
+test('臂 3h ★★★ 接线臂：`contract.task-atomicity` 走环境变量时，裁决进 `observed.*` 而不是 `blockers`', async () => {
+  /**
+   * ★ 口径：**新建一个注册表实例**并显式给 `observeFromEnv`，而不是动进程环境变量。
+   *   理由与注册表自己的注释一致（`observeFromEnv` 参数存在正是为了让夹具不必碰全局状态）：
+   *   动 `process.env` 会让同一次运行里的两次求值用两套门禁，而那是最难归因的一类缺陷。
+   */
+  const module = await import('../lib/gates/contract/task-atomicity.js')
+  const build = (observeFromEnv) => {
+    const r = createGateRegistry(observeFromEnv === undefined ? {} : { observeFromEnv })
+    r.register(asRegistration(module))
+    return r
+  }
+
+  /**
+   * ★ 一份**能让这条判据适用**的 ctx：它声明了 `task`。
+   *   ★ 而"适用"是前置：一条被 `appliesTo` 跳过的判据**不开火**，
+   *     而"没开火"与"开火了但被放过"在读数上**不同形**（本队那条纪律）。
+   */
+  const context = {
+    task: {
+      id: 't4-probe', kind: 'implementation', objective: 'probe',
+      /**
+       * ★★ 让它**真的开火**的唯一条件（实测读源码得出的，不是猜）：
+       *   本判据的设计判据是 `inScope` 里有**目录条目**（以 `/` 结尾）——
+       *   那是"结构改动"，而结构改动的失败原因是**开放的**。
+       *
+       *   MEASURED（我第一版造错了 ctx）：我用的是 `['src/a.ts','docs/b.md']`
+       *   （两个文件、无目录条目）⇒ 判据**正确地**返回 `ok: true`（它不拦这类）
+       *   ⇒ 而我那句"观察中的裁决进 observed.blockers"就成了恒真的断言。
+       *   ★ 又一次"**先看清这一格测的是哪一态，再造它的输入**"。
+       */
+      inScope: ['src/gates/', 'src/tools/shared/'],
+      acceptance: ['a'],
+      verify: ['node --test scripts/a.test.mjs'],
+    },
+  }
+
+  const notObserving = await build(undefined).evaluate('contract', context)
+  const observing = await build('contract.task-atomicity').evaluate('contract', context)
+
+  /**
+   * ★★ 前置：这一轮它**真的跑了** —— 否则下面"进 observed 而不是 blockers"是恒真的
+   *   （一个没跑的判据，两个字段都是空的，而那与"放过了"同形）。
+   */
+  assert.equal(
+    notObserving.evaluated, 1,
+    '★ 前置：这份 ctx 上 `contract.task-atomicity` 必须**真的被求值**（不是 skipped）—— '
+    + '否则"没开火"与"开火了但被放过"同形，本臂什么都没测到',
+  )
+
+  /**
+   * ★★★ 本臂的核心：**同一份 ctx、同一条判据**，在观察中时
+   *     ① 裁决**不阻止流程**（`ok` 仍为 true）
+   *     ② 而它**被记录下来**（`observed.blockers` 非空）
+   *     ③ 且**不并进 `blockers`**（并进去就等于它进了裁决，而观察模式的定义就是"不进裁决"）
+   */
+  assert.equal(
+    observing.ok, true,
+    '★★★ 观察中的判据**不得拒绝流程** —— 这正是观察模式的定义，也是这条判据"一定会误报"的自保',
+  )
+  assert.deepEqual(
+    observing.blockers, [],
+    '★ 被放过的裁决**不许**并进 `blockers` —— 并进去就等于它进了裁决，而观察模式就是"不进裁决"',
+  )
+  assert.ok(
+    (observing.observed?.blockers?.length ?? 0) > 0,
+    '★★★ 而它**必须被记录**（`observed.blockers` 非空）—— 丢掉它，观察期就变成"什么都看不见"，'
+    + '那时没人能从日志里决定"这条判据该不该放出来"。★ 定向突变：从 env 名单移除它 ⇒ 本断言红',
+  )
+  assert.equal(
+    observing.observedBlockers > 0, true,
+    '★ 且"开火了但被放过"必须**可计数**（不是只能靠翻 `ran[]` 数组）',
+  )
+  assert.equal(
+    observing.ran[0]?.observed, true,
+    '★ `ran[]` 里那条条目要带 `observed` 标记 —— "开火了但被放过"与"没跑"在那里必须不同形',
+  )
+
+  /**
+   * ★ 对照：不在观察中 ⇒ 同一份 ctx 上它**照常有否决权**（缺它就无法区分
+   *   "观察期生效了"与"这条判据根本不会拒"）。
+   */
+  assert.equal(
+    notObserving.ok, false,
+    '★ 对照臂：不在观察中时，它**仍然开火**（这份 ctx 是按它的设计判据造的）—— '
+    + '缺这一条，本臂就无法区分"观察期生效"与"这条判据不会拒"',
+  )
+  assert.ok(
+    notObserving.blockers.length > 0,
+    '★ 对照：不在观察中 ⇒ 它的话进 `blockers`（两态的形状必须可分辨）',
+  )
+
+  /** ★ 而两个入口放过的必须是**同一条发现**（原文逐字相同）—— 与臂 3g 对 runtime 同一条纪律。 */
+  const viaRuntime = build(undefined)
+  viaRuntime.observe('contract.task-atomicity', { reason: 't4: observe one round before it gets a say' })
+  const observedViaCall = await viaRuntime.evaluate('contract', context)
+  assert.equal(
+    observedViaCall.observed.blockers[0], observing.observed.blockers[0],
+    '★ 环境变量与运行时调用放过的是**同一条发现**（原文逐字相同）—— 否则两个入口会分叉',
+  )
+  viaRuntime.unobserve('contract.task-atomicity')
+  assert.equal(
+    (await viaRuntime.evaluate('contract', context)).ok, false,
+    '★ `unobserve` 之后必须**立刻恢复否决权**（而这也证明前面那次"放行"是观察带来的，不是判据温和）',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3i（t4 接线）：装配点**只加了一行**，且没有重排/替换别人的行 ────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂钉的是"一人一行"这条装配点约定的**机械形式** ────────────────────────────
+ *
+ * 约定原话（`src/gates/index.ts` 顶部）：「**不要**动别人的行，也不要重排 ——
+ * 一条判据一个 import，冲突面就是那一行」。
+ *
+ * ★ 而"没动别人的行"这句话，只有**集合比对**才是证据：
+ *   · 条数对不上 ⇒ 有人加了/删了不止一行；
+ *   · 差集不是恰好那一条新接线 ⇒ 有人**替换**了某条（而替换在日志里与"新增"同形）。
+ *
+ * ★ 名单来自【装配点源码】而不是手抄：手抄的那份会在别人接线时过期。
+ */
+test('臂 3i ★★ 接线臂：`ALL_GATES` 恰好比基线多一条，且差集就是 `contractTaskAtomicity`', () => {
+  const state = wiringState()
+  const listBody = state.source.match(/const ALL_GATES = \[([\s\S]*?)\] as const/)?.[1]
+  assert.notEqual(listBody, undefined, '★ 装配锚点失效：夹具必须跟着看清新形状，而不是静默变成恒真断言')
+  const listed = [...listBody.matchAll(/^\s{2}([A-Za-z_][\w]*),$/gm)].map((match) => match[1])
+
+  /**
+   * ★ `contractTaskAtomicity` 必须在（那正是本任务的接线）。
+   */
+  assert.ok(
+    listed.includes('contractTaskAtomicity'),
+    '★★ `contractTaskAtomicity` 必须在 `ALL_GATES` 里 —— 否则这条判据【在盘上但一次都不会跑】'
+    + '（那正是本任务要消灭的缺口）。★ 定向突变：从 ALL_GATES 删掉这一行 ⇒ 本断言红',
+  )
+
+  /**
+   * ★★ 而其余那些**基线里就有的**绑定名，一个都不许消失 —— 那是"没有重排/替换别人的行"。
+   *   ★ 名单是**基线**（本任务改动之前装配点里已有的那 11 条），而它由上面那条 `listed`
+   *     之外的稳定集合表达：任何一个基线名缺失 ⇒ 红。
+   */
+  const BASELINE = [
+    'verifyRerun', 'changedPaths', 'worktree', 'r5', 'mutation', 'backtest',
+    'buildArtifactScope', 'contractVerifyCommand', 'deliveryCoverage',
+    'deliveryConvergence', 'runtimeLiveness',
+  ]
+  const missing = BASELINE.filter((binding) => !listed.includes(binding))
+  assert.deepEqual(
+    missing, [],
+    `★★ 接线时动了别人的行：这些基线绑定名在 \`ALL_GATES\` 里不见了 ${JSON.stringify(missing)} —— `
+    + '约定是"一人一行，不要重排、不要替换"。★ 而"替换"与"新增"在日志里同形，'
+    + '所以这里用**集合比对**而不是条数',
+  )
+
+  /**
+   * ★ 而顺序：**基线那 11 条之间的相对顺序不许变**（新增的那一条可以插在任何合法位置）。
+   *   ★ 这就是"没有重排"的机械形式 —— 只比集合会漏掉重排。
+   */
+  const present = listed.filter((binding) => BASELINE.includes(binding))
+  assert.deepEqual(
+    present, BASELINE,
+    '★★ 基线那 11 条的**相对顺序**变了 —— 而 `ALL_GATES` 的书写顺序 = 求值顺序（契约 §3），'
+    + '重排会让 blocker 的排列改变，而那是别人依赖的读数',
+  )
 })
