@@ -245,15 +245,21 @@ test('★★ 臂 5：判据不 import 任何 I/O（不读盘、不碰网络、�
 // 臂 6：★ 闸门口径 —— 只对"有一个任务"的 ctx 说话
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★ 臂 6：`appliesTo` 只对"有一个 task"的 ctx 说话（而**不**问它审没审）', () => {
+test('★ 臂 6：`appliesTo` 问"有没有 task"与"这道门对它适不适用"（而**不**问它审没审）', () => {
   /**
    * ★★ 关键：`appliesTo` **不许**把"没审"当作闸门 ——
    *   那会让判据在**最该说话的那一刻**（没审的项目要派）**根本不跑**，
    *   而"没跑"与"没装"在读数上同形。
    *   ⇒ 闸门问的是"有没有一个任务"，而"审没审"是本判据要回答的问题。
    */
-  assert.equal(appliesTo({ task: { id: 'a' } }), true, '★ 没审的任务**必须**进求值 —— 那是本判据存在的理由')
-  assert.equal(appliesTo({ task: { id: 'a', reviewed: completeReviewed() } }), true, '★ 审过的也要进（它要走 ok 那一支）')
+  /**
+   * ★★ 而这两条【必须给一个晚于闸门的 createdAt】—— 因为它们测的是
+   *   "新任务的没审 / 审过"，而不是存量（存量由臂 9a 测，它落"不适用"）。
+   *   ★ 不给时间戳 ⇒ 偏宽规则判"不适用" ⇒ 那两条就测的是另一件事了。
+   */
+  const fresh = PLAN_REVIEWED_GATE_ONLINE_AT + 60_000
+  assert.equal(appliesTo({ task: { id: 'a', createdAt: fresh } }), true, '★ 没审的新任务**必须**进求值 —— 那是本判据存在的理由')
+  assert.equal(appliesTo({ task: { id: 'a', createdAt: fresh, reviewed: completeReviewed() } }), true, '★ 审过的也要进（它要走 ok 那一支）')
   assert.equal(appliesTo(undefined), false, '★ 没有 ctx ⇒ 不适用（★ 定向突变 d：让它恒真 ⇒ 本断言红）')
   assert.equal(appliesTo({}), false, '★ 没有 task ⇒ 不适用')
   assert.equal(appliesTo({ task: null }), false, '★ task 为 null ⇒ 不适用')
@@ -263,7 +269,7 @@ test('★ 臂 6：`appliesTo` 只对"有一个 task"的 ctx 说话（而**不**�
    *   ★ 这就是定向突变 d 要抓的形态，而它必须由**上面那三条 false** 抓到 ——
    *     只断言 `true` 的臂会让"恒真"照绿（★ 我第一版就是这样，实测发现的）。
    */
-  const trueCases = [{ task: { id: 'a' } }, { task: { id: 'a', reviewed: completeReviewed() } }]
+  const trueCases = [{ task: { id: 'a', createdAt: fresh } }, { task: { id: 'a', createdAt: fresh, reviewed: completeReviewed() } }]
   const falseCases = [undefined, {}, { task: null }]
   for (const ctx of trueCases) assert.equal(appliesTo(ctx), true, `★ 适用：${JSON.stringify(ctx)?.slice(0, 60)}`)
   for (const ctx of falseCases) {
@@ -332,49 +338,62 @@ test('★ 臂 7（读数臂）：三种输入上的裁决，逐条给出', async
  *
  * ⇒ ★ 存量落 `unmeasured`，新任务缺席仍 `blocked`。**两半都要钉。**
  */
-test('★★★ 臂 9a：存量任务（早于闸门）⇒ unmeasured，不是 blocked', () => {
+test('★★★ 臂 9a：存量任务（早于闸门）⇒ ★【不适用】—— appliesTo 为 false，判据不开口', () => {
+  /**
+   * ── ★★★ 而我第一版把存量落成 `unmeasured`，而那是【错的】──────────────────────
+   *
+   * `docs/GATE-REGISTRY.md` 规则一逐字：
+   *   > **「可判定的事实」不得写成「没能测量」**
+   *   > 正确的表达：**不适用 ⇒ `ok`**（并要与「测过了」不同形，带跳过之类的标记）
+   *
+   * ★ 而"这条任务早于闸门"是**完全可判定**的（`createdAt` 是个数、上线时刻是常量）
+   *   ⇒ 它既不是 `unmeasured`（我没能测），也不是 `blocked`（违规）。
+   *   ⇒ ★ 它是【不适用】—— 而正确的落点是 `appliesTo` 返回 false，
+   *     因为只有那样注册表才如实报 `skipped`（"跳过了"与"跑了而通过"不同形）。
+   */
   const before = PLAN_REVIEWED_GATE_ONLINE_AT - 60_000
-  const verdict = gate({ task: { id: 'legacy', createdAt: before } })
-  assert.equal(verdict.ok, false)
-  assert.ok(
-    verdict.unmeasured !== undefined,
-    '★ 早于闸门的任务必须落 unmeasured（"我没能审，因为它在这道门之前"），而不是 blocked',
+  assert.equal(
+    appliesTo({ task: { id: 'legacy', createdAt: before } }),
+    false,
+    '★ 存量任务对这道门【不适用】⇒ appliesTo 必须为 false（那让注册表报 skipped）',
   )
-  assert.equal(verdict.blockers, undefined, '★ 存量不该产生 blockers —— 那会把它冻住')
-  assert.match(verdict.unmeasured, /postdates the task|before .*existed/i, '★ 措辞要说清成因是【门晚于任务】')
 })
 
-test('★★★ 臂 9b：新任务（晚于闸门）⇒ 缺席仍然 blocked', () => {
+test('★★★ 臂 9b：新任务（晚于闸门）⇒ appliesTo 为 true，且缺席仍然 blocked', () => {
   const after = PLAN_REVIEWED_GATE_ONLINE_AT + 60_000
-  const verdict = gate({ task: { id: 'fresh', createdAt: after } })
+  const ctx = { task: { id: 'fresh', createdAt: after } }
+  assert.equal(appliesTo(ctx), true, '★ 新任务适用这道门')
+  const verdict = gate(ctx)
   assert.equal(verdict.ok, false)
   assert.ok(
     verdict.blockers !== undefined,
     '★ 闸门上线之后建的任务，缺席必须仍然 blocked —— 这一半不许放宽',
   )
-  assert.equal(verdict.unmeasured, undefined, '★ 新任务不该落 unmeasured —— 那是给存量的')
+  assert.equal(verdict.unmeasured, undefined, '★ 新任务缺席不是 unmeasured —— 那是"没审"，是可判定的')
 })
 
-test('★★ 臂 9c：两者必须【不同形】—— 同一份输入，两条不同的补救', () => {
-  const before = gate({ task: { id: 'legacy', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT - 60_000 } })
-  const after = gate({ task: { id: 'fresh', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } })
-  assert.notDeepEqual(
-    { u: before.unmeasured !== undefined, b: before.blockers !== undefined },
-    { u: after.unmeasured !== undefined, b: after.blockers !== undefined },
-    '★ 存量与新任务若同形，那"被永久冻住"就与"我还没审"分不开了',
+test('★★★ 臂 9c：两者必须【不同形】—— 一个不开口，一个开口而拒绝', () => {
+  const legacy = { task: { id: 'legacy', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT - 60_000 } }
+  const fresh = { task: { id: 'fresh', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } }
+  assert.notEqual(
+    appliesTo(legacy),
+    appliesTo(fresh),
+    '★ 存量与新任务若同形，那"这道门对它不适用"就与"它没审"分不开了',
   )
 })
 
-test('★★ 臂 9d：createdAt 读不出 ⇒ 偏宽（unmeasured）', () => {
+test('★★ 臂 9d：createdAt 读不出 ⇒ ★【偏宽 = 不适用】', () => {
   /**
    * ★ 宁可偏宽的理由：`createdAt`（team.json 写的墙钟）与闸门上线时刻（git 写的）
-   *   **不同源** ⇒ 边界附近可能误判 ⇒ 不确定时不得读成"拒绝"。
+   *   **不同源** ⇒ 边界附近可能误判 ⇒ 不确定时不得把它读成"适用而拒绝"。
+   *   ★ 而"偏宽"在这里的具体形状是 `appliesTo === false`（不开口），
+   *     不是 `unmeasured`（开口而说测不了）—— 因为后者仍会被调用方读成拒绝。
    */
   for (const task of [{ id: 'x' }, { id: 'y', createdAt: 'not a number' }, { id: 'z', createdAt: Number.NaN }]) {
-    const verdict = gate({ task })
-    assert.ok(
-      verdict.unmeasured !== undefined,
-      `★ createdAt 读不出时应当偏宽（unmeasured），而 ${JSON.stringify(task)} 落成了别的`,
+    assert.equal(
+      appliesTo({ task }),
+      false,
+      `★ createdAt 读不出时应当偏宽（不适用），而 ${JSON.stringify(task)} 被判成了适用`,
     )
   }
 })
