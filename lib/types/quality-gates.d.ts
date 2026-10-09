@@ -95,6 +95,16 @@ export interface QualityCompletionResult {
     ok: boolean;
     error?: string;
     requiredStatus?: TaskStatus;
+    /**
+     * ── ★★★ 通过时也要说得出**凭什么**（t19 验收第 5 条）────────────────────────────
+     *
+     * 本字段是那条"允许 completed，因为失败都在基线里"留下的**读数**。
+     * ★ 缺了它，「通过」与「没有遇到失败」在读的人眼里**同形** ——
+     *   而"通过了，因为这几条都在 `<commit>` 的基线里"是**可核的**那一句。
+     * ★ 而它**不是**一块放行牌：它只在 `ok === true` 且确有存量失败时出现，
+     *   而"该不该放行"由上面的三态裁决决定，不由这里决定。
+     */
+    notes?: string[];
 }
 export interface PlannedFollowUpTask {
     id?: string;

@@ -22,7 +22,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -59,22 +59,28 @@ const refusal = (result) => String(result.error ?? '')
 /** ★ 那条"新增失败"的规则有没有开火 —— 而它与"别的规则先拦了"必须分开。 */
 const firedNewFailureRule = (result) => /NOT in the pinned baseline/.test(refusal(result))
 
-test('★★★ 臂 1：失败【逐条都在基线里】⇒ 那条规则【不开火】', () => {
+test('★★★ 臂 1：失败【逐条都在基线里】⇒ ★【放行】（而不只是"不说某句话"）', () => {
   /**
-   * ★★ 第一版这条断言只写了 `doesNotMatch(/NOT in the pinned baseline/)` ——
-   *   ★ 而定向突变（把判据退回"一律拒"）**没有让它红**，因为它没有断言"放行"，
-   *     只断言了"不说那句话"，而旧行为说的是【另一句】。
-   *   ⇒ ★ 修法：断言【它越过了那条规则】—— 用"它到达了下一个拒绝点"来证明。
-   *     `verification completion requires a passed commandsRun entry…` 是那条规则**之后**的规则，
-   *     所以"报的是它"就证明【基线那条没拦】。
+   * ── ★★★ 而这条臂我改过一次，而改它的理由值得记 ────────────────────────────────
+   *
+   * ★ 第一版断言的是「它到达了【下一个拒绝点】」—— 用 `requires a passed commandsRun entry`
+   *   那一句当"越过基线那条"的证据。
+   *   ★★ 而 `t19` 的作者把那个【堵点】拆掉了（`verifyCovered` 现在也认基线）——
+   *     于是那一句【不再出现】⇒ 本臂红。
+   *   ⇒ ★ 而它红得对：**我把"当前实现的某个细节"当成了不变量** ——
+   *     一个棘轮（ratchet），而它的前提是"那个堵点会一直在"。
+   *     ★ 而那正是我在 t10 修过的臂 3i 的同族。
+   *
+   * ⇒ 现在断言的是【真正的性质】：失败逐条都在基线里 ⇒ `ok === true`（放行）。
+   *   ★ 它不依赖任何中间消息，所以堵点拆掉之后它【仍然成立】。
    */
   const result = evaluateQualityCompletion(task(), update([known[0].test, known[1].test]))
-  assert.equal(firedNewFailureRule(result), false, '★ 全在基线里 ⇒ 那条规则不许开火')
-  assert.match(
-    refusal(result),
-    /requires a passed commandsRun entry/,
-    '★ 而它必须【越过】基线那条，走到后面那条 —— 报别的话说明我没测到这条',
+  assert.equal(
+    result.ok,
+    true,
+    '★ 失败逐条都在基线里 ⇒ 必须【放行】—— 而那正是 17 条任务不可达 completed 的成因被拆掉之后的样子',
   )
+  assert.equal(firedNewFailureRule(result), false, '★ 而那条"新增失败"的规则不许开火')
 })
 
 test('★★★ 臂 2：至少一条【不在】基线里 ⇒ ★ 仍然拒（那一半没放宽）', () => {
@@ -105,18 +111,26 @@ test('★★ 臂 4：【集合比对】而不是计数', () => {
   )
 })
 
-test('★★ 臂 5：基线清单读不出来 ⇒ 判不了（不许读成"基线是空的"）', () => {
+test('★★ 臂 5：基线清单【读不出来】与【是空的】必须不同形', () => {
   /**
-   * ★ 反向半边：`baselineKnownFailures()` 读不到时必须返回 `undefined`（判不了），
-   *   而【不是】空数组 —— 空数组意味着"仓库里没有存量红"，而那是错的。
-   *   ★ 本臂用源码文本核那一条（本脚本不 import 产品内部函数）。
+   * ★★ 第一版钉的是旧实现里的一句字面（`return names.length === 0 ? undefined : names`）——
+   *   而 t19 的作者重构了那个函数 ⇒ 字面消失 ⇒ 本臂红。
+   *   ⇒ ★ 同一条棘轮：**把实现细节当不变量**。
+   *
+   * ⇒ 现在钉【行为】：`baselineKnownFailures()` 读不到清单时必须返回 `undefined`
+   *   （= 判不了），而**不是**空数组（= "仓库里没有存量红"，而那是错的）。
+   *   ★ 做法：把清单文件临时换成一个空数组，看裁决是"判不了"还是"没事"。
    */
-  const src = readFileSync(join(ROOT, 'src', 'quality-gates.ts'), 'utf8')
-  assert.match(
-    src,
-    /return names\.length === 0 \? undefined : names/,
-    '★ 空清单必须落 `undefined`（判不了），而不是空数组（"没有存量红"）',
-  )
+  const fixture = join(ROOT, 'scripts', 'fixtures', 'baseline-known-failures.json')
+  const original = readFileSync(fixture, 'utf8')
+  try {
+    writeFileSync(fixture, JSON.stringify({ schema: 1, knownFailures: [] }), 'utf8')
+    const result = evaluateQualityCompletion(task(), update([known[0].test]))
+    assert.equal(result.ok, false, '★ 空清单 ⇒ 判不了 ⇒ ★ 不许读成"没有存量红"')
+    assert.match(refusal(result), /could not be measured/, '★ 而措辞必须说"测不了"')
+  } finally {
+    writeFileSync(fixture, original, 'utf8')
+  }
 })
 
 test('★★★ 臂 6：`failures` 必须【真的送达】判据 —— 而它缺两环（verifier 在 t40 上查出的）', () => {

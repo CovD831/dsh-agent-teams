@@ -140,6 +140,16 @@ export interface QualityCompletionResult {
   ok: boolean
   error?: string
   requiredStatus?: TaskStatus
+  /**
+   * ── ★★★ 通过时也要说得出**凭什么**（t19 验收第 5 条）────────────────────────────
+   *
+   * 本字段是那条"允许 completed，因为失败都在基线里"留下的**读数**。
+   * ★ 缺了它，「通过」与「没有遇到失败」在读的人眼里**同形** ——
+   *   而"通过了，因为这几条都在 `<commit>` 的基线里"是**可核的**那一句。
+   * ★ 而它**不是**一块放行牌：它只在 `ok === true` 且确有存量失败时出现，
+   *   而"该不该放行"由上面的三态裁决决定，不由这里决定。
+   */
+  notes?: string[]
 }
 
 export interface PlannedFollowUpTask {
@@ -1010,29 +1020,79 @@ function openHighFindings(findings: readonly ReviewFinding[] | undefined): Revie
 /**
  * 读【钉住的基线已知失败】清单（`scripts/fixtures/baseline-known-failures.json`，t18 的产物）。
  *
- * ★ 三态而非布尔：读得到 ⇒ 名字数组；读不到 / 形状不对 ⇒ `undefined`（= 判不了）。
+ * ★ 三态而非布尔：读得到 ⇒ 名字数组 + **它是谁钉的**；读不到 / 形状不对 ⇒ `undefined`（= 判不了）。
  *   ⇒ ★ 而调用方拿 `undefined` 时必须【保守】（仍拒）——
  *     把"读不到清单"读成"清单是空的"就等于说"仓库里没有存量红"，而那是错的。
+ *
+ * ── ★★★ 为什么返回值里必须带上「基线是什么」（t19 验收第 5 条）────────────────────
+ *
+ * 判据说「这几条失败**在基线里**」时，它引用的是一个**参照物**。
+ * ★ 而一个说不出自己参照物是什么的判断，读的人**无从核它**：
+ *   基线是哪一次测的？那时的仓库存量红是哪几条？—— 两个问题都必须有答案，
+ *   否则"存量"这个词在这句话里只是一个**承诺**，而不是一个事实。
+ *
+ * ⇒ 所以这里连同名单一起交出那两格（`_verified_at` / `_pinned_by`）：
+ *     · `at`      —— 那次测量所基于的 commit（`_verified_at` 的行首 ref）
+ *     · `by`      —— 谁钉的（`_pinned_by`）
+ *   ★ 而**任何一格读不出来** ⇒ 整份判不了（不是"那一格空着"）：
+ *     一个说不出参照物的基线，与一个说不清在哪测出来的读数**同形** ——
+ *     而"同形"正是本仓那条纪律要拦的东西。
+ *
+ * ★ 注意这**没有**让判定更宽：`at/by` 读不到 ⇒ `undefined` ⇒ 调用方仍【保守地拒】。
+ *   它只是把"我凭什么说它是存量"这件事**从注释搬进了读数**。
  */
-function baselineKnownFailures(): string[] | undefined {
+interface BaselinePin {
+  readonly names: readonly string[]
+  /** 那次测量所基于的 commit / ref（从 `_verified_at` 的行首取）。 */
+  readonly at: string
+  /** 谁钉的（`_pinned_by`）。 */
+  readonly by: string
+}
+
+/**
+ * 从 `_verified_at` 的自由文本里取出行首那个 ref。
+ *
+ * ★ 那一段是**给人读的**（`ba32130（本 worktree 的 HEAD，且无源码改动）。★ 名单由…`），
+ *   所以只取**第一个 token**，并要求它看起来像一个 ref（十六进制串 / 常见的 ref 名）。
+ *   ★ 取不到 ⇒ 返回 `undefined` ⇒ 整份判不了（不猜一个"大概的" commit）。
+ */
+function pinRefFromVerifiedAt(text: string): string | undefined {
+  const head = text.trim().split(/[\s（(]/)[0] ?? ''
+  /** ★ 只接受两种形状：7 位以上的十六进制串，或 `refs/…` / 常见的分支名式 token。 */
+  if (/^[0-9a-f]{7,40}$/i.test(head)) return head
+  if (/^refs\/[\w./-]+$/.test(head)) return head
+  return undefined
+}
+
+function baselinePin(): BaselinePin | undefined {
   try {
     const raw = readFileSync(join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'), 'utf8')
-    const parsed = JSON.parse(raw) as { knownFailures?: unknown }
+    const parsed = JSON.parse(raw) as { knownFailures?: unknown; _verified_at?: unknown; _pinned_by?: unknown }
     const entries = parsed.knownFailures
     if (!Array.isArray(entries)) return undefined
     const names = entries
       .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { test?: unknown }).test : undefined))
       .filter((name): name is string => typeof name === 'string' && name.trim() !== '')
       .map((name) => name.trim())
-    return names.length === 0 ? undefined : names
+    if (names.length === 0) return undefined
+    /** ★★ 参照物那两格：任一格读不出来 ⇒ 判不了（见上面的注释）。 */
+    const atText = typeof parsed._verified_at === 'string' ? parsed._verified_at.trim() : ''
+    const by = typeof parsed._pinned_by === 'string' ? parsed._pinned_by.trim() : ''
+    const at = atText === '' ? undefined : pinRefFromVerifiedAt(atText)
+    if (at === undefined || by === '') return undefined
+    return { names, at, by }
   } catch {
     return undefined
   }
 }
 
+/**
+ * ★ 前两态都带上 `at`/`by`：**这份判断引用的基线是什么**（t19 验收第 5 条）。
+ *   `undecidable` 不带 —— 它没有引用任何基线（那正是它判不了的原因）。
+ */
 type VerifyFailureDistinction =
-  | { kind: 'no-new-failures'; total: number; baseline: number }
-  | { kind: 'new-failures'; names: string[] }
+  | { kind: 'no-new-failures'; total: number; baseline: number; at: string; by: string }
+  | { kind: 'new-failures'; names: string[]; alsoInBaseline: string[]; at: string; by: string }
   | { kind: 'undecidable'; why: string }
 
 function classifyVerifyFailures(failedCommands: readonly CommandResult[]): VerifyFailureDistinction {
@@ -1057,22 +1117,35 @@ function classifyVerifyFailures(failedCommands: readonly CommandResult[]): Verif
   if (names.length === 0) {
     return { kind: 'undecidable', why: 'a verify command failed but named no failing tests' }
   }
-  /** ③ 基线清单读不出来 ⇒ 判不了（不许读成"基线是空的"）。 */
-  const baseline = baselineKnownFailures()
-  if (baseline === undefined) {
-    return { kind: 'undecidable', why: 'the pinned baseline of known failures could not be read, so "is this one new" could not be answered' }
+  /**
+   * ③ 基线读不出来 ⇒ 判不了（不许读成"基线是空的"）。
+   *   ★ 而"读不出来"含**两种**：名单读不出，或**参照物读不出**（见 `BaselinePin`）。
+   */
+  const pin = baselinePin()
+  if (pin === undefined) {
+    return { kind: 'undecidable', why: 'the pinned baseline of known failures could not be read (either its list or the commit it was measured at), so "is this one new" could not be answered' }
   }
-  const known = new Set(baseline)
+  const known = new Set(pin.names)
   const fresh = names.filter((name) => !known.has(name))
+  const alsoInBaseline = names.filter((name) => known.has(name))
   return fresh.length === 0
-    ? { kind: 'no-new-failures', total: names.length, baseline: known.size }
-    : { kind: 'new-failures', names: fresh }
+    ? { kind: 'no-new-failures', total: names.length, baseline: known.size, at: pin.at, by: pin.by }
+    : { kind: 'new-failures', names: fresh, alsoInBaseline, at: pin.at, by: pin.by }
 }
 
 function distributionError(distinction: VerifyFailureDistinction): string {
   if (distinction.kind === 'new-failures') {
     return 'verify failure must fail the task: these failures are NOT in the pinned baseline, so this delivery introduced them — '
       + distinction.names.join(' · ')
+      + ` (baseline: ${distinction.at}, pinned by ${distinction.by})`
+      /**
+       * ★★ 而**基线里那几条也要点名**（t19 臂 2）：否则读的人只看到"新的那些"，
+       *   无从分辨"这一堆里哪条是旧的、哪条是新的" —— 而分辨它们**正是这条判据的产物**。
+       *   ★ 而措辞必须说清"这些**不是**拒的原因"，免得读的人以为它们也有问题。
+       */
+      + (distinction.alsoInBaseline.length === 0
+        ? ''
+        : `. Not the reason for the refusal (they are in the baseline): ${distinction.alsoInBaseline.join(' · ')}`)
   }
   if (distinction.kind === 'undecidable') {
     return 'verify failure must fail the task, and whether it is new could not be measured: '
@@ -1080,6 +1153,18 @@ function distributionError(distinction: VerifyFailureDistinction): string {
       + ' — "could not measure" is not "nothing new", so this stays refused.'
   }
   return 'verify failure must fail the task'
+}
+
+/**
+ * ── ★★ 而这句是**读数**，不是错误信息：交付【允许通过】时也必须说得出参照物 ─────────
+ *
+ * 它给调用方用来在"允许 completed"那条路上留痕 ——
+ * ★ 否则"它通过了"与"它没有遇到失败"在读的人眼里同形，
+ *   而"通过了，因为这几条都在 `<commit>` 的基线里"是**可核的**那一句。
+ */
+function noNewFailuresNote(distinction: VerifyFailureDistinction & { kind: 'no-new-failures' }): string {
+  return `${distinction.total} verify failure(s) are all in the pinned baseline `
+    + `(${distinction.at}, pinned by ${distinction.by}; ${distinction.baseline} known), so none of them is new here`
 }
 
 function acceptanceCovered(required: readonly string[] | undefined, results: readonly AcceptanceResult[] | undefined): boolean {
@@ -1093,11 +1178,53 @@ function acceptanceCovered(required: readonly string[] | undefined, results: rea
   return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
 }
 
+/**
+ * ── ★★★ `verify` 的每一条都被"覆盖"了吗（t19 修）─────────────────────────────────
+ *
+ * MEASURED（t19，本任务把这条量了出来）：
+ *   本函数**曾经**只认 `status === 'passed'`（逐字）：
+ *
+ *     if ((required ?? []).every((command) => byCommand.get(command)?.status === 'passed')) return true
+ *     return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+ *
+ *   ⇒ ★★ 而它与 `classifyVerifyFailures` **对同一份 `commandsRun` 说话**：
+ *     后者刚刚（在它之前）判出"这些失败都在基线里 ⇒ 允许 completed"，
+ *     而本函数随后**无条件**要求每条 `passed` ⇒ **放行被架空**。
+ *
+ *   机械读数（t19 实测，同一份输入只动 `verify` 列表）：
+ *     verify = ['pnpm test:gates']（该命令红、而失败全在基线里）
+ *       ⇒ `{ ok: false, error: '… requires a passed commandsRun entry for every verify command' }`
+ *       ★ 而那句来自【本函数】，不是来自三态裁决 —— 三态的放行【到不了】
+ *     verify 只声明会绿的那条、把红的放进 `commandsRun` 但不列进 `verify`
+ *       ⇒ `{ ok: true, notes: ['1 verify failure(s) are all in the pinned baseline …'] }`
+ *   ⇒ ★ 同一个仓库事实，只因【它有没有被列进 verify】而给出相反裁决。
+ *
+ * ── 修法的边界（**不许放宽方向**）──────────────────────────────────────────────
+ *
+ *   一条 `failed` 的命令只有当**它的失败逐条都在钉住的基线里**时才算"覆盖"。
+ *   ⇒ 而"新增了失败"仍然不覆盖（那一半不许松）；"判不了"也仍然不算覆盖（保守）。
+ *   ★ 判据**不是**"命令是红的也能算覆盖"，而是"**这条红不是这次带来的**"。
+ */
 function verifyCovered(required: readonly string[] | undefined, results: readonly CommandResult[] | undefined): boolean {
   if (results === undefined) return false
   const byCommand = new Map(results.map((item) => [item.command, item]))
+  /** ① 老路：每条都被一条 `passed` 的记录覆盖 ⇒ 覆盖（这一支一个字没动）。 */
   if ((required ?? []).every((command) => byCommand.get(command)?.status === 'passed')) return true
-  return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+  /**
+   * ② 新路：某条 `verify` 命令是 `failed`，而**它的失败逐条都在基线里** ⇒ 也算覆盖。
+   *    ★ 而它复用**同一个** `classifyVerifyFailures` —— 不许在这里另写一套"算不算存量"
+   *      （两套会分叉，而分叉之后"这条算不算新"在两处给出不同答案，本仓那条纪律正是拦这个）。
+   */
+  const failedRequired = (required ?? [])
+    .map((command) => byCommand.get(command))
+    .filter((item): item is CommandResult => item !== undefined && item.status === 'failed')
+  if (failedRequired.length === 0) {
+    /** 没有任何一条 `verify` 是"有记录且红"的 ⇒ 老路那条 `every(passed)` 已经判过了。 */
+    return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+  }
+  const distinction = classifyVerifyFailures(failedRequired)
+  /** ★ 只有 `no-new-failures` 才算覆盖；`new-failures` 与 `undecidable` 都不算。 */
+  return distinction.kind === 'no-new-failures'
 }
 
 /**
@@ -1117,6 +1244,11 @@ export function evaluateQualityCompletion(
   update: QualityCompletionUpdate,
 ): QualityCompletionResult {
   const nextStatus = update.status
+  /**
+   * ★ 存量失败那一格的读数**跨块**要用（`ok: true` 那几条路上要把它交出去）⇒ 声明在这里。
+   *   ★ 放在内层块里会让最后那个 `return` 读不到它（而那正是"编译期就能抓到"的一类错）。
+   */
+  let baselineNote: string | undefined
   if (nextStatus !== undefined && nextStatus !== task.status) {
     if (!STATUS_TRANSITIONS[task.status].includes(nextStatus)) {
       return { ok: false, error: `task status cannot move from "${task.status}" to "${nextStatus}"` }
@@ -1181,9 +1313,18 @@ export function evaluateQualityCompletion(
             requiredStatus: 'failed',
           }
         }
+        /**
+         * ★★ 放行了，而**留痕**：这一条就是"凭什么"。★ 它同时把基线**是哪一次**说出来 ——
+         *   否则读的人无法核"那几条当初真的在基线里"。
+         */
+        baselineNote = noNewFailuresNote(distinction)
       }
     }
-    if (nextStatus !== 'completed') return { ok: true }
+    /**
+     * ★ 非完成态：`baselineNote` 若在场（= 这次交付带着存量失败、而没要求 completed）
+     *   也一并交出 —— "仓库现在有红"这件事与"我要不要交完成态"无关，而读的人该知道。
+     */
+    if (nextStatus !== 'completed') return baselineNote === undefined ? { ok: true } : { ok: true, notes: [baselineNote] }
     const acceptanceResults = update.acceptanceResults ?? task.acceptanceResults
     if (acceptanceResults === undefined || !acceptanceCovered(task.acceptance, acceptanceResults)) {
       return { ok: false, error: `${kind} completion requires passed acceptanceResults for every acceptance item` }
@@ -1204,7 +1345,7 @@ export function evaluateQualityCompletion(
       }
     }
   }
-  return { ok: true }
+  return baselineNote === undefined ? { ok: true } : { ok: true, notes: [baselineNote] }
 }
 
 function unresolvedFindings(task: TeamTask): ReviewFinding[] {
