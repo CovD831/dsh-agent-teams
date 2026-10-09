@@ -171,6 +171,32 @@ export declare function spawnMember(ctx: Context, config: MemberRuntimeConfig, s
  */
 export declare function deliverToMember(ctx: Context, captain: Agent, childId: string, text: string, signal: AbortSignal, mode?: 'queue' | 'steer'): Promise<boolean>;
 /**
+ * ── ★★★ 投递的【带成因】版本 —— 因为 `false` 与"没票可送"在读法上同形（t43）────
+ *
+ * MEASURED（2026-10-10 00:1x，captain 实测）：
+ *   派发链上前面每一格都是好的（闸门不扣 · 成员 idle · `nextReadyTask` 找得到 ·
+ *   任务过门 · captain 能解析），★ 而票【仍然送不出去】。
+ *   而那一格是：
+ *   ```js
+ *   catch (error) { ctx.logger.warn(…); return false }   // ★ 只写日志，不写记录
+ *   ```
+ *   ⇒ ★ 调用方 `if (accepted) {…}` ⇒ 不进 ⇒ **静默回滚**（attempt 退回、status 回 pending）
+ *   ⇒ ★ 而 team.json 上：任务仍 pending · attempt 不推进 · 成员 idle
+ *   ⇒ ★ **与"根本没人触发派发"完全同形。**
+ *
+ * ★★ 后果（本会话实测）：captain 反复"重派"、反复"调 status"、反复让用户"重启" ——
+ *   而每一次【失败的方式都一样】，而每一次【都看不见】。
+ *
+ * ⇒ 所以本函数把成因【交出来】，而调用方负责把它写进【别人读得到的地方】。
+ *   ★ 三态：ok / failed{reason} —— 而"失败"与"未尝试"因此不同形。
+ */
+export declare function deliverToMemberDetailed(ctx: Context, captain: Agent, childId: string, text: string, signal: AbortSignal, mode?: 'queue' | 'steer'): Promise<{
+    ok: true;
+} | {
+    ok: false;
+    reason: string;
+}>;
+/**
  * Request cancellation of one live member's current turn. Best effort, fire
  * and return; the target may keep running until it observes the signal.
  * @param ctx - the plugin context (injects `subagents`).

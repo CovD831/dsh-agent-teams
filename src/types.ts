@@ -336,6 +336,28 @@ export interface TeamTask {
   handoffFromMemberId?: string
   /** A handoff is quiescing the old owner; the scheduler must not dispatch it yet. */
   reassigning?: boolean
+  /**
+   * ── ★★★ 上一次【投递失败】的成因（t43）──────────────────────────────────────
+   *
+   * MEASURED（2026-10-10）：派发链上前面每一格都是好的，而票送不出去 ——
+   *   因为 `deliverToMember` 的 catch **只写 `logger.warn`**，而 `warn` 不进 `team.json`。
+   *   ⇒ 调用方 `if (accepted) {…}` 不进 ⇒ **静默回滚** ⇒ 任务回 pending。
+   *   ⇒ ★ 而那与"根本没人触发派发"在 `team.json` 上**完全同形**。
+   *
+   * ★★ 后果（本会话实测）：captain 反复重派、反复调 status、反复让用户重启 ——
+   *   而每一次失败的方式都一样，而**每一次都看不见**。
+   *
+   * ⇒ 所以失败必须落进【别人读得到的地方】。★ 而它同时要说清【是哪一次尝试】，
+   *   否则一条旧的失败原因会与"这次又失败了"同形。
+   */
+  deliveryFailure?: {
+    /** 何时失败（墙钟）。 */
+    at: number
+    /** 当时那一代的 attempt 序号 —— ★ 缺了它，旧失败与本次失败同形。 */
+    attempt: number
+    /** 投递是怎么失败的（底层错误原文）。 */
+    reason: string
+  }
   /** Quality-gate kind. Missing values are treated as `work`. */
   kind?: TaskKind
   /** Review / requirements / repair loop index, 1-based when present. */

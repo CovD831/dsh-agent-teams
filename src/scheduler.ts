@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
-import { deliverToMember } from './members.ts'
+import { deliverToMember, deliverToMemberDetailed } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
 import { createTaskWorktree, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
 import { restartQueueFrom } from './tools/shared/entities.ts'
@@ -985,9 +985,18 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
 
         const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)
         const signal = new AbortController().signal
-        const accepted = config.dispatch === undefined
-          ? await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)
-          : await config.dispatch(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
+        /**
+         * ★★★ t43：把投递结果【带成因】地取回来 —— 见下面的失败分支。
+         *   ★ 旧写法 `accepted = await deliverToMember(…)` 丢掉成因，
+         *     而 `if (accepted) {…}` 之外【什么都不记】⇒ 静默回滚。
+         */
+        const delivered = config.dispatch === undefined
+          ? await deliverToMemberDetailed(ctx, captain, ticket.memberId, prompt, signal)
+          : await (async () => {
+            const ok = await config.dispatch!(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
+            return ok ? { ok: true as const } : { ok: false as const, reason: 'the configured dispatch hook returned false' }
+          })()
+        const accepted = delivered.ok
         if (accepted) {
           /**
            * ★ runtime 位置的接线（t6）：投递【被接受之后】才记录这次派发。
@@ -1037,6 +1046,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             task.assignee = ticket.previousAssignee
             task.attemptId = undefined
             parkedAttempts.delete(ticket.memberId)
+          }
+          /**
+           * ★★★ t43：把【投递失败】写进记录 —— 而它是本格存在的全部理由。
+           *
+           * ★ 它必须落在这里（回滚处），因为那是【唯一知道"这次派发试过而没有送达"】的位置。
+           * ★ 而它带 `attempt`：一条旧的失败原因与"这次又失败了"必须不同形。
+           * ★ 而它在成功派发时【不被清】—— 见下面 `onDispatched` 那一支（那里会删它）。
+           */
+          if (!delivered.ok) {
+            task.deliveryFailure = { at: Date.now(), attempt: ticket.attempt, reason: delivered.reason }
           }
           task.handoffId = undefined
           task.reassigning = false
