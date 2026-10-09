@@ -301,8 +301,31 @@ const DELIVERABLE_TASKS = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CALLS = {
+  /**
+   * ── ★★★ t39：`contract` 与 `dispatch` 现在【同在 `create_task` 上】───────────────
+   *
+   * ★ `create_task` 一次调用**穿过两个位置**：`contract`（契约合法性）与
+   *   `dispatch`（派发前审过了吗）。而这是 t39 之后的新格局 ——
+   *   此前 `dispatch` 挂在 `update_task` 上（而那里没有一次是派发）。
+   *
+   * ★★ 所以两者都带 `reviewed`：本文件测的是【每个位置的出口形状】，
+   *   而"没审会被拦"不是它的自变量（那由 t39 自己的夹具覆盖）。
+   *   ⇒ ★ 补全五问也必要：判据要求五问都有答案，
+   *     而"只答一问"会被拒（实测措辞：「A stamp that answers 1 of 5 questions
+   *     is not a review」）。
+   */
   contract: (f) => f.call('agent_teams_create_task', {
     subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
+    reviewed: {
+      at: 1, by: 'probe',
+      checks: [
+        { id: 'scope', verdict: 'pass' },
+        { id: 'prerequisite', verdict: 'pass' },
+        { id: 'move', verdict: 'pass' },
+        { id: 'acceptance', verdict: 'pass' },
+        { id: 'boundary', verdict: 'pass' },
+      ],
+    },
   }),
   /**
    * ★★ `update_task` 一次调用穿过**两个**位置。
@@ -315,9 +338,30 @@ const CALLS = {
    * ★ 本文件因此对 dispatch / completion 一律走**拒绝路径 + 成功路径两条**：
    *   结论挂在哪一侧由调用自己的结局决定，而两条都读得到才是"总是出现"的完整含义。
    */
-  dispatch: (f) => f.call('agent_teams_update_task', {
-    task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
-  }, 'member-1'),
+  /**
+   * ── ★★★ t39：`dispatch` 改走 `create_task`（真正的派发那一刻）─────────────────────
+   *
+   * ★ 它此前走 `update_task` —— 因为那个插入点的求值挂在那里。
+   *   而 `update_task` 的四种状态**没有一次是派发**（`in_progress` 是成员报到、
+   *   `completed`/`failed` 收口、`cancelled` 撤销）。
+   *   ⇒ 把活交给成员发生在 `kickTeam`，而 `create_task`（与 `reassign`）是调它的那两处。
+   *
+   * ★★ 而 `update_task` 现在【只穿过 `completion` 一个位置】——
+   *   所以下面 `completion` 那条调用**不再**顺带把 dispatch 也带出来。
+   */
+  dispatch: (f) => f.call('agent_teams_create_task', {
+    subject: 'w-dispatch', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
+    reviewed: {
+      at: 1, by: 'probe',
+      checks: [
+        { id: 'scope', verdict: 'pass' },
+        { id: 'prerequisite', verdict: 'pass' },
+        { id: 'move', verdict: 'pass' },
+        { id: 'acceptance', verdict: 'pass' },
+        { id: 'boundary', verdict: 'pass' },
+      ],
+    },
+  }),
   completion: (f) => f.call('agent_teams_update_task', {
     task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
   }, 'member-1'),
@@ -417,7 +461,7 @@ function freshWorkspace(label) {
 /** 四条"由本任务补齐"的调用点 —— 臂里反复用。 */
 const PATCHED_SITES = [
   ['contract', 'contract（create_task）'],
-  ['dispatch', 'dispatch（update_task 第一步）'],
+  ['dispatch', 'dispatch（create_task）'],
   ['completion', 'completion（update_task 第二步）'],
   ['delivery_status', 'delivery（agent_teams_status）'],
   ['delivery_declare', 'delivery（declare_delivery）'],
@@ -912,7 +956,7 @@ test('★ 臂 4：补了结构化出口之后，**给人看的那一条 logger.w
       pattern: /create_task reached the contract gate with an unfinished input surface/,
     },
     {
-      siteKey: 'dispatch', label: 'dispatch（update_task 第一步）', probe: true, tasks: [IMPL_TASK],
+      siteKey: 'dispatch', label: 'dispatch（create_task）', probe: true, tasks: [IMPL_TASK],
       pattern: /update_task reached the dispatch gate with an unfinished input surface/,
     },
     {

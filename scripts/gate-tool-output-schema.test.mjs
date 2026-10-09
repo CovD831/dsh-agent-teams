@@ -145,9 +145,24 @@ const DIAGNOSTIC_FIELDS = {
  */
 const EMITTERS = {
   // execute 的返回里挂了 contractGateSurface(input_surface) 与 contractRuntimeRecord(runtime_gates)
-  agent_teams_create_task: ['input_surface', 'runtime_gates'],
+  /**
+   * ★★★ t39：`create_task` 现在也产 `dispatch_input_surface` ────────────────────────
+   *
+   * ★ 而这是【真变动】，不是登记表跟着改：`dispatch` 那个插入点的求值从
+   *   `update_task` **搬到了 `create_task`**（真正的派发那一刻 —— `kickTeam` 之前），
+   *   因为 `update_task` 的四种状态**没有一次是派发**。
+   *
+   * ★★ 所以这一格的位置名出口 【换了一个工具产出】：
+   *     `agent_teams_update_task`   ⇒ 不再有 `dispatch_input_surface`（只剩 completion）
+   *     `agent_teams_create_task`   ⇒ 开始有它
+   *
+   * ★ 而本臂（对账臂）的职责正是抓这个：**产出面变了而登记表没跟 ⇒ 表太窄**。
+   *   实测它当场报「源码产出面里有 "dispatch_input_surface"，而参考表没登记它」。
+   */
+  agent_teams_create_task: ['input_surface', 'runtime_gates', 'dispatch_input_surface'],
   // 一次调用穿过两个位置 ⇒ 挂两格**位置名**；另有 runtimeGateRecord
-  agent_teams_update_task: ['runtime_gates', 'dispatch_input_surface', 'completion_input_surface'],
+  // ★ t39 之后 `update_task` 只承载 **completion**（dispatch 已搬去 create_task）
+  agent_teams_update_task: ['runtime_gates', 'completion_input_surface'],
   // 改契约那条路：amended.input_surface
   agent_teams_amend_task: ['input_surface'],
   /**
