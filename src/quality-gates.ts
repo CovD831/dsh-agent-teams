@@ -1239,6 +1239,61 @@ function verifyCovered(required: readonly string[] | undefined, results: readonl
  *   本文件（`quality-gates.ts`）保持【零 I/O 的纯规则】这一纪律，判据层在它外面。
  */
 
+
+export type ContractGateDisposition = 'ok' | 'blocked' | 'unmeasured'
+
+export interface ContractGateReading {
+  /** ★ 三态之一 —— 而它决定**处置**，不是决定"要不要看一眼"。 */
+  readonly disposition: ContractGateDisposition
+  /** ★ 要不要**拒绝**这次调用。`blocked` ⇒ 是；另两态 ⇒ 否。 */
+  readonly rejects: boolean
+  /**
+   * ★ 要不要**留痕**（"这一步没被检查"）。
+   *   ★ 只有 `unmeasured` 为真 —— 它是那条口径的落点：**放行，但别静默**。
+   *   ★ `ok` **不留痕**：一个每次都通过的判据不该把日志淹掉。
+   */
+  readonly leavesTrace: boolean
+  /** ★ 可读的理由（给人看的那一份）。三态**措辞不同形**。 */
+  readonly reason: string
+}
+
+export function readContractGateVerdict(gates: {
+  readonly ok: boolean
+  readonly blockers: readonly string[]
+  readonly unmeasured?: string | undefined
+}): ContractGateReading {
+  /**
+   * ★★★ 顺序有理由：**`unmeasured` 先判**。
+   *   一份裁决可以同时 `ok:false` 而 `blockers` 为空（那就是 `unmeasured` 的形状）。
+   *   ⇒ 先判 `blockers` 会把"测不了"读成"不行"，而那是本条要修的那条错的**镜像**。
+   */
+  if (gates.unmeasured !== undefined) {
+    return {
+      disposition: 'unmeasured',
+      rejects: false,
+      leavesTrace: true,
+      reason: `the contract gate could not measure this: ${gates.unmeasured}`
+        + ' ★ That is "I could not tell", not "it is wrong" — so the contract is allowed through '
+        + 'and the fact that this step was NOT checked is recorded. A safety constraint that does '
+        + 'not fire must not refuse everything.',
+    }
+  }
+  if (gates.blockers.length > 0) {
+    return {
+      disposition: 'blocked',
+      rejects: true,
+      leavesTrace: false,
+      reason: `the contract gate refused this: ${gates.blockers.join('; ')}`,
+    }
+  }
+  return {
+    disposition: 'ok',
+    rejects: false,
+    leavesTrace: false,
+    reason: 'the contract gate evaluated this and found nothing to refuse',
+  }
+}
+
 export function evaluateQualityCompletion(
   task: TeamTask,
   update: QualityCompletionUpdate,

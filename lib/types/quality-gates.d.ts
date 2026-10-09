@@ -391,6 +391,26 @@ export declare function validateCreateTask(team: TeamState, input: CreateTaskInp
  *   两处都实现"重跑 verify"，改一处不改另一处时，其中一份变成死代码而没人知道。
  *   本文件（`quality-gates.ts`）保持【零 I/O 的纯规则】这一纪律，判据层在它外面。
  */
+export type ContractGateDisposition = 'ok' | 'blocked' | 'unmeasured';
+export interface ContractGateReading {
+    /** ★ 三态之一 —— 而它决定**处置**，不是决定"要不要看一眼"。 */
+    readonly disposition: ContractGateDisposition;
+    /** ★ 要不要**拒绝**这次调用。`blocked` ⇒ 是；另两态 ⇒ 否。 */
+    readonly rejects: boolean;
+    /**
+     * ★ 要不要**留痕**（"这一步没被检查"）。
+     *   ★ 只有 `unmeasured` 为真 —— 它是那条口径的落点：**放行，但别静默**。
+     *   ★ `ok` **不留痕**：一个每次都通过的判据不该把日志淹掉。
+     */
+    readonly leavesTrace: boolean;
+    /** ★ 可读的理由（给人看的那一份）。三态**措辞不同形**。 */
+    readonly reason: string;
+}
+export declare function readContractGateVerdict(gates: {
+    readonly ok: boolean;
+    readonly blockers: readonly string[];
+    readonly unmeasured?: string | undefined;
+}): ContractGateReading;
 export declare function evaluateQualityCompletion(task: TeamTask, update: QualityCompletionUpdate): QualityCompletionResult;
 /**
  * Derive the repair round's inScope from the findings that caused it.
