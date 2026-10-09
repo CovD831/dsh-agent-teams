@@ -234,6 +234,53 @@ export interface TaskEvidence {
   commandsRun?: CommandResult[]
 }
 
+/**
+ * ── ★★★ 那份「已审查」的**逐条读数**（而不是一句"审过了"）────────────────────────
+ *
+ * 用户原话（本字段存在的理由）：
+ * > 「有的任务是自动生成的，有的任务是需要问过我之后再生成、再派发的。
+ * >   对于问过我、我裁决过的任务，在生成计划时就没有走自动生成的那一步，
+ * >   也就没有『已审查』的字段，那它就需要被审查一遍。」
+ *
+ * ⇒ ★ 所以「带 reviewed ⇒ 放行；不带 ⇒ 派之前必须先审一遍」是一条**路由规则**，
+ *   而这一格就是那个判据读的东西。
+ *
+ * ── ★★ 而它必须带 `checks[]`，不能只带一个布尔 ─────────────────────────────────
+ *
+ * ★ 一个 `reviewed: true` 与一个"审过了、逐条写着五问结果"的格子，
+ *   在被路由程序读到的那一刻**同形** —— 而它们的可信度完全不同。
+ * ⇒ 所以这一格记的是**逐条结论**（哪一问、什么结论、为什么），
+ *   而读取方可以据此判断它是不是一条有内容的审查（见 `friction-triage` 的 `reviewStateOf`）。
+ *
+ * ── ★ 三态不同形（与全库那条纪律一致）──────────────────────────────────────────
+ *
+ *     `reviewed` 在场           ⇒ 盖章了（附逐条 checks）
+ *     `reviewed` 缺席           ⇒ ★ **不是错误** —— 它是"这条路没走自动生成"的正常状态
+ *     `reviewed` 在场而形状坏   ⇒ ★ 拒绝（不许静默丢掉 —— 那会让"审过了"与"没审"同形）
+ */
+export interface ReviewedStamp {
+  /** Epoch ms when the review was stamped. */
+  at: number
+  /** Identity that performed the review (`adversarial`, `captain`, …). */
+  by: string
+  /** Per-question verdicts; a bare boolean would be indistinguishable from one here. */
+  checks: ReviewedCheck[]
+}
+
+/** 五问里的一问：它是哪一问、结论是什么、为什么。 */
+export interface ReviewedCheck {
+  /** Question id (`scope`, `prerequisite`, `move`, `acceptance`, `boundary`, …). */
+  id: string
+  /**
+   * ★★★ 三态，且**不许合并**（全库那条最贵的纪律）：
+   *     `pass` / `fail` / `unmeasured`
+   *   ⇒ 而 `unmeasured` **绝不并进 `pass`** —— "我没能审明白"与"审过了，没问题"不同形。
+   */
+  verdict: string
+  /** Why this verdict — the reading that produced it. */
+  why?: string
+}
+
 /** One task of a team's task list. */
 export interface TeamTask {
   /** Stable task id from the profile template; absent for ad-hoc tasks. */
@@ -291,6 +338,19 @@ export interface TeamTask {
   supplementalEvidence?: TaskEvidence[]
   reviewedTaskId?: string
   reviewedAttempt?: number
+  /**
+   * ── ★★★ t2：那份「已审查」的盖章 —— 而它**可选**，且缺席是正常状态 ────────────
+   *
+   * ★ 路由规则（`friction-triage` 的 `reviewStateOf`）：带 `reviewed` ⇒ 放行；
+   *   不带 ⇒ **派之前必须先审一遍**。
+   *   ⇒ 而"不带"**不是错误** —— 它是"这条路没走自动生成"（问过用户、用户裁决过的）的正规形态。
+   *   ★★ 所以这一格**不许**变成必填：把它变成必填会让每一条手工裁决的任务都无法落盘，
+   *     而那正是这条规则要服务的那一类任务。
+   *
+   * ★ 与 `reviewedTaskId` **是两件不同的事**：那个指的是"**哪一条**任务被审过"，
+   *   而这一个记的是"**审的结果**"（逐条 checks）。两者可以各自在场、各自缺席。
+   */
+  reviewed?: ReviewedStamp
   /** Repair source: the implementation / previous successful artifact. */
   sourceTaskId?: string
   sourceFindingIds?: string[]
