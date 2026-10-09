@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { deliverToMember } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
 import { createTaskWorktree, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
+import { restartQueueFrom } from './tools/shared/entities.ts'
 import {
   markMailboxDelivered,
   discardMailboxMessages,
@@ -481,6 +482,42 @@ function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask
     && (task.status === 'claimed' || task.status === 'in_progress'))
 }
 
+/**
+ * ── ★★ 派发的第三个闸门：重载排队（t50）─────────────────────────────────────────
+ *
+ * ★ 它与 `halted` / `phase === 'staged'` **并列**，理由是同一条：
+ *   三者都回答"此刻**不该**开新工作"，而它们各有各的成因 ⇒ 必须**分别**判。
+ *
+ * ── ★ 为什么它【不是】halted ────────────────────────────────────────────────────
+ *
+ *   `halted` 是一个**持久**的、由人设的状态（团队被叫停）；而重载排队是
+ *   **暂时**的（换完版本就没了）。把两者合成一个状态，会让"等人拍板要不要继续"
+ *   与"等这一次交接做完"在日志里**同形**。
+ *
+ * ★★★ MEASURED（2026-10-09，captain 实测）：本函数与它的三处调用曾被
+ *   `t24` 的【整文件 `cp` 覆盖】**静默删除** —— 而"它一直不在"与
+ *   "它刚被删掉"在代码里同形，所以没有任何读数会说。
+ *   ⇒ 本次恢复，并补一条臂钉住它（删掉 ⇒ 臂红）。
+ */
+function dispatchHeldByReload(tasks: readonly TeamTask[]): { held: boolean; state: string; detail: string } {
+  const state = restartQueueFrom(tasks.map((task) => ({ id: task.id, status: task.status })))
+  if (state.status === 'none') return { held: false, state: 'none', detail: '' }
+  if (state.status === 'waiting') {
+    return {
+      held: true,
+      state: 'waiting',
+      detail: state.waitingOn.length === 0
+        ? 'a reload has been requested and nothing is in flight — it is about to run'
+        : `a reload has been requested and is waiting on ${state.waitingOn.join(', ')}`,
+    }
+  }
+  /**
+   * ★ `stuck` 与 `waiting` **分别**处理：两者都"不派发"，而只有 `stuck` 要上报。
+   *   把它们合成一条会让"再等一会儿"与"叫人来"同形 —— 而那正是本队记过的那条。
+   */
+  return { held: true, state: 'stuck', detail: state.reason }
+}
+
 function nextReadyTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
   const ready = tasks.filter(task => task.status === 'pending'
     && task.reassigning !== true
@@ -615,6 +652,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       const stateRoot = stateRootOf(workspace, config)
       const team = await readTeam(stateRoot, teamId)
       if (team === undefined || team.halted === true || team.phase === 'staged') return
+      /**
+       * ★ t50：重载排队期间**不派发新成员工作**。
+       *   ★ 放在 `kickTeam` 这一层，意味着"连一次扫描都不做" ——
+       *     比逐个成员拒绝更早、也更省（而两者都不派发）。
+       */
+      const heldAtTeam = dispatchHeldByReload(team.tasks)
+      if (heldAtTeam.held) {
+        ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtTeam.state}) — ${heldAtTeam.detail}`)
+        return
+      }
       const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
       if (captain === undefined) return
       for (const member of team.members) {
@@ -629,6 +676,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       await serializeMember(queueKey, async () => {
         let team = await readTeam(stateRoot, teamId)
         if (team === undefined || team.halted === true || team.phase === 'staged') return
+        /**
+         * ★ t50：同上 —— 单成员派发也要被挡住。
+         *   ★ 两处都判是**刻意的**：`kickMember` 可被单独调用（不是每次都经过 `kickTeam`），
+         *     只挡一处会让另一条路径成为**绕过闸门**的路。
+         */
+        const heldAtMember = dispatchHeldByReload(team.tasks)
+        if (heldAtMember.held) {
+          ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${heldAtMember.state}) — ${heldAtMember.detail}`)
+          return
+        }
         const captain = liveCaptain(ctx, team.captainSessionId, suppliedCaptain)
         if (captain === undefined) return
         let member = team.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
@@ -666,6 +723,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async (): Promise<DispatchTicket | undefined> => {
           const fresh = await readTeam(stateRoot, team!.id)
           if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged') return undefined
+          /**
+           * ★ t50：第三处 —— 票从队列里取出之前再判一次。
+           *   此处与上两处**同一读数、不同位置**：上两处挡"开始扫描"，
+           *   这一处挡"把已经选好的票送出去"（两者之间隔着 await，状态可能变）。
+           */
+          const held = dispatchHeldByReload(fresh.tasks)
+          if (held.held) {
+            ctx.logger.info(`agent-teams: dispatch held while a reload is queued (${held.state}) — ${held.detail}`)
+            return undefined
+          }
           const currentMember = fresh.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed')
           if (currentMember === undefined || !isMemberAvailable(ctx, currentMember)) return undefined
           const owned = ownedOpenTask(fresh.tasks, currentMember.name)
