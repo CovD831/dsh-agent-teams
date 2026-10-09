@@ -471,3 +471,189 @@ test('⑪ 纯数据变换：判据不 import 任何 I/O，执行器只能由调�
   assert.equal(verdict.ok, false)
   assert.match(expectUnmeasured(verdict), /no revision runner was injected/)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 20（t17 · 粒度）：★★★ 「重构 + 新增臂」不许被判成装饰性 ──────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 本臂钉的是那条**结构性假红**（t17）───────────────────────────────────────
+ *
+ * MEASURED（t17）：本判据此前把**整个测试文件**当成一个单位跑两次，只要父版本
+ * `exit 0` 就判"装饰性"。
+ *
+ *   ⇒ ★ 而"重构 + 新增臂"的交付里，**同一个文件**在父版本上本来就绿
+ *     （它是个早已存在的文件），而这次真正的工作是**往里加了几条臂**
+ *     ⇒ 那些新臂**被判成了装饰品**，而它们恰恰是这次交付的证据。
+ *   ⇒ ★ 红的不是"这条测试没用"，而是"我按文件看，看不到新臂" —— 结构性假红。
+ *
+ * ★ 定向突变 a（改回按文件判：`parentExit === 0` 就进 `fabricated`）⇒ 本臂红。
+ */
+
+/** 一份 `node --test` spec reporter 的输出 —— 只列出跑了哪些臂。 */
+function specReport(arms) {
+  return [...arms.map((arm) => `✔ ${arm} (1.234ms)`), 'ℹ tests ' + arms.length, 'ℹ pass ' + arms.length, 'ℹ fail 0'].join('\n')
+}
+
+/** 一个按版本给输出的执行器：`parent` / `fixed` 各自是 `{exitCode, output}` 或只有 exitCode。 */
+function armRunner(parent, fixed) {
+  return async (_test, revision) => (revision === 'working-tree' ? fixed : parent)
+}
+
+test('臂 20 ★★★ 重构 + 新增臂 ⇒ **不许**判装饰性（而它此前判了 —— 结构性假红）', async () => {
+  /**
+   * ★ 本臂的输入是那条真实形状：**同一个文件**，父版本上绿，而工作区里多了两条臂。
+   */
+  const verdict = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: specReport(['臂 1：这个文件本来就有的']) },
+      { exitCode: 0, output: specReport(['臂 1：这个文件本来就有的', '★ 臂 2：本次新增的', '★ 臂 3：本次新增的']) },
+    ),
+  }))
+  assert.equal(
+    verdict.ok, true,
+    '★★★ 同一文件里**新增了臂** ⇒ 它不是装饰品，**即使整个文件在父版本上就是绿的**。'
+    + '★ 修前它按【文件】判（父版本 exit 0 ⇒ 装饰性）⇒ 而这次交付的臂被判成了装饰品。'
+    + `实测裁决：${JSON.stringify(verdict).slice(0, 240)}`,
+  )
+  /** ★ 而它必须**说出**那两条新臂 —— 否则读的人无法核"到底新增了什么"。 */
+  const evidence = verdict.r5?.evidence ?? []
+  assert.equal(evidence.length, 1, '★ 必须有一格"新增臂"的读数')
+  assert.deepEqual(
+    evidence[0].newArms.sort(), ['★ 臂 2：本次新增的', '★ 臂 3：本次新增的'],
+    '★★ 它必须**逐条指名**新增的臂（不是一句"有新东西"）—— 读的人要能去核那两条',
+  )
+})
+
+test('臂 20b ★★ 反向半边：真正的装饰性**仍然**被判出（一律放过 ⇒ 本臂红）', async () => {
+  /**
+   * ★ 缺了本臂就无法区分"修好了"与"把那条规则删了"：
+   *   一个**一律放行**的实现同样能过臂 20 —— 而它比原缺陷更坏
+   *   （真正的装饰性测试再也没人管）。
+   *
+   * ★ 定向突变 b（一律放过）⇒ 本臂红。
+   */
+  const same = specReport(['臂 1：本来就有的'])
+  const verdict = await gate(ctx({
+    runTestOnRevision: armRunner({ exitCode: 0, output: same }, { exitCode: 0, output: same }),
+  }))
+  assert.equal(verdict.ok, false, '★★ 两边臂集合**相同**、而父版本上就绿 ⇒ 那是真装饰性 ⇒ 必须拒')
+  assert.match(
+    String(verdict.blockers), /decorative/i,
+    '★ 而措辞必须说清是**装饰性**（"它在父版本上就过了，证明不了什么"）',
+  )
+
+  /** ★ 而"修复版本上红"也要拒（两边都没绿过 ⇒ 它不是这次修复的证据）。 */
+  const neverGreen = await gate(ctx({
+    runTestOnRevision: armRunner({ exitCode: 0, output: same }, { exitCode: 1, output: same }),
+  }))
+  assert.equal(neverGreen.ok, false, '★ 两边臂集合相同 ⇒ 走老口径 ⇒ 父版本绿而修复版本红 ⇒ 装饰性')
+})
+
+test('臂 20c ★★ 三态不同形：装饰性 / 有真臂 / 判不了（三者两两不同）', async () => {
+  /**
+   * ── ★★★ 三态各自对应**一件不同的事**，而补救动作不同 ──────────────────────────
+   *
+   *   装饰性     ⇒ `blocked`："这条测试证明不了这次修复" ⇒ 去**改那条测试**
+   *   有真臂     ⇒ `ok` + `evidence` 非空："这文件里有父版本上没有的臂" ⇒ 放行
+   *   判不了     ⇒ `unmeasured`：读不到臂名单 / 读不到输出 ⇒ 去**补那个读数**
+   *
+   * ★ 而本任务新增的是**第二态**：它此前**不存在**（只有"按文件判"的两种结果）。
+   */
+  const novel = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: specReport(['臂 1']) },
+      { exitCode: 0, output: specReport(['臂 1', '★ 臂 2']) },
+    ),
+  }))
+  const decorative = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: specReport(['臂 1']) },
+      { exitCode: 0, output: specReport(['臂 1']) },
+    ),
+  }))
+
+  /** ★ "有真臂"与"装饰性"必须不同形：一个 `ok` + `evidence` 非空，另一个 `blocked`。 */
+  assert.equal(novel.ok, true, '★ 有真臂 ⇒ ok')
+  assert.ok((novel.r5?.evidence ?? []).length > 0, '★ 且 `evidence` 非空 —— 那**就是**"有真臂"那一格')
+  assert.equal(decorative.ok, false, '★ 装饰性 ⇒ 不 ok')
+  assert.equal(decorative.r5, undefined, '★ 而它**不带** `r5` 读数 —— 两个终态的形状必须能分开')
+  assert.notDeepEqual(
+    { ok: novel.ok, evidence: (novel.r5?.evidence ?? []).length > 0 },
+    { ok: decorative.ok, evidence: (decorative.r5?.evidence ?? []).length > 0 },
+    '★★ 两态必须两两不同形（否则"拿到了强证据"与"只拿到弱证据"在读的人眼里同形）',
+  )
+
+  /** ★ 第三态：执行器抛错 ⇒ `unmeasured`（而**不是**装饰性）。 */
+  const couldNotRun = await gate(ctx({
+    runTestOnRevision: async (_test, revision) => {
+      if (revision === 'working-tree') throw new Error('the runner blew up')
+      return { exitCode: 0, output: specReport(['臂 1']) }
+    },
+  }))
+  assert.equal(couldNotRun.ok, false, '★ 跑不了 ⇒ 不 ok')
+  assert.ok(
+    typeof couldNotRun.unmeasured === 'string' && couldNotRun.unmeasured !== '',
+    '★★ 而它必须落 `unmeasured` —— 把一次基础设施故障说成"这条测试是装饰品"，'
+    + '就是让一个故障伪装成一个关于工作的结论',
+  )
+  assert.equal(couldNotRun.r5, undefined, '★ 判不了 ⇒ 不带 `r5` 读数')
+})
+
+test('臂 20d ★ 臂名的解析：两种报告格式都认，且**耗时尾巴不算名字**', async () => {
+  /**
+   * ── ★★ 为什么这一条必须有 ────────────────────────────────────────────────────
+   *
+   * 判据要"新增臂"，就必须能读**臂名**。而：
+   *   · TAP reporter（`ok 1 - 名字`）与 spec reporter（`✔ 名字`）都要认；
+   *   · ★★ 而**耗时尾巴必须去掉** —— 否则同一条臂在两次运行里因耗时不同
+   *     （`(1.2ms)` vs `(2.3ms)`）变成**两个名字** ⇒ "新增臂"**永远非空** ⇒ 本判据恒真。
+   *
+   * ★ 那是一条**恒真**的判据的典型形状：它看起来在工作，而它什么都没在判。
+   */
+  const viaTap = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: 'ok 1 - 臂 1\nok 2 - 臂 2\n# pass 2\n# fail 0' },
+      { exitCode: 0, output: 'ok 1 - 臂 1\nok 2 - 臂 2\nok 3 - ★ 臂 3\n# pass 3\n# fail 0' },
+    ),
+  }))
+  assert.equal(viaTap.ok, true, '★ TAP reporter 也要能读出臂名（`ok N - 名字`）')
+  assert.deepEqual((viaTap.r5?.evidence ?? [])[0]?.newArms, ['★ 臂 3'], '★ 而它必须认出 TAP 里那条新臂')
+
+  /** ★★ 耗时不同、名字相同 ⇒ 新增臂必须为**空**（否则恒真）。 */
+  const sameArmsDifferentTiming = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: '✔ 臂 1 (1.2ms)\n✔ 臂 2 (9.9ms)' },
+      { exitCode: 0, output: '✔ 臂 1 (8.8ms)\n✔ 臂 2 (0.1ms)' },
+    ),
+  }))
+  assert.equal(
+    sameArmsDifferentTiming.ok, false,
+    '★★ 两次运行**耗时不同而臂名相同** ⇒ 新增臂为空 ⇒ 走老口径 ⇒ 装饰性。'
+    + '★ 若耗时没被去掉，这条会变成"新增了两条臂"而**恒真地放行** —— 那是一条不判任何事的判据',
+  )
+})
+
+test('臂 20e ★★ 读数：`evidence` 与 `verified` 必须**分别**读出来（不许合并成一个布尔）', async () => {
+  /**
+   * ── ★★ 两个格子的**强度不同** ────────────────────────────────────────────────
+   *
+   *   `verified` —— "这个文件在父版本与工作区上各是什么退出码"（老口径，弱）
+   *   `evidence` —— "这文件里**有一条臂父版本上没有**"（新口径，强）
+   *
+   * ★ 合并成一个布尔之后，读的人**无法分辨**"我拿到了强证据"与"我只拿到了弱证据"。
+   *   ⇒ 那正是本仓那条纪律：**两种不同的东西不许同形**。
+   */
+  const verdict = await gate(ctx({
+    runTestOnRevision: armRunner(
+      { exitCode: 0, output: specReport(['臂 1']) },
+      { exitCode: 0, output: specReport(['臂 1', '★ 臂 2']) },
+    ),
+  }))
+  assert.equal(verdict.ok, true, '★ 前置')
+  assert.ok(Array.isArray(verdict.r5?.verified), '★ `verified` 必须在（每个文件两轮退出码）')
+  assert.ok(Array.isArray(verdict.r5?.evidence), '★ `evidence` 必须在（新增臂的那一格）')
+  assert.equal(verdict.r5.verified.length, 1, '★ 一个目标文件 ⇒ `verified` 一条')
+  assert.equal(verdict.r5.evidence.length, 1, '★ 而 `evidence` 也只有那条有新增臂的')
+  console.log(`★ 两个读数分别读出来（t17）：verified=${JSON.stringify(verdict.r5.verified)} · evidence 的新增臂=${JSON.stringify(verdict.r5.evidence[0].newArms)}`)
+})
