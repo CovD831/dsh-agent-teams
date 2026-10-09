@@ -151,6 +151,15 @@ const NEW_POSITION_GATES = [
    *   ⇒ 而**登记表**这一行与观察无关：登记问的是"它装在哪个位置、会不会被求值"。
    */
   { binding: 'contractTaskAtomicity', id: 'contract.task-atomicity', point: 'contract' },
+  /**
+   * ── ★★★ t10（接线）：dispatch 位置的第三条 ──────────────────────────────────────
+   *
+   * 它是**用户已定的路由规则**在判据层上的落点：「带 `reviewed` 放行；不带必须先审一遍」。
+   * ★ 而它补上的正是 `docs/PLAN-REVIEW.md` §8 里那条**在此之前没有人读**的准入条件
+   *   （① 值得做 ② **审查通过（带 `reviewed`）** ③ 分档是【小档】）。
+   * ★ 与 `contractTaskAtomicity` 同一个病：**本体在盘上（t8）、而一次都不会跑**。
+   */
+  { binding: 'dispatchPlanReviewed', id: 'dispatch.plan-reviewed', point: 'dispatch' },
 ]
 
 /** 登记表里某条判据挂在哪。 */
@@ -439,12 +448,49 @@ test('臂 2 ★ 未测量臂：已接的槽位形状对、未接的槽位确实�
       )
     }
   }
+  /**
+   * ── ★★★ t10：`dispatch` 那一行此前写的是 `1 + countFromPlaces('dispatch')` —— 而它【早就错了】──
+   *
+   * MEASURED（t10 接线时暴露）：`dispatch` 位置的**基线是两条**
+   * （`dispatch.changed-paths` + `dispatch.worktree`），而 `completion` 的基线是**一条**
+   * （`completion.verify-rerun` —— 另外三条是槽位接进来的）。
+   *
+   * ⇒ 那句 `1 + …` 对 `completion` 成立，而对 `dispatch` **从来就不成立** ——
+   *   它过去之所以绿，是因为**两个数字恰好相等**（`2 === 1 + 1`）。
+   *   ★ 而 t10 接线后 `countFromPlaces('dispatch')` 变成 2 ⇒ `2 + 1 = 3` 而实际是 3…
+   *     等等：**实际的失败是 3 ≠ 1 + 1 = 2** ⇒ 那一行**当场红**。
+   *
+   * ★★ 一般形式：**`1 +` 那个字面量把"基线有几条"写死在了算式里**，
+   *   于是它只在"基线恰好一条"的位置上成立。⇒ 改成**显式地说出基线是哪几条**。
+   */
+  const BASELINE_AT = {
+    completion: ['completion.verify-rerun'],
+    dispatch: ['dispatch.changed-paths', 'dispatch.worktree'],
+  }
+  for (const [point, baseline] of Object.entries(BASELINE_AT)) {
+    const listed = registry.list()[point].map((entry) => entry.id)
+    for (const baselineId of baseline) {
+      assert.ok(
+        listed.includes(baselineId),
+        `★ ${point} 的基线判据 \`${baselineId}\` 不见了 —— 它是这个位置的既有成员，接线不许动它`,
+      )
+    }
+  }
   assert.equal(
     registry.count('completion'),
-    1 + countFromPlaces('completion'),
-    '★ completion 的条数必须等于"既有 verify-rerun + 已接槽位"，多一条少一条都要说得出为什么',
+    BASELINE_AT.completion.length + countFromPlaces('completion'),
+    '★ completion 的条数必须等于"基线判据 + 已接槽位"，多一条少一条都要说得出为什么',
   )
-  assert.equal(registry.count('dispatch'), 1 + countFromPlaces('dispatch'))
+  /**
+   * ★ 而 `dispatch` 这一条**必须显式写基线条数**（它不再能用一个 `1 +` 的巧合表达）——
+   *   而它同时是"t10 接线真的生效了"的读数：基线 2 + 已接槽位。
+   */
+  assert.equal(
+    registry.count('dispatch'),
+    BASELINE_AT.dispatch.length + countFromPlaces('dispatch'),
+    `★ dispatch 的条数必须等于"基线 ${BASELINE_AT.dispatch.length} 条 + 已接槽位"：`
+    + '★ 而这一行此前写的是 `1 + …`（把基线写死成一条）⇒ t10 接线时当场暴露',
+  )
 })
 
 /**
@@ -952,7 +998,12 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
      *     那第三条此前**已在盘上而一次都不会跑**（`ALL_GATES` 里没有它），
      *     所以这里的 2 曾经是"盘上有三条、注册表只有两条"的读数。
      */
-    { admission: 0, contract: 3, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
+    /**
+     * ★ t10（接线）：`dispatch` 由 **2 → 3** —— 加的是 `dispatch.plan-reviewed`。
+     *   ★ 与 t4 的 `contract: 2 → 3` 同一条纪律：这条快照的存在意义就是
+     *     "分布变了必须有人说得出为什么"。
+     */
+    { admission: 0, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 1 },
     '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })
@@ -1620,25 +1671,28 @@ test('臂 3h ★★★ 接线臂：`contract.task-atomicity` 走环境变量时�
  *
  * ★ 名单来自【装配点源码】而不是手抄：手抄的那份会在别人接线时过期。
  */
-test('臂 3i ★★ 接线臂：`ALL_GATES` 恰好比基线多一条，且差集就是 `contractTaskAtomicity`', () => {
+test('臂 3i ★★ 接线臂：`ALL_GATES` 只**增**不**改** —— 基线一条不丢、相对顺序不变', () => {
   const state = wiringState()
   const listBody = state.source.match(/const ALL_GATES = \[([\s\S]*?)\] as const/)?.[1]
   assert.notEqual(listBody, undefined, '★ 装配锚点失效：夹具必须跟着看清新形状，而不是静默变成恒真断言')
   const listed = [...listBody.matchAll(/^\s{2}([A-Za-z_][\w]*),$/gm)].map((match) => match[1])
 
   /**
-   * ★ `contractTaskAtomicity` 必须在（那正是本任务的接线）。
-   */
-  assert.ok(
-    listed.includes('contractTaskAtomicity'),
-    '★★ `contractTaskAtomicity` 必须在 `ALL_GATES` 里 —— 否则这条判据【在盘上但一次都不会跑】'
-    + '（那正是本任务要消灭的缺口）。★ 定向突变：从 ALL_GATES 删掉这一行 ⇒ 本断言红',
-  )
-
-  /**
-   * ★★ 而其余那些**基线里就有的**绑定名，一个都不许消失 —— 那是"没有重排/替换别人的行"。
-   *   ★ 名单是**基线**（本任务改动之前装配点里已有的那 11 条），而它由上面那条 `listed`
-   *     之外的稳定集合表达：任何一个基线名缺失 ⇒ 红。
+   * ── ★★★ 本臂在 t10 上【改了口径】，而理由必须写在这里 ──────────────────────────
+   *
+   * 它在 t4 时断言的是「差集**就是** `contractTaskAtomicity`」—— 那是**当时**的正确形状
+   * （那一次接线只加了一条）。而 t10 接线又加了一条 ⇒ 一条把"恰好是那一条"写死的臂
+   * 会在**第二次合法接线**时变红，而红的原因与"接线坏了"毫无关系。
+   *
+   * ★★ 那正是本队记账过的形态：**把"当前恰好如此"写成不变量**（棘轮）。
+   *   ⇒ 改成钉**性质**而不是钉**某一次的数量**：
+   *
+   *     ① 每一个**基线**绑定名都还在（有人删了/替换了 ⇒ 红）
+   *     ② 基线那 11 条的**相对顺序**不变（有人重排了 ⇒ 红）
+   *     ③ `ALL_GATES` 里**没有**本文件不认识的绑定名（新接线要在 `NEW_POSITION_GATES` 登记）
+   *
+   * ★ 而"新加了几条"**不作断言** —— 那是一个会随接线次数增长的量，钉死它会按设计变红。
+   *   它由每条接线**自己的臂**去钉（见臂 4 的分布快照）。
    */
   const BASELINE = [
     'verifyRerun', 'changedPaths', 'worktree', 'r5', 'mutation', 'backtest',
@@ -1653,14 +1707,39 @@ test('臂 3i ★★ 接线臂：`ALL_GATES` 恰好比基线多一条，且差集
     + '所以这里用**集合比对**而不是条数',
   )
 
-  /**
-   * ★ 而顺序：**基线那 11 条之间的相对顺序不许变**（新增的那一条可以插在任何合法位置）。
-   *   ★ 这就是"没有重排"的机械形式 —— 只比集合会漏掉重排。
-   */
+  /** ★ 顺序：基线那 11 条之间的相对顺序不许变（新增的可以插在任何合法位置）。 */
   const present = listed.filter((binding) => BASELINE.includes(binding))
   assert.deepEqual(
     present, BASELINE,
     '★★ 基线那 11 条的**相对顺序**变了 —— 而 `ALL_GATES` 的书写顺序 = 求值顺序（契约 §3），'
     + '重排会让 blocker 的排列改变，而那是别人依赖的读数',
   )
+
+  /**
+   * ★★ 而**每条接线都必须自己出现在清单里** —— 这是"接线真的做了"的机械形式，
+   *   而它由**一份接线台账**表达（而不是由"差集恰好是某一条"表达）。
+   *   ★ 新接线的人往这里加一行；漏加 ⇒ `NEW_POSITION_GATES` 那条登记臂会红
+   *     （本文件不认识的绑定名被当成"绕过约定"）。
+   */
+  const WIRED_BY_THIS_PIPELINE = ['contractTaskAtomicity', 'dispatchPlanReviewed']
+  const notWired = WIRED_BY_THIS_PIPELINE.filter((binding) => !listed.includes(binding))
+  assert.deepEqual(
+    notWired, [],
+    `★★ 这些接线【不在】\`ALL_GATES\` 里：${JSON.stringify(notWired)} —— `
+    + '而"本体在盘上、夹具也有、而一次都不会跑"正是本流水线反复要消灭的那个缺口。'
+    + '★ 定向突变：从 ALL_GATES 删掉任一行 ⇒ 本断言红',
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：`ALL_GATES` 必须真的有内容，且台账里的名字必须**真的被 import 过**
+   *   —— 否则"它在清单里"可以靠一个拼错的名字满足。
+   */
+  assert.ok(listed.length >= BASELINE.length, `★ ALL_GATES 只有 ${listed.length} 条，少于基线 ${BASELINE.length} 条`)
+  for (const binding of WIRED_BY_THIS_PIPELINE) {
+    assert.equal(
+      state.isImported(binding), true,
+      `★ \`${binding}\` 在清单里，而【没有对应的 import 行】—— 那会让"接上了"与"名字打错了"同形`,
+    )
+  }
 })
+
