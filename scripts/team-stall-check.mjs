@@ -279,7 +279,34 @@ async function analyse(teamId) {
     }
   }
 
-  return { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges }
+  /**
+   * ⑦ ★★★ 【git worktree 台账的僵尸条目】—— 2026-10-10 的"推不动"真因
+   *
+   * 由来（MEASURED）：`createTaskWorktree` 失败于
+   *   `fatal: '…/worktrees/task-t40' is a missing but already registered worktree`
+   *   ⇒ ★ 于是 `dispatch` 在 worktree 那一格【拒绝派发】，而它只写 `logger.warn`
+   *   ⇒ ★ 而"被拒"与"没人派"在 `team.json` 上完全同形。
+   *
+   * ★★ 当时的漂移量: git 台账 74 条 vs 盘上 38 个 ⇒ 33 条僵尸。
+   * ⇒ ★ 而它一旦积起来，【每一条新派工都会撞上】—— 因为任务 id 会复用（t40 被删过）。
+   *
+   * ★ 判据：`prunable` 的条数 > 0 ⇒ 报出来（它们是"已删而仍登记"的）。
+   *   ★ 而处置是 `git worktree prune` —— 它【只清 gitdir 指向不存在位置的】。
+   */
+  let worktreeRegistry
+  try {
+    const out = execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const entries = out.split('\n\n').filter(block => block.trim() !== '')
+    const prunable = (out.match(/^prunable/gm) ?? []).length
+    const onDisk = existsSync(join(ROOT, '.agent-teams', 'worktrees'))
+      ? readdirSync(join(ROOT, '.agent-teams', 'worktrees')).filter(name => name.startsWith('task-')).length
+      : 0
+    worktreeRegistry = { registered: entries.length, prunable, onDisk, stale: prunable > 0 }
+  } catch (error) {
+    worktreeRegistry = { undecidable: String(error) }
+  }
+
+  return { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges, worktreeRegistry }
 }
 
 async function main() {
@@ -294,7 +321,7 @@ async function main() {
     process.exit(2)
   }
 
-  const { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges } = a
+  const { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges, worktreeRegistry } = a
   console.log(`── 停摆检测: ${teamId} ──────────────────────────────`)
   console.log(`  在跑/已认领        ${running.length}  ${running.map(t => t.id).join(', ') || '—'}`)
   console.log(`  真可开工 (ready)   ${ready.length}  ${ready.map(t => t.id).join(', ') || '—'}`)
@@ -326,11 +353,13 @@ async function main() {
   console.log(`  ⑤ 团队心跳          ${heartbeat?.undecidable !== undefined ? '判不了' : heartbeat.silent ? `★ 静默 ${heartbeat.ageMinutes} 分钟（团队日志没被写过）` : `正常（${heartbeat.ageMinutes} 分钟前写过）`}`)
   console.log(`  ⑥ 写域冲突而缺边    ${missingEdges.length}${missingEdges.length ? '  ← ★ 那些任务会互撞，而依赖里没有对方' : ''}`)
   for (const e of missingEdges) console.log(`       ${e.a} ↔ ${e.b}  (共享 ${e.shared})`)
+  console.log(`  ⑦ worktree 台账     ${worktreeRegistry?.undecidable !== undefined ? '判不了' : worktreeRegistry.stale ? `★ ${worktreeRegistry.prunable} 条僵尸（登记 ${worktreeRegistry.registered} · 盘上 ${worktreeRegistry.onDisk}）` : `干净（登记 ${worktreeRegistry.registered} · 盘上 ${worktreeRegistry.onDisk}）`}`)
   console.log()
 
   const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length
     + (freshness?.stale === true ? 1 : 0)
     + (heartbeat?.silent === true ? 1 : 0)
+    + (worktreeRegistry?.stale === true ? 1 : 0)
   /**
    * ★★★ 「在推进」必须要求【真的有人在跑】，而不只是"有任务可开工"
    *   （2026-10-09 实测：我把 `ready > 0` 当成"在推进"，
@@ -355,6 +384,7 @@ async function main() {
   if (stuckHandoffs.length > 0) console.log('     ③ ⇒ 真卡住（该成员正忙）⇒ reassign 或先释放那个成员')
   if (freshness?.stale === true) console.log('     ④ ⇒ ★ 只有【重启】能修：先 pnpm build，再重启宿主（它挡着每一次 update_task）')
   if (heartbeat?.silent === true) console.log('     ⑤ ⇒ ★ 整队静默：核【有没有 ready 任务而没人接】—— 那说明调度器没在送票')
+  if (worktreeRegistry?.stale === true) console.log('     ⑦ ⇒ ★ 跑 `git worktree prune`（它只清 gitdir 指向不存在位置的）—— ★ 否则每一次建树都会失败')
   process.exit(1)
 }
 
