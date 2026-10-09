@@ -3,7 +3,7 @@
  * coverage, and resume. Tools and persistence call these; they do not I/O.
  * @module dsh-agent-teams/quality-gates
  */
-import { type AcceptanceResult, type CommandResult, type FindingSeverity, type ReviewFinding, type ReviewPolicy, type ReviewVerdict, type TaskKind, type TaskEvidence, type TaskRevision, type TaskStatus, type TeamState, type TeamTask } from './types.ts';
+import { type AcceptanceResult, type CommandResult, type FindingSeverity, type ReviewFinding, type ReviewPolicy, type ReviewedStamp, type ReviewVerdict, type TaskKind, type TaskEvidence, type TaskRevision, type TaskStatus, type TeamState, type TeamTask } from './types.ts';
 declare const QUALITY_KINDS: readonly TaskKind[];
 declare const WRITE_KINDS: readonly TaskKind[];
 declare const DEFAULT_REVIEW_POLICY: Required<Pick<ReviewPolicy, 'requirementsMinRounds' | 'requirementsMaxRounds' | 'codeMaxRounds' | 'maxRepairAttempts'>>;
@@ -22,6 +22,22 @@ export interface CreateTaskInput {
     verify?: string[];
     deliverables?: string[];
     nonGoals?: string[];
+    /**
+     * ── ★★★ t11：那一格「已审查」的盖章 —— 而它可选，**但一旦在场就要形状正确** ──────
+     *
+     * ★ 三态（而三者不同形 —— 契约点名的那一条）：
+     *
+     *     缺席            ⇒ ★ **通过**。它不是错误 —— 它是"这条路没走自动生成"
+     *                        （问过用户、用户裁决过的）的正规形态。
+     *     在场且形状正确   ⇒ 通过
+     *     在场而形状坏     ⇒ ★ **拒绝**，而消息要**说清是"形状坏"**，
+     *                        不是"缺了什么" —— 见 `validateCreateTask` 里那一格。
+     *
+     * ★ 而"区分缺失与类型错"是 §54 那条口径在**这一格**上的落点：
+     *   一个说成 `reviewed is required` 的消息会把"在场而坏"读成"缺失"，
+     *   而两者的**补救动作相反**（一个去补字段、一个去修那个字段的内容）。
+     */
+    reviewed?: ReviewedStamp;
     reviewedTaskId?: string;
     sourceTaskId?: string;
     sourceFindingIds?: string[];
@@ -434,6 +450,27 @@ export declare function normalizeBlankOptionalTaskFields<T extends object>(task:
 export declare function hasValidQualityTaskFields(value: Record<string, unknown>): boolean;
 export declare function isTaskKind(value: unknown): value is TaskKind;
 export declare function isReviewVerdict(value: unknown): value is ReviewVerdict;
+/**
+ * ── ★★★ 逐条 check 的三态 —— 而它与 `REVIEW_VERDICTS` **是不同的东西** ──────────────
+ *
+ * MEASURED（t11 的对**对照臂**抓出来的）：第一版把 `reviewed.checks[i].verdict`
+ * 拿 `isReviewVerdict` 去判 ⇒ `'fail'` 与 `'unmeasured'` 被**错误地拒掉**。
+ *
+ * ★ 两套取值的**对象不同**，而那正是它们必须分开的原因：
+ *
+ *     `REVIEW_VERDICTS`            `pass / needs_revision / reject`
+ *       ⇒ 对象是**一条任务**的审查结论（`TeamTask.verdict`）
+ *
+ *     本常量                        `pass / fail / unmeasured`
+ *       ⇒ 对象是**一问**（`ReviewedCheck`）的结论 ——
+ *         三态，且 `unmeasured` **绝不并进 `pass`**（"我没能审明白"与"审过了"不同形）
+ *
+ * ★★ 而"用哪一套"不是一个措辞问题：拿错一套会让**每一条正当的 `fail` / `unmeasured`**
+ *   都被拒 —— 即"一个审查说它有问题"这件事**传不进契约**。
+ */
+export declare const REVIEWED_CHECK_VERDICTS: readonly ["pass", "fail", "unmeasured"];
+/** `ReviewedCheck.verdict` 的取值判定。★ 不是 `isReviewVerdict` —— 见上面那一格。 */
+export declare function isReviewedCheckVerdict(value: unknown): boolean;
 export declare function isFindingSeverity(value: unknown): value is FindingSeverity;
 export declare function looksLikeGateTestContract(value: string | undefined): boolean;
 export declare function sanitizeReviewObjective(value: string | undefined, fallback?: string): string;
