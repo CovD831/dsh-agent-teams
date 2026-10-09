@@ -29,7 +29,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -61,6 +61,14 @@ import {
   reviewStateOf,
   looksTautological,
   REVIEW_CHECKS,
+  /** ★ t113：**单一主干** —— 分类 → 契约 → 分档 → 拆解 → 生成即审查 → ready。 */
+  runPipeline,
+  tierOf,
+  /** ★ 而 `TIER` 是分档那三态的名字（`small` / `large` / `unmeasurable`）。 */
+  TIER,
+  decompose,
+  decomposeContract,
+  OUTCOME_CONTRACT_SOURCE,
   /** ★ t78：这三个现在从 t65 那边 re-export（臂 6 断言**同一性**）。 */
   looksAssertive,
   inputKindOf,
@@ -70,12 +78,6 @@ import {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TOOL = join(ROOT, 'scripts', 'friction-triage.mjs')
 
-/**
- * ── 夹具自造的一份台账（★ 不读盘上的 .agent-teams/）────────────────────────────
- *
- * ★ 它造的是**每一条臂各自要测的那个形状**，而不是"真实台账的缩小版"：
- *   真实台账的分布会变，而本文件要测的是**三种动作各自的条件**。
- */
 function ledger({ frictions = [], judgements = [] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 't72-'))
   const fdir = join(dir, 'frictions')
@@ -624,23 +626,75 @@ test('★★★ 臂 8：模块**移走**时给出可读的失败 —— ★ 而�
    * ★ 而这条臂**真的把模块移走**再跑（不是 mock）—— 否则它测的是"我 mock 得对不对"。
    */
   const { spawnSync } = await import('node:child_process')
-  const { renameSync } = await import('node:fs')
-  const upstream = join(ROOT, 'scripts', 'judgement-triage.mjs')
-  const parked = join(ROOT, 'scripts', 'judgement-triage.mjs.t78-parked')
+  const { renameSync, mkdtempSync: mkdtemp, cpSync, rmSync: rmrf } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+
+  /**
+   * ── ★★★ MEASURED（t113 补强杀伤率时抓出来）：这一条臂改过【共享状态】──────────────
+   *
+   * 它原来**直接在 `scripts/` 里 `rename` 那个模块**（移走 / 跑 / 移回）。
+   * 而本轮新增了若干 `async` 的 CLI 臂（它们 `spawnSync('node', [TOOL, …])`）——
+   * 那些臂 `await` 会让出事件循环 ⇒ 完全可能在"移走"这个窗口里启动子进程
+   * ⇒ 子进程 import `TOOL` ⇒ `TOOL` 静态 import 那个刚被挪走的模块
+   * ⇒ **`ERR_MODULE_NOT_FOUND`**，而那条 CLI 臂**以它自己的名义**报红。
+   *
+   * ★★ 症状是**间歇性假红**（每次红的臂不同、单独跑全绿），而根因是
+   *   「一条臂改了别的臂也读的磁盘状态」⇒ 这条臂**不再是只读自己输入的**。
+   *
+   * ── 修法：把"模块缺"这件事搬到【一份私有副本】里做 ──────────────────────────────
+   *
+   * ★ 为什么不加锁（第一版就是那么写的，MEASURED ⇒ **更坏**）：
+   *   ① `waitFor` + 标志位在有界的实现下会"白等然后照做" —— 那条臂**看起来测了**；
+   *   ② `rename` 与 `spawn` 之间没有原子性，竞态窗口仍在；
+   *   ③ ★ 最坏的一条：一旦 `finally` 没跑到，模块被遗留在 `parked`
+   *      ⇒ **整个夹具文件加载失败**（比间歇红严重得多 —— 它把一条臂的失败
+   *        放大成"这份夹具全废"）。
+   *   ⇒ ★★ 而我加锁之后**真的把模块遗留过一次**（`Cannot find module …/judgement-triage.mjs`）。
+   *
+   * ★★★ 所以正确的修法是**消除共享状态的改写**，而不是给它加锁：
+   *   把 `scripts/` 复制到一份临时目录，在**那里**移走模块并跑 ——
+   *   那一份是我私有的，谁也读不到，**结构上不可能干扰任何别的臂**。
+   *   ★ 而这条臂的意图（"真的把模块移走再跑"，不是 mock）**完整保住**。
+   */
   const l = ledger({ frictions: [], judgements: [] })
-  let moved = false
+  const sandbox = mkdtemp(join(tmpdir(), 't78-absent-'))
   try {
-    renameSync(upstream, parked)
-    moved = true
-    const run = spawnSync('node', [TOOL, '--frictions', l.fdir, '--judgements', l.jdir], { encoding: 'utf8' })
+    /** ★ 抄一份 scripts/（只抄这次要用的两个文件就够 —— 少抄 = 少依赖）。 */
+    cpSync(join(ROOT, 'scripts'), join(sandbox, 'scripts'), { recursive: true })
+    const isolatedTool = join(sandbox, 'scripts', 'friction-triage.mjs')
+    const isolatedUpstream = join(sandbox, 'scripts', 'judgement-triage.mjs')
+
+    /** ★ 而在**副本**里把模块移走 —— 这一步改的是一份没人共享的磁盘状态。 */
+    renameSync(isolatedUpstream, `${isolatedUpstream}.parked`)
+    const run = spawnSync('node', [isolatedTool, '--frictions', l.fdir, '--judgements', l.jdir],
+      { encoding: 'utf8', cwd: sandbox })
     assert.notEqual(run.status, 0, '★ 模块缺 ⇒ 必须**失败**，不许静默地出一个"都判不了"的清单')
     assert.match(
       `${run.stderr}${run.stdout}`,
       /judgement-triage\.mjs|ERR_MODULE_NOT_FOUND/u,
       '★ 而失败必须**指出是哪个模块** —— 否则读的人不知道去补什么',
     )
+
+    /**
+     * ★★ 反面对照（**这条修法自己的守卫**）：同一份副本、把模块放回去之后，
+     *   它必须**能跑**。没有这一条，"隔离副本"若本身是坏的（例如少抄了一个文件），
+     *   上面那条断言会因为**别的原因**失败而照样绿。
+     */
+    renameSync(`${isolatedUpstream}.parked`, isolatedUpstream)
+    const ok = spawnSync('node', [isolatedTool, '--frictions', l.fdir, '--judgements', l.jdir],
+      { encoding: 'utf8', cwd: sandbox })
+    assert.equal(
+      ok.status, 0,
+      `★★ 同一份隔离副本、模块放回之后必须能跑（否则上面那条"模块缺会失败"可能因为别的原因成立）：\n${ok.stderr}`,
+    )
+
+    /** ★ 而**真实**的 `scripts/judgement-triage.mjs` 从头到尾**没有被碰过** —— 那正是这次修法的内容。 */
+    assert.equal(
+      existsSync(join(ROOT, 'scripts', 'judgement-triage.mjs')), true,
+      '★★ 真实的模块必须在原处（这条臂**不许**再动共享状态）',
+    )
   } finally {
-    if (moved) renameSync(parked, upstream)
+    rmrf(sandbox, { recursive: true, force: true })
     l.cleanup()
   }
 })
@@ -1547,4 +1601,1246 @@ test('★★ 臂 T98f：`unmeasurable` 既不许进 ready，也不许混进"等�
   assert.equal(result.awaitingRuling.length, 0, '★ 也不许并进"等人裁决"——它要补的是信息，不是裁决')
   assert.equal(result.cannotEmit.length, 1, '★ 它落在"契约不完整"那一格（缺的是 inScope）')
   assert.equal(result.notReadyBecause.contractIncomplete, 1)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t113 ★★★ 单一主干：分类 → 契约 → **分档** → 拆解 → 生成即审查 → ready
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本组臂的由来（用户原话，逐字）────────────────────────────────────────────────
+ *
+ *   「一开始都是去对符合条件的任务产出契约之类的东西，然后可能有的契约根据一些
+ *     判定认为不符合原子化的条件，那就得去拆」
+ *
+ * ── 而它要消掉的那个缺陷（实测）─────────────────────────────────────────────────
+ *
+ * 此前有**三条独立出口**，各自走了流水线的不同片段，且**顺序不一致**：
+ *
+ *     `--emit-task <id>`   生成 → 审查            ★ **不分档**（大活也产出契约）
+ *     `--dispatchable`     分档 → 生成 → 审查     顺序对，但只**列**不落地
+ *     `--json`             只出分类报告            走不到契约
+ *
+ * ★ 根因：`tierOf` **只**在 `dispatchable()` 内部被调用 ⇒ `emitReviewedContract`
+ *   自己不知道分档 ⇒「原子化判定」是**调用方记得去做的一步**，而不是流水线的一个阶段。
+ *
+ * ⇒ ★★ 于是同一提案走 `--emit-task` 出契约、走 `--dispatchable` 被判大档 ——
+ *   两条路对**同一件工作**给出**相反处置**。本组的臂钉的就是这一条。
+ */
+
+/** ★ 与小档/大档**分明不同形**的第三格：`inScope` 为空 ⇒ 分档判不了。 */
+test('★★★ 臂 T113a：主干是**唯一**的一条路 —— 两个出口对同一提案给出同一份分档', async () => {
+  /**
+   * ── 判据（契约逐字：「★ 同一提案走 `--emit-task` 与 `--dispatchable` 得到**相同**的
+   *           分档与放行结论」）──────────────────────────────────────────────────
+   *
+   * ★ 而"相同"在这里是**可执行**的：`--tier <id>` 那一格印的就是
+   *   `{ sourceId, outcome, tier }`，而 `--dispatchable --json` 的四格用的是
+   *   **同一个** `entry.tier` 对象 ⇒ 两条出口的读数可以直接比。
+   *
+   * ★★ 而这条臂**端到端**跑 CLI（不是 import 函数）：它测的正是
+   *   "两个**出口**给同一个答案" —— 而那件事只在 CLI 那一层才看得见。
+   */
+  const { spawnSync } = await import('node:child_process')
+  /**
+   * ★ 一小组判决，覆盖主干的每一格：
+   *   `j-0001` ⇒ 小档（收窄到两个具体文件，无目录条目、无可搬的东西）
+   *   `j-0002` ⇒ 大档（★ `narrowScope` 收窄不了 ⇒ 写域里留着 `src/gates/` 目录条目）
+   *   `j-0003` ⇒ 判不了（`claim` 挑不出 slug、id 也不是判决 id 的形状 ⇒ 写域标 coarse）
+   *              ★ 而 coarse 本身**不是** unmeasurable —— 它只是"没收窄"。
+   *                ⇒ 所以第三格要另造：见下面那条 `dispatchable` 的直调。
+   */
+  const l = ledger({
+    judgements: [
+      judgement('j-0001', '`changed-paths` 那一格必须与 worktree 观察面同源'),
+      judgement('j-0002', '那条判据要能对某个输入返回真/假'),
+    ],
+  })
+  try {
+    const argv = ['--frictions', l.fdir, '--judgements', l.jdir, '--team', l.dir]
+    const dispatchableExit = spawnSync('node', [TOOL, ...argv, '--dispatchable', '--json'], { encoding: 'utf8' })
+    assert.equal(dispatchableExit.status, 0, `★ --dispatchable 必须 exit=0：\n${dispatchableExit.stderr}`)
+    const result = JSON.parse(dispatchableExit.stdout)
+
+    /** ★ 把四格压成同一张表：`sourceId ⇒ { outcome, tier }`。 */
+    const byExit = new Map()
+    for (const entry of result.ready) byExit.set(entry.sourceId, { outcome: 'ready', tier: entry.tier })
+    for (const entry of result.awaitingRuling) byExit.set(entry.sourceId, { outcome: 'awaitingRuling', tier: entry.tier })
+    for (const entry of result.cannotEmit) byExit.set(entry.sourceId, { outcome: 'cannot-emit', tier: entry.tier })
+    assert.ok(byExit.size > 0, '★ 夹具里至少要有一条走到主干上（否则这条臂什么都没测）')
+
+    for (const sourceId of byExit.keys()) {
+      const tierExit = spawnSync('node', [TOOL, ...argv, '--tier', sourceId, '--json'], { encoding: 'utf8' })
+      assert.equal(tierExit.status, 0, `★ --tier ${sourceId} 必须 exit=0：\n${tierExit.stderr}`)
+      const stubs = JSON.parse(tierExit.stdout)
+      assert.equal(stubs.length, 1, `★ --tier ${sourceId} 必须给出恰好一条读数（★ 而它印的是**同一份**分档）`)
+      const expected = byExit.get(sourceId)
+      assert.equal(
+        stubs[0].outcome, expected.outcome,
+        `★ [${sourceId}] 两个出口的**放行结论**不一样：--tier 说 ${stubs[0].outcome}，--dispatchable 说 ${expected.outcome}`,
+      )
+      assert.deepEqual(
+        stubs[0].tier, expected.tier,
+        `★ [${sourceId}] 两个出口的**分档**不一样 —— 那正是本任务要消掉的那个缺陷`,
+      )
+    }
+
+    /**
+     * ── ★★★ 而下面这一段是**本臂的正面**（MEASURED：第一版漏了它）───────────────
+     *
+     * ★★ 第一版只比了 `--dispatchable` 与 `--tier` —— 而那两个出口**都调 `runPipeline`**
+     *   ⇒ 把 `--emit-task` 换成旧的 `emitReviewedContract`（**绕过分档**）它们仍然相等
+     *   ⇒ 那条突变**打不红**这条臂（实测：突变 H 下它照样绿）。
+     *
+     * ★★★ 而契约点名的配对恰恰是 **`--emit-task` ↔ `--dispatchable`** ——
+     *   那正是本任务的行名（"同一提案走两个出口给出相反处置"）。
+     *   ⇒ 所以这里**直接比这两个出口**，而比的是三样：
+     *     ① 分档（`tier.tier`）
+     *     ② 放行结论（`stage` ↔ 它落在哪一格）
+     *     ③ ★ 而它**走过了分档那一站**（`trace` 里有 `tier`）——
+     *        这一条正是"emit 绕过分档"唯一能露出来的地方。
+     */
+    const emitExit = spawnSync('node', [TOOL, ...argv, '--emit-task', 'j-0001', '--json'], { encoding: 'utf8' })
+    assert.equal(emitExit.status, 0, `★ --emit-task 必须 exit=0：\n${emitExit.stderr}`)
+    const viaEmit = JSON.parse(emitExit.stdout)
+
+    /**
+     * ★ 而 `--dispatchable` 那一侧的同一条读数：从四格里找出它，并把 stage 名字归一到
+     *   `--emit-task` 用的那套（`ready` / `awaitingRuling` / `cannot-emit`）。
+     */
+    const emitRow = byExit.get('j-0001')
+    assert.notEqual(emitRow, undefined, '★ j-0001 必须在 --dispatchable 的某一格里（否则没法比）')
+    assert.equal(
+      viaEmit.stage, emitRow.outcome,
+      `★ 同一提案 ` + '`--emit-task` 说 ' - viaEmit.stage
+      - `，而 ` + '`--dispatchable` 说 ' + emitRow.outcome
+      + ' —— 「同一件工作、两个相反处置」正是本任务要消掉的那个缺陷',
+    )
+    assert.equal(
+      viaEmit.tier.tier, emitRow.tier.tier,
+      `★ 同一提案在两个出口上分到了不同的档（--emit-task=${viaEmit.tier.tier}，--dispatchable=${emitRow.tier.tier}）`,
+    )
+    assert.ok(
+      Array.isArray(viaEmit.trace) && viaEmit.trace.includes('tier'),
+      '★★ `--emit-task` 的路径里**没有分档那一站** —— 它就是靠"记得分档"在走的那个出口，'
+      + `而"分档是硬性阶段"要求它必须经过。走过的：${JSON.stringify(viaEmit.trace)}`,
+    )
+  } finally {
+    l.cleanup()
+  }
+})
+
+test('★★★ 臂 T113b：大档**必然**经过分档阶段，绝不产出可派契约', () => {
+  /**
+   * ── 判据（契约逐字：「★ 大档提案**必然**经过分档阶段，绝不被
+   *            `emitReviewedContract` **直接**产出契约」）────────────────────────────
+   *
+   * ★ 而"经过了分档"在这里是**可核的**：主干把走过的阶段写在 `trace` 里
+   *   （它不是一个承诺，是一条走过的路）。
+   *
+   * ★★ 而"绝不被 `emitReviewedContract` 直接产出契约"是两件事，都要钉：
+   *   ① 它**没有契约**（`emitted` 那一格缺席）—— 大活就不该拿到可派契约
+   *   ② 它走的是**分档那一站之后**的那条路（`trace` 里有 `tier`）
+   */
+  const big = executableProposal({ sourceId: 'big-1', inScope: ['src/a.ts', 'src/b.ts'], objective: '把这两处合起来改' })
+  const outcome = runPipeline(big, team([{ name: 'a', status: 'idle' }]))
+  console.log(`    ℹ 大档 stage=${outcome.stage} · trace=${outcome.trace.join(' → ')} · 有契约=${outcome.emitted !== undefined}`)
+
+  assert.equal(outcome.stage, 'awaitingRuling', '★ 大活不许进 ready（「派出的不应该有大活」）')
+  assert.equal(outcome.tier.tier, 'large', '★ 而它的分档必须**说得出**是大档')
+  assert.equal(
+    outcome.emitted, undefined,
+    '★ 大活拿到了契约 —— 而那条路正是"大活直接产出契约"（本任务的行名）',
+  )
+  assert.ok(
+    outcome.trace.includes('tier'),
+    `★ 它没有经过分档那一站 —— 而"分档是硬性阶段"正是本任务的全部内容。走过的：${outcome.trace.join(' → ')}`,
+  )
+  /** ★ 而它大在哪、卡在哪一问上，必须跟着走（用户裁决时要的正是这两样）。 */
+  assert.match(outcome.entry.whyLarge, /spans 2 existing source files/u, '★ 必须说得出它大在哪')
+  assert.equal(outcome.entry.nextStep, 'decompose', '★ 下一步是【拆解】')
+})
+
+test('★★★ 臂 T113c：小档走的是 ⑥→⑦，而它的契约**只能是**审查那一站给的', () => {
+  /**
+   * ★ 反向半边：不许为了"统一主干"把一条**小活**也拦下来 ——
+   *   那会让派发停摆（而用户的原话是"小货…审一遍，找机会就可以直接派了"）。
+   *
+   * ★★ 而"契约来自审查那一站"是**可核的**：主干把来源写在 `method.source` 上，
+   *   而它与 `OUTCOME_CONTRACT_SOURCE` 是同一个常数 ⇒
+   *   一个绕过审查的实现**当场对不上**。
+   */
+  const small = executableProposal({
+    /**
+     * ★★★ MEASURED（本任务当场抓出来）：下面这两格**都不是随便写的** ────────────────
+     *
+     * ① `sourceId` 必须是**判决 id 的形状**（`j-NNNN`）：`narrowScope` 靠它收窄，
+     *    而一个"不像判决 id"的 sourceId 会让收窄落 `coarse` ⇒ 写域那一问 `unmeasured`
+     *    ⇒ 契约**不盖章**。★ 而那不是本臂要测的东西（本臂测"小档进 ready 且契约来自审查站"）。
+     *
+     * ② 而 `inScope` 给的是**收窄的结果**（两个具体文件）——
+     *    于是 `scope` 与 `boundary` 两问都答得出来 ⇒ 五问全 `pass` ⇒ `reviewed` 真的盖上。
+     */
+    sourceId: 'j-0001',
+    inScope: ['scripts/gate-j-0001.test.mjs', 'src/gates/index.ts'],
+    objective: '那条判据要能对某个输入返回真/假',
+  })
+  const outcome = runPipeline(small, team([{ name: 'a', status: 'idle' }]))
+  assert.equal(outcome.stage, 'ready', '★ 小档必须能进 ready')
+  assert.equal(outcome.tier.tier, 'small')
+  assert.deepEqual(outcome.trace, ['tier', 'review'], '★ 小档走的是 ③ → ⑥（不经过拆解）')
+  assert.equal(
+    outcome.method.source, OUTCOME_CONTRACT_SOURCE,
+    '★ ready 池里那份契约的来源必须是 [审查那一站] —— 绕过去它就到不了这一格',
+  )
+  assert.equal(
+    outcome.emitted.review.outcome, 'passed',
+    '★ 全 pass 才盖章；它落的是 ' + outcome.emitted.review.outcome
+    + `（unmeasured：${JSON.stringify(outcome.emitted.review.unmeasuredIds)}）`,
+  )
+  assert.ok(outcome.emitted.contract.reviewed !== undefined, '★ 而它必须盖了 reviewed（全 pass 才盖）')
+})
+
+test('★★★ 臂 T113d：`unmeasurable` 既不进 ready、也不进"等人裁决" —— 而它与大档**不同形**', () => {
+  /**
+   * ── 判据（契约逐字：「`unmeasurable`（inScope 缺席/为空）不许并进 ready，
+   *            且与「大档」不同形（大档要裁决，它要补信息）」）────────────────────
+   *
+   * ★★ 两件事：
+   *   ① 它**不在** ready 里，也**不在** awaitingRuling 里
+   *   ② 而它与大档的**读数不同形**：大档带"卡在哪一问上"，它带"缺什么"
+   */
+  const noScope = executableProposal({ sourceId: 'unknown-1', inScope: [], objective: 'z' })
+  const large = executableProposal({ sourceId: 'large-1', inScope: ['src/a.ts', 'src/b.ts'], objective: 'x' })
+  const result = dispatchable(
+    { toDispatch: [noScope, large], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  console.log(`    ℹ ready ${result.ready.length} · awaitingRuling ${result.awaitingRuling.length} · cannotEmit ${result.cannotEmit.length}`)
+
+  assert.equal(result.ready.length, 0, '★ "判不了"绝不许并进"可派"')
+  assert.deepEqual(
+    result.awaitingRuling.map((entry) => entry.sourceId), ['large-1'],
+    '★ "判不了"不许并进"等人裁决" —— 那条队列要的是人拍板，而它缺的是【信息】',
+  )
+  assert.deepEqual(result.cannotEmit.map((entry) => entry.sourceId), ['unknown-1'])
+
+  /** ★ 而两者的话必须**不同形**（否则读的人分不出"去补信息"还是"去拍板"）。 */
+  const unmeasurable = result.cannotEmit[0]
+  const ruling = result.awaitingRuling[0]
+  assert.equal(unmeasurable.becauseTier, 'unmeasurable', '★ 它必须自报"分档判不了"')
+  assert.ok(
+    unmeasurable.missing.join(' ').length > 0,
+    '★ 它必须逐项说出【缺什么】（那是"补信息"这一补救动作的全部内容）',
+  )
+  assert.equal(ruling.blockingQuestion !== undefined, true, '★ 大档那一格给的是"卡在哪一问上"（要人拍板）')
+  assert.equal(
+    typeof unmeasurable.blockingQuestion, 'undefined',
+    '★★ 一个"判不了"的提案**没有资格**带"卡在哪一问上" —— 有那一句会让人以为它有东西可裁决',
+  )
+})
+
+test('★★★ 臂 T113e：三态不同形 —— ok / blocked / unmeasured，而 `unmeasured` 绝不并进 `ok`', () => {
+  /**
+   * ── 判据（契约逐字：「三态不同形：ok / blocked / unmeasured ——
+   *            `unmeasured` 绝不并进 `ok`」）────────────────────────────────────────
+   *
+   * ★ 本文件的多条臂各自钉过其中一对（1 / T98c / T98f），而这里钉的是
+   *   **三格同时在场**：一条 ok、一条 unmeasured、一条被写域挡（blocked）。
+   */
+  const ok = executableProposal({ sourceId: 'ok-1', inScope: ['src/a.ts'], objective: '改一行' })
+  const unmeasured = executableProposal({ sourceId: 'unmeasured-1', inScope: [], objective: 'z' })
+  const result = dispatchable(
+    {
+      toDispatch: [ok, unmeasured],
+      /** ★ 第三条**不在** `toDispatch` 里 —— 它被写域挡着（那是另一格，由 `--json` 给出）。 */
+      blocked: [executableProposal({ sourceId: 'blocked-1' })],
+      noAction: [], autoRecorded: [], unknown: [],
+    },
+    team([{ name: 'a', status: 'idle' }]),
+  )
+  const ids = {
+    ready: result.ready.map((entry) => entry.sourceId),
+    cannotEmit: result.cannotEmit.map((entry) => entry.sourceId),
+    awaitingRuling: result.awaitingRuling.map((entry) => entry.sourceId),
+  }
+  console.log(`    ℹ ${JSON.stringify(ids)} · blockedCount=${result.blockedCount}`)
+
+  assert.deepEqual(ids.ready, ['ok-1'])
+  assert.deepEqual(ids.cannotEmit, ['unmeasured-1'], '★ 判不了的那一条落在它自己那一格')
+  assert.deepEqual(ids.awaitingRuling, [], '★ 它不许并进"等人裁决"')
+  assert.equal(result.blockedCount, 1, '★ 被写域挡的是第三格（一个读数，不是"可派"）')
+
+  /** ★★ 而三格**两两不相交**：没有一条同时出现在两格里。 */
+  const sets = [ids.ready, ids.cannotEmit, ids.awaitingRuling].map((list) => new Set(list))
+  for (const id of sets[0]) {
+    assert.equal(sets[1].has(id), false, `★ ${id} 同时在 ready 与 cannotEmit（"没测到"并进了"通过"）`)
+    assert.equal(sets[2].has(id), false, `★ ${id} 同时在 ready 与 awaitingRuling`)
+  }
+  for (const id of sets[1]) assert.equal(sets[2].has(id), false, `★ ${id} 同时在 cannotEmit 与 awaitingRuling`)
+  /** ★ 而"被挡"那一条**绝不**出现在任何一格（它由 blockedCount 单独读）。 */
+  for (const list of Object.values(ids)) {
+    assert.equal(list.includes('blocked-1'), false, '★ 被挡的那一条混进了主干的某一格')
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t113 ★★★ 定向突变：主干上的"分档"拿掉 / `--emit-task` 绕过分档
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ★★★ 突变 G 的针脚：主干上那一站分档（拿掉它 ⇒ 回到"谁都能出契约"）。
+ *
+ * ★★ 而这一行在 t113 里改过一次（captain 裁定②）：分档的输入从**收窄后的契约**
+ *   改成了**提案自己的写域** —— 见 `friction-triage.mjs` 文件头
+ *   "用施工图判这块地原本多大"那一节。
+ *   ★ 而针脚**跟着改**是对的：突变打的是**那一站**，不是某个字符串。
+ */
+const NEEDLE_TRUNK_TIER = `  const tier = tierOf(proposal, options)`
+/** ★★★ 突变 H 的针脚：`--emit-task` 走的是主干（把它换成直调 ⇒ 那条出口就不分档了）。 */
+const NEEDLE_EMIT_VIA_TRUNK = `      const outcome = runPipeline(proposal, teamState)`
+
+test('★★★ 定向突变 G（t113）：把**分档**从主干上拿掉 ⇒ 臂 T113a/T113b 必须红', async (t) => {
+  /**
+   * ── 判据（契约逐字：「定向突变：把分档从主干拿掉 ⇒ 臂红」）──────────────────────
+   *
+   * ★ 而这一条突变要改**一处**就够 —— 因为主干**只有一条**。
+   *   ★★ 那正是本任务的收获：改之前要改**两处**（`dispatchable` 与 `emit-task` 各一遍），
+   *     而"只改了一处"会留下一半的分叉 ⇒ 判据也就钉不住。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_TRUNK_TIER,
+    `  const tier = { tier: 'small', why: 'MUTANT: the trunk does not tier at all', review: 'adversarial-review' } // MUTANT`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=t113-trunk-tier-removed')
+    /** ★ 这一条断言就是**臂 T113b 的红**：大活直接出了契约（"派出的不应该有大活"被违反）。 */
+    const big = mutant.runPipeline(
+      { sourceId: 'big-1', kind: 'implementation', subject: 's', objective: '把这两处合起来改', inScope: ['src/a.ts', 'src/b.ts'], acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'] },
+      { members: [{ name: 'a', status: 'idle' }], tasks: [] },
+    )
+    assert.equal(big.stage, 'ready', '★ 拿掉分档之后，大活**直接进 ready 并拿到契约** —— T113b 就是靠这一条变红的')
+    assert.notEqual(big.emitted, undefined, '★ 而它真的拿到了契约（那正是"大活直接产出契约"）')
+    assert.equal(big.tier.tier, 'small', '★ 分档那一站整个消失了（它现在恒答 small）')
+  })
+
+  const restored = await freshTool('mutation=t113-restored-trunk-tier')
+  assert.equal(
+    restored.runPipeline(
+      { sourceId: 'big-1', kind: 'implementation', subject: 's', objective: '把这两处合起来改', inScope: ['src/a.ts', 'src/b.ts'], acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'] },
+      { members: [{ name: 'a', status: 'idle' }], tasks: [] },
+    ).stage,
+    'awaitingRuling',
+    '★ 还原后，大活必须回到"等人裁决"',
+  )
+})
+
+test('★★★ 定向突变 H（t113）：让 `--emit-task` **绕过分档**（回到改动之前）⇒ 臂 T113a 必须红', async (t) => {
+  /**
+   * ── 判据（契约逐字：「定向突变：让 emit 绕过分档 ⇒ 臂红」）──────────────────────
+   *
+   * ★★ 而这一条突变就是**本任务修之前的那个实现**（逐字）：
+   *
+   *     const emitted = emitReviewedContract(proposal, teamState)
+   *
+   *   ⇒ `--emit-task` 于是**不分档**：一条大活会拿到一份盖了 `reviewed` 的契约，
+   *     而**同一条**走 `--dispatchable` 会被判大档。
+   *     ⇒ 两个出口对同一件工作给出**相反处置** —— 正是本任务的行名。
+   *
+   * ⚠️ 本臂改的是 **CLI 那一层**，所以它用 `spawnSync` 驱动**真实的两个出口**
+   *    （而不是 import 函数 —— 那样测不到"出口"这件事）。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const { spawnSync } = await import('node:child_process')
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_EMIT_VIA_TRUNK,
+    `      const outcome = (() => { const e = emitReviewedContract(proposal, teamState); return e.status === 'executable' ? { stage: 'ready', emitted: e, tier: { tier: 'small', why: 'MUTANT: emit does not tier' }, trace: ['contract', 'review'] } : { stage: 'cannot-emit', missing: e.missing, trace: ['contract'] } })() // MUTANT`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  const l = ledger({ judgements: [judgement('j-0001', '`changed-paths` 那一格必须与 worktree 观察面同源')] })
+  try {
+    /** ★ ① 突变体上：`--emit-task` 走的是**没有分档**的那条路。 */
+    writeFileSync(TOOL, mutated)
+    const argv = ['--frictions', l.fdir, '--judgements', l.jdir, '--team', l.dir]
+    const emitMutant = spawnSync('node', [TOOL, ...argv, '--emit-task', 'j-0001', '--json'], { encoding: 'utf8' })
+    assert.equal(emitMutant.status, 0, `★ 突变体必须能跑：\n${emitMutant.stderr}`)
+    const parsedMutant = JSON.parse(emitMutant.stdout)
+    assert.equal(parsedMutant.stage, 'ready', '★ 突变体把那条活直接放了行')
+    assert.equal(
+      parsedMutant.trace.includes('tier'), false,
+      '★★ 突变体的路径里**没有**分档那一站 —— 这就是"emit 绕过分档"，而 T113a 就是靠它变红的',
+    )
+    assert.equal(parsedMutant.tier.why, 'MUTANT: emit does not tier', '★ 它的"分档"是一个编出来的常数')
+  } finally {
+    writeFileSync(TOOL, original)
+  }
+
+  /** ★★ ② 还原之后：两个出口**都**经过分档（`trace` 里都有那一站）。 */
+  const argv = ['--frictions', l.fdir, '--judgements', l.jdir, '--team', l.dir]
+  const emit = spawnSync('node', [TOOL, ...argv, '--emit-task', 'j-0001', '--json'], { encoding: 'utf8' })
+  assert.equal(emit.status, 0, `★ 还原后 --emit-task 必须 exit=0：\n${emit.stderr}`)
+  const parsed = JSON.parse(emit.stdout)
+  assert.equal(parsed.trace.includes('tier'), true, '★ 还原后 --emit-task 必须经过分档那一站')
+  for (const sourceId of [parsed.sourceId]) {
+    const dispatch = spawnSync('node', [TOOL, ...argv, '--dispatchable', '--json'], { encoding: 'utf8' })
+    const result = JSON.parse(dispatch.stdout)
+    const same = [...result.ready, ...result.awaitingRuling, ...result.cannotEmit].find((entry) => entry.sourceId === sourceId)
+    assert.notEqual(same, undefined, '★ 那条活必须在 --dispatchable 的某一格里')
+    assert.equal(same.tier.tier, parsed.tier.tier, `★ [${sourceId}] 两个出口的分档必须一致`)
+  }
+  l.cleanup()
+})
+
+test('★★ 二次对照（t113）：突变 G/H 的针脚在源码里真的存在', () => {
+  const source = readFileSync(TOOL, 'utf8')
+  assert.equal(source.includes(NEEDLE_TRUNK_TIER), true, '★ 突变 G 的针脚必须逐字存在')
+  assert.equal(source.includes(NEEDLE_EMIT_VIA_TRUNK), true, '★ 突变 H 的针脚必须逐字存在')
+  /**
+   * ★★ 而主干**只有一条** —— 它是本任务的交付，而这里把它写成可执行的断言。
+   *
+   * ★ MEASURED：只数 `tierOf(` 会把**它自己的定义**也数进去（`export function tierOf(`）
+   *   ⇒ 那一版断言报"出现 2 次"而**产品代码是对的**。
+   *   ★ 修法：只数**调用**（`tierOf(` 后面跟着的不是 `contract, {`）。
+   */
+  const trunkCalls = [...source.matchAll(/tierOf\(\s*(?!contract, \{)/gu)].length
+  assert.equal(
+    trunkCalls, 1,
+    `★ \`tierOf\` 在源码里被**调用**了 ${trunkCalls} 次 —— 而"分档是主干上的一站"要求它**只**有一处`
+    + '（多一处就意味着又有一个出口在自己分档，而那正是本任务要消掉的那种分叉）。',
+  )
+  /** ★ 而那一处**必须在主干里**（而不是某个出口自己写的）。 */
+  const trunk = source.slice(source.indexOf('function runStages'), source.indexOf('export function dispatchable'))
+  assert.equal(trunk.includes('tierOf('), true, '★ 分档那一站必须在 `runStages`（主干）里面')
+})
+
+test('★★★ 臂 T113f：拆解器**还没落地**时，这一站如实落 `unmeasured`（★ 而不是编一个结果）', () => {
+  /**
+   * ── 而它为什么现在就要钉住（P3 还没做）──────────────────────────────────────────
+   *
+   * ★ 任务的边界逐字写着：「在 P3 完成前，③ 判为大档时走**现有的** `awaitingRuling`
+   *   （行为不变）」。
+   *
+   * ★★ 而本条臂钉的是**这一站自己的诚实**：一条大活走到拆解，
+   *   而拆解器**没有**给出结论时，它**不许**编：
+   *
+   *     编成 `[]`          ⇒ "拆完了、一条不用做"（一条编出来的结论）
+   *     编成 `[原提案]`     ⇒ 大活**原样**进了下一轮（它只是绕了一圈，而下一轮会再判大档）
+   *     `unmeasured`       ⇒ ★ "我还没学会怎么拆" —— 而它的补救动作是**填 P3**
+   */
+  const tier = { tier: 'large', why: 'spans 2 existing source files', blockingQuestion: 'it spans 2 existing source files' }
+  const contract = { inScope: ['src/a.ts', 'src/b.ts'], objective: '把这两处合起来改' }
+
+  /**
+   * ⚠️ MEASURED：`decompose(tier, proposal)` 而 `decomposeContract(contract, tier)`
+   *   —— ★ 两个函数的头两个参数**顺序相反**。我第一版按同一个顺序传，
+   *     于是"它为什么该被拆"读到的是一句 `(分档没给理由)`。
+   *   ★★ 而下面那一条断言**当场把它打红了** —— 夹具替我把自己的错传参拦住。
+   */
+  const absent = decompose(tier, contract, { depth: 0 })
+  assert.equal(absent.status, 'unmeasured', '★ 拆解器没落地 ⇒ 如实落 unmeasured（不许编一个"拆完了"）')
+  assert.equal(absent.decomposed, false, '★ 而它**没有**拆出东西 —— 那一格不许被填成 true')
+  assert.ok(absent.missing.length > 0, '★ 而"缺什么"要逐项说清（读的人要能直接去补）')
+  assert.match(
+    absent.missing.join(' '), /P3/u,
+    '★ 那一条必须**指名**它是 P3 的任务 —— 否则读的人不知道该去补什么',
+  )
+
+  /** ★★ 而"缺什么"里必须**带着这条活为什么该被拆**（那是拆解器的输入）。 */
+  assert.match(absent.missing.join(' '), /spans 2 existing source files/u, '★ 必须说出它为什么该被拆')
+
+  /**
+   * ── ★ 而下面两个**非法**的拆法必须被当场拒掉 ────────────────────────────────────
+   *
+   * ★★★ 它们是给 P3 的验收网：一个"拆了个空的"、或"原样还回来"的拆解器，
+   *   在这里**当场红** —— 而不是等到那条大活溜进 ready 之后才被发现。
+   *
+   * ⚠️ MEASURED：第一版**够不着**它们 —— `decomposeContract` 先 `return` 掉 `unmeasured`，
+   *   ⇒ 那两道闸门在 P3 之前**永远不跑**（而"够不着"与"守住了"在读数上同形）。
+   *   ⇒ 修法：`decompose` 接受一个**注入的拆解器**（`options.decomposer`），
+   *     于是这里能喂进一个**故意坏掉**的它，把闸门**真的跑一遍**。
+   */
+  const empty = decomposeContract(contract, tier, { depth: 0, decomposer: () => [] })
+  assert.equal(empty.status, 'unmeasured', '★ 拆出 0 条 ⇒ 那不是"拆完了"，是"这条活凭空消失了"')
+  assert.equal(empty.children, undefined, '★ 而它**不许**把一个空数组交给下游当子提案')
+  assert.match(empty.why, /0|凭空/u, '★ 必须说清它为什么被拒')
+
+  /** ★★ 而"原样还回来"那一种（拆出来的子活与原来**同形**）也必须被拒。 */
+  const sameShape = decomposeContract(contract, tier, {
+    depth: 0,
+    decomposer: () => [{ sourceId: 'child-1', inScope: [...contract.inScope], objective: '同一条活，只是换了个 id' }],
+  })
+  assert.equal(sameShape.status, 'unmeasured', '★ 拆出来的与原来同形 ⇒ 大活只是绕了一圈（下一轮还会被判大档）')
+  assert.equal(sameShape.children, undefined, '★ 而它同样**不许**把那个"子活"放下去')
+  assert.match(sameShape.why, /同形/u, '★ 必须说清它是"原样传下去"')
+
+  /**
+   * ★★★ 而反面对照：一个**合法**的拆法（写域真的变小了）必须被判 `decomposed` ——
+   *   否则上面两条闸门可能是"一律拒绝"（而那会让拆解**永远无效**）。
+   */
+  const legal = decomposeContract(contract, tier, {
+    depth: 0,
+    decomposer: () => [
+      { sourceId: 'child-a', inScope: ['src/a.ts'], objective: '只改 a' },
+      { sourceId: 'child-b', inScope: ['src/b.ts'], objective: '只改 b' },
+    ],
+  })
+  assert.equal(legal.status, 'decomposed', '★ 写域真的变小了 ⇒ 那是合法的拆法，不许一律拒绝')
+  assert.equal(legal.children.length, 2, '★ 而那两条子活要真的交下去（回到 ② 各自再走一遍）')
+})
+
+test('★★★ 臂 T113g：`decomposition` 那一格**不许把"拆解器没落地"藏起来**', () => {
+  /**
+   * ── 它防的是什么 ────────────────────────────────────────────────────────────────
+   *
+   * ★ 本任务的边界说"P3 之前行为不变"（大档 ⇒ `awaitingRuling`）。
+   * ★★ 而**行为不变**不等于"读数不变"：若把"拆解器还没落地"这句话省掉，
+   *   那么队列里那一条**看起来**是一条正常的大活等人裁决 ——
+   *   而人**会去裁决**，可他要裁决的"这么拆行不行"**根本没有被提出来**（没有拆法）。
+   *
+   * ⇒ ★ 那是本队记账过的形态：**把基础设施工况伪装成关于数据的结论**。
+   *   ⇒ 所以这一格必须在读数里看得见（它不是错误，是一条读数）。
+   */
+  const big = executableProposal({ sourceId: 'big-1', inScope: ['src/a.ts', 'src/b.ts'], objective: '把这两处合起来改' })
+  const outcome = runPipeline(big, team([{ name: 'a', status: 'idle' }]))
+
+  assert.equal(outcome.stage, 'awaitingRuling', '★ P3 之前：大档仍然走现有的 awaitingRuling（行为不变）')
+  assert.notEqual(outcome.decomposition, undefined, '★★ "拆解器还没落地"这件事**不许被藏起来**')
+  assert.equal(outcome.decomposition.status, 'unmeasured', '★ 它的形状是 unmeasured（补救：填 P3）')
+  assert.equal(outcome.decomposition.decomposed, false, '★ 而它**没有**拆出东西')
+  assert.ok(
+    outcome.decomposition.missing.join(' ').includes('P3'),
+    '★ 而它必须指名那条补救动作（去填 P3），否则读的人只会看到"一条大活"',
+  )
+  /** ★ 而它**仍然在等人裁决** —— 两条读数同时在场，不互相吞并。 */
+  assert.equal(outcome.entry.nextStep, 'decompose', '★ 而它**还要**被拆（下一步没变）')
+})
+
+test('★★★ 臂 T113h：拆解那一站**不许**静默吞掉一条提案（stage 认不出 ⇒ 当场炸）', () => {
+  /**
+   * ★ 反向半边：主干上每一格都必须在 `dispatchable` 的四格里**找得到去处**。
+   *   ★★ 一个"认不出的 stage"若被静默跳过，那条提案会**凭空消失** ——
+   *     而那正是本队记账的"一个读数悄悄少了一格"。
+   *
+   * ★ 而这条臂用的是**源码级**的检查：`COLUMN_BY_STAGE` 必须覆盖主干所有非 ready 的 stage。
+   */
+  const source = readFileSync(TOOL, 'utf8')
+  /**
+   * ⚠️ MEASURED：第一版写成 `/stage: '([a-z-]+)'/`（冒号后**没有**空白），
+   *   而源码里是 `stage: 'awaitingRuling'`（冒号后有空格）⇒ 匹配数 0。
+   *   ★★ 第二版改成允许空白，而它**仍然漏掉了 `awaitingRuling`** ——
+   *     因为字符类里**只有小写**（`[a-z-]`），而 `R` 是大写
+   *     ⇒ 那一条被我自己的正则静默地滤掉了，而报告里那一行读作"通过"。
+   *   ★★★ 而这正是本队那条最贵的纪律的近亲：**一个没测到的东西，
+   *     与"通过"在读数上同形** —— 所以我下面**另外**断言"认出的里面必须有它"。
+   *   ⇒ 修法：字符类改成 `[A-Za-z-]`（stage 名是驼峰）。
+   */
+  const stages = [...source.matchAll(/stage:\s*'([A-Za-z-]+)'/gu)].map((match) => match[1])
+  const unique = [...new Set(stages)]
+  assert.ok(unique.length > 0, '★ 一个 stage 都没认出来 —— 这条自检就变成了"什么都没测到，却显示通过"')
+  assert.ok(unique.includes('ready'), '★ 主干必须能落 ready（否则它什么都不放行）')
+  assert.ok(unique.includes('awaitingRuling'), '★ 主干必须能落 awaitingRuling（大档那一格）')
+  assert.ok(unique.includes('cannot-emit'), '★ 主干必须能落 cannot-emit（补信息那一格）')
+
+  const table = /const COLUMN_BY_STAGE = \{([\s\S]*?)\n  \}/u.exec(source)
+  assert.notEqual(table, null, '★ `COLUMN_BY_STAGE` 必须仍然在（它是"没进 ready"那一栏的唯一口径）')
+  /**
+   * ⚠️ MEASURED：第一版查的是 `'awaitingRuling'`（**带引号**），而源码里那张表的键
+   *   `awaitingRuling` / `rejected` 是**不带引号**的（只有 `cannot-emit` 带，
+   *   因为它有一个连字符）⇒ 那两条断言恒假。
+   *   ★★ 而那不是"产品代码漏了一栏" —— 是**我的检查读错了形状**
+   *     （一个"我读不出来"被读成了"它没有"）。⇒ 修法：两种写法都认。
+   */
+  const mentions = (body, stage) => body.includes(`'${stage}'`) || new RegExp(`(^|[\\s{,])${stage}\\s*:`, 'u').test(body)
+  for (const stage of unique) {
+    if (stage === 'ready') continue
+    assert.ok(
+      mentions(table[1], stage),
+      `★ 主干能落 "${stage}" 而分栏表里**没有它** ⇒ 那一条会被静默漏计（读的人会以为那一类是 0 条）`,
+    )
+  }
+})
+
+test('★★★ 定向突变 G2（t113）：突变 G 下 **`--emit-task` 也**必须红（两个出口一起坏）', async (t) => {
+  /**
+   * ── ★ 它补的是什么 ──────────────────────────────────────────────────────────────
+   *
+   * ★ 上面那两条突变臂各自在**自己那一侧**跑（G 走函数、H 走 CLI）。
+   *   而契约要的那一句是「同一提案走 `--emit-task` 与 `--dispatchable` 得到**相同**的
+   *   分档与放行结论」—— ★ 它说的是**两个出口之间的关系**。
+   *
+   * ★★ 所以这里再补一条：把分档从主干拿掉之后，**两个出口必须一起错** ——
+   *   而"一起错"这件事本身是**信息**：它证明这两个出口**共享**那条主干
+   *   （一个各自实现的版本会让其中一个对、一个错）。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const { spawnSync } = await import('node:child_process')
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_TRUNK_TIER,
+    `  const tier = { tier: 'small', why: 'MUTANT: the trunk does not tier at all', review: 'adversarial-review' } // MUTANT`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  const l = ledger({ judgements: [judgement('j-0001', '`changed-paths` 那一格必须与 worktree 观察面同源')] })
+  try {
+    /** ★ ① 突变体上：两个出口**都**把那条活直接放了行，而 `trace` 里都没有分档那一站。 */
+    writeFileSync(TOOL, mutated)
+    const argv = ['--frictions', l.fdir, '--judgements', l.jdir, '--team', l.dir]
+    const emit = JSON.parse(spawnSync('node', [TOOL, ...argv, '--emit-task', 'j-0001', '--json'], { encoding: 'utf8' }).stdout)
+    const dispatch = JSON.parse(spawnSync('node', [TOOL, ...argv, '--dispatchable', '--json'], { encoding: 'utf8' }).stdout)
+    const entry = [...dispatch.ready, ...dispatch.awaitingRuling, ...dispatch.cannotEmit]
+      .find((row) => row.sourceId === 'j-0001') ?? dispatch.ready[0]
+
+    /**
+     * ⚠️ MEASURED：第一版断言 `emit.trace.includes('tier') === false` —— 而它**红了**，
+     *   因为突变 G 拿掉的是**分档这件事**（`tierOf(...)` 换成一个常数），
+     *   而 `trace` 那一站（`at('tier')`）**仍然被走过**。
+     *   ★★ 那不是产品代码的问题 —— 是**我的断言钉错了东西**：
+     *     `trace` 证明"这一站存在"，而它对"这一站**有没有真的判**"一无所知。
+     *   ⇒ 修法：把它钉在**那个判据本身**上（`tier.why` 是不是那句编出来的常数）。
+     */
+    assert.equal(
+      emit.tier.why, 'MUTANT: the trunk does not tier at all',
+      '★ 突变体给的是一个**编出来的档位**（分档那一站不再真的判了）',
+    )
+    /** ★★ 而**两个出口一起**错 —— 那证明它们走的是同一条主干。 */
+    assert.equal(
+      emit.tier.tier, 'small',
+      '★ 突变体把每一条都报成小档（于是大活也会被放行）',
+    )
+    assert.equal(entry.tier.tier, 'small', '★ `--dispatchable` 那一侧也被同一个突变改了 —— 两个出口共享主干')
+    assert.equal(entry.tier.why, emit.tier.why, '★★ 两个出口给的是**同一句** why（同一个编出来的常数）')
+  } finally {
+    writeFileSync(TOOL, original)
+    l.cleanup()
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t113 ★★★★ captain 裁定②：分档读【提案自己的写域】，不是收窄后的
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── 裁定原文（逐字，本组臂的由来）─────────────────────────────────────────────────
+ *
+ * > 分档问的是「这条活**本身**有多大」，
+ * > 而 `narrowScope` 是**为了产出契约**做的一次收窄，发生在"已决定要做它"**之后**。
+ * > 用收窄后的写域判"它大不大"，等于**用施工图判这块地原本多大**。
+ *
+ * ★★ 而它要防的后果是**具体的**：此前 `tierOf({...contract, inScope: narrow.inScope})`
+ *   读的是**收窄器的输出** ⇒ 信号 A（跨多个现有源码文件 —— t54 教出来的那条）
+ *   在判决侧**永不触发** ⇒ 一个真实事故的防线被**结构性**关掉。
+ */
+
+test('★★★★ 臂 T113i：分档读【提案自己的写域】—— 收窄不许改变一条活的大小', () => {
+  /**
+   * ── 契约新增验收项：「`tierOf(proposal)` 而非 `tierOf({...contract, inScope: narrow.inScope})`」
+   *
+   * ★★ 本臂的构造是**关键**：它必须同时满足两件事，否则它什么都没测 ——
+   *
+   *   ① 提案的写域**跨两个现有源码文件**（⇒ 信号 A 该触发 ⇒ 大档）
+   *   ② 而 `narrowScope` **真的会把它收窄成两个具体文件**（⇒ 收窄后信号 A 消失）
+   *
+   *   ★ 只有 ① 而没有 ② ⇒ 收窄与否都一样，这条臂对"读哪一份"**无话可说**；
+   *   ★ 只有 ② 而没有 ① ⇒ 它本来就是小档，断言不出"该是大档"。
+   */
+  const proposal = {
+    source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+    /** ★ 判决侧的 slug 来自它里面的**英文标识符**（`gate-index-assembly`）⇒ 收窄会生效。 */
+    objective: 'gate-index-assembly 的清单必须覆盖新文件',
+    inScope: ['src/a.ts', 'src/b.ts'],
+    acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  }
+
+  /** ★ 前置一：收窄**真的**发生了（否则下面那条断言是同义反复）。 */
+  const narrow = narrowScope(proposal, {})
+  assert.equal(narrow.status, 'narrowed', '★ 夹具前提：这条提案必须能被收窄（否则本臂测不到"读哪一份"）')
+  assert.notDeepEqual(narrow.inScope, proposal.inScope, '★ 夹具前提：收窄必须**真的改了**写域')
+  assert.equal(
+    narrow.inScope.some((entry) => entry === 'src/a.ts' || entry === 'src/b.ts'), false,
+    '★ 夹具前提：收窄必须把那两个源码文件**换掉**（否则信号 A 不会消失）',
+  )
+
+  /**
+   * ★★★ MEASURED（本任务当场抓出来，一次**假绿**）：第一版这里调的是
+   *   `tierOf(proposal, …)` **直调** —— 而它测的是**那个函数本身**，
+   *   不是**主干喂给它什么**。
+   *   ⇒ 把主干回退成 `tierOf({ ...contract, inScope: narrow.inScope })` 时，
+   *     这条臂**照样绿**（实测：回退下 T113i ✔、只有 T113j/T113k 红）。
+   *   ★★ 而那正是本队那条：**一条钉在写法上的断言，与它要保护的那件事无关。**
+   *
+   * ⇒ 修法：**经主干**取读数（`runPipeline` 的 `tier` 就是主干喂出来的那一份）。
+   *   ★ 而反面对照也必须经主干 —— 否则那个差是"两个直调之差"，不是"主干读哪一份"。
+   */
+  const outcome = runPipeline(proposal, team([{ name: 'a', status: 'idle' }]))
+  assert.equal(
+    outcome.tier.tier, TIER.large,
+    '★ 跨两个现有源码文件的判决被判成了小档 —— 主干把【收窄后的写域】喂给了分档（= 用施工图判这块地原本多大）',
+  )
+  assert.equal(outcome.tier.signals.multipleFiles, true, '★ 而它必须是**信号 A** 触发的（不是别的信号碰巧也判大）')
+
+  /**
+   * ★ 反面对照（**同一个主干**、只换分档的输入）：把收窄后那一份喂进 `tierOf`
+   *   ⇒ 它判小 —— 于是"主干读哪一份"这件事有一个**可观测的差**。
+   *   ★★ 没有这个差，本臂就没有可测的东西（它只是在复述 `tierOf` 的实现）。
+   */
+  const onNarrowed = tierOf({ ...proposal, inScope: narrow.inScope }, { exists: () => true })
+  assert.equal(
+    onNarrowed.tier, TIER.small,
+    '★ 夹具前提：收窄后的写域**确实**判小 —— 那个差就是本臂要量的东西',
+  )
+})
+
+test('★★★★ 臂 T113j：信号 A 在判决侧真的能触发 ⇒ 那条活进【等人裁决】，不被直接放行', () => {
+  /**
+   * ── 契约新增验收项：「信号 A 在判决侧能再次触发：`inScope:['src/a.ts','src/b.ts']`
+   *            的判决必须判 large」
+   *
+   * ★★ 而"判 large"**必须一路走到放行结论上**才有意义 ——
+   *   一个"分档说 large、而放行照旧"的实现，等于把那个读数**读了不用**。
+   *   ⇒ 所以本臂断言的是 `stage === 'awaitingRuling'`（不是 ready、也没有契约）。
+   */
+  const proposal = {
+    source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+    objective: 'gate-index-assembly 的清单必须覆盖新文件',
+    inScope: ['src/a.ts', 'src/b.ts'],
+    acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  }
+  const outcome = runPipeline(proposal, team([{ name: 'a', status: 'idle' }]))
+  console.log(`    ℹ 判决侧跨两文件 ⇒ stage=${outcome.stage} · tier=${outcome.tier.tier} · 有契约=${outcome.emitted !== undefined}`)
+
+  assert.equal(outcome.tier.tier, TIER.large, '★ 判决侧跨两个现有源码文件必须判 large（信号 A）')
+  assert.equal(
+    outcome.stage, 'awaitingRuling',
+    '★ 它被判了大档，却没进"等人裁决" —— 那个分档读数**读了不用**',
+  )
+  assert.equal(outcome.emitted, undefined, '★ 大活不许拿到可派契约')
+
+  /** ★ 而"它大在哪"必须一路带到队列条目上（用户裁决时要的正是这一句）。 */
+  assert.match(
+    outcome.entry.whyLarge, /spans 2 existing source files/u,
+    '★ 队列条目必须说得出它是信号 A 判大的',
+  )
+})
+
+test('★★★★ 臂 T113k：收窄的读数仍进返回值 —— 只是不再当分档输入', () => {
+  /**
+   * ── 契约新增验收项：「`narrow.inScope` 的读数仍进返回值（收窄前后的差是有用信号）
+   *            只是不再作分档输入」
+   *
+   * ★★ 而"有用"必须**说得清它是哪一件事**：
+   *   收窄把一个大面压成两个具体文件 ⇒ ★ **原始写域粗得没能指认对象**
+   *   （判决侧 claim 是人话散文，推不出路径 —— 那正是 t72 那条实测）。
+   *
+   * ★ 所以 `narrowing` 那一格要**逐条可核**：`from` 是提案给的、`to` 是收窄器给的、
+   *   `dropped` 是两者的差。
+   */
+  const proposal = {
+    source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+    objective: 'gate-index-assembly 的清单必须覆盖新文件',
+    inScope: ['src/a.ts', 'src/b.ts'],
+    acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  }
+  const outcome = runPipeline(proposal, team([{ name: 'a', status: 'idle' }]))
+
+  assert.notEqual(outcome.narrowing, undefined, '★ 收窄的读数不许因为"不再当分档输入"就被丢掉')
+  assert.deepEqual(outcome.narrowing.from, ['src/a.ts', 'src/b.ts'], '★ `from` 必须是【提案自己的】写域')
+  assert.deepEqual(
+    outcome.narrowing.to, narrowScope(proposal, {}).inScope,
+    '★ `to` 必须是【收窄后、写进契约】的那一份',
+  )
+  assert.deepEqual(
+    outcome.narrowing.dropped, ['src/a.ts', 'src/b.ts'],
+    '★ 而"被收窄掉了哪些格子"必须看得见 —— 那是"原始写域粗"的证据',
+  )
+  assert.equal(outcome.narrowing.status, 'narrowed', '★ 而它的三态（narrowed/coarse/none）要如实带着')
+
+  /**
+   * ★★ 而**两个读数各说各的事**（不许合成一个）：
+   *   `tier` 说"这条活多大" —— 它读 `from`
+   *   `narrowing` 说"这次收窄干了什么" —— 它读 `from` 与 `to` 的差
+   *   ★ 合成一个，就会让"收窄器坏了"与"这条活很小"在读数上同形。
+   */
+  assert.equal(outcome.tier.tier, TIER.large, '★ `tier` 说的是这条活的面')
+  assert.equal(outcome.narrowing.status, 'narrowed', '★ 而 `narrowing` 说的是收窄干了什么 —— 两件事')
+})
+
+test('★★★★ 臂 T113l（反向半边）：收窄【推不出来】时，信号 A 照样触发', () => {
+  /**
+   * ★ 反向半边：判决侧也可能**收窄不了**（`narrowScope` 落 `coarse`）
+   *   —— 那时写域原样留着。
+   *
+   * ★★ 而无论收窄推得出来推不出来，**分档读的都是同一份**（提案的写域）
+   *   ⇒ 两条路的档位必须**一致**（这正是不再读收窄输出的意义：分档不再依赖收窄器的状态）。
+   */
+  const base = {
+    source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+    inScope: ['src/a.ts', 'src/b.ts'],
+    acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  }
+  /** ★ ① 收窄得了（claim 里有英文 slug）。 */
+  const narrowable = { ...base, objective: 'gate-index-assembly 的清单必须覆盖新文件' }
+  /** ★ ② 收窄不了（claim 全是中文散文、id 也不是判决 id 的形状）。 */
+  const coarse = { ...base, sourceId: 'whatever', objective: '「尾斜杠对照对」—— 用两种写法把形状检查与真判断分开' }
+
+  assert.equal(narrowScope(narrowable, {}).status, 'narrowed', '★ 夹具前提：① 必须收窄得了')
+  assert.equal(narrowScope(coarse, {}).status, 'coarse', '★ 夹具前提：② 必须收窄不了')
+
+  const theTeam = team([{ name: 'a', status: 'idle' }])
+  const a = runPipeline(narrowable, theTeam)
+  const b = runPipeline(coarse, theTeam)
+  assert.equal(a.tier.tier, TIER.large, '★ 收窄得了的那一条：信号 A ⇒ 大档')
+  assert.equal(
+    b.tier.tier, TIER.large,
+    '★ 收窄不了的那一条也必须是大档 —— 分档若读收窄器的状态，这两条会被分成两档（而它们是同一件活的面）',
+  )
+  assert.deepEqual(
+    a.tier.signals, b.tier.signals,
+    '★ 两条的**信号**必须一模一样（它们读的是同一份写域的形状）',
+  )
+  /**
+   * ★★ 而这一条**必须经主干**（同 T113i 的 MEASURED）：直调 `tierOf` 会让它在
+   *   "主干读收窄后"那一版下**照样绿** —— 那样它就钉在写法上，而不是钉在裁定上。
+   */
+  assert.equal(a.stage, 'awaitingRuling', '★ 而两条都要一路走到"等人裁决"（分档读了要用）')
+  assert.equal(b.stage, 'awaitingRuling', '★ 收窄推不出来的那一条也一样')
+})
+
+/**
+ * ★★★★ 突变 I 的针脚（裁定②）：主干**喂给分档的**是提案自己的写域。
+ *
+ * ★ 它与突变 G 的针脚**不同**：
+ *   G 打的是"分档那一站还在不在"（换成一个常数）
+ *   I 打的是"分档那一站**读哪一份写域**"（提案 vs 收窄后的契约）
+ * ⇒ 两条钉的是两件不同的事。
+ */
+const NEEDLE_TIER_INPUT = `  const tier = tierOf(proposal, options)`
+
+test('★★★★ 定向突变 I（裁定②）：把分档的输入换回【收窄后的契约】⇒ 臂 T113i–l 必须红', async (t) => {
+  /**
+   * ── 这条突变就是**裁定②要修掉的那一版实现**（逐字）──────────────────────────────
+   *
+   *     const tier = tierOf({ ...contract, inScope: narrow.inScope }, options)
+   *
+   * ★★ 而它要防的后果是**结构性**的：信号 A（跨多个现有源码文件 —— t54 那条）
+   *   在判决侧**永不触发** ⇒ 一个真实事故的防线被关掉，而**没有任何一行日志会说这件事**。
+   *
+   * ★★★ 而本条臂本身也踩过一个坑（MEASURED，见 T113i 的注释）：
+   *   我最初的 T113i/T113l **直调 `tierOf`** ⇒ 在这条突变下**照样绿**
+   *   （它们测的是那个函数，不是主干喂给它什么）。
+   *   ⇒ 那说明"四条臂都红"这件事**必须先被量过**，否则一条钉在写法上的臂
+   *     会被读成"这条判据守住了"。
+   */
+  if (process.env.AGENT_TEAMS_FRICTION_MUTATION !== '1') {
+    t.skip('串行突变：设 AGENT_TEAMS_FRICTION_MUTATION=1 时运行')
+    return
+  }
+  const original = readFileSync(TOOL, 'utf8')
+  const mutated = original.replaceAll(
+    NEEDLE_TIER_INPUT,
+    `  const tier = tierOf({ ...contract, inScope: narrow.inScope }, options) // MUTANT: tiering reads the narrowed scope`,
+  )
+  assert.notEqual(mutated, original, '★ 突变必须真的改到那一行')
+
+  await withMutatedTool(mutated, async () => {
+    const mutant = await freshTool('mutation=t113-tier-reads-narrowed')
+    /** ★ 这一条断言就是**臂 T113i/j 的红**：判决侧跨两个源码文件被判成了小档。 */
+    const outcome = mutant.runPipeline(
+      {
+        source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+        objective: 'gate-index-assembly 的清单必须覆盖新文件',
+        inScope: ['src/a.ts', 'src/b.ts'],
+        acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+      },
+      { members: [{ name: 'a', status: 'idle' }], tasks: [] },
+    )
+    assert.equal(
+      outcome.tier.tier, 'small',
+      '★ 突变体把一条跨两文件的判决判成了小档 —— 臂 T113i/j 就是靠这一条变红的',
+    )
+    assert.equal(
+      outcome.stage, 'ready',
+      '★★ 而它**因此被直接放行**了（信号 A 在判决侧被关掉 ⇒ 大活不再进裁决队列）',
+    )
+  })
+
+  const restored = await freshTool('mutation=t113-restored-tier-input')
+  assert.equal(
+    restored.runPipeline(
+      {
+        source: 'judgement', sourceId: 'j-0002', kind: 'implementation', subject: 's',
+        objective: 'gate-index-assembly 的清单必须覆盖新文件',
+        inScope: ['src/a.ts', 'src/b.ts'],
+        acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+      },
+      { members: [{ name: 'a', status: 'idle' }], tasks: [] },
+    ).tier.tier,
+    'large',
+    '★ 还原后必须回到 large（信号 A 重新触发）',
+  )
+})
+
+test('★★ 二次对照（裁定②）：突变 I 的针脚在源码里真的存在', () => {
+  assert.equal(readFileSync(TOOL, 'utf8').includes(NEEDLE_TIER_INPUT), true, '★ 突变 I 的针脚必须逐字存在')
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t113 ★★★ 杀伤率补强：把【渲染分支的两侧】都走到
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── 这一组是为什么存在（t13 的读数，逐字）─────────────────────────────────────────
+ *
+ *   `[completion.mutation] the delivered tests are decorative on the lines this task
+ *    changed: mutation score 0.5 < 0.6 (63/126 mutant(s) survived)`
+ *
+ * ★★ 而它点名的那批存活体**有一个共同的形状** —— 全都是
+ *   **`renderDispatchable` 那几个 `if (…length > 0)` 守卫**：
+ *
+ *     gt-to-ge@L2070/2083/2094/2101   ← `> 0` 换成 `>= 0`
+ *     true-to-false@L2178             ← `=== true` 换成 `=== false`
+ *     and-to-or@L2128/2262            ← `&&` 换成 `||`
+ *
+ * ★ 而那意味着**同一件事**：**这些分支的【假】那一侧从来没有被走到。**
+ *   此前每条渲染臂给的都是**非空**队列 ⇒ `length > 0` 恒真
+ *   ⇒ 把 `>` 改成 `>=` 读出来一模一样 ⇒ 变异体存活。
+ *
+ * ★★ 而"守卫恒真"不是小事：它意味着**"空的时候印什么"这件事从没被核过** ——
+ *   一个印错的空清单（例如印出一整栏空的"等人裁决"）会让人以为有活等着裁决。
+ */
+
+test('★★★★ 臂 T113m：渲染的分支**两侧都走到** —— 三个队列都空时印什么', () => {
+  /**
+   * ★★ 本臂喂一份**三个队列全空、blockedCount = 0** 的结果 ——
+   *   那是此前**从没被渲染过**的形状 ⇒ 四个 `> 0` 守卫的假侧同时被走到。
+   *
+   * ★ 而断言钉在**意图**上：空的时候**不许印出那一栏**。
+   *   一个"印了一栏、只是里面写着（无）"的实现会让读的人以为有东西。
+   */
+  const empty = {
+    ready: [], awaitingRuling: [], cannotEmit: [], rejected: [],
+    blockedCount: 0,
+    notReadyBecause: { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 },
+  }
+  const text = renderDispatchable(empty)
+  console.log(`    ℹ 空结果的渲染：长度 ${text.length} · 行数 ${text.split('\n').length}`)
+
+  /** ★ 那一栏**必须在**（"现在就能建（0）"是一个诚实的空读数）。 */
+  assert.match(text, /现在就能建（0）/u, '★ 空清单也要印出"现在就能建（0）"，不是什么都不印')
+
+  /**
+   * ★★ 而三个**条件栏**在空的时候**一个都不许出现** ——
+   *   这正是那四个守卫的**假侧**（把它们改成 `>= 0` ⇒ 这里当场红）。
+   */
+  assert.equal(text.includes('等人裁决（'), false, '★ 队列空时不许印"等人裁决"那一栏（`> 0` 的假侧）')
+  assert.equal(text.includes('契约生成不出来（'), false, '★ 空时不许印"契约生成不出来"那一栏')
+  assert.equal(text.includes('被写域挡着'), false, '★ blockedCount=0 时不许印"被写域挡着"那一行')
+  assert.equal(text.includes('为什么不给别人'), false, '★ 没有 ready 条目时不许印"为什么不给别人"那一行')
+
+  /** ★ 而分栏报照旧要在（它是**无条件**读数 —— 与上面三栏不同形）。 */
+  assert.match(text, /分栏（为什么没进/u, '★ 分栏报是无条件读数，空结果也要有')
+})
+
+test('★★★★ 臂 T113n：`ready` 条目的 `whyNot` **两侧都走到**（有 / 没有）', () => {
+  /**
+   * ── 契约（t13 点名的 `gt-to-ge@L2070`）───────────────────────────────────────
+   *
+   * ★ L2070 = `if (Object.keys(entry.assignee.whyNot).length > 0)` ——
+   *   即"**为什么不是别人**"那一行。此前**没有一条渲染臂**断言过它。
+   *
+   * ★ 而"有 whyNot"这个形状要自己造（`recommendAssignee` 只在**确实比较过别人**时才填）——
+   *   所以这里直接把 `assignee` 换掉，而不是去构造一个能产生它的团队。
+   */
+  const withWhyNot = {
+    sourceId: 'a-1', tier: { tier: 'small', why: 'w' },
+    contract: { subject: 's1', kind: 'implementation', objective: 'o1', inScope: ['scripts/x.mjs'] },
+    assignee: { member: 'a', reasons: ['理由一'], whyNot: { b: '写域重叠', c: '在忙' } },
+    review: { outcome: 'passed', checks: [] },
+  }
+  const withoutWhyNot = {
+    sourceId: 'a-2', tier: { tier: 'small', why: 'w' },
+    contract: { subject: 's2', kind: 'implementation', objective: 'o2', inScope: ['scripts/y.mjs'] },
+    assignee: { member: 'a', reasons: ['理由二'], whyNot: {} },
+    review: { outcome: 'passed', checks: [] },
+  }
+  const text = renderDispatchable({
+    ready: [withWhyNot, withoutWhyNot], awaitingRuling: [], cannotEmit: [], rejected: [],
+    blockedCount: 0,
+    notReadyBecause: { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 },
+  })
+
+  /** ★ 有 whyNot 的那一条 ⇒ 那一行**要在**，且两个名字都要印出来（`> 0` 的真侧）。 */
+  assert.match(text, /为什么不给别人：/u, '★ 有 whyNot 时"为什么不给别人"那一行必须在')
+  assert.match(text, /- b：写域重叠/u, '★ 而逐条理由要印出来')
+  assert.match(text, /- c：在忙/u, '★ 每一条都在')
+
+  /**
+   * ★★ 而没有 whyNot 的那一条 ⇒ 那一行**不许**跟着出现。
+   *   ★ 所以这条断言要**数次数**，不能问"在不在"：
+   *     两个条目都印时，"第 2 条也印了" 与 "第 1 条印了" 在"存在性"上**同形**。
+   *   ⇒ 恰好 1 次（只有第 1 条那一个 whyNot）。
+   */
+  const occurrences = text.split('为什么不给别人：').length - 1
+  assert.equal(
+    occurrences, 1,
+    `★ "为什么不给别人"出现了 ${occurrences} 次 —— 而只有第 1 条有 whyNot ⇒ 空的那条也印了`,
+  )
+})
+
+test('★★★★ 臂 T113o：被 **import** 时不许跑 CLI（`and-to-or@L2128` 的另一侧）', async () => {
+  /**
+   * ── 契约（t13 点名的 `and-to-or@L2128`）───────────────────────────────────────
+   *
+   * ★★ L2128 是 CLI 的入口判定：
+   *
+   *     process.argv[1] !== undefined && import.meta.url === new URL(`file://${process.argv[1]}`).href
+   *
+   *   ⇒ 把 `&&` 换成 `||` 之后，**任何 import** 都会被当成 CLI 调用 ⇒
+   *     import 这个模块会**直接执行 CLI**（读 argv、印清单、可能设 exitCode）。
+   *
+   * ★ 而它此前存活，因为**没有一条臂从"被 import"这一侧断言过** ——
+   *   臂 7 只测"当脚本跑"那一侧。⇒ 本臂把**被 import** 那一侧钉住。
+   *
+   * ★★★ 而它的判据钉的是**可观测的后果**，不是去读那个布尔：
+   *   被 import 时**不许有 stdout 输出、不许设 exitCode** ——
+   *   那是 `&&` 与 `||` 在**行为上**唯一分得开的地方。
+   */
+  const { spawnSync } = await import('node:child_process')
+  /** ★ 一个只 import、不跑 CLI 的子进程；它把 stdout 的写抓下来。 */
+  const probe = `
+    const captured = []
+    const orig = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (chunk, ...rest) => { captured.push(String(chunk)); return true }
+    await import(${JSON.stringify(TOOL)})
+    process.stdout.write = orig
+    orig(JSON.stringify({ wrote: captured.length, exitCode: process.exitCode ?? null }))
+  `
+  const r = spawnSync('node', ['--input-type=module', '-e', probe], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `★ 子进程必须能跑：\n${r.stderr}`)
+  const read = JSON.parse(r.stdout.trim().split('\n').pop())
+  console.log(`    ℹ 被 import 时：wrote=${read.wrote} · exitCode=${read.exitCode}`)
+
+  assert.equal(
+    read.wrote, 0,
+    '★★ 被 import 时它**印了东西** —— 那说明入口判定让"被 import"也走进了 CLI（and-to-or@L2128 的红）',
+  )
+  assert.equal(
+    read.exitCode, null,
+    '★★ 被 import 时它设了 exitCode —— 那是 CLI 路径的副作用，不该出现在 import 上',
+  )
+
+  /** ★ 反面对照：**当脚本跑**时它必须真的印清单（否则上面那条会因为"它从不输出"而恒真）。 */
+  const l = ledger({ frictions: [friction('f-open', 'open')], judgements: [] })
+  try {
+    const run = spawnSync('node', [TOOL, '--frictions', l.fdir, '--judgements', l.jdir], { encoding: 'utf8' })
+    assert.equal(run.status, 0, `★ 当脚本跑时 exit=0：\n${run.stderr}`)
+    assert.ok(run.stdout.length > 0, '★ 反面对照：当脚本跑时**必须**有输出 —— 否则上面那条断言没有意义')
+  } finally {
+    l.cleanup()
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// t113 ★★★ 杀伤率补强（二）：把**消息文本本身**断言掉
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── 这一组补的是同一类缺口，而它的形状值得写下来 ─────────────────────────────────
+ *
+ * ★★ `plus-to-minus` 有 22 条存活，而它们**几乎全是字符串拼接**：
+ *
+ *     why: '第一句。'
+ *       + '第二句。'      ← 这一行被换成 `- '第二句。'`
+ *
+ * ★ 而 `'a' - 'b'` 在 JS 里**不是语法错**，它是 **`NaN`** ⇒ 那段文本变成 `[NaN]`
+ *   ⇒ 只要有任何一条臂**断言了那句文本**，这个变异体就当场被杀。
+ *
+ * ⇒ ★★ 所以存活的原因不是"它不可杀"，而是**那几句文本从来没有人读过**：
+ *   臂只断言了 `missing.length > 0` 或**另一条**消息里的一个字串。
+ *   ★ 而那正是本队那条：**一条从没被读过的输出，与一条正确的输出同形。**
+ */
+
+test('★★★★ 臂 T113p：`decompose` 的 `why` **全文**被断言（不是只看长度）', () => {
+  /**
+   * ★★ 本臂把那段话**逐句**钉住 —— 而它此前只被 `assert.ok(missing.length > 0)` 间接碰过。
+   *   ⇒ `+` 换成 `-` 会把它变成 `NaN`，而本臂当场红。
+   */
+  const tier = { tier: 'large', why: 'spans 2 files', blockingQuestion: 'q' }
+  const out = decompose(tier, { inScope: ['src/a.ts', 'src/b.ts'] }, { depth: 0 })
+
+  assert.equal(typeof out.why, 'string', '★ `why` 必须是一句**字符串**（`NaN` 会让这里红）')
+  /** ★ 而"逐句在不在"是本臂的实质 —— 每一句都单独钉。 */
+  assert.match(out.why, /我还没学会怎么把一条大活拆成原子活/u, '★ 第一句必须原样在里面')
+  assert.match(out.why, /不许\*\*并进"可派"/u, '★ 第二句必须原样在里面（L1507 那一段）')
+  assert.match(out.why, /也\*\*不许\*\*并进"等人裁决"/u, '★ 第三句必须原样在里面（L1508 那一段）')
+  assert.match(out.why, /补的是 P3/u, '★ 而那个补救动作要看得见')
+  /**
+   * ★★ 而"不是 NaN"要**单独**钉一次：上面三条 `match` 在 `why` 是 `[NaN].toString()`
+   *   （即字符串 `"NaN"`）时会全红 —— 但一个**更隐蔽**的实现（例如 `why` 变成
+   *   只含第一句）会让它们中的一部分仍然绿。⇒ 这一条钉住**它没有丢掉任何一句**。
+   */
+  assert.equal(
+    out.why.includes('NaN'), false,
+    '★★ `why` 里出现了 "NaN" —— 那是字符串拼接被换成算术减法的特征（plus-to-minus 的红）',
+  )
+
+  /** ★ 而 `missing` 的三条也逐条钉（它们此前只被数了条数）。 */
+  assert.equal(out.missing.length, 3, '★ 三条：拆解器本体 / 它为什么该被拆 / 它卡在哪一问')
+  assert.match(out.missing[0], /拆解器本体（P3 的任务）/u, '★ 第一条要指名 P3')
+  assert.match(out.missing[1], /spans 2 files/u, '★ 第二条要带上分档给的理由')
+  assert.match(out.missing[2], /q/u, '★ 第三条要带上"卡在哪一问"')
+})
+
+test('★★★★ 臂 T113q：`decomposeContract` 两条拒绝理由**各自**被断言（不是只看一条）', () => {
+  /**
+   * ── 契约（t13 点名的 `plus-to-minus@L1572/1589`）──────────────────────────────
+   *
+   * ★★ 那两条 `why` 分别属于**两个不同的拒绝**：
+   *
+   *     L1572  拆出来的子活与原来**同形**   ⇒ "原样传下去"
+   *     L1589  拆出 **0** 条                ⇒ "这条活凭空消失了"
+   *
+   * ★ 而它们此前只被 `/0|凭空/` 与 `/同形/` 那种**宽**匹配碰过 ——
+   *   而宽匹配的危险恰恰是：它accepts 一个**被截断**的实现。
+   *   ⇒ 本臂把两条**各自**逐句钉住。
+   */
+  const tier = { tier: 'large', why: 'w', blockingQuestion: 'q' }
+  const contract = { inScope: ['src/a.ts', 'src/b.ts'], objective: 'o' }
+
+  const empty = decomposeContract(contract, tier, { depth: 0, decomposer: () => [] })
+  assert.equal(typeof empty.why, 'string', '★ 空拆法的 `why` 必须是字符串')
+  assert.match(empty.why, /拆解给出了 \*\*0\*\* 条子活/u, '★ 它必须说清是 0 条')
+  assert.match(empty.why, /这条活凭空消失了/u, '★ 以及那个后果')
+  assert.match(empty.why, /不许并进 ready/u, '★ 以及"不许并进 ready"')
+
+  const same = decomposeContract(contract, tier, {
+    depth: 0,
+    decomposer: () => [{ sourceId: 'c', inScope: [...contract.inScope], objective: 'o' }],
+  })
+  assert.equal(typeof same.why, 'string', '★ 同形拆法的 `why` 必须是字符串')
+  assert.match(same.why, /与\*\*原契约同形\*\*/u, '★ 它必须说清是"与原来同形"')
+  assert.match(same.why, /原样传下去/u, '★ 以及那个后果')
+  assert.match(same.why, /不许并进 ready/u, '★ 以及"不许并进 ready"')
+
+  /** ★★ 而两条理由必须**不同形**（否则读的人分不出该修哪一半的拆解器）。 */
+  assert.notEqual(empty.why, same.why, '★ 两条拒绝理由必须不一样')
+})
+
+test('★★★★ 臂 T113r：分栏报那一行**逐格**被断言（`plus-to-minus@L2112/2113`）', () => {
+  /**
+   * ── 契约（t13 点名的 L2112/2113）─────────────────────────────────────────────
+   *
+   * ★★ 那两行是分栏报：
+   *
+   *     `大档等人裁决 ${columns.large ?? 0} · 审查没过 ${columns.notReviewed ?? 0}`
+   *     + ` · 契约不全 ${columns.contractIncomplete ?? 0} · 写域被挡 ${result.blockedCount}`
+   *
+   * ★ 而它此前只被 `/大档等人裁决 1/` 碰过 **一格** —— 另外三格从没被读过。
+   *   ⇒ 本臂把**四格**用**各不相同**的数喂进去，于是任何一格错位/丢失都当场红。
+   */
+  const one = (sourceId) => ({
+    sourceId, tier: { tier: 'small', why: 'w' },
+    contract: { subject: `s-${sourceId}`, kind: 'implementation', objective: 'o', inScope: ['scripts/x.mjs'] },
+    assignee: { member: 'a', reasons: ['r'], whyNot: {} },
+    review: { outcome: 'passed', checks: [] },
+  })
+  const text = renderDispatchable({
+    ready: [one('r1'), one('r2')],
+    /** ★ 大档 3 条 —— 以及每一条都要带裁决所需的两格（否则渲染会炸）。 */
+    awaitingRuling: [1, 2, 3].map((i) => ({
+      sourceId: `L${i}`, subject: `s${i}`, inScope: ['src/a.ts'],
+      whyLarge: 'w', blockingQuestion: 'q', nextStep: 'decompose', signals: {},
+    })),
+    cannotEmit: [{ sourceId: 'c1', missing: ['缺 A'] }],
+    rejected: [],
+    /** ★ 写域被挡 5 条（与其它三格**都不同**）。 */
+    blockedCount: 5,
+    notReadyBecause: { large: 3, notReviewed: 4, contractIncomplete: 1, scopeBlocked: 5 },
+  })
+  console.log(`    ℹ 分栏行：${text.split('\n').filter((l) => l.includes('分栏（')).join('')}`)
+
+  /**
+   * ★★ 四格**各自**钉住，而它们的数**互不相同**（3 / 4 / 1 / 5）——
+   *   于是"某两格串了"也会红，不只是"某一格没了"。
+   */
+  assert.match(text, /大档等人裁决 3/u, '★ 第一格（大档）')
+  assert.match(text, /审查没过 4/u, '★ 第二格（审查没过）—— 而它此前从没被读过')
+  assert.match(text, /契约不全 1/u, '★ 第三格（契约不全）')
+  assert.match(text, /写域被挡 5/u, '★ 第四格（写域被挡）')
+
+  /** ★ 而那一行里**不许出现 NaN**（那是拼接被换成减法时最容易漏过的一格）。 */
+  assert.equal(text.includes('NaN'), false, '★★ 分栏报里出现了 NaN（plus-to-minus@L2112/2113 的红）')
+})
+
+test('★★★★ 臂 T113s：`--emit-task` 找不到 id 时的那段提示**逐句**被断言', async () => {
+  /**
+   * ── 契约（t13 点名的 `plus-to-minus@L2173`）───────────────────────────────────
+   *
+   * ★★ 那是 CLI 的"找不到"分支，而它**没有任何臂断言过它的文本** ——
+   *   此前只测了 exitCode=1。⇒ 把拼接的 `+` 换成 `-` 会往输出里塞一个 `NaN`，
+   *   而**没有人读那句话** ⇒ 变异体存活。
+   *
+   * ★ 而它的实用价值也是真的：那句"已看过的：…"是**唯一**告诉人
+   *   "有哪些 id 是有效的"的地方。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const l = ledger({ frictions: [friction('f-open', 'open')], judgements: [] })
+  try {
+    const r = spawnSync('node', [TOOL, '--frictions', l.fdir, '--judgements', l.jdir, '--emit-task', 'nope-1'], { encoding: 'utf8' })
+    assert.equal(r.status, 1, '★ 找不到 ⇒ exit=1')
+    /** ★ 而下面两句**逐句**钉住 —— 它们是那条分支的全部内容。 */
+    assert.match(r.stdout, /★ 找不到 "nope-1"/u, '★ 必须指名找不到的是哪一个 id')
+    assert.match(r.stdout, /它既不在待派里，也不在被挡里/u, '★ 必须说清它是从哪两个池子找的')
+    assert.match(r.stdout, /已看过的：/u, '★ 以及"已看过的"那一句（L2173 的拼接）')
+    assert.equal(r.stdout.includes('NaN'), false, '★★ 输出里出现 NaN（plus-to-minus@L2173 的红）')
+  } finally {
+    l.cleanup()
+  }
+})
+
+test('★★★★ 臂 T113t：`--emit-task` 打出【走过的阶段】与【分档】—— 逐句断言', async () => {
+  /**
+   * ── 契约（t13 点名的 `plus-to-minus@L2204` 那一组）──────────────────────────────
+   *
+   * ★★ `--emit-task` 的 ready 分支会印三行"人话"：
+   *     分档：<档> —— <为什么>
+   *     审查（五问）：<结论>
+   *     走过的阶段：tier → review
+   *
+   * ★ 而"走过的阶段"那一行**是 t113 交付的证据本身**
+   *   （它证明两个出口都经过分档那一站）—— 而它此前**从没被断言过文本**。
+   */
+  const { spawnSync } = await import('node:child_process')
+  const l = ledger({ judgements: [judgement('j-0001', '`changed-paths` 那一格必须与 worktree 观察面同源')] })
+  try {
+    const r = spawnSync('node', [TOOL, '--frictions', l.fdir, '--judgements', l.jdir, '--team', l.dir, '--emit-task', 'j-0001'], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `★ 必须 exit=0：\n${r.stderr}`)
+    assert.match(r.stdout, /★ 分档：small/u, '★ 必须印出档位')
+    assert.match(r.stdout, /★ 审查（五问）：/u, '★ 必须印出审查结论')
+    assert.match(r.stdout, /★ 写域：/u, '★ 必须印出写域收窄的结论')
+    assert.match(r.stdout, /★ 派工理由：/u, '★ 必须印出派工理由')
+    /**
+     * ★★★ 而这一行是**本任务的交付证据**：两个出口都经过分档那一站。
+     *   ⇒ 它必须在，且顺序必须是 `tier → review`。
+     */
+    assert.match(r.stdout, /★ 走过的阶段：tier → review/u, '★★ 必须印出走过的阶段（那是"分档是硬性阶段"的证据）')
+    assert.equal(r.stdout.includes('NaN'), false, '★★ 输出里出现 NaN（plus-to-minus 那一组的红）')
+  } finally {
+    l.cleanup()
+  }
 })

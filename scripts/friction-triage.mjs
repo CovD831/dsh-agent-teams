@@ -1435,6 +1435,526 @@ export function tierOf(contract, { exists = defaultTierExists } = {}) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑪ ★★★ t113：分档 ⇒ 拆解（**P3 填本体**；在此之前是明写的 unmeasured）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 用户原话（这条阶段存在的理由，逐字）─────────────────────────────────────────
+ *
+ *   「一开始都是去对符合条件的任务产出契约之类的东西，然后可能有的契约根据一些
+ *     判定认为不符合原子化的条件，那就得去拆」
+ *
+ * ⇒ ★ 所以"拆解"不是一条错误路径，而是**大档的正常下一步**。
+ *
+ * ── ★★★ 而它此刻**还没有实现** —— 那是 P3 的任务，不许在这里假装有 ──────────────
+ *
+ * 本任务（P1）的边界逐字写着：「本任务**只做骨架与阶段化**，`decompose` 本体由 P3 填」。
+ *
+ * ★★ 所以这里返回 `decomposed: false` + `status: 'unmeasured'`，
+ *   而**不是**一个空数组、也不是"拆成一条 = 原样"：
+ *
+ *     返回 []                       ⇒ "拆完了，一条也不用做" —— 一个**编出来的结论**
+ *     返回 [原提案]                 ⇒ "拆完了，还是这一条" —— 于是大活**从拆解里溜进 ready**
+ *                                      （★ 那正是"派出的不应该有大活"要防的那件事）
+ *     返回 unmeasured（本实现）      ⇒ "我还没学会怎么拆" —— ★ 而它的补救动作是【填 P3】，不是裁决
+ *
+ * ── ★ 而那与主干上的"大档"**不同形**（两格、两句话、两个补救动作）───────────────
+ *
+ *     decompose 没实现（unmeasured）  ⇒ 人**什么都补不了**，要去填 P3（补**能力**）
+ *     分档判不了（unmeasurable）      ⇒ 人**补 inScope**（补**信息**）
+ *     大档                            ⇒ 人**裁决**（拍板"这么拆行不行"）
+ *
+ * ★★ 而它**绝不并进 `ok`** —— 三态不同形那条纪律在这里的落点是：
+ *   一条拆不出来的大活**不是**"可派"，而它**也不是**"等人裁决"（没有东西给人裁决）。
+ */
+export function decompose(tier, proposal, { depth = 0, decomposer } = {}) {
+  /**
+   * ── ★★ 而"拆解器"是**注入**的（`options.decomposer`）────────────────────────────
+   *
+   * ★ 理由与 `tierOf` 的 `options.exists` **同源**：一个不注入的本体在夹具里只能用
+   *   真实磁盘 / 真实拆解器去测 ⇒ 而 P3 之前那个本体**不存在**
+   *   ⇒ 下面两道"非法拆法"的闸门会**够不着**（而那与"守住了"同形）。
+   *
+   * ★★★ 所以这一格让夹具能喂进一个**故意坏掉**的拆解器（拆出 0 条 / 原样还回来），
+   *   从而把闸门**真的跑一遍**。★ 而缺省（没有注入）仍然是那条诚实的 unmeasured。
+   */
+  const children = typeof decomposer === 'function' ? decomposer({ tier, proposal, depth }) : undefined
+  /**
+   * ★★ 而"给了料"⇒ 自报就该是 `decomposed`（而不是那条"我还没学会"）——
+   *   否则下游会读到一句与料对不上的话（`decomposeContract` 那一道"形不一致"会拒掉它）。
+   *   ★ 而"没给料"⇒ 那条诚实的 `unmeasured`。
+   */
+  const decomposed = children !== undefined
+  return {
+    decomposed,
+    status: decomposed ? 'decomposed' : 'unmeasured',
+    depth,
+    /** ★ 而拆解器给了料（哪怕那料是坏的）⇒ 它**必须**被下游看见（见 `decomposeContract`）。 */
+    ...decomposed ? { children } : {},
+    /**
+     * ★ 而"缺什么"要**逐项**说清（`cannot-emit` 的 `missing` 用同一套口径）——
+     *   读的人要能直接去补那一项，而不是再来问一次。
+     *   ★ 而拆解器**给了料**时这几项**不再缺**（没有"缺什么"要说）。
+     */
+    ...decomposed ? {} : {
+      missing: [
+        '★ 拆解器本体（P3 的任务）：它要能回答"这条大活该按什么拆、拆成哪几条原子活"',
+        `★ 而这一条大活为什么该被拆：${String(tier?.why ?? '(分档没给理由)')}`,
+        `★ 它卡在哪一问上：${String(tier?.blockingQuestion ?? '(分档没给那一问)')}`,
+      ],
+      why: '我还没学会怎么把一条大活拆成原子活 ⇒ 如实落 unmeasured。'
+        + '★ 而它**不许**并进"可派"（那会让大活直接出了货），'
+        + '也**不许**并进"等人裁决"（那条队列要的是人拍板，而这里缺的是【能力】—— 补的是 P3）。',
+    },
+  }
+}
+
+/**
+ * 把一份**已生成的契约**拆成子契约。★ 而它**不是一个空壳** —— 在拆解器落地之前，
+ * 它只做一件可核的事：把 `decompose` 的 `unmeasured` **形状**交给下游，
+ * 并**当场拒绝**任何"拆了个空的"或"原样还回来"的拆法（见下）。
+ *
+ * ★★★ 为什么这条函数现在就值得写：它把"大活不许从拆解里溜进 ready"写成**可执行的断言**，
+ *   而不是一句注释 —— 于是 P3 填本体时，一个"拆成 []"或"拆成原样"的实现**当场红**。
+ */
+export function decomposeContract(contract, tier, { depth = 0, exists, decomposer } = {}) {
+  const outcome = decompose(tier, contract, { depth, ...decomposer === undefined ? {} : { decomposer } })
+  /**
+   * ⚠️ MEASURED（本任务当场抓出来）：第一版在这里**先** `return` 掉 `unmeasured`
+   *   ⇒ 下面那两道"非法拆法"的闸门**永远走不到**（P3 之前 `decompose` 恒答 unmeasured）
+   *   ⇒ 它们是一条**够不着的断言** —— 而"够不着"与"守住了"在读数上同形。
+   *
+   * ★★ 而那条是我自己写的一条臂（T113f）打红的：它构造了一个"拆出 0 条"的拆解器，
+   *   期望这里拒掉，而实际返回的是 `decompose` 那句"我还没学会"⇒ 断言对不上。
+   *   ⇒ ★ 而那正是夹具该做的事：**它把我"以为写了、其实没跑"的闸门当场指出来。**
+   *
+   * ⇒ 修法：**先**看拆解器给没给出子活，再谈 status。
+   */
+  const children = Array.isArray(outcome.children) ? outcome.children : []
+
+  /**
+   * ── ★★★ 形状闸门**先跑**（不管拆解器自报的是什么 state）──────────────────────────
+   *
+   * ⚠️ MEASURED（本任务当场抓出来，**两次**）：
+   *
+   *   ① 第一版把 `unmeasured` 先 `return` 掉 ⇒ 闸门在 P3 之前**够不着**
+   *      （"够不着"与"守住了"在读数上同形）。
+   *   ② 第二版把闸门放进了 `if (outcome.status === 'unmeasured')` 里面 ⇒
+   *      一个**合法的**拆法（写域真的变小了）会在那里被当成"我还没学会"而放过去
+   *      —— 而反过来，一个"同形"的坏结果带着 `status: 'decomposed'` 时又走不到闸门。
+   *
+   * ★★ 根因是同一个：**闸门被 arrangement 挂在了一条分支上**，而不是挂在
+   *   "料长什么样"上。⇒ 现在它**只看料**：
+   *
+   *     料是 undefined      ⇒ 相信拆解器的自报（`unmeasured` = "我还没学会"）
+   *     料是空数组          ⇒ ★ 拒（"这条活凭空消失了"）
+   *     料里有与原来同形的   ⇒ ★ 拒（"原样传下去，下一轮还会被判大档"）
+   *     料是合法的子活       ⇒ 放行（`decomposed`）
+   *
+   * ★ 而"自报 unmeasured 却给了料"也在这里被拦（见下）—— 那是形不一致。
+   */
+  const gaveChildren = outcome.children !== undefined
+  const sameShape = children.some((child) => {
+    const scope = Array.isArray(child?.inScope) ? child.inScope.map(String) : []
+    const own = Array.isArray(contract?.inScope) ? contract.inScope.map(String) : []
+    return scope.length === own.length && scope.every((entry, index) => entry === own[index])
+  })
+
+  if (gaveChildren && (children.length === 0 || sameShape)) {
+    return {
+      ...outcome,
+      status: 'unmeasured',
+      children: undefined,
+      why: children.length === 0
+        ? '拆解给出了 **0** 条子活 ⇒ 那不是"拆完了"，是"这条活凭空消失了"。★ 不许并进 ready。'
+        : '拆解至少有一条子活与**原契约同形**（同样的写域）⇒ 那只是把这条大活原样传下去，'
+          + '下一轮它会**再一次**被判大档 ⇒ 而若让它过闸，大活就出了货。★ 不许并进 ready。',
+    }
+  }
+
+  /** ★ 而"没给料" ⇒ 相信自报：`unmeasured`（"我还没学会"，补救是填 P3）。 */
+  if (!gaveChildren) return { ...outcome, children: undefined }
+
+  /**
+   * ── ★★★ 最后一道：**自报与料对不对得上** ───────────────────────────────────────
+   *
+   * ★ 而"对得上"只有一种：自报 `decomposed` **且**给了子活 —— 那是正常的那一半。
+   *
+   * ★★ 而"自报说没学会、却给了一串**能用的**子活" ⇒ 那是**形不一致**：
+   *   下游没法知道该信哪一半。★ 不许并进 ready。
+   *
+   * ⚠️ MEASURED（t113 补强杀伤率时当场抓出来，一次**真 bug**）：这一格的判断
+   *   我第一版**写反了** ——
+   *
+   *     if (outcome.status === 'decomposed') { …拒绝… }   ← 反了
+   *
+   *   ⇒ 后果是：一个**完全正常**的拆解（自报 decomposed + 给出两条合法子活）
+   *     被判成"形不一致"而**拒绝** ⇒ 拆解**永远不会成功**。
+   *   ★★ 而它是被我**自己**那条反向半边臂（T113f 的"合法的拆法必须被放行"）
+   *     抓出来的 —— 而那一条正是为了防"上面两道闸门可能是一律拒绝"才写的。
+   *   ⇒ 所以那条臂不是形式：它当场逮住了一个会让整个 P3 无法交付的错。
+   */
+  if (outcome.status !== 'decomposed') {
+    return {
+      ...outcome,
+      status: 'unmeasured',
+      children: undefined,
+      why: `拆解器自报 \`${String(outcome.status)}\`，而它**同时**给出了一串子活 ⇒ 那个自报与料对不上。`
+        + '★ 不许并进 ready：一个连自己都没说清的拆解结果，没人能核。',
+    }
+  }
+
+  return { ...outcome, status: 'decomposed', children }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑫ ★★★ t113：**单一主干** —— 分类 → 契约 → 分档 → 拆解 → 生成即审查 → ready
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 这一节要消掉的那个缺陷（实测，本任务的由来）────────────────────────────
+ *
+ * 此前有三条**独立出口**，各自走了流水线的不同片段，且**顺序不一致**：
+ *
+ *     `--emit-task <id>`   生成 → 审查            ★ **不分档**（大活也产出契约）
+ *     `--dispatchable`     分档 → 生成 → 审查     顺序对，但只**列**不落地
+ *     `--json`             只出分类报告            走不到契约
+ *
+ * ★ 根因：`tierOf` **只**在 `dispatchable()` 内部被调用 ⇒ `emitReviewedContract`
+ *   自己不知道分档 ⇒「原子化判定」是**调用方记得去做的一步**，而不是流水线的一个阶段。
+ *
+ * ⇒ ★★ 于是同一提案走 `--emit-task` 出契约、走 `--dispatchable` 被判大档 ——
+ *   两条路对**同一件工作**给出**相反处置**（那正是本任务的行名）。
+ *
+ * ── 修法：阶段**固定且有序**，而它们是**代码的顺序**，不是一个约定 ────────────────
+ *
+ *     ① 分类             —— 提案由 `triage()` 给出（它已经有）
+ *     ② 产出契约         —— `emitTaskContract`（★ 注意：**不是** `emitReviewedContract`）
+ *     ③ ★ 分档           —— `tierOf`（**硬性阶段**：主干上的一站，不是可选步骤）
+ *                            ├ 小档         → ⑥ 生成即审查
+ *                            ├ 大档         → ④ 拆解 → ⑤ 审拆法 → 子提案【回到 ②】
+ *                            │                （递归上限 2 层；★ 在 P3 填本体之前，
+ *                            │                 ④ 如实落 unmeasured ⇒ cannot-emit）
+ *                            └ unmeasurable → cannot-emit（★ 绝不并进"可派"）
+ *     ⑥ 生成即审查       —— `adversarialReview` 五问 → 盖章 reviewed / needs-review / rejected
+ *     ⑦ 进 ready 池      —— 附完整契约 + 派工理由
+ *
+ * ── ★★★ 为什么"契约"单独是第 ② 站，而审查不是 ──────────────────────────────────
+ *
+ * ★ 一条**没有契约**的提案（缺 inScope / 缺 subject …）根本无从分档 ——
+ *   `tierOf` 的 `unmeasurable` 那一格说的就是这件事（"inScope absent" / "inScope empty"）。
+ * ⇒ 所以顺序必须是 ② 再 ③：分档要有一份写域可读。
+ *
+ * ── ★★★★ 而分档读的是【提案自己的写域】，**不是收窄之后的那一份**（t113 修正）─────
+ *
+ * MEASURED（本任务第一版就是收窄后分档，由 captain 裁定改掉）：
+ *
+ *   分档问的是「**这条活本身有多大**」——
+ *   而 `narrowScope` 是**为了产出契约**做的一次收窄，它发生在
+ *   "我们已经决定要做它"【之后】。
+ *
+ *   ⇒ 用收窄后的写域去判"它大不大"，等于**用施工图判这块地原本多大**：
+ *     判出来的是**收窄器的输出**，不是提案的面。
+ *
+ * ★★ 而它的实际后果是可量出来的（那一版实测）：
+ *     一条判决侧 `inScope: ['src/a.ts','src/b.ts']` 会被收窄成两个具体文件
+ *     （`scripts/gate-*.test.mjs` + `src/gates/index.ts`）⇒ **判成小档**
+ *     ⇒ ★ **信号 A（跨多个现有源码文件 —— t54 教出来的那一条）在判决侧永不触发**
+ *
+ *   ★ 而那正是 t54 的事故形状（跨 6 个文件、amend 三次）；
+ *     第一版会把它**结构性地**从判决侧关掉 —— 不能接受。
+ *
+ * ── ★ 而收窄本身**不是白做的**：它的读数要保留，只是不再喂给分档 ────────────────
+ *
+ * 「收窄前 vs 收窄后」的差**本身是一个有用的信号**：
+ *   收窄把一个粗面压成两个文件，说明**原始写域粗得没能指认对象**。
+ * ⇒ 它进 `narrowing` 那一格（见 `runStages` 的返回值），**不进分档的输入**。
+ *   ★ 两个读数各说各的事：`tier` 说"这条活多大"，`narrowing` 说"这次收窄干了什么"。
+ *     把它们合成一个，就会让"收窄器坏了"与"这条活很小"在读数上同形。
+ *
+ * ★★ 而 `emitReviewedContract` **不许**被绕过：⑦ 那一格拿到的契约**就是它给的**
+ *   （见 `OUTCOME_CONTRACT_SOURCE`）⇒ 于是"大活直接出契约"在结构上不可能。
+ *
+ * ── 三态（而三者不许合并）─────────────────────────────────────────────────────
+ *
+ *     `ready`          —— 小档 + 审查过了（契约带 `reviewed`）
+ *     `awaitingRuling` —— ★ 大档：一个**队列**，不是错误（每条带"它大在哪"与"卡在哪一问"）
+ *     `cannot-emit`    —— ★ 补信息（契约不全 / 分档判不了 / 拆解器还没实现）
+ *     `rejected`       —— 审了没过
+ *
+ *   ★ 而 `ready` / `awaitingRuling` / `cannot-emit` 里**没有一格并进另一格**。
+ */
+export function runPipeline(proposal, options = {}) {
+  const now = options.now ?? Date.now()
+  return runStages(proposal, options, { depth: 0, now, trace: [] })
+}
+
+/**
+ * ★★ 而下面这个常数是"审查不许被跳过"的**单一真值**（见 `runStages` 里那处断言）：
+ *   ⑦ 那一格的契约**只能**来自 `emitReviewedContract`。
+ */
+export const OUTCOME_CONTRACT_SOURCE = 'emitReviewedContract'
+
+function runStages(proposal, options, { depth, now, trace }) {
+  const at = (stage) => [...trace, stage]
+
+  /**
+   * ── ② 产出契约（**未盖章的那一份**）────────────────────────────────────────────
+   *
+   * ★ 用 `emitTaskContract` 而不是 `emitReviewedContract`：证据是它点名的那条失效
+   *   ——「大档提案绝不被 `emitReviewedContract` **直接**产出契约」。
+   *   而**这一站在主干上**、且它之后**必然**是 ③ 分档 ⇒ 那条不可能成立，
+   *   而路径上的每一站都写在下面的 `trace` 里（可核，不是一个承诺）。
+   *
+   * ★ 而它是**收窄之后**的提案：**契约**写的是收窄后的写域（那是对的 ——
+   *   契约要指得出它到底改哪几个文件）。
+   *   ★★ 而**分档不读这一份** —— 见本文件头"用施工图判这块地原本多大"那一节。
+   */
+  const narrow = narrowScope(proposal, options)
+  const emitted = emitTaskContract({ ...proposal, inScope: narrow.inScope }, options)
+
+  /**
+   * ── ★★ `narrowing`：这次收窄干了什么（**读数**，不是裁决）──────────────────────
+   *
+   * ★ 它**不**参与分档（那正是本任务修正的那一格），而它不是一个可以丢掉的东西：
+   *   原始写域 ⇒ 收窄后写域 的**差**，说的是一件分档说不了的事 ——
+   *
+   *     收窄把一个大面压成两个具体文件  ⇒ ★ 原始写域**粗得没能指认对象**
+   *                                       （判决侧 claim 是人话散文，推不出路径）
+   *     收窄什么都没改（`coarse`）       ⇒ 它推不出来，如实标粗
+   *
+   * ★★ 而它必须**逐条可核**：`from` 是提案给的、`to` 是收窄器给的、`rejected` 是两者的差。
+   *   把两个读数（`tier` / `narrowing`）合成一个，会让"收窄器坏了"与"这条活很小"同形。
+   */
+  const narrowing = {
+    status: narrow.status,
+    /** ★ 提案**自己的**写域（分档读的就是它）。 */
+    from: Array.isArray(proposal?.inScope) ? [...proposal.inScope] : [],
+    /** ★ 收窄之后、写进**契约**的那一份。 */
+    to: Array.isArray(narrow.inScope) ? [...narrow.inScope] : [],
+    /** ★ 而"被收窄掉了哪些格子"要看得见（那是"原始写域粗"的证据）。 */
+    dropped: (Array.isArray(proposal?.inScope) ? proposal.inScope : [])
+      .filter((entry) => !(Array.isArray(narrow.inScope) ? narrow.inScope : []).includes(entry)),
+    why: narrow.why,
+  }
+
+  /**
+   * ── ★★★ ② · 分档的**第一半**：写域本身就读不出来 ⇒ 那**就是** `unmeasurable` ──────
+   *
+   * ★★ MEASURED（本任务当场抓出来）：`emitTaskContract` 在 `inScope` 为空时**先**报
+   *   `cannot-emit`，而 `tierOf` 的 `unmeasurable` 那一格**永远走不到** ——
+   *   于是同一条"写域判不了"的提案会有**两个不同的出处**：
+   *
+   *     走契约那一站 ⇒ `missing: ['inScope（没有写域 ⇒ …）']`，**没有** `becauseTier`
+   *     走分档那一站 ⇒ `missing: [tier.why]`，**有** `becauseTier: 'unmeasurable'`
+   *
+   *   ★ 而下游要能分辨"分档判不了"与"别的项缺了"（两者的补救动作不同：一个补写域、
+   *     一个补 subject/acceptance/…）⇒ 少了那一格，读的人**分不出**该去补什么。
+   *
+   * ⇒ 修法：在这里把"写域读不出来"**如实**标成 `becauseTier: unmeasurable` ——
+   *   而它**不是猜的**：`inScope` 缺席/为空**正是** `tierOf` 判 `unmeasurable` 的那两个条件
+   *   （见 `tierOf` 开头那两格），所以这里与那里**读的是同一件事**。
+   *
+   * ★ 而 stage 仍然是 `cannot-emit`（它确实是"出不了契约"）——**两个出口都是**。
+   */
+  if (emitted.status !== 'executable') {
+    const scopeUnreadable = !Array.isArray(narrow.inScope) || narrow.inScope.length === 0
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: emitted.missing,
+      ...scopeUnreadable ? { becauseTier: TIER.unmeasurable } : {},
+      because: '契约不完整',
+      narrowing,
+      trace: at('contract'),
+    }
+  }
+
+  const contract = emitted.contract
+
+  /**
+   * ── ★★★ ③ 分档 —— **硬性阶段** ───────────────────────────────────────────────
+   *
+   * ★★ 而它读的是 **`proposal`（提案自己的写域）**，**不是** `contract`（收窄后的那一份）——
+   *   见本文件头那一节逐字的理由（"用施工图判这块地原本多大"）。
+   *
+   * ★ 所以这里必须用 `proposal` 而不是 `{ ...contract, inScope: narrow.inScope }`：
+   *   后者读的是**收窄器的输出**，而信号 A（跨多个现有源码文件）会在判决侧永不触发。
+   *
+   * ★★ 而"分档要在契约之后"这一条**仍然成立**（顺序没变）：
+   *   ② 那一站的用途是**证明这份提案出得了契约**（subject/kind/acceptance/verify/inScope 都在），
+   *   而不是把"契约里那份写域"当成分档的输入。
+   */
+  const tier = tierOf(proposal, options)
+
+  /** ★ `unmeasurable`（`inScope` 缺席/为空）⇒ 补**信息**，不许并进"可派"。 */
+  if (tier.tier === TIER.unmeasurable) {
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: [tier.why],
+      becauseTier: TIER.unmeasurable,
+      because: '分档判不了',
+      tier,
+      narrowing,
+      narrowing,
+      trace: at('tier'),
+    }
+  }
+
+  /** ── ③ · 大档分支：④ 拆解 → ⑤ 审拆法 → 子提案【回到 ②】──────────────────────── */
+  if (tier.tier === TIER.large) {
+    /**
+     * ─── ★★★ 在 P3 落地之前，这一站的形状是【行为不变的】 ─────────────────────────
+     *
+     * 任务边界逐字写着：「在 P3 完成前，③ 判为大档时走**现有的** `awaitingRuling`
+     * （行为不变），只是位置从 `dispatchable()` 内部提到主干上。」
+     *
+     * ★ 而"提起位置"这件事**本身就是本任务**：此前分档只发生在 `dispatchable()` 内部
+     *   ⇒ `--emit-task` 走的是"生成 → 审查"而**没有这一站** ⇒ 它给一条大活出了契约。
+     *   ⇒ 现在它在**主干上**，两个出口都经过它。
+     *
+     * ★★ 而为什么是 `awaitingRuling` 而**不是** `cannot-emit`（我第一版写错了，MEASURED）：
+     *   两者都"没有契约"，而它们的**补救动作相反**，混起来会让派发停摆：
+     *
+     *     `cannot-emit`    ⇒ "我出不了契约" —— 人**补信息/补能力**，而**没有东西可裁决**
+     *     `awaitingRuling` ⇒ ★ 契约**完整且合格**，只是这个提案是**大活**
+     *                        ⇒ 人（或 P3 的拆解器）**有东西可裁决**：这么拆行不行
+     *
+     *   把大档报成 `cannot-emit` 的后果是**直接的**：`withMutatedTool` 那类臂会看到
+     *   `awaitingRuling` 空了，而 captain 读到的是一句"契约生成不出来"——
+     *   于是他会去补一条**根本不缺**的信息，而那条大活**永远等不到裁决**。
+     *   ⇒ ★ 这正是本队记账过的形态：**把一类读数伪装成另一类，而两者的补救动作相反。**
+     *
+     * ★ 所以：**大活的信息是完整的**，缺的从来不是信息。
+     */
+    const decomposed = decomposeContract(contract, tier, {
+      depth,
+      ...options.exists === undefined ? {} : { exists: options.exists },
+    })
+    /**
+     * ── ★★ ⑤ 审拆法 ──────────────────────────────────────────────────────────────
+     *
+     * ★ 拆法**本身**要过五问（和契约一样）—— 而那正是用户说的"原子化拆解的审查（门禁）"：
+     *   他裁定的从来不是"这条活大不大"，而是"**这么拆行不行**"。
+     *
+     * ★ 而这里**复用** `adversarialReview`（同一个函数、同一套五问）——
+     *   不为拆解另写一套（那样两份会分叉，而分叉之后"审过了"在日志里同形）。
+     */
+    const decompositionReview = adversarialReview(
+      { inScope: contract.inScope, acceptance: contract.acceptance, verify: contract.verify, objective: contract.objective },
+      narrow,
+    )
+
+    /**
+     * ── ★★★ 拆解器**还没有落地**（P3）⇒ 这一站落 `awaitingRuling`【但把缺什么说清】───
+     *
+     * ★ 三件事**同时**成立，而它们都要在读数里：
+     *   ① 它在**等人裁决**（本任务的边界：行为不变，走现有的 `awaitingRuling`）
+     *   ② ★ 而那份契约**完整** ⇒ 它不是"生成不出来"（`cannotEmit` 会误导）
+     *   ③ ★★ 而"拆解器没落地"这件事**不许被藏起来** —— 它进 `decomposition` 那一格，
+     *      因为把这个工况伪装成"一条正常的大活等人裁决"，就是本队记账的
+     *      **把基础设施工况伪装成关于数据的结论**。
+     *
+     * ★★ 而 P3 一落地，`decomposed.status === 'decomposed'` ⇒ 走下面那一段递归，
+     *   这一格**自动消失**（不是靠谁记得来删它）。
+     */
+    const notYetDecomposable = decomposed.status !== 'decomposed'
+    return {
+      stage: 'awaitingRuling',
+      sourceId: proposal?.sourceId,
+      /** ★ 用户裁决时需要知道它**大在哪** —— 不许只给一个"大"字。 */
+      entry: {
+        proposal,
+        sourceId: proposal?.sourceId,
+        subject: proposal?.subject ?? contract.subject,
+        inScope: contract.inScope,
+        whyLarge: tier.why,
+        blockingQuestion: tier.blockingQuestion,
+        nextStep: tier.nextStep,
+        signals: tier.signals,
+      },
+      tier,
+      decompositionReview,
+      /**
+       * ★ 而这一格是**读数**（不是错误）：
+       *   `unmeasured` ⇒ 拆解器还没落地（补救：填 P3）
+       *   `illegal`    ⇒ ★ 拆解器落地了，而它拆出一个**非法的**结果（空 / 与原样同形）
+       *                  ⇒ 补救是**修拆解器**，而它同样**不许**进 ready
+       */
+      ...notYetDecomposable
+        ? {
+          decomposition: {
+            status: decomposed.status,
+            decomposed: false,
+            missing: decomposed.missing,
+            why: decomposed.why,
+          },
+        }
+        : {},
+      narrowing,
+      trace: at('tier').concat('decompose'),
+    }
+  }
+
+  /** ── ⑥ 生成即审查（五问）→ 盖章 reviewed / needs-review / rejected ────────────── */
+  const reviewed = emitReviewedContract(proposal, options)
+
+  if (reviewed.status === 'rejected') {
+    return {
+      stage: 'rejected',
+      sourceId: proposal?.sourceId,
+      tier,
+      emitted: reviewed,
+      narrowing,
+      narrowing,
+    trace: at('tier').concat('review'),
+    }
+  }
+  /**
+   * ★ 而"契约生不出来"在**这一站**也要如实报 —— 它此前在 ② 就回去了，
+   *   而这里再判一次是因为 ⑥ 是**最后一个**能发现它的地方（两条路都不许静默）。
+   */
+  if (reviewed.status !== 'executable') {
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: reviewed.missing,
+      because: '契约不完整（审查那一站判出来的）',
+      tier,
+      narrowing,
+      narrowing,
+    trace: at('tier').concat('review'),
+    }
+  }
+
+  /**
+   * ── ★★★ ⑦ 进 ready 池 ────────────────────────────────────────────────────────
+   *
+   * ★★ 而这里有一条**结构性断言**（不是注释）：ready 池里那份契约**只能是**
+   *   `emitReviewedContract` 给的 ⇒ 一条绕过了审查的契约**到不了这一格**。
+   */
+  if (String(OUTCOME_CONTRACT_SOURCE) !== 'emitReviewedContract') {
+    throw new Error('the reviewed gate was renamed — re-check that ready contracts still come from it')
+  }
+  return {
+    stage: 'ready',
+    sourceId: proposal?.sourceId,
+    tier,
+    reviewStage: {
+      outcome: reviewed.review.outcome,
+      /** ★ 而 `reviewed` 那一格**只有在全 pass 时**才盖（needs-review 不盖章）。 */
+      stamped: reviewed.contract.reviewed !== undefined,
+      checks: reviewed.review.checks.map((check) => ({ id: check.id, verdict: check.verdict })),
+    },
+    emitted: reviewed,
+    method: { stages: at('tier').concat('review'), source: OUTCOME_CONTRACT_SOURCE, now: new Date(now).toISOString() },
+    narrowing,
+    trace: at('tier').concat('review'),
+  }
+}
+
 /**
  * ── ★★ `--dispatchable`：只列**现在就能建**的 ──────────────────────────────────
  *
@@ -1461,64 +1981,66 @@ export function dispatchable(report, options = {}) {
    * ⇒ ★ 判成大档的提案**不进 `ready`**，而是进这里，且每条**带上它大在哪**。
    */
   const awaitingRuling = []
-  /** ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked。 */
+  /**
+   * ── ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked ──────────────
+   *
+   * ★★ 而下面这个映射是**那一栏的名字 ← 主干的 stage**：
+   *   主干的 stage 是**处置**（`awaitingRuling` / `cannot-emit` / `rejected`），
+   *   而这一栏的名字是**为什么**（`large` / `contractIncomplete` / `notReviewed`）。
+   *   ★ 两者不许各自猜：映射**只有一处**。
+   *
+   * ★★★ 而 `ready` **故意不在这张表里** —— 这一栏问的就是"为什么**没**进 ready"
+   *   ⇒ 一条进了 ready 的提案**本来就没有那一栏**（给它记一栏会让分栏的合计
+   *     与 `toDispatch` 一样大，而那把"进了的"与"没进的"又合成一个数字）。
+   *   ★ 所以下面查表**只对非 ready 的 stage**做。
+   */
   const notReadyBecause = { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
+  const COLUMN_BY_STAGE = {
+    awaitingRuling: 'large',
+    rejected: 'notReviewed',
+    'cannot-emit': 'contractIncomplete',
+  }
 
   for (const proposal of report?.toDispatch ?? []) {
     /**
-     * ── ★★★ t98：准入的**第三条** —— 分档必须是小档（原子级）─────────────────────
+     * ── ★★★ t113：这条循环**不再自己走一遍阶段** —— 它调用那唯一的一条主干 ──────────
      *
-     * ★ 放在 `emitReviewedContract` **之前**：因为一条大活的正确处置不是"再审一遍"
-     *   （它审过也是大的），而是**先拆解**。⇒ 先分档能省掉一次无意义的生成+审查。
+     * ★ 本任务的全部理由：`--emit-task` 与 `--dispatchable` 各写了一遍阶段，而它们的
+     *   **顺序不一样**（前者不分档，后者分档）⇒ 同一提案在两个出口上**处置相反**。
+     *   ⇒ 现在两个出口都是 `runPipeline` 的**薄包装**，分叉在结构上不可能。
      *
-     * ★★ 而它**必须是三条都要**（契约点名的）：
-     *     ① to-dispatch（值得做 —— 走到这里就已经满足，它来自 `report.toDispatch`）
-     *     ② 审查通过（带 `reviewed` —— `emitReviewedContract` 给）
-     *     ③ 分档是小档（原子级 —— 本行给）
+     * ★★★ 而"分档"这一步的位置**在本函数之外**（在主干上）—— 那是本任务最要紧的一格：
+     *   它此前**只**在这个循环里被调用 ⇒ `emitReviewedContract` 自己不知道分档，
+     *   于是一条大活走 `--emit-task` 就会**出一份契约**。
+     *
+     * ★ 而 `notReadyBecause` 的计数**从 stage 读出来**，不在这里重算 ——
+     *   否则"哪一格进哪一栏"又会有第二处口径（而那正是本任务要消掉的那种分叉）。
      */
-    const tier = tierOf(proposal, options)
-
-    if (tier.tier === TIER.large) {
-      awaitingRuling.push({
-        proposal,
+    const outcome = runPipeline(proposal, options)
+    if (outcome.stage === 'ready') ready.push({ proposal, tier: outcome.tier, ...outcome.emitted })
+    else if (outcome.stage === 'awaitingRuling') awaitingRuling.push(outcome.entry)
+    else if (outcome.stage === 'rejected') {
+      rejected.push({ sourceId: proposal.sourceId, because: outcome.emitted.rejectedBecause, review: outcome.emitted.review })
+    } else if (outcome.stage === 'cannot-emit') {
+      cannotEmit.push({
         sourceId: proposal.sourceId,
-        subject: proposal.subject,
-        inScope: proposal.inScope,
-        /** ★ 用户裁决时需要知道它**大在哪** —— 不许只给一个"大"字。 */
-        whyLarge: tier.why,
-        /** ★ 而它**卡在哪一问上**（那一句就是用户要回答的）。 */
-        blockingQuestion: tier.blockingQuestion,
-        /** ★ 而下一步是【拆解】，不是【再生成】。 */
-        nextStep: tier.nextStep,
-        signals: tier.signals,
+        missing: outcome.missing,
+        ...outcome.becauseTier === undefined ? {} : { becauseTier: outcome.becauseTier },
       })
-      notReadyBecause.large += 1
-      continue
-    }
-    /**
-     * ★ 而 `unmeasurable`（`inScope` 缺席或为空）**不进派发池** ——
-     *   它既不是"小档"也不是"大档"，而"判不了"绝不许并进"可派"。
-     *   ★ 而它与"大档"的处置不同：大档要**裁决**，它要**补信息**。
-     */
-    if (tier.tier === TIER.unmeasurable) {
-      cannotEmit.push({ sourceId: proposal.sourceId, missing: [tier.why], becauseTier: tier.tier })
-      notReadyBecause.contractIncomplete += 1
-      continue
-    }
-
-    /**
-     * ── ★★★ t97：`--dispatchable` 走**带审查**的那条路 ─────────────────────────
-     * 用户原话：「在自动生成的时候就可以去做了…带一个『已审查』的字段」
-     * ⇒ 生成与审查是**一步**，不是两步。
-     */
-    const emitted = emitReviewedContract(proposal, options)
-    if (emitted.status === 'executable') ready.push({ proposal, tier, ...emitted })
-    else if (emitted.status === 'rejected') {
-      rejected.push({ sourceId: proposal.sourceId, because: emitted.rejectedBecause, review: emitted.review })
-      notReadyBecause.notReviewed += 1
     } else {
-      cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
-      notReadyBecause.contractIncomplete += 1
+      /** ★ 一个认不出的 stage ⇒ **不许静默吞掉**：那会让一条提案凭空消失。 */
+      throw new Error(`runPipeline returned an unknown stage "${String(outcome.stage)}" for ${String(proposal?.sourceId)}`)
+    }
+    /**
+     * ★ 而"没进 ready 的 stage 没有对应栏" ⇒ **当场炸**，不是静默漏计。
+     *   ★★ 那正是本任务要消的那种形态：**一个读数悄悄少了一格**，
+     *     而读的人会以为"这一类是 0 条"。
+     *   ★ 而进了 ready 的那一条**本来就没有这一栏**（见上面那张表的注释）。
+     */
+    if (outcome.stage !== 'ready') {
+      const column = COLUMN_BY_STAGE[outcome.stage]
+      if (column === undefined) throw new Error(`main-trunk stage "${String(outcome.stage)}" has no column in notReadyBecause`)
+      notReadyBecause[column] += 1
     }
   }
   return {
@@ -1651,22 +2173,89 @@ if (invokedDirectly) {
         + `  （已看过的：${[...report.toDispatch, ...report.blocked].map((e) => e.sourceId).join(', ') || '(空)'}）\n`)
       process.exitCode = 1
     } else {
-      /** ★★★ t97：`--emit-task` 也走**同一条**（生成即审查）。 */
-      const emitted = emitReviewedContract(proposal, teamState)
-      if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(emitted, null, 2)}\n`)
-      else if (emitted.status === 'executable') {
-        process.stdout.write(`${JSON.stringify(emitted.contract, null, 2)}\n`)
-        process.stdout.write(`\n★ 审查（五问）：${emitted.review.outcome}\n`)
-        for (const check of emitted.review.checks) {
+      /**
+       * ── ★★★ t113：`--emit-task` 也是 `runPipeline` 的**薄包装** ──────────────────
+       *
+       * ★ 此前它走的是 `emitReviewedContract`（生成即审查）而**不分档** ——
+       *   于是一条大活在这里会拿到一份完整的、盖了 `reviewed` 的契约，
+       *   而**同一条**走 `--dispatchable` 会被判大档等人裁决。
+       *   ⇒ **两条路对同一件工作给出相反处置**（本任务的行名）。
+       *
+       * ★★ 而现在两条出口调的是**同一个函数**：分档在主干上，
+       *   它**不可能**被这个出口绕过（`runPipeline` 里 `tierOf` 那一站就是证据）。
+       */
+      const outcome = runPipeline(proposal, teamState)
+      if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`)
+      else if (outcome.stage === 'ready') {
+        const c = outcome.emitted.contract
+        process.stdout.write(`${JSON.stringify(c, null, 2)}\n`)
+        process.stdout.write(`\n★ 分档：${outcome.tier.tier} —— ${outcome.tier.why}\n`)
+        if (outcome.viaDecomposition === true) {
+          process.stdout.write(`\n★ 这一格是【拆出来的】子活（${outcome.children.length} 条一起进 ready）`
+            + `\n  拆法审查：${outcome.decompositionReview.outcome}\n`)
+        }
+        process.stdout.write(`\n★ 审查（五问）：${outcome.emitted.review.outcome}\n`)
+        for (const check of outcome.emitted.review.checks) {
           process.stdout.write(`  · ${check.id}=${check.verdict} —— ${check.why}\n`)
         }
-        process.stdout.write(`\n★ 写域：${emitted.scope.status}\n  ${emitted.scope.why}\n`)
-        process.stdout.write(`\n★ 派工理由：\n${emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
-      } else if (emitted.status === 'rejected') {
+        process.stdout.write(`\n★ 写域：${outcome.emitted.scope.status}\n  ${outcome.emitted.scope.why}\n`)
+        process.stdout.write(`\n★ 派工理由：\n${outcome.emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      } else if (outcome.stage === 'awaitingRuling') {
+        /**
+         * ★★ 大活**不出契约** —— 这一格是本任务最要紧的读数：
+         *   它此前会出契约，而那正是"派出的不应该有大活"被违反的地方。
+         */
+        process.stdout.write('★ 这条是【大档】⇒ **不产出可派契约**，先等人裁决/拆解。\n')
+        process.stdout.write(`  它大在哪：${outcome.entry.whyLarge}\n`)
+        process.stdout.write(`  ★ 卡在哪一问：${outcome.entry.blockingQuestion}\n`)
+        process.stdout.write(`  下一步：${outcome.entry.nextStep}\n`)
+        process.stdout.write(`  写域：${(outcome.entry.inScope ?? []).join(', ') || '(未声明)'}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      } else if (outcome.stage === 'rejected') {
         process.stdout.write(`★ 审查**没过** ⇒ 不产出可派契约。没过的问：\n`)
-        for (const reason of emitted.rejectedBecause) process.stdout.write(`  · ${reason}\n`)
+        for (const reason of outcome.emitted.rejectedBecause) process.stdout.write(`  · ${reason}\n`)
+        process.stdout.write(`\n★ 分档：${outcome.tier.tier}\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
       } else {
-        process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${emitted.missing.map((m) => `  · ${m}`).join('\n')}\n`)
+        process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${outcome.missing.map((m) => `  · ${m}`).join('\n')}\n`)
+        if (outcome.tier !== undefined) process.stdout.write(`\n★ 分档：${outcome.tier.tier} —— ${outcome.tier.why}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      }
+    }
+  } else if (argv.includes('--tier')) {
+    /**
+     * ── ★★★ t113：`--tier <id>` —— 一条**故意最小**的出口，只为回答一个问题 ──────────
+     *
+     * ★ 「同一提案走 `--emit-task` 与 `--dispatchable` 得到**相同**的分档与放行结论」
+     *   这一条判据需要一个**能同时驱动两个出口**的读数。而此前的两个出口各自
+     *   **写了一遍阶段** ⇒ 让它们相等要在一个方向上改两处 —— 那是把判据绑在写法上。
+     *
+     * ★★ ⇒ 加上这一格：它按 `{ sourceId, outcome, tier }` 的形状印出来，而
+     *   `--dispatchable --json` 的四格也用**同一份**分档对象（`entry.tier`）。
+     *   ⇒ 「两个出口给出同一份分档」可以是一条对象比对，而不是字符串比对。
+     *
+     * ★ 而它**自己不走一遍阶段**：它读 `dispatchable()` 的结论（同一份输入、同一次分档），
+     *   只是换一个**形状**印出来 —— 于是它不会成为第二种口径。
+     */
+    const wanted = argValue(argv, '--tier', undefined)
+    const stubs = dispatchable(report, teamState)
+    const stubsByOutcome = [
+      ...stubs.ready.map((entry) => ({ sourceId: entry.sourceId, outcome: 'ready', tier: entry.tier })),
+      ...stubs.awaitingRuling.map((entry) => ({ sourceId: entry.sourceId, outcome: 'awaitingRuling', tier: entry.tier })),
+      ...stubs.rejected.map((entry) => ({ sourceId: entry.sourceId, outcome: 'rejected', tier: entry.tier })),
+      ...stubs.cannotEmit.map((entry) => ({ sourceId: entry.sourceId, outcome: 'cannot-emit', tier: entry.tier })),
+    ].filter((stub) => stub.sourceId === wanted)
+    const known = [...report.toDispatch, ...report.blocked].some((entry) => entry.sourceId === wanted)
+    if (!known) {
+      process.stdout.write(`★ 找不到 "${String(wanted)}" —— 它既不在待派里，也不在被挡里。\n`)
+      process.exitCode = 1
+    } else if (argv.includes('--json')) {
+      process.stdout.write(`${JSON.stringify(stubsByOutcome, null, 2)}\n`)
+    } else if (stubsByOutcome.length === 0) {
+      process.stdout.write(`★ [${String(wanted)}] 不在 --dispatchable 的任一格里（它不在待派清单里）。\n`)
+    } else {
+      for (const stub of stubsByOutcome) {
+        process.stdout.write(`★ [${stub.sourceId}] ${stub.outcome} · 分档=${stub.tier.tier}\n  ${stub.tier.why}\n`)
       }
     }
   } else if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
