@@ -61,23 +61,39 @@ async function analyse(teamId) {
   /**
    * ① 成员被占着。
    *
-   * ★★ 而"被占着"与"正在跑"不同（2026-10-09 实测）：
-   *   · 那条任务的 `updatedAt` 很新 ⇒ 它【在跑】⇒ 不是占位
-   *   · 而它很久没动、且没有 turn 在跑 ⇒ ★ 那才是占位（工作已完成而记录落不下去）
-   * ⇒ 判据用一个【可读的量】: 距上次更新多久（默认 30 分钟 = STALE_MS）
-   *   ★ 而那个阈值是【注入的】，便于测试（与 C4 的 stall sentinel 同一条纪律）。
+   * ★★★ 判据是【成员自己的状态】，不是【多久没更新】（2026-10-09 实测，已更正）：
+   *
+   *   我第一版用"距上次更新多久"当"它在不在跑"的【代理】—— 而那是错的：
+   *   ```
+   *   成员 status = idle，而他名下有一条 claimed/in_progress
+   *     ⇒ ★ 那就是占位，与"多久没更新"无关
+   *   ```
+   *   实测：t5/t15 停了 22 分钟，而阈值是 30 分钟
+   *   ⇒ ★ 检测器判它们"在跑" ⇒ 报"在推进"，而实际【全队零 turn】。
+   *
+   * ★★ 所以正确的信号是那个成员【自己说它是什么状态】：
+   *   · member.status === 'idle' 而名下有未完成 ⇒ ★ 占位（他没事做，而那件事还挂着他）
+   *   · member.status === 'working'               ⇒ 真的在跑
+   *   ⇒ ★ 而"多久没更新"只作【附注】（说明占位持续了多久），不作判据。
+   *
+   * ★ 而它正是本队那条纪律的又一次：**时间里没有"在不在跑"，只有成员状态里有。**
    */
-  const STALE_MS = Number(process.env.STALL_AFTER_MS ?? 30 * 60 * 1000)
-  const now = Date.now()
   const occupying = []
   for (const member of team.members ?? []) {
     const mine = team.tasks.filter(
       t => t.assignee === member.name && (t.status === 'in_progress' || t.status === 'claimed'),
     )
+    if (mine.length === 0) continue
+    /** ★ 成员自己说 idle ⇒ 没有 turn 在跑 ⇒ 而这些任务挂着它 ⇒ 占位。 */
+    if (member.status !== 'idle') continue
     for (const task of mine) {
-      const idleMs = now - (task.updatedAt ?? now)
-      if (idleMs < STALE_MS) continue // ★ 它在跑 ⇒ 不是占位
-      occupying.push({ member: member.name, task: task.id, status: task.status, idleMinutes: Math.round(idleMs / 60000) })
+      const idleMs = Date.now() - (task.updatedAt ?? Date.now())
+      occupying.push({
+        member: member.name,
+        task: task.id,
+        status: task.status,
+        idleMinutes: Math.round(idleMs / 60000), // ★ 附注，不是判据
+      })
     }
   }
 
@@ -202,12 +218,12 @@ async function main() {
     process.exit(2)
   }
 
-  const { occupying, deadEdges, danglingHandoffs, ready, running, freshness } = a
+  const { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness } = a
   console.log(`── 停摆检测: ${teamId} ──────────────────────────────`)
   console.log(`  在跑/已认领        ${running.length}  ${running.map(t => t.id).join(', ') || '—'}`)
   console.log(`  真可开工 (ready)   ${ready.length}  ${ready.map(t => t.id).join(', ') || '—'}`)
   console.log()
-  console.log(`  ① 成员被占着        ${occupying.length}  (判定: 该任务 ${Math.round((Number(process.env.STALL_AFTER_MS ?? 30 * 60 * 1000)) / 60000)} 分钟无更新)`)
+  console.log(`  ① 成员被占着        ${occupying.length}  (判定: 成员 status=idle 而名下有未完成)`)
   for (const o of occupying) console.log(`       ${o.member} ← ${o.task} (${o.status}, 已 ${o.idleMinutes} 分钟无更新)`)
   console.log(`  ② 卡在 failed 依赖  ${deadEdges.length}`)
   for (const e of deadEdges) {
@@ -234,10 +250,23 @@ async function main() {
   console.log()
 
   const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length + (freshness?.stale === true ? 1 : 0)
-  const progressing = running.length > 0 || ready.length > 0
+  /**
+   * ★★★ 「在推进」必须要求【真的有人在跑】，而不只是"有任务可开工"
+   *   （2026-10-09 实测：我把 `ready > 0` 当成"在推进"，
+   *    于是当 4 条任务挂着 2 个 idle 成员、而 3 条 ready 时，它报"在推进"，
+   *    而实际【全队零 turn】—— 而那正是用户看到"进行中 0"的那一刻。）
+   */
+  const anyoneWorking = (team.members ?? []).some(m => m.status === 'working')
+  const progressing = anyoneWorking || occupying.length > 0
   if (stallSignals === 0 && progressing) {
-    console.log('⇒ ★ 在推进（三个数都为 0，且有任务在跑或可开工）')
+    console.log(`⇒ ★ 在推进（成员 working: ${(team.members ?? []).filter(m => m.status === 'working').map(m => m.name).join(', ') || '—'}）`)
     process.exit(0)
+  }
+  if (stallSignals === 0 && !progressing) {
+    console.log('⇒ ★★ 停摆 —— 而且这次【不是】三种已知成因之一:')
+    console.log(`     没有任何成员在 working（全 idle），而 ready = ${ready.length}、未完成 = ${running.length}`)
+    console.log('     ⇒ ★ 那是【调度器没有把 ready 送出去】—— 一种新的成因，要单独查')
+    process.exit(1)
   }
   console.log('⇒ ★★ 停摆 —— 而它【不会自己好】。按 DISPATCH-RULES §16.5 的处置表逐条解:')
   if (occupying.length > 0) console.log('     ① ⇒ reassign_task 解开那个占位')
