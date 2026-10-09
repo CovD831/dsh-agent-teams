@@ -167,11 +167,21 @@ async function analyse(teamId) {
     const mod = await import('../lib/tools/shared/entities.js')
     const f = mod.moduleFreshness()
     freshness = {
+      status: f?.status,
+      why: f?.why,           // ★ 'content' | 'commit' —— 两者补救动作不同
+      behind: f?.behind,
       content: f?.content,
       loaded: f?.loaded,
       onDisk: f?.onDisk,
       head: f?.head,
-      stale: f?.content === 'different',
+      /**
+       * ★★★ 两种陈旧【不同形】（verifier 在 t5 上实测后 captain 采纳）:
+       *   why='content' ⇒ 盘上产物与加载的不是同一份 ⇒ ★ 要 build（重生成产物）
+       *   why='commit'  ⇒ ★ 内容一致，而它构建时的 commit 落后于 HEAD
+       *                   ⇒ 可能只是"有提交但没动那个产物" ⇒ 不一定要 build
+       *   ⇒ ★ 而只报"stale / 否"是粗的 —— 它把这两种合成了一个字。
+       */
+      stale: f?.status === 'stale',
     }
   } catch (error) {
     freshness = { undecidable: String(error) }
@@ -215,9 +225,11 @@ async function main() {
    *   三个数都为 0 且（ready > 0 或有任务在跑）⇒ 真的在推进
    *   否则 ⇒ 停摆，而它要靠人解
    */
-  console.log(`  ④ 部署陈旧          ${freshness?.stale === true ? '★ 是（进程持有的构建比盘上旧）' : freshness?.undecidable !== undefined ? '判不了' : '否'}`)
+  console.log(`  ④ 部署陈旧          ${freshness?.stale === true ? '★ 是（运行的代码比 HEAD 旧）' : freshness?.undecidable !== undefined ? '判不了' : '否'}`)
   if (freshness?.stale === true) {
-    console.log(`       loaded=${String(freshness.loaded).slice(0, 12)}… onDisk=${String(freshness.onDisk).slice(0, 12)}… head=${String(freshness.head).slice(0, 12)}…`)
+    console.log(`       why=${freshness.why ?? '?'}  behind=${String(freshness.behind ?? '').slice(0, 12)}…  head=${String(freshness.head ?? '').slice(0, 12)}…`)
+    if (freshness.why === 'content') console.log('       ⇒ ★ 产物不一致 ⇒ 先 `pnpm build` 再重启')
+    else console.log('       ⇒ ★ 内容一致而 commit 落后 ⇒ 它跑的可能是【旧的一版修复】⇒ 核那一版与本版的差异')
   }
   console.log()
 
