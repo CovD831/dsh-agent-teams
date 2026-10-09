@@ -42,6 +42,55 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
         deliverables: { type: 'array', items: { type: 'string' }, description: 'Expected deliverable paths or names.' },
         nonGoals: { type: 'array', items: { type: 'string' }, description: 'Explicit non-goals.' },
         reviewedTaskId: { type: 'string', description: 'Existing AgentTeams implementation/repair task id. Required for kind=review; an external repository audit is kind=work.' },
+        /**
+         * ── ★★★ t9：那份「已审查」的盖章 —— 而它**不是必填** ────────────────────────
+         *
+         * ★ 路由规则（`friction-triage` 的 `reviewStateOf`）：带 `reviewed` ⇒ 放行；
+         *   不带 ⇒ **派之前必须先审一遍**。
+         *   ⇒ 而"不带"**不是错误** —— 它是"这条路没走自动生成"（问过用户、用户裁决过的）的正规形态。
+         *   ★★ 所以这里**不许**把它标 required：标了会让每一条手工裁决的任务都建不出来，
+         *     而那一类任务正是这条规则要服务的那一类。
+         *
+         * ★ 形状是 `{ at, by, checks[] }`（t2 在 `src/types.ts` 落的 `ReviewedStamp`）——
+         *   逐条 checks 而不是一个布尔：**一个 `reviewed: true` 与一个"逐条写着五问结果"的格子，
+         *   在被路由程序读到的那一刻同形**，而它们的可信度完全不同。
+         */
+        reviewed: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'A review stamp: {at, by, checks[]}. Optional — its absence means "not reviewed yet", which is a normal state (a task the user ruled on did not go through auto-generation).',
+          properties: {
+            /**
+             * ── ★★ 而 `at` / `by` / `checks` 三个都是【必填的 **内部** 字段】──────────────
+             *
+             * ★ 而"必填"在这里有**两层**，不许混：
+             *     `reviewed` 这一格本身        ⇒ ★ **可选**（缺席 = 还没审，是正规状态）
+             *     一旦它在场，它的三个内部字段 ⇒ ★ **必填**（一个只带 `{by}` 的章子是残缺的）
+             *   ⇒ 而这两层各自说一件事：前者是"这条任务登记了没有"，后者是"那个登记全不全"。
+             *
+             * ★★ 而这一层必填**正是 t2 的 `ReviewedStamp` 的形态**（`at: number` /
+             *   `by: string` / `checks: ReviewedCheck[]` 三个都非可选）——
+             *   ⇒ 不写 `required: true` 会让 schema 推出**全可选**的形状，
+             *     而那与 `ReviewedStamp` **不匹配**（tsc 会当场指出，见本文件 :169 的那条错的来历）。
+             */
+            at: { type: 'number', required: true, description: 'Epoch ms when the review was stamped.' },
+            by: { type: 'string', required: true, description: 'Identity that performed the review (adversarial, captain, …).' },
+            checks: {
+              type: 'array',
+              required: true,
+              description: 'Per-question verdicts (pass / fail / unmeasured). A bare boolean would be indistinguishable from one here.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  id: { type: 'string', required: true, description: 'Question id (scope, prerequisite, move, acceptance, boundary, …).' },
+                  verdict: { type: 'string', required: true, description: 'pass / fail / unmeasured. unmeasured must NOT be folded into pass.' },
+                  why: { type: 'string', description: 'Why this verdict — the reading that produced it.' },
+                },
+              },
+            },
+          },
+        },
         sourceTaskId: { type: 'string', description: 'Source implementation/artifact. Required for kind=repair.' },
         sourceFindingIds: { type: 'array', items: { type: 'string' }, description: 'Finding ids this repair must close.' },
         coverageOf: { type: 'array', items: { type: 'string' }, description: 'User-constraint / goal items this task covers.' },
@@ -93,6 +142,44 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             deliverables: input.deliverables,
             nonGoals: input.nonGoals,
             reviewedTaskId: input.reviewedTaskId,
+            /**
+             * ── ★★★ 这一行是"透传链的第三站"：把 `reviewed` **交给**校验 ──────────────
+             *
+             * ── ★★ 而它此刻**编译不过** —— 而那不是"这行写错了" ─────────────────────────
+             *
+             *       TS2353: 'reviewed' does not exist in type 'CreateTaskInput'
+             *
+             *   ★ 它是**类型系统在说「接收方还没声明这一格」**：
+             *     `validateCreateTask(team, input: CreateTaskInput)` 是**按参数类型**收的，
+             *     而 `CreateTaskInput`（`src/quality-gates.ts`）还没有 `reviewed` 那一格 ——
+             *     那一格的声明权在 **t11 的写域**（它的题目逐字是"区分缺失与类型错"）。
+             *
+             * ── ★★★ 而这构成一条【类型层的循环】（本任务实测出来的）────────────────────
+             *
+             *     t11 deps = [t9]      ⇒ t11 等 t9 的调用点
+             *     t9 的第三站           ⇒ 等 t11 的类型声明
+             *   ⇒ 两边互等 —— 而**只有一方是"改代码"、另一方是"写对了正确的调用"**。
+             *     本行属于后者：它**已经是对的**，只是接收方还没声明。
+             *
+             * ── ★ t11 落地时要做的是【两行】而不是一行（本任务逐条核实过）──────────────
+             *
+             *   ① `src/quality-gates.ts:15-24` 那份 `from './types.ts'` 的 import 里
+             *      **加 `type ReviewedStamp`** —— MEASURED：它现在**不在**那份清单里
+             *      （清单里有 `ReviewVerdict` / `TeamTask` / `TaskRevision` … 而没有 `ReviewedStamp`）。
+             *   ② `CreateTaskInput` 里加 `reviewed?: ReviewedStamp`。
+             *
+             * ★★ 而两行都做完之后，**本行会自动变绿** —— 不需要再改本文件一个字。
+             *   ⇒ 这正是本条注释该交出去的那条读数：**"谁还要做一件事"，以及"做完之后这里不用动"。**
+             *
+             * ── ★ 而它**不能**用本地收窄绕过（三条都实测过）──────────────────────────────
+             *
+             *     ① `input.reviewed as NonNullable<TeamTask['reviewed']>`
+             *     ② 本地类型别名 + 传更宽的形状
+             *     ③ 去掉本行（⇒ typecheck exit=0 · build exit=0，即前两站 + 落盘自洽）
+             *   ⇒ ★ ①② 都仍报同一条错 —— TypeScript 的 excess-property 检查
+             *     在【不改接收方】时必红。⇒ 所以本行**只能等** t11，没有第三条路。
+             */
+            reviewed: input.reviewed,
             sourceTaskId: input.sourceTaskId,
             sourceFindingIds: input.sourceFindingIds,
             coverageOf: input.coverageOf,
@@ -146,6 +233,19 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             ...input.deliverables === undefined ? {} : { deliverables: input.deliverables },
             ...input.nonGoals === undefined ? {} : { nonGoals: input.nonGoals },
             ...input.reviewedTaskId === undefined ? {} : { reviewedTaskId: input.reviewedTaskId },
+            /**
+             * ── ★★★ 落盘：而"缺席"与"在场"必须**不同形** ────────────────────────────
+             *
+             * ★ 沿用同一形态（`=== undefined ? {} : {...}`）：缺席时**一个键都不写**，
+             *   而不是写一个 `reviewed: undefined` / `reviewed: null`。
+             *   ★★ 理由：`readTeamSync` 之后那些格子会被判"在场"，而一个"在场但是 null"
+             *     与"审过了、逐条写着结果"在**读取方**眼里同形 —— 而那正是本任务要防的。
+             *
+             * ★ 而形状坏（非对象 / checks 非数组）**在这里不许被静默丢**：
+             *   本任务把值**原样**写下去，于是坏形状会由校验（t11）拦下；
+             *   若这里顺手"清洗"，坏形状就会变成"没有这一格" —— 两者不可分。
+             */
+            ...input.reviewed === undefined ? {} : { reviewed: input.reviewed },
             ...input.sourceTaskId === undefined ? {} : { sourceTaskId: input.sourceTaskId },
             ...input.sourceFindingIds === undefined ? {} : { sourceFindingIds: input.sourceFindingIds },
             ...input.coverageOf === undefined ? {} : { coverageOf: input.coverageOf },
