@@ -69,6 +69,15 @@ export declare const requires: readonly ["task.reviewed"];
 export interface PlanReviewedContext {
     task?: {
         id?: string;
+        /**
+         * ★★★ 任务【何时建的】—— 它决定这道门要不要对这条任务说话。
+         *
+         * 本题的缺陷形状（MEASURED 2026-10-09）：一道**新上线的**门对**它出现之前**
+         * 建的任务一律判 `blocked` ⇒ 全队每一次状态转换都被拒。
+         *   ⇒ 而 `createdAt` 正是"它在这道门之前存不存在"的那处读数。
+         *   ★ 读不出时（非数 / 缺席）按【偏宽】处理（落 `unmeasured`）。
+         */
+        createdAt?: unknown;
         reviewed?: {
             at?: unknown;
             by?: unknown;
@@ -87,6 +96,29 @@ export interface PlanReviewedContext {
  *   （"没审过的不该直接派" —— 没有说"只对某几类"）。
  */
 export declare function appliesTo(ctx: PlanReviewedContext | undefined): boolean;
+/**
+ * ── ★★★ 这道门【何时上线】—— 而它是一处单一真值 ─────────────────────────────────
+ *
+ * MEASURED（2026-10-09，两位成员独立普查 + captain 复算）：
+ *   本队 **39 条任务里 0 条**带 `reviewed` 戳，而它们**全部建于**这道门之前。
+ *   ⇒ 门对它们一律判 `blocked` ⇒ 每一次状态转换都被拒 ⇒ 全队停摆。
+ *
+ * ★★ 所以这里需要一处"这道门从何时起存在"的读数 —— 而它**不需要一张新表**:
+ *   它就是【本判据进 `ALL_GATES` 的那个提交的时刻】，而那个时刻是可核的：
+ *     `git log -S"dispatchPlanReviewed" -- src/gates/index.ts` ⇒ `99e8fe3`（2026-10-09 09:33:50 +0800）
+ *
+ * ★ 为什么写成一个常量而不是运行时去问 git：
+ *   · 判据在**每一次派发**时被求值，而读 git 是子进程 ⇒ 太贵
+ *   · 而"这道门何时上线"是**一次性的历史事实**，它不会变
+ *   ⇒ ★ 而它的**可核性**由一条夹具保证（夹具断言这个常量与 git 里那个提交对得上），
+ *     而不是由"记得同步改两处"保证。
+ *
+ * ★★ 而两个时刻的**不同源**是一个必须处理的前提：
+ *   `Task.createdAt` 由 `team.json` 写（墙钟），而本常量来自 git 的提交时刻（另一个墙钟）
+ *   ⇒ 边界附近可能误判 ⇒ ★ **宁可偏宽**（不确定时落 `unmeasured`，而不是 `blocked`）——
+ *     而那与三态纪律一致：「没能测量」不得读成「拒绝」。
+ */
+export declare const PLAN_REVIEWED_GATE_ONLINE_AT: number;
 /**
  * ── 三态裁决 ──────────────────────────────────────────────────────────────────
  *
