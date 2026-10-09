@@ -25,10 +25,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { gate, appliesTo, id, point, REVIEW_QUESTION_IDS } from '../lib/gates/dispatch/plan-reviewed.js'
+import { gate, appliesTo, id, point, REVIEW_QUESTION_IDS, PLAN_REVIEWED_GATE_ONLINE_AT } from '../lib/gates/dispatch/plan-reviewed.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => readFileSync(join(ROOT, relative), 'utf8')
@@ -61,7 +62,13 @@ test('臂 1 ★★★ 三态不同形：带且五问无 fail/unmeasured ⇒ ok�
   const ok = await gate({ task: { id: 't-ok', reviewed: completeReviewed() } })
   assert.equal(ok.ok, true, '★ 带了完整 reviewed（五问全 pass）⇒ 必须放行')
 
-  const absent = await gate({ task: { id: 't-absent' } })
+  /**
+   * ★★ 而这一条测的是【新任务】的缺席（闸门上线之后建的）——
+   *   所以它必须给出一个【晚于闸门】的 createdAt：不给的话，偏宽规则会把它读成存量，
+   *   而那样它就测的是另一件事了（存量 ⇒ unmeasured）。
+   *   ★ 见臂 9b/9d：那两条分别钉"新任务 ⇒ blocked"与"读不出 ⇒ 偏宽"。
+   */
+  const absent = await gate({ task: { id: 't-absent', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } })
   assert.equal(absent.ok, false, '★★ 没有 reviewed ⇒ 拦住（用户原话：必须先审一遍才能派）')
   assert.equal(absent.unmeasured, undefined, '★ 缺席不是 unmeasured —— 那是"读不到"，而这里读得到：那一格确实不在')
   assert.ok(Array.isArray(absent.blockers) && absent.blockers.length > 0, '★ 而它必须说得出**为什么**拦')
@@ -123,7 +130,8 @@ test('★ 臂 3：`blocked` 的措辞必须**指名它缺哪一问**（不是一
    *   而补救的人需要知道的正是**缺哪一问**（他要照着那几问去审）。
    * ★ 定向突变 b（让措辞不指名）⇒ 本臂红。
    */
-  const absent = await gate({ task: { id: 't' } })
+  /** ★ 测的是【新任务】的 blocked 措辞 ⇒ 必须晚于闸门（否则偏宽规则把它读成存量）。 */
+  const absent = await gate({ task: { id: 't', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } })
   const text = absent.blockers.join(' ')
   for (const questionId of REVIEW_QUESTION_IDS) {
     assert.ok(
@@ -282,7 +290,7 @@ test('★ 臂 7（读数臂）：三种输入上的裁决，逐条给出', async
    */
   const cases = [
     { label: '① 带完整 reviewed（五问全 pass）', input: { task: { id: 'r1', reviewed: completeReviewed() } } },
-    { label: '② 没有 reviewed', input: { task: { id: 'r2' } } },
+    { label: '② 没有 reviewed（新任务）', input: { task: { id: 'r2', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } } },
     { label: '③ reviewed 在场但形状坏（checks 不是数组）', input: { task: { id: 'r3', reviewed: { at: 1, by: 'x', checks: 'nope' } } } },
   ]
   const readouts = []
@@ -309,4 +317,82 @@ test('★ 臂 7（读数臂）：三种输入上的裁决，逐条给出', async
   assert.equal(readout.by, 'adversarial', '★ 读数里要有"谁审的"')
   assert.equal(Array.isArray(readout.answered) && readout.answered.length, REVIEW_QUESTION_IDS.length, '★ 读数里要**逐条**给出五问各自的 verdict')
   console.log(`   · ok 那一支的读数：by=${readout.by} · answered=${readout.answered.map((entry) => `${entry.id}:${entry.verdict}`).join(' ')}`)
+})
+
+/**
+ * ── ★★★ 臂 9：存量 vs 新任务（F21）──────────────────────────────────────────────
+ *
+ * 由来（MEASURED 2026-10-09，两位成员独立普查 + captain 复算）：
+ *   本队 **39 条任务里 0 条**带 `reviewed` 戳，而它们**全部建于**这道门之前
+ *   ⇒ 门对它们一律判 `blocked` ⇒ 每一次状态转换都被拒 ⇒ **全队停摆**。
+ *
+ * ★★ 而那不是"它们没审" —— 是【这条路由在它们建的时候还不存在】。
+ *   把两者读成同一件事，会让「我还没审」（一条待办）与
+ *   「这条老任务被永久冻住」（一条缺陷）**同形**。
+ *
+ * ⇒ ★ 存量落 `unmeasured`，新任务缺席仍 `blocked`。**两半都要钉。**
+ */
+test('★★★ 臂 9a：存量任务（早于闸门）⇒ unmeasured，不是 blocked', () => {
+  const before = PLAN_REVIEWED_GATE_ONLINE_AT - 60_000
+  const verdict = gate({ task: { id: 'legacy', createdAt: before } })
+  assert.equal(verdict.ok, false)
+  assert.ok(
+    verdict.unmeasured !== undefined,
+    '★ 早于闸门的任务必须落 unmeasured（"我没能审，因为它在这道门之前"），而不是 blocked',
+  )
+  assert.equal(verdict.blockers, undefined, '★ 存量不该产生 blockers —— 那会把它冻住')
+  assert.match(verdict.unmeasured, /postdates the task|before .*existed/i, '★ 措辞要说清成因是【门晚于任务】')
+})
+
+test('★★★ 臂 9b：新任务（晚于闸门）⇒ 缺席仍然 blocked', () => {
+  const after = PLAN_REVIEWED_GATE_ONLINE_AT + 60_000
+  const verdict = gate({ task: { id: 'fresh', createdAt: after } })
+  assert.equal(verdict.ok, false)
+  assert.ok(
+    verdict.blockers !== undefined,
+    '★ 闸门上线之后建的任务，缺席必须仍然 blocked —— 这一半不许放宽',
+  )
+  assert.equal(verdict.unmeasured, undefined, '★ 新任务不该落 unmeasured —— 那是给存量的')
+})
+
+test('★★ 臂 9c：两者必须【不同形】—— 同一份输入，两条不同的补救', () => {
+  const before = gate({ task: { id: 'legacy', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT - 60_000 } })
+  const after = gate({ task: { id: 'fresh', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } })
+  assert.notDeepEqual(
+    { u: before.unmeasured !== undefined, b: before.blockers !== undefined },
+    { u: after.unmeasured !== undefined, b: after.blockers !== undefined },
+    '★ 存量与新任务若同形，那"被永久冻住"就与"我还没审"分不开了',
+  )
+})
+
+test('★★ 臂 9d：createdAt 读不出 ⇒ 偏宽（unmeasured）', () => {
+  /**
+   * ★ 宁可偏宽的理由：`createdAt`（team.json 写的墙钟）与闸门上线时刻（git 写的）
+   *   **不同源** ⇒ 边界附近可能误判 ⇒ 不确定时不得读成"拒绝"。
+   */
+  for (const task of [{ id: 'x' }, { id: 'y', createdAt: 'not a number' }, { id: 'z', createdAt: Number.NaN }]) {
+    const verdict = gate({ task })
+    assert.ok(
+      verdict.unmeasured !== undefined,
+      `★ createdAt 读不出时应当偏宽（unmeasured），而 ${JSON.stringify(task)} 落成了别的`,
+    )
+  }
+})
+
+test('★★★ 臂 9e：闸门上线时刻与 git 对得上（那处单一真值是可核的）', () => {
+  /**
+   * ★ 这道门的"何时上线"是一个**历史事实**，而它不是运行时读的（太贵）——
+   *   所以它的正确性必须由【这一条臂】保证，而不是靠"记得同步改两处"。
+   *   ★ 判据：那个常量对应 `dispatchPlanReviewed` 进 `ALL_GATES` 的提交时刻。
+   */
+  const iso = execFileSync('git', ['log', '-1', '--format=%cI', '-SdispatchPlanReviewed', '--', 'src/gates/index.ts'], {
+    cwd: join(dirname(fileURLToPath(import.meta.url)), '..'),
+    encoding: 'utf8',
+  }).trim()
+  assert.notEqual(iso, '', '★ git 里找不到那次接线 —— 而"闸门何时上线"就无从核起')
+  assert.equal(
+    Date.parse(iso),
+    PLAN_REVIEWED_GATE_ONLINE_AT,
+    '★ 常量与 git 里那次接线对不上 ⇒ 存量/新任务的分界会漂移',
+  )
 })
