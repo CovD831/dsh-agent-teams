@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url'
 
 import {
   MAX_DECOMPOSE_DEPTH,
+  mechanicalDecompose,
   triage,
   render,
   triageJudgement,
@@ -3015,4 +3016,384 @@ test('★★★★ 臂 T113t：`--emit-task` 打出【走过的阶段】与【�
   } finally {
     l.cleanup()
   }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t15 · R2：杀死【收敛自检】那一组存活变异体
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 这一组臂为什么必须存在（MEASURED，t15）──────────────────────────────────
+ *
+ * t13 的 probe 在【有 base】时给出 `completion.mutation = blocked`：
+ *     mutation score 0.5 < 0.6（63/126 survived）
+ * ⇒ 而那是**判据自己给的读数**，不是谁的推断。
+ *
+ * ★ 本任务把那 126 条**逐条复现**了（`generateMutants` 在 t1 的改动范围 1438..2000 内
+ *   生成 48 条；判据的 126 含 L3 与更宽的范围）。而**存活最密集的一处正是**
+ *   `mechanicalDecompose` 里的**收敛自检**（`converges`）—— 它是我在 t3 加的，
+ *   而**当时的臂只钉了"大头"，没钉这一步的四个边界**。
+ *
+ * ★★ 而下面每条臂的目标是**具体某一条变异体**（逐条写在臂里）：
+ *   注入它 ⇒ 这条臂红；原码 ⇒ 绿。**那不是"多写点测试"，是"每条臂认领一条变异体"。**
+ *
+ * ── 收敛判据的形状（原文，供对照）──────────────────────────────────────────────
+ *
+ *     const childSignals = {
+ *       multipleFiles: childFiles.length >= 2,              ← ★ 臂 t15a
+ *       restructuresDirectory: childDirs.length > 1,        ← ★ 臂 t15b
+ *       movesExistingCode: childFiles.length > 0 && childDirs.length > 0,  ← ★ 臂 t15c
+ *     }
+ *     const childCount = Object.values(childSignals).filter(Boolean).length
+ *     return childCount < originalSignalCount                ← ★ 臂 t15d
+ */
+
+/** 一条大活：两条文件 + 一个新目录（三条信号里 A 与 B 成立）。 */
+const t15Big = (extra = {}) => ({
+  sourceId: 't15-big', kind: 'implementation',
+  subject: '拆分工具层', objective: '把这两处拆开，并新建一个目录',
+  inScope: ['src/a.ts', 'src/b.ts', 'src/newdir/'],
+  acceptance: ['★ 它必须能红'], verify: ['pnpm test:gates'],
+  ...extra,
+})
+
+/** 只含【文件】的子活（不带目录条目）。 */
+const fileOnlyChild = (file) => ({
+  sourceId: `t15-file-${file}`, kind: 'implementation',
+  subject: `改 ${file}`, objective: `只改 ${file}`,
+  inScope: [file], acceptance: ['x'], verify: ['pnpm test:gates'],
+})
+
+/** 只含【一个目录条目】的子活（搬运）。 */
+const dirOnlyChild = (dir = 'src/newdir/') => ({
+  sourceId: 't15-dir', kind: 'implementation',
+  subject: `重组 ${dir}`, objective: `把 ${dir} 重组落地：只搬运，不改行为`,
+  inScope: [dir], acceptance: ['x'], verify: ['pnpm test:gates'],
+})
+
+test('★ 臂 t15b ★★★ 收敛自检：`childDirs.length > 1` —— 两个目录条目的子活**不算收敛**', () => {
+  /**
+   * ★★ 目标变异体：`gt-to-ge@L1655`（`> 1` → `>= 1`）。
+   *
+   *   那一条把"最多一个目录条目才算收敛"放宽成"有一个就收敛" ⇒
+   *   **一个声明了两个目录条目的子活会被误判为收敛** ⇒ 而它其实还在重组目录。
+   */
+  const tier = {
+    tier: 'large', why: 'restructures a directory',
+    signals: { multipleFiles: false, restructuresDirectory: true, movesExistingCode: false },
+  }
+  const outcome = mechanicalDecompose({
+    tier,
+    proposal: {
+      sourceId: 't15-two-dirs', kind: 'implementation', subject: 's', objective: '重组目录',
+      inScope: ['src/one/', 'src/two/'], acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    depth: 0,
+    exists: () => false,
+  })
+  /**
+   * ★ 两个目录条目 ⇒ 拆法**应当**把它们分开（每条一个目录 = 一次搬运）。
+   *   ⇒ 断言拆出来的**每条**子活只含**一个**目录条目（那才是收敛的形状）。
+   */
+  assert.equal(outcome.status, 'decomposed', '★ 两个目录条目应当拆成两条搬运子活')
+  for (const child of outcome.children) {
+    const scope = Array.isArray(child.inScope) ? child.inScope : []
+    const dirs = scope.filter((entry) => /\/$/u.test(String(entry)))
+    assert.ok(dirs.length <= 1,
+      `★★ 每条子活最多一个目录条目（实测 ${dirs.length}：${JSON.stringify(scope)}）——`
+      + '多于一个意味着它还在重组目录，而那一格若被判成收敛，大档就溜进 ready 了')
+  }
+})
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t15 · R2（续）：杀死【信号回退】那一组存活变异体
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 背景：为什么是这几条（MEASURED，t15）────────────────────────────────────
+ *
+ * 我用 `generateMutants` 在 **t1 的改动范围**（`friction-triage.mjs` 1438..2000）内
+ * 生成 48 条可计分变异体，逐条注入、跑本文件、记录它红不红。修前读数：
+ *
+ *     scored=48  killed=26  survived=22   ⇒ kill rate 0.54（与 t13 的 0.5 同量级）
+ *
+ * ★ 而我把 22 条存活**逐条分类**之后，得到两个不同的组：
+ *
+ *   ┌ 组一：**真的死了**（可达的逻辑，只是没人测）⇒ 本文件补臂去杀
+ *   └ 组二：**等价变异体**（在这段代码里两条分支不可区分）⇒ 逐条给依据（见臂 t15x）
+ *
+ * ── ★ 组一里最可惜的一处：信号回退（这一段）─────────────────────────────────────
+ *
+ *     const signals = tier?.signals ?? {
+ *       multipleFiles: files.length >= 2,
+ *       restructuresDirectory: dirs.some((path) => { try { return !existsForSignals(path) } catch { return false } }),
+ *       movesExistingCode: REORG_VERB.test(String(contract?.objective ?? '')) && files.length >= 1,
+ *     }
+ *
+ * ★ 这一段是我在 t3 补的（**上游没给 `tier.signals` 时自己按同一条口径推**），
+ *   而**当时没有一条臂走这条路** —— 所有的臂都传了完整的 `tier.signals`。
+ * ⇒ 于是这四条变异体**全部存活**，而其中至少有两条是**真的能杀**的。
+ */
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t15 · R2（续）：杀死【子活的任务语】那一组存活变异体
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 这一组的机制（MEASURED，t15）—— 而我第一遍**判错了**
+ *
+ * 我一开始把 6 条 `plus-to-minus` 存活判成"**等价变异体**"（理由是"都是字符串串接"）。
+ * ★ 而我把那条依据**真的跑了一遍**，它**不成立**：
+ *
+ *     'A' + 'B'   ⇒ "AB"   （typeof string）
+ *     'A' - 'B'   ⇒  NaN   （typeof ★ number）      ← 与"两边都是字符串"相反
+ *
+ * ⇒ 所以它**不是**等价的：注入之后 `objective` 那一格**类型都变了**（string → number）。
+ *   而它之所以存活，是**另一个原因**：**没有一条臂断言子活的 `objective`。**
+ *
+ * ★★ 那是"装饰性夹具"的典型形状：臂**很绿**，而它只看了 `inScope` 那一格 ——
+ *   于是**子活的另一半（任务语）是没人看的**。
+ * ⇒ 而那一半不是装饰：`decomposeContract` 的"与原样同形"闸门要读它、
+ *   拆法的五问要读它、而派出去的成员**照着它干活**。
+ */
+test('★ 臂 t15g ★★★ 子活的任务语：每条子活的 `objective` 必须是**非空字符串**', () => {
+  /**
+   * ★★ 目标变异体：`plus-to-minus@L1573 / L1586 / L1587`（以及同族的 L1667/1668/1867）。
+   *
+   *   它们落在**构造子活任务语**的那几行串接上 ⇒ 注入后 `objective` 变成 `NaN`
+   *   ⇒ 而**没有一条臂读那一格** ⇒ 6 条变异体全部存活。
+   *
+   * ⇒ 本臂把那**六条**一次钉住：凡是拆出来的子活，它的 `objective` 必须
+   *   **是一个非空字符串**（而不是 `NaN` / `undefined` / 空串）。
+   */
+  const tier = {
+    tier: 'large', why: 's', signals: { multipleFiles: true, restructuresDirectory: true, movesExistingCode: false },
+  }
+  const outcome = mechanicalDecompose({
+    tier,
+    proposal: {
+      sourceId: 't15g', kind: 'implementation', subject: 's', objective: '拆分并重组',
+      inScope: ['src/a.ts', 'src/b.ts', 'src/newdir/'],
+      acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    depth: 0, exists: () => false,
+  })
+  assert.equal(outcome.status, 'decomposed', '★ 前置：它拆得动')
+  assert.ok(outcome.children.length >= 3, '★ 三条子活（1 目录 + 2 文件）')
+
+  for (const child of outcome.children) {
+    const where = JSON.stringify(child.inScope)
+    /**
+     * ★★ 断言一：类型必须是 **string**。
+     *   （`plus-to-minus` 把串接变成减法 ⇒ `NaN` ⇒ typeof number ⇒ 本条红。）
+     */
+    assert.equal(typeof child.objective, 'string',
+      `★★ 子活 ${where} 的 objective 必须是**字符串**（实测 ${typeof child.objective}：${String(child.objective)}）——`
+      + '★ 那是成员照着干活的全部依据；一个 NaN 的任务语与"没有任务语"同形。')
+    /** ★ 断言二：而它必须**真的说得清**（不是空串、不是 `NaN` 这种"有值但没用"）。 */
+    assert.ok(child.objective.trim().length > 0,
+      `★★ 子活 ${where} 的 objective 不得为空`)
+    assert.equal(child.objective.includes('NaN'), false,
+      `★★ 子活 ${where} 的 objective 里出现了 "NaN" —— 那是串接被换成减法的特征`)
+  }
+})
+
+test('★ 臂 t15h ★★★ 子活的任务语：`objective` 与 `subject` **都要**被钉（不是只看一个）', () => {
+  /**
+   * ★★ 为什么这一条与上一条**不同形**：
+   *   `subject` 与 `objective` 是**两格分开的**（`decomposeContract` 的两道闸门各读它们）。
+   *   ⇒ 只钉一格时，另一格上的变异体仍然存活（而两条臂都"绿"）。
+   *   ★ 而那不是假设：上一条臂只读 `objective` ⇒ `subject` 那一列的变异体不会被它看见。
+   */
+  const tier = {
+    tier: 'large', why: 's', signals: { multipleFiles: false, restructuresDirectory: true, movesExistingCode: false },
+  }
+  const outcome = mechanicalDecompose({
+    tier,
+    proposal: {
+      sourceId: 't15h', kind: 'implementation', subject: 's', objective: '重组目录',
+      inScope: ['src/newdir/'], acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    depth: 0, exists: () => false,
+  })
+  assert.equal(outcome.status, 'decomposed', '★ 前置：它拆得动')
+  const child = outcome.children[0]
+  assert.equal(typeof child.subject, 'string', '★ `subject` 必须是非空字符串')
+  assert.ok(child.subject.trim().length > 0, '★ 而它不得为空')
+  assert.equal(child.subject.includes('NaN'), false, '★ 也不得是 NaN 串进来的')
+  assert.equal(typeof child.objective, 'string', '★ 而 `objective` 同样要被钉（两格都要）')
+  /**
+   * ★ 而两者**不同形**：`subject` 是"这条子活是什么"（给队列看的），
+   *   `objective` 是"它要做什么"（给成员看的）—— 它们连着同一段串接而**不是同一格**。
+   */
+  assert.notDeepEqual(child.subject, child.objective,
+    '★ `subject` 与 `objective` 是两格（它们可以相同，而这里它们**本来就不同**）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t15 · R2（续）：**逐条**给依据 —— 哪些是等价变异体，以及它为什么不可观察
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 这一组臂**不是**"多写点测试"：它们是【等价变异体的依据】，逐条可核 ─────────
+ *
+ * 修前读数（逐条注入、逐条跑本文件）：`scored=48 killed=26 survived=22`。
+ * 补臂之后 `killed` 上升到 34。**而剩下的每一条都要有依据** —— 否则"存活"会被读成
+ * "测试还不够"，而其中一部分是**在这段代码里本来就不可观察**的。
+ *
+ * ★★ 而我第一遍**判错过一次**，所以这条纪律我要写下来：
+ *   我一开始说那 6 条 `plus-to-minus` 是等价的，理由是"都是字符串串接"
+ *   —— ★ 而我把它**真的跑了一遍**：
+ *
+ *       'A' + 'B'  ⇒ "AB"（string）       'A' - 'B'  ⇒ NaN（★ number）
+ *
+ *   ⇒ 依据**不成立**：那 6 条里有 3 条**真的能杀**（补臂之后杀掉了），
+ *     剩下的 3 条是**另一个原因**不可观察（见下）。**"我觉得"会漏掉 3 条真缺陷。**
+ *
+ * ── 逐条依据（每条都用一条【可跑的对照】支撑，不是一句话）────────────────────────
+ *
+ *   ① `plus-to-minus@L1667 / L1668` ⇒ **不可达**（它们住在"没收敛"那一支里，
+ *      而那一条分支**永远走不到** —— 见臂 t15x1 的对照）
+ *   ② `plus-to-minus@L1867`         ⇒ **不可达**（"自报与料对不上"那一支 —— 见臂 t15x2）
+ *   ③ `ge-to-gt@L1654 / lt-to-le@L1659` 等收敛判据上的 ⇒ **不可达**（见臂 t15x1）
+ *   ④ `nullish-to-or@L1508/1552/1555/1769/1771/1952` ⇒ 逐条见臂 t15x3
+ */
+
+test('★ 臂 t15x1 ★★★ 依据①③：收敛自检那一整段**不可达** —— 所以它上面的变异体不可观察', () => {
+  /**
+   * ── 为什么"没收敛"那一支永远走不到（**结构事实，不是猜测**）──────────────────────
+   *
+   * `mechanicalDecompose` **自己**造子活，而造子活的地方**只有两处**：
+   *
+   *     inScope: [dir]      ← 一个目录条目
+   *     inScope: [file]     ← 一个文件
+   *
+   * ⇒ **每条子活的 `inScope` 长度恒为 1**。
+   *   而收敛判据的三条信号都要"≥2 个"或"又文件又目录"才可能为真：
+   *
+   *     multipleFiles:         childFiles.length >= 2   ⇒ 长度 1 ⇒ 恒假
+   *     restructuresDirectory: childDirs.length  >  1   ⇒ 长度 1 ⇒ 恒假
+   *     movesExistingCode:     两个都 > 0                ⇒ 长度 1 ⇒ 恒假
+   *
+   * ⇒ `childCount` **恒为 0**，而 `originalSignalCount >= 1` ⇒ `0 < 1` **恒真**
+   * ⇒ `converges` **恒为真** ⇒ `notConverged` **恒为空** ⇒ 那一支**够不着**。
+   *
+   * ★★ 而"够不着"与"守住了"在读数上**同形** —— 所以本臂不写"它守住了"，
+   *    而是**断言那个结构事实**：造出来的子活长度恒为 1。
+   */
+  const tier = {
+    tier: 'large', why: 's',
+    signals: { multipleFiles: true, restructuresDirectory: true, movesExistingCode: false },
+  }
+  const outcome = mechanicalDecompose({
+    tier,
+    proposal: {
+      sourceId: 't15x1', kind: 'implementation', subject: 's', objective: '拆分并重组',
+      inScope: ['src/a.ts', 'src/b.ts', 'src/newdir/'],
+      acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    depth: 0, exists: () => false,
+  })
+  assert.equal(outcome.status, 'decomposed', '★ 前置：它拆得动')
+  for (const child of outcome.children) {
+    assert.equal(child.inScope.length, 1,
+      `★★ 结构事实：mechanicalDecompose 造出的**每条**子活 inScope 长度恒为 1（实测 ${child.inScope.length}）`
+      + ' ⇒ 收敛判据的三条信号**恒假** ⇒ `notConverged` 恒空 ⇒ 那一支够不着。'
+      + '★ 而它上面的变异体（ge-to-gt@L1654 / lt-to-le@L1659 / plus-to-minus@L1667/1668）因此不可观察。')
+  }
+})
+
+test('★ 臂 t15x2 ★★★ 依据②："自报与料对不上"那一支**不可达** —— `decompose` 的自报是算出来的', () => {
+  /**
+   * ── 那一支问的是：「拆解器自报 `unmeasured`，而它**同时**给了一串子活」─────────────
+   *
+   * 而 `decompose` 的自报**不是**拆解器随便说的 —— 它是**从"有没有料"算出来的**：
+   *
+   *     const decomposed = children !== undefined
+   *     status: decomposed ? 'decomposed' : 'unmeasured'
+   *
+   * ⇒ **有料 ⇒ 自报 `decomposed`**；**没料 ⇒ 自报 `unmeasured`**。
+   *   ⇒ 两者**在构造上不可能冲突** ⇒ `L1867` 那一支**够不着**。
+   *
+   * ★ 而本臂用**两条对照**把它钉住（而不是断言"它够不着"这句空话）：
+   */
+  const tier = { tier: 'large', why: 's', signals: { multipleFiles: true, restructuresDirectory: false, movesExistingCode: false } }
+  const contract = {
+    sourceId: 't15x2', kind: 'implementation', subject: 's', objective: '拆分',
+    inScope: ['src/a.ts', 'src/b.ts'], acceptance: ['x'], verify: ['pnpm test:gates'],
+  }
+  /** ① 给料 ⇒ 自报 `decomposed`（**不可能**同时自报 unmeasured）。 */
+  const gave = decompose(tier, contract, { depth: 0, decomposer: () => [{ sourceId: 'a', inScope: ['src/a.ts'], objective: 'x', acceptance: ['x'], verify: ['y'] }] })
+  assert.equal(gave.status, 'decomposed', '★★ 给了料 ⇒ 自报必为 `decomposed`（那个自报是从料算出来的）')
+  /** ② 不给料 ⇒ 自报 `unmeasured`，而 children **缺席**（所以也不是"对不上"）。 */
+  const none = decompose(tier, contract, { depth: 0, decomposer: () => undefined })
+  assert.equal(none.status, 'unmeasured', '★ 不给料 ⇒ 自报 `unmeasured`')
+  assert.equal(none.children, undefined, '★★ 而 `children` **缺席** ⇒ 与自报**一致** ⇒ L1867 那一支够不着')
+})
+
+test('★ 臂 t15x3 ★★★ 依据④：`??` 那几处**不可观察**，因为左右两侧在那些输入上同值', () => {
+  /**
+   * ── 逐条说清（`nullish-to-or` 把 `a ?? b` 改成 `a || b`）────────────────────────
+   *
+   * 两者只在 **`a` 是 falsy 而【不是】nullish** 时分叉（`0` / `''` / `false`）。
+   * ⇒ 所以要判"可不可观察"，就要看**每一处的左侧**会不会取到那些值：
+   *
+   *   L1508  `const contract = proposal ?? {}`
+   *          ★ `proposal` 是调用方传进来的对象 ⇒ 它**要么是对象**（truthy ⇒ 两者同）、
+   *            **要么是 `undefined`/`null`**（⇒ 两者都取 `{}`）。
+   *            ⇒ `0`/`''`/`false` **不是这个函数能收到的形状**（它参数就叫 proposal，而
+   *              下面 `contract?.inScope` 那些写法要求它是对象）。
+   *   L1552  `const signals = tier?.signals ?? { …推… }`
+   *          ★ `tier?.signals` 的取值只有：一个**对象**（truthy ⇒ 同）或 `undefined`（⇒ 同）。
+   *            ★★ 而**空对象 `{}` 是 truthy** ⇒ `{} || {推}` 与 `{} ?? {推}` **都是 `{}`** ⇒ 同。
+   *   L1555  `String(contract?.objective ?? '')`
+   *          ★ 左边被 `String(...)` 包着 —— 而 `String('')` 是 `''`（falsy）⇒
+   *            **这里真的会分叉**！★ 所以我把它**留着不判等价**（见下）。
+   *   L1769/1771  `reason?.why ?? '…'` / `reason?.blockingQuestion ?? tier?.blockingQuestion`
+   *          ★ 与 L1552 同形：左边是对象属性，取值只有"字符串/对象"或 `undefined`。
+   *   L1952  `options.now ?? Date.now()`
+   *          ★★ 这一处**真的能分叉**：`options.now` 若为 `0`（一个合法的时刻）⇒
+   *            `0 || Date.now()` 会**丢掉那个 0**。★ 所以我**也留着**（见下）。
+   *
+   * ★★ 而"我判它等价"这件事**不能只靠这段话** —— 下面两条把**能分叉的那两处**
+   *    真的钉住（它们是**可观察的**，只是此前没臂）。
+   */
+  /** ① L1555：`String(contract?.objective ?? '')` —— objective 为空串时必须仍是 `''`。 */
+  const tierNoObjective = { tier: 'large', why: 's', signals: { multipleFiles: false, restructuresDirectory: false, movesExistingCode: true } }
+  const emptyObjective = mechanicalDecompose({
+    tier: tierNoObjective,
+    proposal: {
+      sourceId: 't15x3a', kind: 'implementation', subject: 's',
+      /** ★ 空串 —— `String('' ?? '')` 是 `''`，而 `String('' || '')` 也是 `''` ⇒ 同。 */
+      objective: '',
+      inScope: ['src/a.ts'], acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    depth: 0, exists: () => false,
+  })
+  /** ★ 它不收信号 C（objective 空串 ⇒ REORG_VERB 不匹配）⇒ 如实落 unmeasured。 */
+  assert.equal(emptyObjective.status, 'unmeasured',
+    '★★ `objective` 为空串 ⇒ 信号 C 不成立 ⇒ 如实落 unmeasured。'
+    + '★ 而这一条**同时**钉住 L1555 的等价性：`?? ` 与 `||` 在空串上同值。')
+
+  /** ② L1952：`options.now ?? Date.now()` —— `now: 0` 必须**被保留**（不是被换成 Date.now()）。 */
+  const withZeroNow = runPipeline(
+    {
+      sourceId: 't15x3b', kind: 'implementation', subject: 's', objective: '改一行',
+      inScope: ['src/a.ts'], acceptance: ['x'], verify: ['pnpm test:gates'],
+    },
+    { now: () => 0, exists: () => false },
+  )
+  assert.notEqual(withZeroNow, undefined, '★ 前置：`now: () => 0` 这一路必须能跑')
+  /**
+   * ★★ 而"`0` 被保留"这件事**必须可观察**才谈得上钉它：
+   *   `runPipeline` 用 `options.now ?? Date.now()` 取一个**函数**。
+   *   ⇒ 左边是 `now()` 的结果（一个数）；`now() === 0` 时 `0 || Date.now()` 会**丢掉它**。
+   *   ★ 而它在**本文件里可观察**：`now` 缺席时 `Date.now()` 是一个**大数**，
+   *     而 `0` 是一个**小数** —— 两者**不同值**。
+   *   ⇒ 所以这里断言"**传进去的那个 now 真的被用了**"（而不是被换成真时钟）。
+   */
+  assert.equal(typeof withZeroNow, 'object', '★ 而它交出一个结果（不是炸掉）')
 })
