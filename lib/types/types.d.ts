@@ -152,6 +152,24 @@ export interface CommandResult {
     status: 'passed' | 'failed';
     exitCode?: number;
     evidence?: string;
+    /**
+     * ── ★★★ 这条命令失败的【是哪几条测试】—— 而它让"新增失败"可判定（t19）──────
+     *
+     * 由来（MEASURED 2026-10-09）：本仓有 18 条**存量红**，而完工规则原本说
+     * 「commandsRun 里有 failed ⇒ 不许 completed」⇒ ★ 于是 17 条任务**全部不可达 completed**
+     *   —— 而它们的工作都做完了。
+     *
+     * ★★ 而正确的分界是【这次交付有没有新增失败】：
+     *   · `failures` 在场且逐条都在基线里 ⇒ 允许 completed（那不是撒谎: `exit=1` 说"仓库里有红"，
+     *     而它说"我没有新增红" —— ★ 两者是不同的量）
+     *   · 至少一条不在基线里 ⇒ 只能 failed
+     *   · ★ `failures` 缺席 ⇒ **判不了**（不是"没有新增"）——
+     *     因为"我没能测量"不得读成"没事"。
+     *
+     * ★ 而它必须是【名字】而不是计数：同一个命令在三次运行里给出过 47 / 14 / 14 条失败
+     *   （本会话实测）⇒ ★ 计数不是证据，只有【哪几条】是。
+     */
+    failures?: readonly string[];
 }
 /** Profile / team review-loop limits. */
 export interface ReviewPolicy {
