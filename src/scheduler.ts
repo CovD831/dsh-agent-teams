@@ -881,6 +881,27 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
              *   回滚，而两者在日志里看不出区别。
              */
             ctx.logger.warn(`agent-teams: refusing to dispatch task "${ticket.taskId}" to "${ticket.memberName}": no isolated worktree (${created.reason})`)
+            /**
+             * ── ★★★ t43：这一处也【必须留痕】（2026-10-10 实测补的）──────────────
+             *
+             * MEASURED：t40 被 reassign 之后，`attempt` 推进 · `handoff` 被清 ·
+             *   ★ 而 `deliveryFailure` **没有写** —— 因为【拒绝发生在投递之前】，
+             *   走到了这一格，而不是回滚那一格。
+             *   ⇒ ★ 于是"worktree 建不出来 ⇒ 拒绝派发"与"从来没派过"
+             *     在 `team.json` 上【完全同形】—— 与那条 warn 的处境一模一样。
+             *
+             * ★★ 而这一格比投递失败那一格【更值得留痕】：
+             *   它是一个【结构性的拒绝】（隔离退化成提示是它要防的事），
+             *   而"我不知道为什么这个成员一直不干活"正是它造成的。
+             */
+            await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
+              const fresh0 = await readTeam(stateRoot, team!.id)
+              const t0 = fresh0?.tasks.find(candidate => candidate.id === ticket.taskId)
+              if (t0 !== undefined) {
+                t0.deliveryFailure = { at: Date.now(), attempt: ticket.attempt, reason: `no isolated worktree: ${created.reason}` }
+              }
+              if (fresh0 !== undefined) await writeTeam(stateRoot, fresh0)
+            })
             await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
               const fresh = await readTeam(stateRoot, team!.id)
               if (fresh === undefined) return
