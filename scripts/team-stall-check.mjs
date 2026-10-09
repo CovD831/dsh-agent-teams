@@ -52,7 +52,7 @@ function hasCommit(cwd, taskId) {
   }
 }
 
-function analyse(teamId) {
+async function analyse(teamId) {
   const found = readTeam(teamId)
   if (found === undefined) return undefined
   const { team } = found
@@ -138,22 +138,61 @@ function analyse(teamId) {
 
   const running = team.tasks.filter(t => t.status === 'in_progress' || t.status === 'claimed')
 
-  return { team, occupying, deadEdges, danglingHandoffs, ready, running }
+  /**
+   * ④ ★ `[deployment]` 那条门 —— 它是【唯一重启能解】的那一条。
+   *
+   * 由来：本会话大量终态是"工作已完成而交不上"，而其中一类成因是
+   *   `[deployment] this process holds a build OLDER than the one on disk`
+   *   ⇒ 它挡着【每一次】update_task ⇒ 成员一轮又一轮 "试交 ⇒ 被拒 ⇒ 报"。
+   *
+   * ★★ 而它【不在 team.json 里】—— 所以前三个信号测不到它。
+   *    它由 `moduleFreshness()` 给出（`src/tools/shared/entities.ts:853`）:
+   *      loaded = 进程加载时读的 stamp（★ 只读一次，缓存常量）
+   *      onDisk = 盘上当前 lib 的 stamp
+   *      head   = 主树当前 commit
+   *    ⇒ ★ "进程旧"与"盘上旧"是两件事 —— 而只有 reload 能修前者。
+   *
+   * ★★★ 而本条信号有一条【必须说清的边界】（诚实优先于好看）:
+   *     本脚本在【一个新进程】里跑 ⇒ 它读到的 `loaded` 是【它自己加载的那份】，
+   *     而【宿主进程持有的那份】它看不到。
+   *   ⇒ 所以:
+   *       报 "是" ⇒ ★ 板上钉钉：盘上的产物与它自己的加载不一致 ⇒ 要 build + reload
+   *       报 "否" ⇒ ★ 只说明【盘上是一致的】——
+   *                 而宿主可能是旧的（那要读宿主那行 `[deployment]`，而它不在此文件里）
+   *   ⇒ ★ 所以 ④ 只能【确认要重启】，不能【确认不需要重启】。
+   *     而这条边界写在这里，而不是让它读起来像"全部查过了"（本会话最贵那条）。
+   */
+  let freshness
+  try {
+    const mod = await import('../lib/tools/shared/entities.js')
+    const f = mod.moduleFreshness()
+    freshness = {
+      content: f?.content,
+      loaded: f?.loaded,
+      onDisk: f?.onDisk,
+      head: f?.head,
+      stale: f?.content === 'different',
+    }
+  } catch (error) {
+    freshness = { undecidable: String(error) }
+  }
+
+  return { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness }
 }
 
-function main() {
+async function main() {
   const teamId = process.argv[2]
   if (teamId === undefined) {
     console.error('usage: node scripts/team-stall-check.mjs <teamId>')
     process.exit(2)
   }
-  const a = analyse(teamId)
+  const a = await analyse(teamId)
   if (a === undefined) {
     console.error(`★ 读不到 .agent-teams/${teamId}/team.json`)
     process.exit(2)
   }
 
-  const { occupying, deadEdges, danglingHandoffs, ready, running } = a
+  const { occupying, deadEdges, danglingHandoffs, ready, running, freshness } = a
   console.log(`── 停摆检测: ${teamId} ──────────────────────────────`)
   console.log(`  在跑/已认领        ${running.length}  ${running.map(t => t.id).join(', ') || '—'}`)
   console.log(`  真可开工 (ready)   ${ready.length}  ${ready.map(t => t.id).join(', ') || '—'}`)
@@ -176,7 +215,13 @@ function main() {
    *   三个数都为 0 且（ready > 0 或有任务在跑）⇒ 真的在推进
    *   否则 ⇒ 停摆，而它要靠人解
    */
-  const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length
+  console.log(`  ④ 部署陈旧          ${freshness?.stale === true ? '★ 是（进程持有的构建比盘上旧）' : freshness?.undecidable !== undefined ? '判不了' : '否'}`)
+  if (freshness?.stale === true) {
+    console.log(`       loaded=${String(freshness.loaded).slice(0, 12)}… onDisk=${String(freshness.onDisk).slice(0, 12)}… head=${String(freshness.head).slice(0, 12)}…`)
+  }
+  console.log()
+
+  const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length + (freshness?.stale === true ? 1 : 0)
   const progressing = running.length > 0 || ready.length > 0
   if (stallSignals === 0 && progressing) {
     console.log('⇒ ★ 在推进（三个数都为 0，且有任务在跑或可开工）')
@@ -186,6 +231,7 @@ function main() {
   if (occupying.length > 0) console.log('     ① ⇒ reassign_task 解开那个占位')
   if (deadEdges.some(e => e.artefactInMain)) console.log('     ② ⇒ 产物已在主树 ⇒ edit_plan 改那条依赖（不许改记录去骗依赖）')
   if (stuckHandoffs.length > 0) console.log('     ③ ⇒ 真卡住（该成员正忙）⇒ reassign 或先释放那个成员')
+  if (freshness?.stale === true) console.log('     ④ ⇒ ★ 只有【重启】能修：先 pnpm build，再重启宿主（它挡着每一次 update_task）')
   process.exit(1)
 }
 
