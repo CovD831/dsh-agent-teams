@@ -26,7 +26,7 @@
  *   2 ⇒ 用法错误 / 读不到 team.json
  */
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
@@ -203,7 +203,83 @@ async function analyse(teamId) {
     freshness = { undecidable: String(error) }
   }
 
-  return { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness }
+  /**
+   * ⑤ ★★★ 【团队心跳】—— `team.json` 多久没被写过了（用户提的第二来源）
+   *
+   * 由来（2026-10-09，用户提问）：本会话反复出现"团队日志几个小时没写"，
+   *   而**那条读数我一直在人肉看**（`ls -la team.json`），却从没让脚本看它。
+   *
+   * ★★ 而它与前四个信号探的是【不同的东西】：
+   *   ```
+   *   ①②③ 探的是【任务与成员的状态】
+   *   ④   探的是【进程加载的代码】
+   *   ⑤ ★ 探的是【这个队整体还在不在动】—— 它是【唯一一个不依赖任何假设】的信号
+   * ```
+   *   ⇒ ★ 前三者都可能"看起来正常而实际停了"（今晚就是：全部 idle、零占位、
+   *     零死边、零悬挂交接，而**队已经不写了**）。
+   *
+   * ★★★ 而它与 `runtime.liveness`（探活）的分工值得说清：
+   *   · `runtime.liveness` 探的是【一个等待窗口里，那个成员的 lastActivityAt 变没变】
+   *     ⇒ 它需要【有等待窗口】才开口
+   *   · 本信号探的是【整队有没有在写】⇒ ★ 它【不需要任何窗口】——
+   *     而今晚的病正是"**根本没有等待窗口**"（任务是 pending、成员 idle、
+   *     调度器不派）⇒ ★ 探活【无从开口】，而本信号照样说话。
+   *   ⇒ 所以两者是【互补】的：一个探"等着的那个还活着吗"，
+   *     一个探"有没有任何东西在动"。
+   */
+  let heartbeat
+  try {
+    const stat = statSync(join(ROOT, '.agent-teams', teamId, 'team.json'))
+    const ageMs = Date.now() - stat.mtimeMs
+    /**
+     * ★ 阈值：默认 15 分钟（可注入 STALL_AFTER_MS_HEARTBEAT）。
+     *   ★ 为什么比成员的 10 分钟探活宽松：`team.json` 只在**状态变化**时被写
+     *     （派发、认领、落终态、写 mailbox），而一个健康的长任务可能十几分钟不动它。
+     *   ⇒ ★ 而"比 15 分钟更久没写"在【有 ready 任务而没人接】时是真的异常。
+     */
+    const limitMs = Number(process.env.STALL_AFTER_MS_HEARTBEAT ?? 15 * 60 * 1000)
+    heartbeat = {
+      ageMinutes: Math.round(ageMs / 60000),
+      silent: ageMs >= limitMs,
+      mtime: stat.mtimeMs,
+    }
+  } catch (error) {
+    heartbeat = { undecidable: String(error) }
+  }
+
+  /**
+   * ⑥ ★★★ 【写域冲突而依赖里没有对方】—— 一个漏掉的边
+   *
+   * 由来（2026-10-09，captain 在给 t39 盖 review 戳时抓到）：
+   *   `t39` 的 deps = **空**，而它的前提是【t26 释放 `src/tools/update-task.ts` 的写域】
+   *   （实测 t26 / t32 / t42 的 inScope 都含那个文件）
+   *   ⇒ ★ 四者串行，而 t39 的依赖里【没有 t26】—— 那是我的契约错误。
+   *
+   * ★★ 而它为什么没被抓住：`t39` **创建在 t42/t32 之前**（那时还没有那几个占写域的任务）
+   *   ⇒ 而"写域冲突"是后来才出现的，而**依赖列表不会自动更新**。
+   *   ⇒ 于是那个冲突只在 `edit_plan` 的写域门禁上暴露一次，而**事后不再有人看见**。
+   *
+   * ★ 判据：把 inScope 两两求交，交集非空而依赖里没有对方的 ⇒ 那是漏掉的边。
+   */
+  const missingEdges = []
+  const pendingTasks = team.tasks.filter(t => t.status === 'pending' || t.status === 'claimed' || t.status === 'in_progress')
+  for (let i = 0; i < pendingTasks.length; i += 1) {
+    for (let j = 0; j < pendingTasks.length; j += 1) {
+      if (i === j) continue
+      const a = pendingTasks[i]
+      const b = pendingTasks[j]
+      const aScope = a.inScope ?? []
+      const bScope = b.inScope ?? []
+      const shared = aScope.filter(p => bScope.includes(p))
+      /** ★ 只报【单向缺对方】的那一半，否则每对会报两次。 */
+      if (shared.length === 0) continue
+      if ((a.dependencies ?? []).includes(b.id)) continue
+      if ((b.dependencies ?? []).includes(a.id)) continue
+      if (i < j) missingEdges.push({ a: a.id, b: b.id, shared: shared.join(', ') })
+    }
+  }
+
+  return { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges }
 }
 
 async function main() {
@@ -218,7 +294,7 @@ async function main() {
     process.exit(2)
   }
 
-  const { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness } = a
+  const { team, occupying, deadEdges, danglingHandoffs, ready, running, freshness, heartbeat, missingEdges } = a
   console.log(`── 停摆检测: ${teamId} ──────────────────────────────`)
   console.log(`  在跑/已认领        ${running.length}  ${running.map(t => t.id).join(', ') || '—'}`)
   console.log(`  真可开工 (ready)   ${ready.length}  ${ready.map(t => t.id).join(', ') || '—'}`)
@@ -247,9 +323,14 @@ async function main() {
     if (freshness.why === 'content') console.log('       ⇒ ★ 产物不一致 ⇒ 先 `pnpm build` 再重启')
     else console.log('       ⇒ ★ 内容一致而 commit 落后 ⇒ 它跑的可能是【旧的一版修复】⇒ 核那一版与本版的差异')
   }
+  console.log(`  ⑤ 团队心跳          ${heartbeat?.undecidable !== undefined ? '判不了' : heartbeat.silent ? `★ 静默 ${heartbeat.ageMinutes} 分钟（团队日志没被写过）` : `正常（${heartbeat.ageMinutes} 分钟前写过）`}`)
+  console.log(`  ⑥ 写域冲突而缺边    ${missingEdges.length}${missingEdges.length ? '  ← ★ 那些任务会互撞，而依赖里没有对方' : ''}`)
+  for (const e of missingEdges) console.log(`       ${e.a} ↔ ${e.b}  (共享 ${e.shared})`)
   console.log()
 
-  const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length + (freshness?.stale === true ? 1 : 0)
+  const stallSignals = occupying.length + deadEdges.length + stuckHandoffs.length
+    + (freshness?.stale === true ? 1 : 0)
+    + (heartbeat?.silent === true ? 1 : 0)
   /**
    * ★★★ 「在推进」必须要求【真的有人在跑】，而不只是"有任务可开工"
    *   （2026-10-09 实测：我把 `ready > 0` 当成"在推进"，
@@ -273,6 +354,7 @@ async function main() {
   if (deadEdges.some(e => e.artefactInMain)) console.log('     ② ⇒ 产物已在主树 ⇒ edit_plan 改那条依赖（不许改记录去骗依赖）')
   if (stuckHandoffs.length > 0) console.log('     ③ ⇒ 真卡住（该成员正忙）⇒ reassign 或先释放那个成员')
   if (freshness?.stale === true) console.log('     ④ ⇒ ★ 只有【重启】能修：先 pnpm build，再重启宿主（它挡着每一次 update_task）')
+  if (heartbeat?.silent === true) console.log('     ⑤ ⇒ ★ 整队静默：核【有没有 ready 任务而没人接】—— 那说明调度器没在送票')
   process.exit(1)
 }
 
