@@ -422,7 +422,20 @@ test('★ 臂 4b（P2 · 判据真的读它）：五问齐 ⇒ 放行；缺一�
     return
   }
   const { registry } = await realRegistry()
-  const base = { id: 'probe-t5-reviewed', kind: 'implementation', inScope: ['src/x.ts'], acceptance: ['a'], verify: ['pnpm typecheck'] }
+  /**
+   * ── ★★★ `createdAt` 必须**晚于**这道门上线 —— 否则它根本不适用（t42/f-21 之后）──────
+   *
+   * MEASURED（本任务实测，2026-10-09）：`plan-reviewed` 的 `appliesTo` 现在问
+   *   `predatesThisGate(task)`，而它对**没有 `createdAt` 的任务判 `true`**（存量）
+   *   ⇒ `appliesTo` 为假 ⇒ **判据根本不跑**（`skipped`）。
+   *
+   * ★ 而那是对的（它把"这条路建的时候还不存在"如实报成『不适用』而不是造一个假的三态）。
+   * ★★ 但它意味着：**本臂若不给 `createdAt`，它测的就是"判据不适用"，而不是"判据判了什么"**
+   *   —— 而两者在读数上同形（都是没有 blocker）。
+   * ⇒ 所以本臂显式给一个**晚于上线时刻**的 `createdAt`：它要的是"**新任务**身上那条门会开火"。
+   */
+  const NEW_TASK_CREATED_AT = Date.now() + 86_400_000
+  const base = { id: 'probe-t5-reviewed', kind: 'implementation', inScope: ['src/x.ts'], acceptance: ['a'], verify: ['pnpm typecheck'], createdAt: NEW_TASK_CREATED_AT }
   const stamp = (ids, verdictFor = () => 'pass') => ({
     at: 1, by: 'probe', checks: ids.map((id) => ({ id, verdict: verdictFor(id) })),
   })
@@ -470,7 +483,10 @@ test('★ 臂 4c（P2 · 三态）：`unmeasured` **不许**被规整成 `pass`'
    *   ★ 可执行的形状：把五问里的一问标成 `unmeasured`，整体的 blocker 数必须
    *     **与"那一问标 fail"不同**，或**至少不为 0** —— 两者都证明它没被并进 pass。
    */
-  const base = { id: 'probe-t5-3state', kind: 'implementation', inScope: ['src/x.ts'], acceptance: ['a'], verify: ['pnpm typecheck'] }
+  /**
+   * ★ 同臂 4b：`createdAt` 必须**晚于**门上线，否则本臂测的是"不适用"而不是"判据说了什么"。
+   */
+  const base = { id: 'probe-t5-3state', kind: 'implementation', inScope: ['src/x.ts'], acceptance: ['a'], verify: ['pnpm typecheck'], createdAt: Date.now() + 86_400_000 }
   const oneQuestion = await registry.evaluate('dispatch', {
     task: { ...base, reviewed: { at: 1, by: 'probe', checks: [{ id: 'scope', verdict: 'pass' }] } },
     wantsCompleted: false, taskNotTerminal: true,
