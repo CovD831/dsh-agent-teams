@@ -1465,9 +1465,245 @@ export function tierOf(contract, { exists = defaultTierExists } = {}) {
  *     分档判不了（unmeasurable）      ⇒ 人**补 inScope**（补**信息**）
  *     大档                            ⇒ 人**裁决**（拍板"这么拆行不行"）
  *
- * ★★ 而它**绝不并进 `ok`** —— 三态不同形那条纪律在这里的落点是：
- *   一条拆不出来的大活**不是**"可派"，而它**也不是**"等人裁决"（没有东西给人裁决）。
+ * ── ★★★ P3 落地：拆解器本体（**纯机械、零 token**）────────────────────────────────
+ *
+ * 上一版在这里返回 `unmeasured`（"我还没学会"）。P3 把那一条填上了，而**填法**是本任务
+ * 的实质：它**不许调用模型**，只按 `tierOf` 已有的**三条信号**切边界。
+ *
+ * ── 为什么"三条信号"就是拆法的全部依据（而不是另找一套判据）────────────────────
+ *
+ *   `tierOf` 判"大"用的正是这三条（`signals` 那一格），所以**拆解要消灭的也正是它们**：
+ *
+ *     A `multipleFiles`         ⇒ 跨 ≥2 个现有文件 ⇒ 按**文件**切（一个子活一个文件）
+ *     B `restructuresDirectory` ⇒ 要新建/重组目录 ⇒ **目录**那一条单独成子活（它是搬运）
+ *     C `movesExistingCode`     ⇒ 要搬已有代码   ⇒ 搬与被搬**分开**（否则它还是"搬"）
+ *
+ *   ★ 拆完**每条子活**该落在小档 —— 而那正是可判定的成功条件（见 `decomposeContract`
+ *     与下面那个 `verifyChildrenAreAtomic`）：**拆法自己也要能被 `tierOf` 判小。**
+ *     ⇒ 于是"拆得对不对"不是一个主观问题，而是"子活过不过得了同一条 `tierOf`"。
+ *
+ * ── ★★★ 而这条实现里最要紧的一条纪律：【拆不动时留在队列并指名哪一问】─────────────
+ *
+ *   绝不静默降级成一个大任务。所以下面每一个"我不拆"的出口都带 `blockingQuestion`
+ *   （从 `tier.blockingQuestion` 来）与 `missing`（缺什么），而**都不产出 children**
+ *   ⇒ 于是它落回主干那条 `awaitingRuling`（有人要裁决），**不会**并进 ready。
+ *
+ * ── ★ 递归上限 2 层 ────────────────────────────────────────────────────────────
+ *
+ *   `depth` 由主干传进来（`runStages` 的 `depth`）。到 `MAX_DECOMPOSE_DEPTH` 就不再往下拆
+ *   —— 而**超限不是错误**，它是一个读数：那些子活**留在队列**（`awaitingRuling`），
+ *   因为"再拆一层"这件事需要人拍板（或者说明这条活本身不该被拆）。
  */
+export const MAX_DECOMPOSE_DEPTH = 2
+
+/**
+ * 把一条大活按 `tier.signals` **机械地**切成子提案。
+ *
+ * ★ 它是纯函数：同样的 (tier, contract, depth) 给出同样的结果，**不读盘、不调模型**。
+ *   （存在性只经由 `tier.signals` 进来 —— 那是 `tierOf` 已经读过的结论。）
+ */
+export function mechanicalDecompose({ tier, proposal, depth = 0, exists = defaultTierExists }) {
+  /** ★ 信号 B 要问"这个目录此刻存在吗" —— 与 `tierOf` 用的是**同一个** `exists`。 */
+  const existsForSignals = exists
+  const contract = proposal ?? {}
+  const inScope = Array.isArray(contract?.inScope) ? contract.inScope.map(String) : []
+  const files = tierSourceFiles(inScope)
+  const dirs = tierDirectoryEntries(inScope)
+
+  /**
+   * ── 递归上限 ────────────────────────────────────────────────────────────────
+   *
+   * ★ 到顶了 ⇒ **不产出 children**（于是主干落 `awaitingRuling` ⇒ 子活**留在队列**），
+   *   而理由要说清是"到顶"而不是"我不会"（两者的补救动作不同）。
+   */
+  if (depth >= MAX_DECOMPOSE_DEPTH) {
+    return {
+      status: 'unmeasured',
+      why: `递归到第 ${depth} 层（上限 ${MAX_DECOMPOSE_DEPTH}）⇒ 不再往下拆。`
+        + '★ 这不是"拆不了"，而是"再拆一层要人拍板" —— 子活**留在队列**，'
+        + '不许静默当成一条大活派出去。',
+      missing: [`★ 递归上限（第 ${depth} 层 / 上限 ${MAX_DECOMPOSE_DEPTH}）`],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  /**
+   * ── 切边界：按信号逐条来 ──────────────────────────────────────────────────────
+   *
+   * ★ 顺序有理由：**目录那一条最先**（它是搬运，而搬运是这三条里唯一"会移动已有代码"的）
+   *   —— 若把它并进某个文件的子活，那条子活仍然含"重组"，拆完还是大档。
+   */
+  const children = []
+  /**
+   * ── ★★★ 信号：**从 `tier.signals` 读**，而 `tier` 没给时**自己按同一条口径推** ──────
+   *
+   * ⚠️ MEASURED（P3 当场抓出来）：第一版**只读 `tier.signals`** ⇒ 一条手工构造的 tier
+   *   （`{ tier:'large', why:'…' }`，没有 `signals`）会让拆解器答"三条信号一条都不成立"
+   *   —— 而**那是错的读数**：拆解器明明能从写域自己看出信号 A。
+   *
+   *   ★ 而它的形态是本队记账过的那条：**把"上游没给这一格"读成了"这一件事实不成立"。**
+   *     （"我没拿到读数"与"读数是零"合流 —— 而两者的补救动作相反。）
+   *
+   * ⇒ 修法：`tier.signals` 在场就**以它为准**（那是分档亲眼读到的，最新鲜）；
+   *   不在场时**按 `tierOf` 的同一条口径从写域推**（同样的三个判断、同一份 `exists`）。
+   *   ★ 而推的时候必须用**同一套 helper**（`tierSourceFiles`/`tierDirectoryEntries`）
+   *     —— 各写一遍会让两处在下一次改动时对同一份写域给出不同的信号。
+   */
+  const signals = tier?.signals ?? {
+    multipleFiles: files.length >= 2,
+    restructuresDirectory: dirs.some((path) => { try { return !existsForSignals(path) } catch { return false } }),
+    movesExistingCode: REORG_VERB.test(String(contract?.objective ?? '')) && files.length >= 1,
+  }
+  const base = {
+    sourceId: contract?.sourceId,
+    kind: contract?.kind,
+    objective: contract?.objective,
+    acceptance: contract?.acceptance,
+    verify: contract?.verify,
+  }
+
+  if (signals.restructuresDirectory === true) {
+    for (const dir of dirs) {
+      children.push({
+        ...base,
+        sourceId: `${String(contract?.sourceId ?? 'proposal')}#dir:${dir}`,
+        inScope: [dir],
+        subject: `重组目录 ${dir}（只做搬运，不改行为）`,
+        objective: `把 ${dir} 这一处目录重组落地：只搬运，不改行为。`
+          + '★ 它是拆出来的一条**搬运**子活 —— 而"搬"与"改"分开，正是为了让这条能单独被审。',
+      })
+    }
+  }
+
+  if (signals.multipleFiles === true) {
+    for (const file of files) {
+      children.push({
+        ...base,
+        sourceId: `${String(contract?.sourceId ?? 'proposal')}#file:${file}`,
+        inScope: [file],
+        subject: `改 ${file}`,
+        objective: `只改 ${file} 这一个文件。`
+          + '★ 它是拆出来的一条**单文件**子活 —— 一条子活一个文件，'
+          + '于是 `tierOf` 对它判小（信号 A 不再成立）。',
+      })
+    }
+  }
+
+  /**
+   * ★ 而 C（`movesExistingCode`）**没有单独的子活** —— 它由上面两条**消掉**：
+   *   搬运落在目录那条子活里，而"改"落在单文件那几条里。
+   *   ⇒ 于是每一条子活的任务语里都不再含"拆/搬/重组"（见下面 `verifyChildrenAreAtomic`）。
+   *
+   * ★ 而若三条信号一条都不成立 ⇒ **那不是大档**（`tierOf` 不会这么判）⇒ 如实报"形不一致"，
+   *   而不是编一个空拆法出来。
+   */
+  if (children.length === 0) {
+    return {
+      status: 'unmeasured',
+      why: '这条提案被判大档，而它的三条信号**一条都不成立** ⇒ 拆解器读不懂它大在哪。'
+        + '★ 不产出子活：编一个空拆法出来会把"我不懂"伪装成"拆完了"。',
+      missing: ['★ 大档的三条信号（multipleFiles / restructuresDirectory / movesExistingCode）一条都不成立'],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  /**
+   * ★★ 拆完**自检**：每一条子活都必须**真的比原来小**。
+   *
+   * ── ★★★ 而"小"在这里的定义必须精确 —— 我第一版写错了，被自己的自检当场打红 ──────
+   *
+   *   第一版判据是"子活必须被 `tierOf` 判**小档**"。而它**必然**拒掉目录那条子活：
+   *
+   *     src/newdir/ 这条子活 ⇒ `tierOf` 仍判 large，因为**信号 B 还在**
+   *     （`restructuresDirectory` 正是"声明了一个不存在的目录条目"）
+   *
+   *   ⇒ ★ 而那不是子活的毛病：**"重组一个目录"这条活，说它自己大不大是没意义的** ——
+   *     它是**搬运**，而搬运的风险在于"搬了什么、漏了什么"，不在于面有多宽。
+   *     ⇒ 所以用 `tierOf` 的档位去判它，等于**拿一把量宽度的尺去量一件关于顺序的事**。
+   *     本队记过这条：**拿一个不是那个东西的量，去断言那个东西的性质。**
+   *
+   * ── 正确的判据：拆解要消灭的是【原提案那几条信号】，而不是"让每一条都变小档" ──
+   *
+   *   逐条对：
+   *     · 信号 A（跨 ≥2 文件）⇒ 子活**一个文件** ⇒ ★ A 消失（可核：`files.length === 1`）
+   *     · 信号 B（新建/重组目录）⇒ 子活含**恰好一个**目录条目 ⇒ ★ B 收敛到"一条搬运"
+   *       （可核：目录条目数 = 1），而那条搬运**本身**就是原子的 —— 它不再需要"拆"
+   *     · 信号 C（搬已有的东西）⇒ 拆完每条子活**只剩一种动作**（要么搬、要么改）
+   *
+   *   ★ 而"子活仍被判大档"**不是失败**，只要它大的原因是**已经收敛的那一条**
+   *     （即：它的信号集**严格小于**原来的）。⇒ 所以判据是**信号集合的真包含**，
+   *     而它同样是机械的、可核的。
+   */
+  const originalSignalCount = [signals.multipleFiles, signals.restructuresDirectory, signals.movesExistingCode]
+    .filter(Boolean).length
+
+  /**
+   * 一条子活是否**真的收敛了**：它的信号集合是原来的**真子集**。
+   *
+   * ★ 逐条说清（与上面那段一一对应）：
+   *   · A 消失 ⇒ 它只碰一个文件（`files.length <= 1`）
+   *   · B 收敛 ⇒ 它最多声明一个目录条目（`dirs.length <= 1`）—— 而那一格就是"一次搬运"
+   *   · C 消失 ⇒ 它的写域里**要么只有目录条目、要么只有文件**（不同时）
+   *     ⇒ 那正是"搬"与"改"分开的机械形式
+   */
+  const converges = (child) => {
+    const scope = Array.isArray(child?.inScope) ? child.inScope.map(String) : []
+    const childFiles = tierSourceFiles(scope)
+    const childDirs = tierDirectoryEntries(scope)
+    const childSignals = {
+      multipleFiles: childFiles.length >= 2,
+      restructuresDirectory: childDirs.length > 1,
+      movesExistingCode: childFiles.length > 0 && childDirs.length > 0,
+    }
+    const childCount = Object.values(childSignals).filter(Boolean).length
+    return childCount < originalSignalCount
+  }
+
+  const notConverged = children.filter((child) => !converges(child))
+  if (notConverged.length > 0) {
+    return {
+      status: 'unmeasured',
+      why: `拆出来的 ${notConverged.length} 条子活**没有收敛**（信号没有变少，例如 `
+        + `${String(notConverged[0]?.inScope?.[0] ?? '(无写域)')}）⇒ 这次拆解没消灭大档。`
+        + '★ 不许并进 ready：那只是把大活换了个名字。',
+      missing: ['★ 一个能让每条子活的信号集合【真包含于】原提案的拆法'],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  return { status: 'decomposed', children }
+}
+
+/**
+ * 缺省拆解器 —— **零 token、纯机械**。
+ *
+ * ★ 它是 `decompose` 的缺省 `decomposer`。而 `options.decomposer` 仍可覆盖它
+ *   （夹具要喂"故意坏掉"的拆解器去跑那两道非法拆法的闸门，见 `decomposeContract`）。
+ */
+function defaultDecomposer({ tier, proposal, depth }) {
+  const outcome = mechanicalDecompose({ tier, proposal, depth })
+  /**
+   * ★ 三态翻译：**只有 `decomposed` 才交出 children**。
+   *   `unmeasured` ⇒ **不给料**（`undefined`），于是 `decompose` 那一层如实落 unmeasured
+   *   ⇒ 主干落 `awaitingRuling` ⇒ 子活留在队列。
+   *   ★ 而"给了料却自称 unmeasured"那条形不一致，`decomposeContract` 会拒 —— 这里不走那条路。
+   */
+  return outcome.status === 'decomposed' ? outcome.children : undefined
+}
+
+/**
+ * 缺省拆解器**为什么**答 unmeasured —— 与 `defaultDecomposer` 读的是同一件事。
+ *
+ * ★ 为什么要单列一个：`decompose` 那一层只拿得到 children（`undefined`），拿不到原因。
+ *   而原因**必须**往上走 —— 见 `decompose` 里那段"三种情形不许合流成一句"。
+ * ★ 而它与 `defaultDecomposer` **共用 `mechanicalDecompose`** ⇒ 两者不会分叉
+ *   （若各写一遍判断，它们会在下一次改动时对同一份料给出不同的解释）。
+ */
+function defaultDecomposerReason({ tier, proposal, depth }) {
+  const outcome = mechanicalDecompose({ tier, proposal, depth })
+  return outcome.status === 'decomposed' ? undefined : outcome
+}
+
 export function decompose(tier, proposal, { depth = 0, decomposer } = {}) {
   /**
    * ── ★★ 而"拆解器"是**注入**的（`options.decomposer`）────────────────────────────
@@ -1479,13 +1715,24 @@ export function decompose(tier, proposal, { depth = 0, decomposer } = {}) {
    * ★★★ 所以这一格让夹具能喂进一个**故意坏掉**的拆解器（拆出 0 条 / 原样还回来），
    *   从而把闸门**真的跑一遍**。★ 而缺省（没有注入）仍然是那条诚实的 unmeasured。
    */
-  const children = typeof decomposer === 'function' ? decomposer({ tier, proposal, depth }) : undefined
+  const children = typeof decomposer === 'function'
+    ? decomposer({ tier, proposal, depth })
+    : defaultDecomposer({ tier, proposal, depth })
   /**
    * ★★ 而"给了料"⇒ 自报就该是 `decomposed`（而不是那条"我还没学会"）——
    *   否则下游会读到一句与料对不上的话（`decomposeContract` 那一道"形不一致"会拒掉它）。
    *   ★ 而"没给料"⇒ 那条诚实的 `unmeasured`。
    */
   const decomposed = children !== undefined
+  /**
+   * ── ★★★ P3：`unmeasured` 时，**理由必须来自拆解器自己**，不是这里替它编一句 ────────
+   *
+   *   缺省拆解器（`defaultDecomposer`）在三种情形下答 unmeasured，而它们的补救动作相反：
+   *   ① 递归到顶 ② 三条信号一条都不成立 ③ 拆出来没收敛。
+   *   ⇒ 若这里统一写一句"我还没学会"，那三种就**合流**成一句 —— 而读的人会去补 P3
+   *     （那已经填好了），真正的那一条永远读不到。
+   */
+  const reason = decomposed ? undefined : defaultDecomposerReason({ tier, proposal, depth })
   return {
     decomposed,
     status: decomposed ? 'decomposed' : 'unmeasured',
@@ -1498,14 +1745,30 @@ export function decompose(tier, proposal, { depth = 0, decomposer } = {}) {
      *   ★ 而拆解器**给了料**时这几项**不再缺**（没有"缺什么"要说）。
      */
     ...decomposed ? {} : {
+      /**
+       * ★★★ P3 之后这一格的含义变了（**不许留着旧措辞**）────────────────────────────
+       *
+       *   落地前：它是"**我还没学会**"（补救动作 = 填 P3）。
+       *   落地后：拆解器**在**了，而它**仍然**答 unmeasured ⇒ 那说明的是**别的**原因，
+       *           而可能的原因**至少有三种**，补救动作各不相同：
+       *
+       *     ① 递归到顶（`depth >= MAX_DECOMPOSE_DEPTH`）⇒ 再拆一层要人拍板
+       *     ② 大档的三条信号一条都不成立        ⇒ 分档与拆解器读的不是同一件事
+       *     ③ 拆出来的子活没有收敛               ⇒ 拆法不够好，要换一个
+       *
+       *   ⇒ ★ 所以 `why` 由**拆解器自己**给出（它最清楚为什么），而这里只补上
+       *     "这条活为什么该被拆"与"它卡在哪一问"那两条**下游要用来裁决**的信息。
+       *   ★ 而"留着旧措辞"的后果是实的：读的人会去填一个**已经填好的** P3，
+       *     而真正的那一条（到顶 / 信号不成立 / 没收敛）**永远读不到**。
+       */
       missing: [
-        '★ 拆解器本体（P3 的任务）：它要能回答"这条大活该按什么拆、拆成哪几条原子活"',
+        ...Array.isArray(reason?.missing) ? reason.missing : [],
         `★ 而这一条大活为什么该被拆：${String(tier?.why ?? '(分档没给理由)')}`,
         `★ 它卡在哪一问上：${String(tier?.blockingQuestion ?? '(分档没给那一问)')}`,
       ],
-      why: '我还没学会怎么把一条大活拆成原子活 ⇒ 如实落 unmeasured。'
-        + '★ 而它**不许**并进"可派"（那会让大活直接出了货），'
-        + '也**不许**并进"等人裁决"（那条队列要的是人拍板，而这里缺的是【能力】—— 补的是 P3）。',
+      why: String(reason?.why ?? '拆解器答 unmeasured ⇒ 如实落 unmeasured。')
+        + '★ 而它**不许**并进"可派"（那会让大活直接出了货）。',
+      blockingQuestion: reason?.blockingQuestion ?? tier?.blockingQuestion,
     },
   }
 }
@@ -1687,7 +1950,21 @@ export function decomposeContract(contract, tier, { depth = 0, exists, decompose
  */
 export function runPipeline(proposal, options = {}) {
   const now = options.now ?? Date.now()
-  return runStages(proposal, options, { depth: 0, now, trace: [] })
+  /**
+   * ── ★★★ 递归上限那一格的【唯一真值】必须在这里读，而不是写死 0 ──────────────────
+   *
+   * ⚠️ MEASURED（P3 当场抓出来）：第一版这里写死 `depth: 0` —— 于是子活回到入口时
+   *   **深度被清零**，`MAX_DECOMPOSE_DEPTH` **永远够不着** ⇒ 递归没有上限。
+   *
+   *   ★ 而它的形态正是本队记账最久的那条：**一条守着上限的门，而那个上限从来没被读到。**
+   *     （"有上限"与"上限生效"在读数上同形 —— 直到有人造一条真的会无限往下拆的活。）
+   *
+   * ⇒ 修法：深度由调用方经 `options.depth` 传进来，缺省 0。
+   *   ★ 而**对外**的语义不变：`runPipeline(proposal)` 仍然从第 0 层开始 ——
+   *     只有递归那条路会显式递增它。
+   */
+  const depth = Number.isInteger(options.depth) ? options.depth : 0
+  return runStages(proposal, options, { depth, now, trace: [] })
 }
 
 /**
@@ -1832,6 +2109,12 @@ function runStages(proposal, options, { depth, now, trace }) {
     const decomposed = decomposeContract(contract, tier, {
       depth,
       ...options.exists === undefined ? {} : { exists: options.exists },
+      /**
+       * ★★ 注入的拆解器必须**转发到这里** —— 否则 `options.decomposer` 永远到不了
+       *   `decompose`，而"夹具能喂一个故意坏掉的拆解器"这件事就成了空话：
+       *   那两道非法拆法的闸门会**够不着**（而"够不着"与"守住了"在读数上同形）。
+       */
+      ...options.decomposer === undefined ? {} : { decomposer: options.decomposer },
     })
     /**
      * ── ★★ ⑤ 审拆法 ──────────────────────────────────────────────────────────────
@@ -1861,6 +2144,119 @@ function runStages(proposal, options, { depth, now, trace }) {
      *   这一格**自动消失**（不是靠谁记得来删它）。
      */
     const notYetDecomposable = decomposed.status !== 'decomposed'
+
+    /**
+     * ── ★★★ P3：拆得动 ⇒ 子提案**回到流水线入口**（递归，上限 2 层）───────────────
+     *
+     * ★ 那正是用户那句话的落点：「拆解 →（回到）一开始」。
+     *   所以每一条子活**重新走一遍** ②契约 → ③分档 → …… —— 而不是在这里就地宣布它合格。
+     *   ★ 理由与"审查不许被跳过"同源：**子活自己也要被判一次**，
+     *     否则"拆过了"就成了一个绕过分档的后门（而子活可能还是大档）。
+     *
+     * ★★ 而递归的深度是 `depth + 1`，上限由 `MAX_DECOMPOSE_DEPTH` 管
+     *   ⇒ 到顶时子活落进它自己的 `awaitingRuling`（**留在队列**，不是被丢掉）。
+     *
+     * ★★★ 而审查（⑤ 审拆法）**先过**才递归：`needs-review` / `rejected` 一律不往下走
+     *   —— 那正是"审拆法"这道门的意义。见下面 `decompositionReview.status`。
+     */
+    /**
+     * ── ★★★ 而审查（⑤ 审拆法）**先过**才递归 ──────────────────────────────────────
+     *
+     * ⚠️ MEASURED（P3 当场抓出来）：我第一版写的是 `decompositionReview?.status`，
+     *   而 `adversarialReview` 交出来的那一格叫 **`outcome`**（不是 `status`）。
+     *   ⇒ 那个 `!== 'rejected'` 因此**恒真**（`undefined !== 'rejected'`）
+     *   ⇒ **审拆法这道门被静默跳过了** —— 而它看起来完全正常（返回值里那份 review 在）。
+     *
+     *   ★★ 而它的形状正是本队记账最久的那条：**读了一个不存在的字段，而它恒真。**
+     *     （"门守住了"与"门读了 undefined"在读数上同形 —— 因为两者都不抛。）
+     *
+     * ⇒ 修法两条**同时**做：
+     *   ① 读**真的那一格**（`outcome`）；
+     *   ② ★ 而它**读不到时就【不】放行** —— 一个读不到的审查结论**不能**当成"审查过了"
+     *      （与"没能测量不得并进通过"同一条纪律）。
+     *
+     * ── ★★★ 而"哪几种 outcome 该拦下"必须分清（否则这道门会把 P3 整个卡死）─────────
+     *
+     *   修好 ① 之后，一条**正常**的拆解会拿到 `needs-review` —— 而那不是"拆法坏了"：
+     *
+     *     `needs-review` 的成因是**别的**那一问（实测：`scope` 因为 claim 是散文
+     *     ⇒ `narrowScope` 推不出具体文件 ⇒ 它如实标 `unmeasured`）。
+     *     ★ 而那是**收窄器**的既有限制（与拆解无关），且现有行为就是"如实标粗、交给人看"。
+     *
+     *   ⇒ 把它当成"拆法没过"的后果是**直接的**：**每一条大活都拆不动** ⇒ P3 整个不可用。
+     *     ★ 而那不是"严格"，是一条**永远不能为真**的门（本队记账过的那条）。
+     *
+     *   ⇒ 所以这里拦的是【**拆法自己**出了问题】那两种，而不是"别的问没测到"：
+     *     · `rejected`   ⇒ 拆法**被拒** ⇒ 拦住（那是结论，不是缺读数）
+     *     · ★ 而**拆法那几问里出现 `fail`** ⇒ 拦住（那是"这么拆不行"）
+     *     · `needs-review` 而**只有 `unmeasured`** ⇒ **放行**（缺的是别人的读数，不是拆法的问题）
+     *       ★ 而它**不静默**：`decomposition.review` 那一格如实带着这份结论
+     *         —— 于是"为什么它过了、而哪一问没测到"读得出来。
+     */
+    const reviewOutcome = decompositionReview?.outcome
+    const reviewReadable = typeof reviewOutcome === 'string'
+    /**
+     * ★ 拆法自己失败了吗：五问里有没有 `fail`。
+     *   （`adversarialReview` 交出的 `failedIds` 就是那个读数 —— 用它，不重算一遍。）
+     */
+    const reviewFailures = Array.isArray(decompositionReview?.failedIds) ? decompositionReview.failedIds : []
+    const decompositionAccepted = decomposed.status === 'decomposed'
+      && reviewReadable
+      && reviewOutcome !== 'rejected'
+      && reviewFailures.length === 0
+
+    if (decompositionAccepted) {
+      const children = Array.isArray(decomposed.children) ? decomposed.children : []
+      /**
+       * ★ 每条子活回到入口 ⇒ 而它们的结论**全部**在返回值里（不是只留第一条）。
+       *   ★ 而"回不去"（无 sourceId 等）时它仍然是子活 —— 由下一轮自己去报缺什么。
+       */
+      const runs = children.map((child, index) => ({
+        index,
+        child,
+        /**
+         * ★★★ **深度必须递增** —— `depth + 1`，不是 0。
+         *
+         *   ⚠️ MEASURED（P3 当场抓出来）：第一版漏了这一步（而 `runPipeline` 那时
+         *   还写死 `depth: 0`）⇒ 子活回到入口时深度被清零 ⇒ **递归没有上限**。
+         *   那是一条"守着上限而从未读到上限"的门 —— 见 `runPipeline` 里那段。
+         */
+        ...runPipeline(child, { ...options, depth: depth + 1 }),
+      }))
+      return {
+        stage: 'decomposed',
+        sourceId: proposal?.sourceId,
+        entry: {
+          proposal,
+          sourceId: proposal?.sourceId,
+          subject: proposal?.subject ?? contract.subject,
+          inScope: contract.inScope,
+          whyLarge: tier.why,
+          blockingQuestion: tier.blockingQuestion,
+          nextStep: tier.nextStep,
+          signals: tier.signals,
+        },
+        tier,
+        decompositionReview,
+        decomposition: {
+          status: 'decomposed',
+          decomposed: true,
+          depth,
+          /** ★ 拆了几条，以及**每一条自己走到了哪一站** —— 那才是可核的读数。 */
+          count: children.length,
+          children: runs.map((run) => ({
+            sourceId: run.child?.sourceId,
+            inScope: run.child?.inScope,
+            stage: run.stage,
+            ...run.tier === undefined ? {} : { tier: run.tier.tier },
+          })),
+        },
+        runs,
+        narrowing,
+        trace: at('tier').concat('decompose', 'recurse'),
+      }
+    }
+
     return {
       stage: 'awaitingRuling',
       sourceId: proposal?.sourceId,
@@ -1879,10 +2275,16 @@ function runStages(proposal, options, { depth, now, trace }) {
       decompositionReview,
       /**
        * ★ 而这一格是**读数**（不是错误）：
-       *   `unmeasured` ⇒ 拆解器还没落地（补救：填 P3）
-       *   `illegal`    ⇒ ★ 拆解器落地了，而它拆出一个**非法的**结果（空 / 与原样同形）
+       *   `unmeasured` ⇒ ★ **拆不动**（递归到顶 / 信号一条都不成立 / 拆了没收效）
+       *                  ⇒ 子活**留在队列**（就是这一站），而 `missing` 指名缺什么
+       *   `illegal`    ⇒ 拆解器拆出一个**非法的**结果（空 / 与原样同形）
        *                  ⇒ 补救是**修拆解器**，而它同样**不许**进 ready
+       *
+       * ★★★ 而 `blockingQuestion` 必须**跟着这一站一起出去** ——
+       *   那就是"留在队列**并指名哪一问**"那句验收的落点：
+       *   读的人要能直接回答"它在等哪一问被裁决"，而不是再来问一次。
        */
+      blockingQuestion: tier?.blockingQuestion,
       ...notYetDecomposable
         ? {
           decomposition: {
@@ -1890,9 +2292,24 @@ function runStages(proposal, options, { depth, now, trace }) {
             decomposed: false,
             missing: decomposed.missing,
             why: decomposed.why,
+            /** ★ 拆不动时**指名哪一问**（与 `entry.blockingQuestion` 同一件事，这里更醒目）。 */
+            blockingQuestion: decomposed.blockingQuestion ?? tier?.blockingQuestion,
           },
         }
-        : {},
+        : {
+          /**
+           * ★ 拆得动、而**审拆法没过** ⇒ 也留在这里，而理由要指名是**哪一问**没过。
+           *   这是 ⑤ 那道门的落点：不许"拆了就算过"。
+           */
+          decomposition: {
+            status: 'not-accepted',
+            decomposed: true,
+            blockingQuestion: decompositionReview?.missing?.[0]
+              ?? decompositionReview?.questions?.find((q) => q?.status !== 'passed')?.question,
+            why: '拆法本身没通过五问 ⇒ 子活**留在队列**，等这一问被裁决。',
+            review: decompositionReview?.status,
+          },
+        },
       narrowing,
       trace: at('tier').concat('decompose'),
     }
@@ -1982,6 +2399,11 @@ export function dispatchable(report, options = {}) {
    */
   const awaitingRuling = []
   /**
+   * ★★★ P3：拆出来的那一栏 —— 每条大活拆成几条子活、而**每条子活走到了哪一站**。
+   *   它与 `awaitingRuling` **不同形**：那里是"有人要拍板"，这里是"拆解已经发生"。
+   */
+  const decomposed = []
+  /**
    * ── ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked ──────────────
    *
    * ★★ 而下面这个映射是**那一栏的名字 ← 主干的 stage**：
@@ -1994,9 +2416,11 @@ export function dispatchable(report, options = {}) {
    *     与 `toDispatch` 一样大，而那把"进了的"与"没进的"又合成一个数字）。
    *   ★ 所以下面查表**只对非 ready 的 stage**做。
    */
-  const notReadyBecause = { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
+  const notReadyBecause = { large: 0, decomposed: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
   const COLUMN_BY_STAGE = {
     awaitingRuling: 'large',
+    /** ★ P3：拆解那一栏 —— 而它**不是** `notReviewed`（拆解不是审查没过的意思）。 */
+    decomposed: 'decomposed',
     rejected: 'notReviewed',
     'cannot-emit': 'contractIncomplete',
   }
@@ -2019,7 +2443,28 @@ export function dispatchable(report, options = {}) {
     const outcome = runPipeline(proposal, options)
     if (outcome.stage === 'ready') ready.push({ proposal, tier: outcome.tier, ...outcome.emitted })
     else if (outcome.stage === 'awaitingRuling') awaitingRuling.push(outcome.entry)
-    else if (outcome.stage === 'rejected') {
+    /**
+     * ── ★★★ P3：`decomposed` 是一条**新的 stage**，而它进哪一栏要说清 ────────────────
+     *
+     * ★ 它**不进 ready**（那会把一条大活当成可派的），也**不进 awaitingRuling**
+     *   （那不是"等人裁决"：拆解**已经发生了**，等人看的是它拆出来的那几条）。
+     *
+     * ★★ 而它进 `decomposed` 那一栏，且**带着每条子活自己的去向** ——
+     *   于是"拆出来的那几条现在在哪"是一个直接读得出来的读数，
+     *   而不是要靠人去把三栏扫一遍才知道。
+     *
+     * ★★★ 而子活里那些走到 `ready` 的**也在这一栏里**（不重复进顶层 ready）——
+     *   理由：把它们同时报在顶层 ready 会让"这一轮该派几条"变成一个要数两遍的问题，
+     *   而拆解这一站的产出**本来就是一组子活**（见 `decomposition.children`）。
+     */
+    else if (outcome.stage === 'decomposed') {
+      decomposed.push({
+        sourceId: proposal.sourceId,
+        tier: outcome.tier,
+        decomposition: outcome.decomposition,
+        children: Array.isArray(outcome.decomposition?.children) ? outcome.decomposition.children : [],
+      })
+    } else if (outcome.stage === 'rejected') {
       rejected.push({ sourceId: proposal.sourceId, because: outcome.emitted.rejectedBecause, review: outcome.emitted.review })
     } else if (outcome.stage === 'cannot-emit') {
       cannotEmit.push({
@@ -2052,6 +2497,8 @@ export function dispatchable(report, options = {}) {
     rejected,
     ready,
     awaitingRuling,
+    /** ★★★ P3：拆解那一栏 —— 每条大活拆成了几条子活、而每条子活走到了哪一站。 */
+    decomposed,
     cannotEmit,
     /** ★ 而那一格是**读数**：被挡的有几条（它们不在这份清单里，而读的人要知道有多少）。 */
     blockedCount: (report?.blocked ?? []).length,
@@ -2106,6 +2553,24 @@ export function renderDispatchable(result) {
       lines.push(`      写域：${(entry.inScope ?? []).join(', ') || '(未声明)'}`)
     }
   }
+  /**
+   * ── ★★★ P3：拆解那一栏（而它与"等人裁决"**不同形**）────────────────────────────
+   *
+   * ★ 这里报的是**已经拆完的**：每条大活拆成了几条、而**每条子活走到了哪一站**。
+   *   ⇒ 读的人不必把三栏都扫一遍才知道"拆出来的那几条现在在哪"。
+   *   ★ 而"有人要拍板"（awaitingRuling）与"拆解已经发生"（本栏）是**两件事** ——
+   *     前者是队列（等一个回答），后者是**读数**（一项已完成的工作的产出）。
+   */
+  if ((result.decomposed ?? []).length > 0) {
+    lines.push('', `── ★ 已拆解（${result.decomposed.length}）—— 每条大活拆成的子活，及其各自去向 ──`)
+    for (const entry of result.decomposed) {
+      lines.push('', `  · [${entry.sourceId}] ⇒ ${entry.children.length} 条子活`)
+      for (const child of entry.children) {
+        const where = child.inScope?.join(', ') ?? '(未声明)'
+        lines.push(`      · ${where} ⇒ ${child.stage}${child.tier === undefined ? '' : ` (${child.tier})`}`)
+      }
+    }
+  }
   if (result.cannotEmit.length > 0) {
     lines.push('', `── ★ 契约生成不出来（${result.cannotEmit.length}）—— 缺什么写在下面 ──`)
     for (const entry of result.cannotEmit) {
@@ -2124,7 +2589,8 @@ export function renderDispatchable(result) {
   lines.push(
     '',
     `★ 分栏（为什么没进"现在就能建"）：`
-    + `大档等人裁决 ${columns.large ?? 0} · 审查没过 ${columns.notReviewed ?? 0}`
+    + `大档等人裁决 ${columns.large ?? 0} · 已拆解 ${columns.decomposed ?? 0}`
+    + ` · 审查没过 ${columns.notReviewed ?? 0}`
     + ` · 契约不全 ${columns.contractIncomplete ?? 0} · 写域被挡 ${result.blockedCount}`,
   )
   return lines.join('\n')

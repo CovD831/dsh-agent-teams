@@ -35,6 +35,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  MAX_DECOMPOSE_DEPTH,
   triage,
   render,
   triageJudgement,
@@ -1470,12 +1471,29 @@ test('★★★ 臂 T98a：判成大档的任务**不许**出现在 dispatchable
   console.log(`    ℹ awaitingRuling: ${JSON.stringify(result.awaitingRuling.map((e) => e.sourceId))}`)
 
   assert.deepEqual(result.ready.map((e) => e.sourceId), ['small-1'], '★ 只有小档能进 ready')
-  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), ['large-1'], '★ 大档必须进等人裁决的队列')
+  /**
+   * ── ★★★ P3 之后：大档的去处是【拆解】，而**不是**先落在等人裁决 ─────────────────
+   *
+   *   落地前：大档无处可拆 ⇒ 原样进 `awaitingRuling`（等人拍板"这么拆行不行"）。
+   *   落地后：拆解器在主干上 ⇒ 大档**当场被拆** ⇒ 它进 `decomposed` 那一栏。
+   *
+   *   ★ 而**本臂真正守的那一条一字不动**：大档**绝不许**出现在 `ready` 里 ——
+   *     无论它这一步是"被拆了"还是"等人裁决"，它都**不是一条可派的活**。
+   *   ★★ 而"它现在在哪一栏"必须**正好**是拆解那一栏：若它还落在 `awaitingRuling`，
+   *      那说明拆解这一站没接上（P3 白做了）。
+   */
+  assert.deepEqual(result.decomposed.map((e) => e.sourceId), ['large-1'],
+    '★★ P3 落地后大档必须进【拆解】那一栏（而不是仍停在等人裁决）')
+  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), [],
+    '★ 而它**不该**同时停在等人裁决 —— 拆解已经发生了')
   /** ★ 而它**绝不许**同时出现在 ready 里（那是本任务要防的那件事）。 */
   assert.equal(
     result.ready.some((e) => e.sourceId === 'large-1'), false,
     '★ 一条大档进了 dispatchable —— 「派出的不应该有大活」',
   )
+  /** ★★ 而拆出来的每一条子活**都**要在那一栏里报出来（不许只报"拆了"而不说拆成什么）。 */
+  assert.equal(result.decomposed[0].children.length, 2,
+    '★ 两条文件写域 ⇒ 必须拆成 2 条子活，而它们逐条可读')
 })
 
 test('★★★ 臂 T98b：大活必须说得出【它大在哪】与【卡在哪一问上】—— 不许只给一个"大"字', () => {
@@ -1490,17 +1508,30 @@ test('★★★ 臂 T98b：大活必须说得出【它大在哪】与【卡在�
     },
     team([{ name: 'a', status: 'idle' }]),
   )
-  const entry = result.awaitingRuling[0]
-  assert.notEqual(entry, undefined, '★ 那条大活没进队列')
-  assert.match(entry.whyLarge, /spans 2 existing source files/u, '★ 必须说得出它大在哪')
-  assert.equal(typeof entry.blockingQuestion, 'string', '★ 必须带"卡在哪一问"')
-  assert.ok(entry.blockingQuestion.length > 10, '★ 那一问不能是一句空话')
-  assert.equal(entry.nextStep, 'decompose', '★ 而下一步是【拆解】，不是【再生成】')
+  /**
+   * ── ★★★ P3 之后：这条大活**被拆了**，而"它大在哪"那一套读数**仍然必须在** ──────
+   *
+   *   ★ 拆解**不取消**"说得出它大在哪"这条要求 —— 恰恰相反：拆解的依据就是那三条信号，
+   *     所以 `entry.whyLarge` / `blockingQuestion` / `signals` 必须一路带到拆解那一栏。
+   *   ★★ 而若拆解把它吞掉（只剩"拆了 2 条"），读的人就**再也看不出它当初为什么被判大**
+   *     —— 而那正是本队记账的"一个读数在下一站丢了"。
+   */
+  const entry = result.decomposed[0]
+  assert.notEqual(entry, undefined, '★ 那条大活没进拆解栏')
+  const detail = entry.decomposition
+  assert.equal(detail?.decomposed, true, '★ P3 落地后它必须真的被拆了')
+  assert.equal(detail?.count, 2, '★ 拆成 2 条（两条文件写域）')
 
-  /** ★ 而人话输出里那两行必须都在（否则读的人只看到一个"大"字）。 */
+  /** ★ 而"它大在哪"与"卡在哪一问"仍然读得出来（从 tier 那一格）。 */
+  assert.match(String(entry.tier?.why ?? ''), /spans 2 existing source files/u, '★ 必须说得出它大在哪')
+  assert.equal(typeof entry.tier?.blockingQuestion, 'string', '★ 必须带"卡在哪一问"')
+  assert.ok(String(entry.tier?.blockingQuestion).length > 10, '★ 那一问不能是一句空话')
+
+  /** ★ 而人话输出里**拆解那一栏**必须给出每条子活的去向（否则读的人只看到一个"拆了"）。 */
   const text = renderDispatchable(result)
-  assert.match(text, /它大在哪：/u, '★ 人话输出必须给出"它大在哪"')
-  assert.match(text, /★ 卡在哪一问：/u, '★ 以及"卡在哪一问"')
+  assert.match(text, /已拆解/u, '★ 人话输出必须给出"已拆解"那一栏')
+  assert.match(text, /条子活/u, '★ 以及拆成了几条')
+  assert.match(text, /src\/a\.ts/u, '★ 以及每条子活**各自**是什么')
 })
 
 test('★★★ 臂 T98c：三种处置**不同形**（可派 / 等人裁决 / 不可派）', () => {
@@ -1519,19 +1550,35 @@ test('★★★ 臂 T98c：三种处置**不同形**（可派 / 等人裁决 / �
     team([{ name: 'a', status: 'idle' }]),
   )
   console.log(`    ℹ ready ${JSON.stringify(result.ready.map((e) => e.sourceId))}`
+    + ` · decomposed ${JSON.stringify((result.decomposed ?? []).map((e) => e.sourceId))}`
     + ` · awaitingRuling ${JSON.stringify(result.awaitingRuling.map((e) => e.sourceId))}`
     + ` · cannotEmit ${JSON.stringify(result.cannotEmit.map((e) => e.sourceId))}`)
 
   assert.deepEqual(result.ready.map((e) => e.sourceId), ['ok'])
-  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), ['big'])
+  /**
+   * ★★★ P3 之后是【四格】而不是三格 —— 而"四种处置不得合并"这条纪律**照旧**，
+   *   只是多出来的一种正是本任务实现的那一种：
+   *
+   *     可派 / **已拆解** / 等人裁决 / 不可派
+   *
+   *   ★ 而"已拆解"与"等人裁决"**必须不同形**：前者是"拆解已经发生"（读数），
+   *     后者是"有人要拍板"（队列）—— 把它们合成一格会让"P3 白做了"看不出来。
+   */
+  assert.deepEqual((result.decomposed ?? []).map((e) => e.sourceId), ['big'])
+  assert.deepEqual(result.awaitingRuling.map((e) => e.sourceId), [])
   assert.deepEqual(result.cannotEmit.map((e) => e.sourceId), ['inc'])
-  /** ★ 三格两两不相交（逐对断言，不循环）。 */
-  const sets = [result.ready, result.awaitingRuling, result.cannotEmit].map((list) => new Set(list.map((e) => e.sourceId)))
-  for (const id of sets[0]) {
-    assert.equal(sets[1].has(id), false, `★ ${id} 同时出现在 ready 与 awaitingRuling`)
-    assert.equal(sets[2].has(id), false, `★ ${id} 同时出现在 ready 与 cannotEmit`)
+  /** ★ 四格两两不相交（逐对断言，不循环）。 */
+  const lists = [result.ready, result.decomposed ?? [], result.awaitingRuling, result.cannotEmit]
+  const names = ['ready', 'decomposed', 'awaitingRuling', 'cannotEmit']
+  const sets = lists.map((list) => new Set(list.map((e) => e.sourceId)))
+  for (let i = 0; i < sets.length; i += 1) {
+    for (let j = i + 1; j < sets.length; j += 1) {
+      for (const id of sets[i]) {
+        assert.equal(sets[j].has(id), false,
+          `★ ${id} 同时出现在 ${names[i]} 与 ${names[j]} —— 四格必须两两不相交`)
+      }
+    }
   }
-  for (const id of sets[1]) assert.equal(sets[2].has(id), false, `★ ${id} 同时出现在 awaitingRuling 与 cannotEmit`)
 })
 
 test('★★ 臂 T98d：**分栏报** —— 每条为什么没进 ready，而不是一个笼统的 blocked', () => {
@@ -1550,14 +1597,22 @@ test('★★ 臂 T98d：**分栏报** —— 每条为什么没进 ready，而�
     team([{ name: 'a', status: 'idle' }]),
   )
   console.log(`    ℹ notReadyBecause = ${JSON.stringify(result.notReadyBecause)}`)
-  assert.equal(result.notReadyBecause.large, 1, '★ "大档"那一栏要数出来')
+  /**
+   * ── ★★★ P3 之后：那条大活走的是**拆解**那一栏，而不是"大档等人裁决" ────────────
+   *
+   *   ★ 而"分栏报"这条纪律一字不动 —— 只是那一栏的名字与它报的东西更准了：
+   *     落地前它只能说"这条大活还没人拆"（⇒ 等人裁决），
+   *     落地后它说得出"这条大活**已经拆成 N 条**"（⇒ 可执行的读数）。
+   */
+  assert.equal(result.notReadyBecause.decomposed, 1, '★ "已拆解"那一栏要数出来')
+  assert.equal(result.notReadyBecause.large, 0, '★ 而它**不该**再落"等人裁决"那一栏（拆解已经发生）')
   assert.equal(result.notReadyBecause.contractIncomplete, 1, '★ "契约不全"那一栏也要数出来')
   assert.equal(result.blockedCount, 1, '★ 写域被挡是另一栏')
 
   /** ★ 而人话输出里那**一栏一行**必须在场。 */
   const text = renderDispatchable(result)
   assert.match(text, /分栏（为什么没进/u, '★ 必须分栏报')
-  assert.match(text, /大档等人裁决 1/u, '★ 大档那一栏的计数必须可读')
+  assert.match(text, /已拆解 1/u, '★ 拆解那一栏的计数必须可读')
 })
 
 test('★★ 臂 T98e：反向半边 —— 不许把小档判成大档（那会让裁决变成形式）', () => {
@@ -1746,7 +1801,16 @@ test('★★★ 臂 T113b：大档**必然**经过分档阶段，绝不产出可
   const outcome = runPipeline(big, team([{ name: 'a', status: 'idle' }]))
   console.log(`    ℹ 大档 stage=${outcome.stage} · trace=${outcome.trace.join(' → ')} · 有契约=${outcome.emitted !== undefined}`)
 
-  assert.equal(outcome.stage, 'awaitingRuling', '★ 大活不许进 ready（「派出的不应该有大活」）')
+  /**
+   * ── ★★★ P3 之后：大活走到的是【拆解】，而本臂守的那两件事**都没变** ──────────────
+   *
+   *   ① 它**没有契约**（`emitted` 缺席）—— 大活就不该拿到可派契约（本臂的行名）
+   *   ② 它走的是**分档那一站之后**的路（`trace` 里有 `tier`）
+   *
+   *   ★ 变的只是它的**去处**：落地前它停在 `awaitingRuling`（没人能拆），
+   *     落地后它当场被拆 ⇒ `decomposed`，而**子活**各自再走一遍主干。
+   */
+  assert.equal(outcome.stage, 'decomposed', '★★ P3 落地后大活必须被拆（而不是停在等人裁决）')
   assert.equal(outcome.tier.tier, 'large', '★ 而它的分档必须**说得出**是大档')
   assert.equal(
     outcome.emitted, undefined,
@@ -1756,9 +1820,17 @@ test('★★★ 臂 T113b：大档**必然**经过分档阶段，绝不产出可
     outcome.trace.includes('tier'),
     `★ 它没有经过分档那一站 —— 而"分档是硬性阶段"正是本任务的全部内容。走过的：${outcome.trace.join(' → ')}`,
   )
+  /**
+   * ★★★ 而"拆了"这件事**必须可核**：拆了几条、每条走到哪一站 —— 都在 `decomposition` 里。
+   *   ★ 而"拆成 0 条"或"拆成原样"在 `decomposeContract` 那里已经被拒（见臂 T113f），
+   *     所以这里能真的断言"它拆出了东西"。
+   */
+  assert.equal(outcome.decomposition?.decomposed, true, '★★ 它必须真的拆出了子活')
+  assert.ok(outcome.decomposition.count >= 2, '★ 两条文件写域 ⇒ 至少 2 条子活')
   /** ★ 而它大在哪、卡在哪一问上，必须跟着走（用户裁决时要的正是这两样）。 */
   assert.match(outcome.entry.whyLarge, /spans 2 existing source files/u, '★ 必须说得出它大在哪')
   assert.equal(outcome.entry.nextStep, 'decompose', '★ 下一步是【拆解】')
+  assert.equal(outcome.entry.signals.multipleFiles, true, '★ 而判它大的那条信号要跟着走')
 })
 
 test('★★★ 臂 T113c：小档走的是 ⑥→⑦，而它的契约**只能是**审查那一站给的', () => {
@@ -1816,24 +1888,33 @@ test('★★★ 臂 T113d：`unmeasurable` 既不进 ready、也不进"等人裁
     { toDispatch: [noScope, large], blocked: [], noAction: [], autoRecorded: [], unknown: [] },
     team([{ name: 'a', status: 'idle' }]),
   )
-  console.log(`    ℹ ready ${result.ready.length} · awaitingRuling ${result.awaitingRuling.length} · cannotEmit ${result.cannotEmit.length}`)
+  console.log(`    ℹ ready ${result.ready.length} · decomposed ${(result.decomposed ?? []).length}`
+    + ` · awaitingRuling ${result.awaitingRuling.length} · cannotEmit ${result.cannotEmit.length}`)
 
   assert.equal(result.ready.length, 0, '★ "判不了"绝不许并进"可派"')
   assert.deepEqual(
-    result.awaitingRuling.map((entry) => entry.sourceId), ['large-1'],
+    result.awaitingRuling.map((entry) => entry.sourceId), [],
     '★ "判不了"不许并进"等人裁决" —— 那条队列要的是人拍板，而它缺的是【信息】',
   )
+  /**
+   * ── ★★★ P3 之后：`large-1` 走的是**拆解**那一栏（而不是等人裁决）────────────────
+   *   ★ 而**本臂真正守的那条**照旧：`unmeasurable`（无法分档 ⇒ 缺【信息】）
+   *     与 `large`（能分档、而它大 ⇒ 缺【拆解/拍板】）**必须不同形**。
+   *   ⇒ 所以下面比的是 **cannotEmit 与 decomposed 那一栏**（不再是 awaitingRuling）。
+   */
+  assert.deepEqual((result.decomposed ?? []).map((entry) => entry.sourceId), ['large-1'],
+    '★★ P3 落地后大档进的是【拆解】那一栏')
   assert.deepEqual(result.cannotEmit.map((entry) => entry.sourceId), ['unknown-1'])
 
-  /** ★ 而两者的话必须**不同形**（否则读的人分不出"去补信息"还是"去拍板"）。 */
+  /** ★ 而两者的话必须**不同形**（否则读的人分不出"去补信息"还是"去拆解"）。 */
   const unmeasurable = result.cannotEmit[0]
-  const ruling = result.awaitingRuling[0]
+  const ruling = result.decomposed[0]
   assert.equal(unmeasurable.becauseTier, 'unmeasurable', '★ 它必须自报"分档判不了"')
   assert.ok(
     unmeasurable.missing.join(' ').length > 0,
     '★ 它必须逐项说出【缺什么】（那是"补信息"这一补救动作的全部内容）',
   )
-  assert.equal(ruling.blockingQuestion !== undefined, true, '★ 大档那一格给的是"卡在哪一问上"（要人拍板）')
+  assert.equal(ruling.tier.blockingQuestion !== undefined, true, '★ 大档那一格给的是"卡在哪一问上"')
   assert.equal(
     typeof unmeasurable.blockingQuestion, 'undefined',
     '★★ 一个"判不了"的提案**没有资格**带"卡在哪一问上" —— 有那一句会让人以为它有东西可裁决',
@@ -2048,17 +2129,42 @@ test('★★★ 臂 T113f：拆解器**还没落地**时，这一站如实落 `u
    *     于是"它为什么该被拆"读到的是一句 `(分档没给理由)`。
    *   ★★ 而下面那一条断言**当场把它打红了** —— 夹具替我把自己的错传参拦住。
    */
-  const absent = decompose(tier, contract, { depth: 0 })
-  assert.equal(absent.status, 'unmeasured', '★ 拆解器没落地 ⇒ 如实落 unmeasured（不许编一个"拆完了"）')
-  assert.equal(absent.decomposed, false, '★ 而它**没有**拆出东西 —— 那一格不许被填成 true')
-  assert.ok(absent.missing.length > 0, '★ 而"缺什么"要逐项说清（读的人要能直接去补）')
+  /**
+   * ── ★★★ P3 已落地 ⇒ 这一条的**措辞**变了，而它守的东西没变 ──────────────────────
+   *
+   *   落地前：`tier + contract`（两份**都不含** `kind/acceptance/verify`）⇒ 拆解器
+   *           **什么都拆不出来** ⇒ `missing` 里指名"补 P3"。
+   *   落地后：P3 在**主干上**（拆解器是缺省行为）⇒ 同一份输入 ⇒ 拆解器**能拆**
+   *           （它只需要 `inScope` 与信号）⇒ 这条活**真的被拆了**，不再落 unmeasured。
+   *
+   *   ★ 所以这里不再断言"必须指名 P3" —— 那会把一条**已经落地**的能力写成永久缺失，
+   *     而那正是本队记账的"留着旧措辞 ⇒ 读的人去补一个已经填好的东西"。
+   *   ★ 而**诚实那一条一字不改**：真拆不动时（递归到顶 / 信号不成立 / 没收敛）
+   *     仍然如实落 `unmeasured` 且 `decomposed: false` —— 见下面 `atCeiling` 那一组。
+   */
+  const nowDecomposable = decompose(tier, contract, { depth: 0 })
+  assert.equal(nowDecomposable.status, 'decomposed',
+    '★★ P3 落地后，一条有两条文件写域的大活**必须真的被拆**（拆解器是缺省行为，不是可选）')
+  assert.equal(nowDecomposable.decomposed, true, '★ 而它确实拆出了东西')
+
+  /**
+   * ★★★ 而**拆不动**时的诚实仍然要钉 —— 用一条真到顶的（depth = 上限）。
+   *   那与"我还没学会"**不同形**：这里的补救动作是"人拍板要不要再拆一层"。
+   */
+  const atCeiling = decompose(tier, contract, { depth: MAX_DECOMPOSE_DEPTH })
+  assert.equal(atCeiling.status, 'unmeasured', '★ 到顶 ⇒ 如实落 unmeasured（不许编一个"拆完了"）')
+  assert.equal(atCeiling.decomposed, false, '★ 而它**没有**拆出东西 —— 那一格不许被填成 true')
+  assert.ok(atCeiling.missing.length > 0, '★ 而"缺什么"要逐项说清（读的人要能直接去补）')
   assert.match(
-    absent.missing.join(' '), /P3/u,
-    '★ 那一条必须**指名**它是 P3 的任务 —— 否则读的人不知道该去补什么',
+    atCeiling.missing.join(' '), /递归上限/u,
+    '★ 那一条必须**指名**是递归到顶（而不是"我还没学会"）—— 两种的补救动作相反',
   )
 
-  /** ★★ 而"缺什么"里必须**带着这条活为什么该被拆**（那是拆解器的输入）。 */
-  assert.match(absent.missing.join(' '), /spans 2 existing source files/u, '★ 必须说出它为什么该被拆')
+  /**
+   * ★★ 而"缺什么"里必须**带着这条活为什么该被拆**（那是拆解器的输入）——
+   *   现在读的是**到顶那一条**（`absent` 那个名字已经不再存在：P3 落地后它会真的拆）。
+   */
+  assert.match(atCeiling.missing.join(' '), /spans 2 existing source files/u, '★ 必须说出它为什么该被拆')
 
   /**
    * ── ★ 而下面两个**非法**的拆法必须被当场拒掉 ────────────────────────────────────
@@ -2115,16 +2221,29 @@ test('★★★ 臂 T113g：`decomposition` 那一格**不许把"拆解器没落
   const big = executableProposal({ sourceId: 'big-1', inScope: ['src/a.ts', 'src/b.ts'], objective: '把这两处合起来改' })
   const outcome = runPipeline(big, team([{ name: 'a', status: 'idle' }]))
 
-  assert.equal(outcome.stage, 'awaitingRuling', '★ P3 之前：大档仍然走现有的 awaitingRuling（行为不变）')
-  assert.notEqual(outcome.decomposition, undefined, '★★ "拆解器还没落地"这件事**不许被藏起来**')
-  assert.equal(outcome.decomposition.status, 'unmeasured', '★ 它的形状是 unmeasured（补救：填 P3）')
-  assert.equal(outcome.decomposition.decomposed, false, '★ 而它**没有**拆出东西')
+  /**
+   * ── ★★★ P3 之后这一格的含义变了，而**它守的东西一字不动** ──────────────────────
+   *
+   *   落地前：`decomposition.status === 'unmeasured'` + `missing` 里指名"去填 P3"
+   *           —— 因为那时**没有**拆解器。
+   *   落地后：拆解器在 ⇒ 大档**真的被拆** ⇒ `decomposition.decomposed === true`。
+   *
+   *   ★★ 而**这一格必须在读数里看得见**这条纪律**没变**，只是它现在报的东西更准：
+   *     落地前它报"基础设施没到位"，落地后它报"**拆了几条、每条去哪了**"。
+   *   ⇒ 而**不许被藏起来**在这两个版本里都是同一条要求：
+   *     一个 `decomposition` 缺席的返回值，会让读的人只看到"一条大活"。
+   */
+  assert.equal(outcome.stage, 'decomposed', '★★ P3 之后：大档当场被拆（`decomposed`）')
+  assert.notEqual(outcome.decomposition, undefined,
+    '★★ "拆解这一步干了什么"**不许被藏起来** —— 缺了这一格，读的人只会看到"一条大活"')
+  assert.equal(outcome.decomposition.decomposed, true, '★ 它必须真的拆出了东西')
+  assert.equal(outcome.decomposition.status, 'decomposed', '★ 形状与结论一致')
   assert.ok(
-    outcome.decomposition.missing.join(' ').includes('P3'),
-    '★ 而它必须指名那条补救动作（去填 P3），否则读的人只会看到"一条大活"',
+    Array.isArray(outcome.decomposition.children) && outcome.decomposition.children.length >= 2,
+    '★ 而它必须报出**拆成了哪几条**（不是只报一句"拆了"）—— 那是可核的读数',
   )
-  /** ★ 而它**仍然在等人裁决** —— 两条读数同时在场，不互相吞并。 */
-  assert.equal(outcome.entry.nextStep, 'decompose', '★ 而它**还要**被拆（下一步没变）')
+  /** ★ 而"它为什么该被拆"仍然跟着走（两条读数同时在场，不互相吞并）。 */
+  assert.equal(outcome.entry.nextStep, 'decompose', '★ 下一步仍是拆解（它已经被拆了）')
 })
 
 test('★★★ 臂 T113h：拆解那一站**不许**静默吞掉一条提案（stage 认不出 ⇒ 当场炸）', () => {
@@ -2326,8 +2445,8 @@ test('★★★★ 臂 T113j：信号 A 在判决侧真的能触发 ⇒ 那条�
 
   assert.equal(outcome.tier.tier, TIER.large, '★ 判决侧跨两个现有源码文件必须判 large（信号 A）')
   assert.equal(
-    outcome.stage, 'awaitingRuling',
-    '★ 它被判了大档，却没进"等人裁决" —— 那个分档读数**读了不用**',
+    outcome.stage, 'decomposed',
+    '★★ P3 落地后：被判大档 ⇒ 必须**真的被拆**（进了 decomposed）—— 分档读数读了就该用',
   )
   assert.equal(outcome.emitted, undefined, '★ 大活不许拿到可派契约')
 
@@ -2417,8 +2536,21 @@ test('★★★★ 臂 T113l（反向半边）：收窄【推不出来】时，�
    * ★★ 而这一条**必须经主干**（同 T113i 的 MEASURED）：直调 `tierOf` 会让它在
    *   "主干读收窄后"那一版下**照样绿** —— 那样它就钉在写法上，而不是钉在裁定上。
    */
-  assert.equal(a.stage, 'awaitingRuling', '★ 而两条都要一路走到"等人裁决"（分档读了要用）')
-  assert.equal(b.stage, 'awaitingRuling', '★ 收窄推不出来的那一条也一样')
+  /**
+   * ── ★★★ P3 之后：两条的去处是【拆解】而不是"等人裁决" ──────────────────────────
+   *   ★ 而本臂守的那件事**一字不动**：两条是**同一件活的面** ⇒ 它们必须走到**同一站**、
+   *     带**同一份分档**。⇒ 所以这里比的是"a 与 b 相同"，而不是钉某个字面 stage 名。
+   *   ★★ 而若主干读了收窄器的输出，这两条会**分开**（一条被收窄成两个文件、另一条推不出来）
+   *     ⇒ 它们的 stage 或 signals 会不同形 —— 那正是本臂要抓的。
+   */
+  assert.equal(a.stage, b.stage, '★ 两条是同一件活的面 ⇒ 必须走到同一站（分档读了要用）')
+  assert.equal(a.stage, 'decomposed', '★ 而那一站是【拆解】（P3 落地后被判大档就该被拆）')
+  /**
+   * ★★ 而它们**拆出来的条数允许不同** —— 收窄推不出来时写域的面更粗，拆法自然不一样。
+   *   ⇒ 本臂要钉的是**分档相同**（那才是"主干喂的是提案自己的写域"的后果），
+   *     而"拆成几条"是拆解器的输出、不是分档的读数 —— 拿它当判据是拿错了量。
+   */
+  assert.equal(a.tier.tier, b.tier.tier, '★ 两条分到同一档（那才是"同一份分档"）')
 })
 
 /**
@@ -2680,30 +2812,56 @@ test('★★★★ 臂 T113p：`decompose` 的 `why` **全文**被断言（不�
    * ★★ 本臂把那段话**逐句**钉住 —— 而它此前只被 `assert.ok(missing.length > 0)` 间接碰过。
    *   ⇒ `+` 换成 `-` 会把它变成 `NaN`，而本臂当场红。
    */
+  /**
+   * ── ★★★ P3 落地后：这一段话**换了内容**，而本臂要钉的那件事没变 ──────────────────
+   *
+   *   落地前：`why` 说的是"我还没学会怎么拆"（补 P3）。
+   *   落地后：`why` 由**拆解器自己**给出它为什么答 unmeasured
+   *           （到顶 / 信号不成立 / 没收敛 —— 三种补救动作**相反**，不许合流成一句）。
+   *
+   *   ★ 所以本臂现在钉的是**那三种真的分得开** —— 而那正是它原来想守的东西
+   *     （"每一句都单独钉住"），只是被钉的对象从"一句固定的话"变成了"三种不同的原因"。
+   *   ★★ 而 `NaN` 那一条**照旧有效**：拼接被换成算术减法会让整段变成 `NaN`。
+   */
   const tier = { tier: 'large', why: 'spans 2 files', blockingQuestion: 'q' }
-  const out = decompose(tier, { inScope: ['src/a.ts', 'src/b.ts'] }, { depth: 0 })
+  const contract = { inScope: ['src/a.ts', 'src/b.ts'], objective: '改这两处' }
 
-  assert.equal(typeof out.why, 'string', '★ `why` 必须是一句**字符串**（`NaN` 会让这里红）')
-  /** ★ 而"逐句在不在"是本臂的实质 —— 每一句都单独钉。 */
-  assert.match(out.why, /我还没学会怎么把一条大活拆成原子活/u, '★ 第一句必须原样在里面')
-  assert.match(out.why, /不许\*\*并进"可派"/u, '★ 第二句必须原样在里面（L1507 那一段）')
-  assert.match(out.why, /也\*\*不许\*\*并进"等人裁决"/u, '★ 第三句必须原样在里面（L1508 那一段）')
-  assert.match(out.why, /补的是 P3/u, '★ 而那个补救动作要看得见')
+  /** ① 到顶那一种。 */
+  const atCeiling = decompose(tier, contract, { depth: MAX_DECOMPOSE_DEPTH })
+  assert.equal(typeof atCeiling.why, 'string', '★ `why` 必须是一句**字符串**（`NaN` 会让这里红）')
+  assert.match(atCeiling.why, /递归到第 \d+ 层（上限 \d+）/u, '★ 到顶那一种必须指名【递归上限】（第几层 / 上限几）')
+  assert.equal(atCeiling.why.includes('NaN'), false, '★★ `why` 里出现 "NaN" —— 那是拼接被换成算术减法的特征')
+
+  /** ② 信号一条都不成立那一种（手工 tier、写域不含 src/ 文件）。 */
+  const noSignals = decompose(tier, { inScope: ['docs/x.md'], objective: '写文档' }, { depth: 0 })
+  assert.equal(typeof noSignals.why, 'string', '★ 那一种的 `why` 也必须是字符串')
+  assert.match(noSignals.why, /信号/u, '★ 它必须指名【三条信号一条都不成立】')
+
+  /** ★★ 而**两种原因必须不同形** —— 它们是这个臂现在守的核心。 */
+  assert.notEqual(atCeiling.why, noSignals.why, '★★ 到顶与"信号不成立"必须是**两句不同的话**')
   /**
    * ★★ 而"不是 NaN"要**单独**钉一次：上面三条 `match` 在 `why` 是 `[NaN].toString()`
    *   （即字符串 `"NaN"`）时会全红 —— 但一个**更隐蔽**的实现（例如 `why` 变成
    *   只含第一句）会让它们中的一部分仍然绿。⇒ 这一条钉住**它没有丢掉任何一句**。
    */
   assert.equal(
-    out.why.includes('NaN'), false,
+    atCeiling.why.includes('NaN'), false,
     '★★ `why` 里出现了 "NaN" —— 那是字符串拼接被换成算术减法的特征（plus-to-minus 的红）',
   )
+  assert.equal(
+    noSignals.why.includes('NaN'), false,
+    '★★ 那一种也一样（两处拼接都要查）',
+  )
 
-  /** ★ 而 `missing` 的三条也逐条钉（它们此前只被数了条数）。 */
-  assert.equal(out.missing.length, 3, '★ 三条：拆解器本体 / 它为什么该被拆 / 它卡在哪一问')
-  assert.match(out.missing[0], /拆解器本体（P3 的任务）/u, '★ 第一条要指名 P3')
-  assert.match(out.missing[1], /spans 2 files/u, '★ 第二条要带上分档给的理由')
-  assert.match(out.missing[2], /q/u, '★ 第三条要带上"卡在哪一问"')
+  /**
+   * ★ 而 `missing` 的三条也逐条钉（它们此前只被数了条数）——
+   *   P3 之后第一条换成了**拆解器自己报的那一条**，而后两条（分档的理由 / 卡在哪一问）**没变**。
+   */
+  assert.equal(atCeiling.missing.length, 3, '★ 三条：拆解器报的那条 / 它为什么该被拆 / 它卡在哪一问')
+  assert.match(atCeiling.missing[0], /递归上限/u,
+    '★ 第一条是拆解器自己报的（到顶）—— `missing` 里用的是"递归上限"这个词')
+  assert.match(atCeiling.missing[1], /spans 2 files/u, '★ 第二条要带上分档给的理由')
+  assert.match(atCeiling.missing[2], /q/u, '★ 第三条要带上"卡在哪一问"')
 })
 
 test('★★★★ 臂 T113q：`decomposeContract` 两条拒绝理由**各自**被断言（不是只看一条）', () => {
