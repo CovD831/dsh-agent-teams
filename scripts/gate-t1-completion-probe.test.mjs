@@ -808,14 +808,34 @@ test('★ 臂 5：`resolveBaseRevision` 的两条来源与两个"没有"的成�
    *     `no-worktree`   ⇒ 这类任务本来就没有父版本（不适用）
    *     `not-recorded`  ⇒ ★ 本该有而丢了（**要去看一眼**）
    *
-   * ★ MEASURED：t1 的记录（`.agent-teams/unified-pipeline/team.json`）里
-   *   **没有 `baseRevision` 这一格**，而 `attempt === 1` ⇒ 落到 `not-recorded`。
-   *   ⇒ 也就是"本该有、而丢了" —— 一条**要去看一眼**的信号，不是"不适用"。
+   * ── ★★★ t21 更正：判别依据是 **`kind`**，不是 `attempt`（t20 改的口径）──────────
+   *
+   * MEASURED（本臂第一版就是按 `attempt` 调的，而它现在**测的是一个已经不存在的形状**）：
+   *
+   *     // t20 之前（旧口径）              // t20 之后（现在）
+   *     attempt > 0 ? 'not-recorded'       needsWorktreeFor(kind) ? 'not-recorded' : 'no-worktree'
+   *                 : 'no-worktree'
+   *
+   * ★ 而 t20 的更正理由是硬的（`entities.ts:355-360` 逐字）：
+   *   「"这个任务被派发过几次"与"这类任务该不该有父版本"是两件不相干的事。
+   *     旧写法把它们绑在一起，于是**重派**（一个与基准无关的动作）会翻转诊断。」
+   *   ⇒ ★ 后果（t20 实测）：任何非 implementation/repair 的任务，只要被重派过一次，
+   *     就再也无法提交终态 —— 而它被拒的理由**从来没有发生过**。
+   *
+   * ★★ 而本臂此前传 `{ id, attempt }`（无 kind）⇒ `needsWorktreeFor(undefined)` 为假
+   *   ⇒ **两种情形都落 `no-worktree`** ⇒ "两种没有必须不同形"这条断言必然红。
+   *   ★ 而那不是产品坏了：生产**两个**调用方（`update-task.ts:466`、
+   *     `update-task/completion.ts:250`）**都传整个 `task`**（因而带 kind）。
+   *   ⇒ ★ 这是我的夹具用了**旧的产品形状** —— 与 t34 同族（夹具复刻了旧的形状）。
+   *
+   * ⇒ 修法：按**现在的**口径调（带 kind），并**两个方向都钉**：
+   *     会建 worktree 的 kind（implementation/repair）⇒ `not-recorded`（本该有却丢了）
+   *     不会建 worktree 的 kind（其余五种）        ⇒ `no-worktree`（按设计没有）
    */
-  const noWorktree = resolveBaseRevision({ id: 't13-never-dispatched', attempt: 0 })
-  const notRecorded = resolveBaseRevision({ id: 't13-dispatched-but-lost', attempt: 1 })
-  console.log(`  [t13] attempt=0 ⇒ ${JSON.stringify(noWorktree)}`)
-  console.log(`  [t13] attempt=1 ⇒ ${JSON.stringify(notRecorded)}`)
+  const notRecorded = resolveBaseRevision({ id: 't13-dispatched-but-lost', kind: 'implementation', attempt: 1 })
+  const noWorktree = resolveBaseRevision({ id: 't13-review-never-had-one', kind: 'review', attempt: 1 })
+  console.log(`  [t13] kind=implementation ⇒ ${JSON.stringify(notRecorded)}`)
+  console.log(`  [t13] kind=review         ⇒ ${JSON.stringify(noWorktree)}`)
 
   assert.equal(noWorktree.kind, 'absent')
   assert.equal(notRecorded.kind, 'absent')
@@ -823,6 +843,27 @@ test('★ 臂 5：`resolveBaseRevision` 的两条来源与两个"没有"的成�
     noWorktree.reason, notRecorded.reason,
     '★ 两种"没有"必须不同形 —— 它们的补救动作相反（一个不适用，一个要去看一眼）',
   )
+  assert.equal(noWorktree.reason, 'no-worktree', '★ 不建 worktree 的 kind ⇒ 按设计没有')
+  assert.equal(notRecorded.reason, 'not-recorded', '★ 该建 worktree 的 kind ⇒ 本该有而丢了')
+
+  /**
+   * ── ★★ 反向半边（t20 的口径）：`attempt` **不再参与判定** ─────────────────────
+   *
+   * ★ 这一条是**刻意的**：旧写法里"重派"会翻转诊断，而那正是 t20 修的那个缺陷。
+   *   ⇒ 所以同一 kind 下，`attempt` 取任何值都必须给出**同一个结论**。
+   */
+  for (const attempt of [0, 1, 9]) {
+    assert.equal(
+      resolveBaseRevision({ id: `t21-attempt-${attempt}`, kind: 'implementation', attempt }).reason,
+      'not-recorded',
+      `★ implementation 且 attempt=${attempt} ⇒ 必须恒为 not-recorded（attempt 不参与判定）`,
+    )
+    assert.equal(
+      resolveBaseRevision({ id: `t21-attempt-r-${attempt}`, kind: 'review', attempt }).reason,
+      'no-worktree',
+      `★ review 且 attempt=${attempt} ⇒ 必须恒为 no-worktree（重派不该翻转诊断）`,
+    )
+  }
 
   /**
    * ── t1 的**真实记录**：直接读耐久态，确认那一格真的不在 ──────────────────────
@@ -839,13 +880,15 @@ test('★ 臂 5：`resolveBaseRevision` 的两条来源与两个"没有"的成�
     console.log('  [t13] （团队里没有 t1 ⇒ 那一半跳过）')
     return
   }
-  console.log(`  [t13] t1.attempt=${t1.attempt} · t1.baseRevision=${JSON.stringify(t1.baseRevision)} · status=${t1.status}`)
+  console.log(`  [t13] t1.kind=${t1.kind} · t1.attempt=${t1.attempt} · t1.baseRevision=${JSON.stringify(t1.baseRevision)} · status=${t1.status}`)
   assert.equal(
     Object.hasOwn(t1, 'baseRevision'), false,
-    '★ t1 的记录里【不该】有 baseRevision —— 而它 attempt=1 ⇒ 这正是 `not-recorded`（本该有而丢了）',
+    '★ t1 的记录里【不该】有 baseRevision，且它的 kind 会建 worktree ⇒ 这正是 `not-recorded`（本该有而丢了）',
   )
+  /** ★ 前置：t1 的 kind 确实是"会建 worktree"那一类（否则本臂的 `not-recorded` 前提不成立）。 */
+  assert.equal(t1.kind, 'implementation', '★ 前置：t1 是 implementation（会建 worktree ⇒ 本该有父版本）')
   assert.equal(resolveBaseRevision(t1).kind, 'absent', '★ 前置：t1 的 base 解析确实落 absent')
-  assert.equal(resolveBaseRevision(t1).reason, 'not-recorded', '★ 而它的成因是 not-recorded，不是 no-worktree')
+  assert.equal(resolveBaseRevision(t1).reason, 'not-recorded', '★ 而它的成因是 not-recorded（kind 会建 worktree），不是 no-worktree')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
