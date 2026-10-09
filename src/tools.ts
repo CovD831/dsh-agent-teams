@@ -129,6 +129,12 @@ export {
   moduleFreshnessFrom,
   stampCommitOf,
   currentHead,
+  /**
+   * ★ `isAncestorOf` 与上面几个同一理由导出：它决定 `commitBehind` 那一格，
+   *   而"构建时的提交是不是 HEAD 的祖先"必须能被夹具【精确驱动】——
+   *   ★ 否则它的三态（是 / 不是 / 判不了）只能靠 live 读数去碰。
+   */
+  isAncestorOf,
   readStamp,
   moduleFreshnessMessage,
   restartArbitrationMessage,

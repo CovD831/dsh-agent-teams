@@ -272,9 +272,38 @@ export interface FreshnessInput {
     onDisk?: BuildStamp;
     /** 此刻的 HEAD。★ 由调用方在**调用时**取。 */
     head?: string;
+    /**
+     * ── ★★★ 构建时那条提交【是不是 HEAD 的祖先】────────────────────────────────
+     *
+     * MEASURED（2026-10-09，captain 自己踩进去的）：
+     *   `commitBehind = builtCommit !== head` 用【不相等】判【落后】——
+     *   而"构建时的提交是 HEAD 的祖先"也被读成了落后
+     *   （实测：stamp=`49894d0` 而 HEAD=`d457d9c`，`git merge-base --is-ancestor` 为**真**，
+     *    即代码没有落后，只是 stamp 没更新）。
+     *
+     * ★★ 而它的后果是一个【循环】：`build` 之后 `commit`（提交 lib/ 与 stamp）
+     *   必然让 stamp 落后 HEAD 一格 ⇒ 那条门【每轮都会说话】。
+     *
+     * ⇒ ★ 所以"落后"的正确判据是【祖先关系】：
+     *   · 是祖先   ⇒ 构建基于更早的提交，而它在 HEAD 的历史里 ⇒ ★ 不是"你手上的代码旧了"
+     *   · 不是祖先 ⇒ 构建基于一条【不在当前线上】的提交（换分支 / rebase）⇒ 那才是
+     *
+     * ★ 三态：`true`（是祖先 ⇒ 不算落后）· `false`（不是祖先 ⇒ 真落后）·
+     *   `undefined`（**跑不了 git ⇒ 判不了**）⇒ ★ 而判不了时【保守】：维持"落后"。
+     *   —— 因为"说不清"不得读成"没事"（本队那条三态纪律）。
+     */
+    builtCommitIsAncestorOfHead?: boolean;
 }
 export declare function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness;
 export declare function moduleFreshness(): ModuleFreshness;
+/**
+ * `ancestor` 是不是 `descendant` 的祖先（用 git 判，而不是用字符串比）。
+ *
+ * ★ 三态：`true` / `false` / `undefined`（**跑不了 git ⇒ 判不了**）。
+ *   ★ 而"判不了"与"不是祖先"必须不同形 —— 前者的处置是"保守地当作落后"，
+ *     后者是"真的换了线"。而调用方拿 `undefined` 时按保守处理。
+ */
+export declare function isAncestorOf(ancestor: string, descendant: string, root?: string): boolean | undefined;
 /** ★ 加载时读一次的整份 stamp —— 「构建时的提交」是常量，与 `output` 同一时机。 */
 export declare let LOADED_STAMP: BuildStamp | undefined;
 export declare let LOADED_STAMP_READ: boolean;

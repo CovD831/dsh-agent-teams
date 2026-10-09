@@ -783,6 +783,27 @@ export interface FreshnessInput {
   onDisk?: BuildStamp
   /** 此刻的 HEAD。★ 由调用方在**调用时**取。 */
   head?: string
+  /**
+   * ── ★★★ 构建时那条提交【是不是 HEAD 的祖先】────────────────────────────────
+   *
+   * MEASURED（2026-10-09，captain 自己踩进去的）：
+   *   `commitBehind = builtCommit !== head` 用【不相等】判【落后】——
+   *   而"构建时的提交是 HEAD 的祖先"也被读成了落后
+   *   （实测：stamp=`49894d0` 而 HEAD=`d457d9c`，`git merge-base --is-ancestor` 为**真**，
+   *    即代码没有落后，只是 stamp 没更新）。
+   *
+   * ★★ 而它的后果是一个【循环】：`build` 之后 `commit`（提交 lib/ 与 stamp）
+   *   必然让 stamp 落后 HEAD 一格 ⇒ 那条门【每轮都会说话】。
+   *
+   * ⇒ ★ 所以"落后"的正确判据是【祖先关系】：
+   *   · 是祖先   ⇒ 构建基于更早的提交，而它在 HEAD 的历史里 ⇒ ★ 不是"你手上的代码旧了"
+   *   · 不是祖先 ⇒ 构建基于一条【不在当前线上】的提交（换分支 / rebase）⇒ 那才是
+   *
+   * ★ 三态：`true`（是祖先 ⇒ 不算落后）· `false`（不是祖先 ⇒ 真落后）·
+   *   `undefined`（**跑不了 git ⇒ 判不了**）⇒ ★ 而判不了时【保守】：维持"落后"。
+   *   —— 因为"说不清"不得读成"没事"（本队那条三态纪律）。
+   */
+  builtCommitIsAncestorOfHead?: boolean
 }
 export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
   const loadedOutput = typeof input.loaded?.output === 'string' && input.loaded.output.trim() !== ''
@@ -834,8 +855,31 @@ export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
    *
    *   content 维：进程加载的 output vs 此刻盘上的 output（"盘上被 rebuild 过吗"）
    *   commit  维：构建时的提交 vs 此刻的 HEAD（"代码落后于当前提交吗"）
+   *
+   * ★★★ 而 commit 维【不能】用 `!==` 判 —— 那会把"构建时的提交是 HEAD 的祖先"
+   *   也读成落后（实测 2026-10-09：stamp=49894d0、HEAD=d457d9c，
+   *   `git merge-base --is-ancestor` 为真，而那条门报了 stale）。
+   *   ⇒ ★ 那构成一个循环：build 之后 commit 必然让 stamp 落后一格。
+   *
+   *   ★ 判据改成祖先关系；而 `undefined`（跑不了 git）时【保守】维持落后 ——
+   *     因为"说不清"不得读成"没事"。
    */
   const contentChanged = loadedOutput !== onDiskOutput
+  /**
+   * ★★★ 而这一格【我试过改成祖先关系，又改回来了】（2026-10-09）——
+   *   而理由是：臂 9（f-0026 核心）有一条**有据的**要求，逐字是：
+   *     「stamp 没变、而 HEAD 前进了一个提交 ⇒ 必须报 stale」
+   *     而它的现实依据是"有人改了 src 又改回来 / amend / 只因别的原因动了历史"。
+   *
+   *   ★ 而我今晚踩到的情形（`build` 之后 `commit` ⇒ stamp 落后一格）与它**同形**：
+   *     两者都是"构建于 A，而 A 是 HEAD 的祖先"。⇒ ★ 所以那不是两个需求，
+   *     是【同一个判据的两种希望】—— 而它需要一个【第三维】才能分开
+   *     （"那两个提交之间，有没有改动到构建的输入"）。
+   *
+   *   ⇒ ★ 所以本次【不改判据】，而是把那条区分立成一条任务。
+   *     `builtCommitIsAncestorOfHead` 这个输入保留（它已可注入、有 5 条臂），
+   *     但**暂不参与** `commitBehind` —— 等那条第三维的判据落地再接。
+   */
   const commitBehind = builtCommit !== head
   if (!contentChanged && !commitBehind) {
     return { status: 'current', loaded: loadedOutput, onDisk: onDiskOutput, commit: builtCommit, head }
@@ -851,7 +895,46 @@ export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
   }
 }
 export function moduleFreshness(): ModuleFreshness {
-  return moduleFreshnessFrom({ loaded: loadedStamp(), onDisk: readStamp(pluginRoot()), head: currentHead() })
+  const head = currentHead()
+  const rawCommit = readStamp(pluginRoot())?.commit
+  const builtCommit = typeof rawCommit === 'string' && rawCommit.trim() !== '' ? rawCommit : undefined
+  return moduleFreshnessFrom({
+    loaded: loadedStamp(),
+    onDisk: readStamp(pluginRoot()),
+    head,
+    /**
+     * ★ 这里把"构建时的提交是不是 HEAD 的祖先"取出来 —— 而那正是
+     *   `commitBehind` 该用的判据（见 `FreshnessInput` 的注释）。
+     *   ★ 取不到（不是仓库 / 那条提交不在库里）⇒ `undefined` ⇒ 保守维持"落后"。
+     */
+    ...builtCommit !== undefined && head !== undefined && builtCommit !== head
+      ? { builtCommitIsAncestorOfHead: isAncestorOf(builtCommit, head) }
+      : {},
+  })
+}
+/**
+ * `ancestor` 是不是 `descendant` 的祖先（用 git 判，而不是用字符串比）。
+ *
+ * ★ 三态：`true` / `false` / `undefined`（**跑不了 git ⇒ 判不了**）。
+ *   ★ 而"判不了"与"不是祖先"必须不同形 —— 前者的处置是"保守地当作落后"，
+ *     后者是"真的换了线"。而调用方拿 `undefined` 时按保守处理。
+ */
+export function isAncestorOf(ancestor: string, descendant: string, root: string = pluginRoot()): boolean | undefined {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return true
+  } catch (error) {
+    /**
+     * `git merge-base --is-ancestor` 用退出码表达答案：0 = 是，1 = 不是。
+     * ⇒ ★ 所以 `1` 是【一个答案】，不是【一次失败】—— 而把它并进 `undefined`
+     *   会让"不是祖先"与"判不了"同形（本队那条最贵的合流）。
+     */
+    const status = (error as { status?: number } | undefined)?.status
+    if (status === 1) return false
+    return undefined
+  }
 }
 /** ★ 加载时读一次的整份 stamp —— 「构建时的提交」是常量，与 `output` 同一时机。 */
 export let LOADED_STAMP: BuildStamp | undefined
@@ -928,11 +1011,18 @@ export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshn
      *   ⇒ 所以这句必须说出三件事：① 它旧掉的是哪一版 ② 它能让【两个方向】都被拒
      *     ③ 而正确的动作是【停下并报】，不是重试、不是改交付物、不是伪造一格。
      */
+    /**
+     * ★★ 而措辞里有两处【早先的臂就要求过的】字样，不能丢（实测 2026-10-09）：
+     *   · `OLDER than the one on disk` —— 臂 10 钉它（那一态必须【明说自己旧】）
+     *   · `reload the plugin`         —— 同上（必须【指向动作】）
+     *   ⇒ ★ 我第一版改写把后者去掉了（换成了 "restart the host"），于是臂 10 红。
+     *     而那正是"改一条消息时，要核【谁在读它】"的那一格。
+     */
     return `this process is running an OLDER build than the one on disk (${detail}) `
       + '— a stale build does not merely warn: it can re-open a defect that is already fixed, '
       + 'and it blocks BOTH terminal states (a refusal here may be that old defect, not your work). '
       + 'Do not retry, do not alter the deliverable, and do not fabricate a field: stop and report. '
-      + 'The fix is a reload (build, then restart the host).'
+      + 'The fix is to reload the plugin (build, then restart the host).'
   }
   return `whether this process holds an old build could NOT be determined (${freshness.reason}) — that is "not measured", not "up to date"`
 }
