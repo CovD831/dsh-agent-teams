@@ -386,9 +386,33 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            *   （`registered === 0`）上也成立，而那是"这里本来就没有判据"，是正常情形。
            *   `skippedAll` 才是注册表**显式**说的"这一步没被检查"。
            */
-          const dispatchNotChecked = dispatchGates.ok === false && dispatchGates.skippedAll !== undefined
+          /**
+           * ── ★★★ "这一步没能被检查"有两种成因，而【两种都不该是拒绝】（t42）──────────
+           *
+           * MEASURED（2026-10-09，`verifier` 在 t5 上给出【两个终态的拒绝原文】）：
+           *   ```
+           *   completed ⇒ rejected: the completion gate could not measure (…)
+           *   failed    ⇒ rejected: ★ 同一条，逐字相同
+           *   ```
+           *   ⇒ ★ 而那条判据**在自己的措辞里**写着 "so it is reported rather than refused"。
+           *   ⇒ 判据说"我是报告，不是拒绝"，而调用方读成了"rejected"。
+           *
+           * ★★ 两种成因（而旧代码只认第一种）：
+           *   · `skippedAll` —— 一条判据都没跑（"这里本来就没检查"）
+           *   · `unmeasured` —— 跑了而**这一步测不成**（"我试了，测不出来"）
+           *   ⇒ ★ 两者都是「我没能检查」，而不是「我检查了而它不行」。
+           *
+           * ★★★ 而"我检查了而它不行"是 `blockers` —— ★ 只有那一种才拒。
+           *   与 `delivery.ts:96-100` 的口径**逐字同源**：
+           *   「一个安全约束【不触发】时，应当【放行】并留下痕迹，而不是拒绝。」
+           */
+          const dispatchNotChecked = dispatchGates.ok === false
+            && (dispatchGates.skippedAll !== undefined || dispatchGates.unmeasured !== undefined)
           if (dispatchNotChecked) {
-            ctx.logger.warn(`agent-teams: update_task reached the dispatch gate with nothing evaluated (${dispatchGates.registered} registered, all skipped); the dispatch step was NOT checked — allowing it through, because "not checked" is not "refused"`)
+            const why = dispatchGates.unmeasured !== undefined
+              ? `the dispatch step could not be measured (${dispatchGates.unmeasured})`
+              : `nothing was evaluated (${dispatchGates.registered} registered, all skipped)`
+            ctx.logger.warn(`agent-teams: update_task reached the dispatch gate and ${why}; the dispatch step was NOT checked — allowing it through, because "not checked" is not "refused"`)
           }
           /**
            * ★★★ 拒绝逻辑整体包进 `!dispatchNotChecked &&`。
@@ -691,9 +715,18 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * ★ 两处逐字同形是刻意的：同一个事实在两个出口上用两句话，它们会随下一次
            *   改动分叉，而分叉后的两次读数在断言层面同形。
            */
-          const completionNotChecked = completionGates.ok === false && completionGates.skippedAll !== undefined
+          /**
+           * ★★★ 与 dispatch 位置**逐字同形**（t42：两处必须同一口径）——
+           *   只修一处会让它们分叉，而分叉后「哪一处放行」在日志里同形。
+           *   ★ 而成因同样是两种：`skippedAll`（一条都没跑）与 `unmeasured`（跑了而测不成）。
+           */
+          const completionNotChecked = completionGates.ok === false
+            && (completionGates.skippedAll !== undefined || completionGates.unmeasured !== undefined)
           if (completionNotChecked) {
-            ctx.logger.warn(`agent-teams: update_task for task "${task.id}" reached completion with nothing evaluated (${completionGates.registered} registered, all skipped); the completion step was NOT checked — allowing it through, because "not checked" is not "refused"`)
+            const why = completionGates.unmeasured !== undefined
+              ? `the completion step could not be measured (${completionGates.unmeasured})`
+              : `nothing was evaluated (${completionGates.registered} registered, all skipped)`
+            ctx.logger.warn(`agent-teams: update_task for task "${task.id}" reached completion and ${why}; the completion step was NOT checked — allowing it through, because "not checked" is not "refused"`)
           }
           /**
            * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬），放在拒绝逻辑**之前**是因为
