@@ -309,6 +309,125 @@ export declare let LOADED_STAMP: BuildStamp | undefined;
 export declare let LOADED_STAMP_READ: boolean;
 export declare function loadedStamp(): BuildStamp | undefined;
 export declare function pluginRoot(): string;
+/**
+ * ── ★★★ 卡点/判决 ⇒ 任务：把 `friction-triage` 接上【生产调用方】（t26）───────────────
+ *
+ * ── 它接的是什么 ───────────────────────────────────────────────────────────────
+ *
+ * `scripts/friction-triage.mjs` 早已能把**卡点/判决**变成一份**审查过的、分好档的**
+ * 任务契约（`triage` → `runPipeline` → `emitReviewedContract` → `dispatchable` 四态）。
+ * ★ 而它此前**零生产调用方**：`src/` 里对它的引用**全部在注释里**，
+ *   真正 `import` 它的只有 `scripts/*.test.mjs`。
+ * ⇒ 于是盘上的卡点与判决**没有任何东西**把它们变成任务 ——
+ *   「机制建好了，没有接线」的第 8 个实例。
+ *
+ * ── ★★★ 而它为什么需要【动态 import + `pluginRoot()`】─────────────────────────────
+ *
+ * `scripts/` 在 `tsconfig.json` 的 `rootDir = "src"` **之外** ⇒ 静态
+ * `import '../../scripts/friction-triage.mjs'` 会落 `TS2307`（实测），
+ * 且 `rootDir=src` 意味着 **`lib/` 里不会有 `scripts/`**。
+ *
+ * ★ 而这**不构成障碍**，因为本仓【已经在这么做】了：
+ *   `src/quality-gates.ts` 读基线清单时走的是
+ *   `readFileSync(join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'))`
+ *   —— ★ 运行时路径，不经 `tsc` 的 `rootDir`。
+ * ⇒ 本条沿用**同一种做法**（裁定 A1），而不是新开一个先例。
+ *
+ * ★ 类型面由 `scripts/friction-triage.d.ts`（最小声明）给出 —— 而**不是**
+ *   `@ts-expect-error`：后者会让「这个模块不存在」与「这个模块存在而导出改名了」
+ *   读成同一件事，而那正是本仓那条最贵纪律的同形。
+ *
+ * ── ★★ 边界：本条**只加调用方**，不改 `friction-triage.mjs` 的判据语义 ────────────
+ *
+ * 分档（`tierOf`）、五问（`adversarialReview`）、四态（`dispatchable`）都是对的。
+ * 用户 §38 那条判据由**它**实现，而本条只负责把它的结论**读出来并交出去**：
+ *
+ *     ✓ 小档 + 审查通过 + 契约完整  ⇒ 可派（`ready`）
+ *     ✗ 大档（要拆解）/ 审不过 / 契约不全
+ *       ⇒ 分别进 `awaitingRuling` / `rejected` / `cannotEmit`
+ *
+ * ★★★ 而 `awaitingRuling` 的**长度本身是一条读数**（用户 §38：
+ *   「需要人拍板是**缺陷指标**，不是交付方式」）⇒ 它长了说明"能自己解决的事太少"，
+ *   而那正是要消灭的那个指标。⇒ 所以下面把四个数字**分别**交出去，**不合并成一个**。
+ */
+export interface ExperienceDispatchReadout {
+    /** ★ 四态的**各自条数**（不合并 —— 合并会抹掉"为什么没进 ready"）。 */
+    readonly ready: number;
+    readonly awaitingRuling: number;
+    readonly rejected: number;
+    readonly cannotEmit: number;
+    /** 拆解那一栏（每条大活拆成了几条、各去哪）。 */
+    readonly decomposed: number;
+    /** ★ 「为什么没进 ready」的分栏（主干的 stage → 那一栏的名字，只有一处映射）。 */
+    readonly notReadyBecause: Record<string, number>;
+    /** ★ `ready` 里那些提案的**完整契约**（调用方拿它去建任务）。 */
+    readonly contracts: readonly ExperienceDispatchCandidate[];
+}
+/** 一条**可派**的提案：它带着完整契约与来源。 */
+export interface ExperienceDispatchCandidate {
+    readonly sourceId?: string;
+    readonly tier?: string;
+    /** ★ 审查过的契约 —— `ready` 池里只可能是 `emitReviewedContract` 给的。 */
+    readonly contract: Record<string, unknown>;
+}
+/**
+ * ── ★★ 三态（而它们**不同形**）──────────────────────────────────────────────────
+ *
+ *   `ok`          读到了卡点/判决（`unreadable` 为空）
+ *   `partial`     ★ **有一侧读不到**（附是哪一侧）—— 而它**不是** `ok`
+ *   `unmeasured`  ★ 整个 `friction-triage` 引不进来（模块不在 / 导出改名）
+ *
+ * ★★★ 而 `unreadable` 那格**绝不许**被读成"没有待派的"：
+ *   「我没能读」与「我看了，确实没有」**不同形** —— 后者是"确实为空"，
+ *   前者是"我根本不知道有多少"。合并它们会让"卡点目录写错了"伪装成"一切都好"。
+ */
+export type ExperienceDispatchState = 'ok' | 'partial' | 'unmeasured';
+export interface ExperienceDispatchResult {
+    readonly state: ExperienceDispatchState;
+    /** ★ 读不到的那几侧（空数组 = 都读到了）。 */
+    readonly unreadable: readonly string[];
+    /** 判据层给出的四态读数（`unmeasured` 时为 `undefined` —— 它没算出来）。 */
+    readonly readout?: ExperienceDispatchReadout;
+    /** `unmeasured` 时说明**为什么**（模块不在 / 导出对不上）。 */
+    readonly why?: string;
+}
+/**
+ * 走一遍「卡点/判决 ⇒ 任务」：调 `friction-triage` 的 `triage` + `dispatchable`。
+ *
+ * @param options.frictionsDir 卡点目录（**由调用方注入** —— 判据层不猜路径）
+ * @param options.judgementsDir 判决目录
+ * @param options.occupied 已被占用的写域（避免派到别人的文件上）
+ * @param options.loadModule ★ 注入点：默认走 `pluginRoot()` 动态 import；
+ *   夹具可以换掉它（**而它只换装载，不换判据**）。
+ */
+export declare function readExperienceDispatch(options?: {
+    readonly frictionsDir?: string;
+    readonly judgementsDir?: string;
+    readonly occupied?: readonly unknown[];
+    readonly loadModule?: () => Promise<FrictionTriageModule>;
+}): Promise<ExperienceDispatchResult>;
+/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那两格（见 `scripts/friction-triage.d.ts`）。 */
+interface FrictionTriageModule {
+    readonly triage?: (options?: Record<string, unknown>) => {
+        readonly unreadable?: readonly string[];
+        readonly [key: string]: unknown;
+    };
+    readonly dispatchable?: (report: unknown, options?: Record<string, unknown>) => {
+        readonly ready: readonly {
+            readonly sourceId?: string;
+            readonly tier?: {
+                readonly tier?: string;
+            };
+            /** ★ 契约**直接挂在条目上**（实测形状）—— 不是嵌在 `emitted` 里。 */
+            readonly contract?: Record<string, unknown>;
+        }[];
+        readonly awaitingRuling: readonly unknown[];
+        readonly rejected: readonly unknown[];
+        readonly cannotEmit: readonly unknown[];
+        readonly decomposed: readonly unknown[];
+        readonly notReadyBecause?: Record<string, number>;
+    };
+}
 export declare function moduleFreshnessMessage(freshness?: ModuleFreshness): string;
 export declare function freshnessLine(): string;
 export type RestartArbitration = 
@@ -781,3 +900,4 @@ export declare function restartQueueFrom(tasks: ReadonlyArray<{
 }>): RestartQueueState;
 /** 一句人话（供工具结果与 status 读）。★ 三态措辞必须互不同形。 */
 export declare function restartQueueMessage(state: RestartQueueState): string;
+export {};

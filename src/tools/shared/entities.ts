@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path'
 import { parseRules, type RulesLoad } from '../../gates/contract/verify-command.ts'
 
 import { readFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
@@ -978,6 +979,203 @@ export function pluginRoot(): string {
    *     层数是**结构事实**：`lib/tools/shared/x.js` ⇒ 四层到项目根。
    */
   return dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
+}
+
+/**
+ * ── ★★★ 卡点/判决 ⇒ 任务：把 `friction-triage` 接上【生产调用方】（t26）───────────────
+ *
+ * ── 它接的是什么 ───────────────────────────────────────────────────────────────
+ *
+ * `scripts/friction-triage.mjs` 早已能把**卡点/判决**变成一份**审查过的、分好档的**
+ * 任务契约（`triage` → `runPipeline` → `emitReviewedContract` → `dispatchable` 四态）。
+ * ★ 而它此前**零生产调用方**：`src/` 里对它的引用**全部在注释里**，
+ *   真正 `import` 它的只有 `scripts/*.test.mjs`。
+ * ⇒ 于是盘上的卡点与判决**没有任何东西**把它们变成任务 ——
+ *   「机制建好了，没有接线」的第 8 个实例。
+ *
+ * ── ★★★ 而它为什么需要【动态 import + `pluginRoot()`】─────────────────────────────
+ *
+ * `scripts/` 在 `tsconfig.json` 的 `rootDir = "src"` **之外** ⇒ 静态
+ * `import '../../scripts/friction-triage.mjs'` 会落 `TS2307`（实测），
+ * 且 `rootDir=src` 意味着 **`lib/` 里不会有 `scripts/`**。
+ *
+ * ★ 而这**不构成障碍**，因为本仓【已经在这么做】了：
+ *   `src/quality-gates.ts` 读基线清单时走的是
+ *   `readFileSync(join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'))`
+ *   —— ★ 运行时路径，不经 `tsc` 的 `rootDir`。
+ * ⇒ 本条沿用**同一种做法**（裁定 A1），而不是新开一个先例。
+ *
+ * ★ 类型面由 `scripts/friction-triage.d.ts`（最小声明）给出 —— 而**不是**
+ *   `@ts-expect-error`：后者会让「这个模块不存在」与「这个模块存在而导出改名了」
+ *   读成同一件事，而那正是本仓那条最贵纪律的同形。
+ *
+ * ── ★★ 边界：本条**只加调用方**，不改 `friction-triage.mjs` 的判据语义 ────────────
+ *
+ * 分档（`tierOf`）、五问（`adversarialReview`）、四态（`dispatchable`）都是对的。
+ * 用户 §38 那条判据由**它**实现，而本条只负责把它的结论**读出来并交出去**：
+ *
+ *     ✓ 小档 + 审查通过 + 契约完整  ⇒ 可派（`ready`）
+ *     ✗ 大档（要拆解）/ 审不过 / 契约不全
+ *       ⇒ 分别进 `awaitingRuling` / `rejected` / `cannotEmit`
+ *
+ * ★★★ 而 `awaitingRuling` 的**长度本身是一条读数**（用户 §38：
+ *   「需要人拍板是**缺陷指标**，不是交付方式」）⇒ 它长了说明"能自己解决的事太少"，
+ *   而那正是要消灭的那个指标。⇒ 所以下面把四个数字**分别**交出去，**不合并成一个**。
+ */
+export interface ExperienceDispatchReadout {
+  /** ★ 四态的**各自条数**（不合并 —— 合并会抹掉"为什么没进 ready"）。 */
+  readonly ready: number
+  readonly awaitingRuling: number
+  readonly rejected: number
+  readonly cannotEmit: number
+  /** 拆解那一栏（每条大活拆成了几条、各去哪）。 */
+  readonly decomposed: number
+  /** ★ 「为什么没进 ready」的分栏（主干的 stage → 那一栏的名字，只有一处映射）。 */
+  readonly notReadyBecause: Record<string, number>
+  /** ★ `ready` 里那些提案的**完整契约**（调用方拿它去建任务）。 */
+  readonly contracts: readonly ExperienceDispatchCandidate[]
+}
+
+/** 一条**可派**的提案：它带着完整契约与来源。 */
+export interface ExperienceDispatchCandidate {
+  readonly sourceId?: string
+  readonly tier?: string
+  /** ★ 审查过的契约 —— `ready` 池里只可能是 `emitReviewedContract` 给的。 */
+  readonly contract: Record<string, unknown>
+}
+
+/**
+ * ── ★★ 三态（而它们**不同形**）──────────────────────────────────────────────────
+ *
+ *   `ok`          读到了卡点/判决（`unreadable` 为空）
+ *   `partial`     ★ **有一侧读不到**（附是哪一侧）—— 而它**不是** `ok`
+ *   `unmeasured`  ★ 整个 `friction-triage` 引不进来（模块不在 / 导出改名）
+ *
+ * ★★★ 而 `unreadable` 那格**绝不许**被读成"没有待派的"：
+ *   「我没能读」与「我看了，确实没有」**不同形** —— 后者是"确实为空"，
+ *   前者是"我根本不知道有多少"。合并它们会让"卡点目录写错了"伪装成"一切都好"。
+ */
+export type ExperienceDispatchState = 'ok' | 'partial' | 'unmeasured'
+
+export interface ExperienceDispatchResult {
+  readonly state: ExperienceDispatchState
+  /** ★ 读不到的那几侧（空数组 = 都读到了）。 */
+  readonly unreadable: readonly string[]
+  /** 判据层给出的四态读数（`unmeasured` 时为 `undefined` —— 它没算出来）。 */
+  readonly readout?: ExperienceDispatchReadout
+  /** `unmeasured` 时说明**为什么**（模块不在 / 导出对不上）。 */
+  readonly why?: string
+}
+
+/**
+ * 走一遍「卡点/判决 ⇒ 任务」：调 `friction-triage` 的 `triage` + `dispatchable`。
+ *
+ * @param options.frictionsDir 卡点目录（**由调用方注入** —— 判据层不猜路径）
+ * @param options.judgementsDir 判决目录
+ * @param options.occupied 已被占用的写域（避免派到别人的文件上）
+ * @param options.loadModule ★ 注入点：默认走 `pluginRoot()` 动态 import；
+ *   夹具可以换掉它（**而它只换装载，不换判据**）。
+ */
+export async function readExperienceDispatch(options: {
+  readonly frictionsDir?: string
+  readonly judgementsDir?: string
+  readonly occupied?: readonly unknown[]
+  readonly loadModule?: () => Promise<FrictionTriageModule>
+} = {}): Promise<ExperienceDispatchResult> {
+  const load = options.loadModule ?? loadFrictionTriageModule
+  let module: FrictionTriageModule
+  try {
+    module = await load()
+  } catch (error) {
+    /**
+     * ★★ 模块引不进来 ⇒ `unmeasured`（**不是**"没有待派的"）。
+     *   ★ 而它必须说清是**哪一步**不行：模块不在盘上 / 导出对不上，两者的补救不同。
+     */
+    return {
+      state: 'unmeasured',
+      unreadable: [],
+      why: `the friction triage module could not be loaded: ${String((error as Error | undefined)?.message)}`,
+    }
+  }
+  if (typeof module.triage !== 'function' || typeof module.dispatchable !== 'function') {
+    return {
+      state: 'unmeasured',
+      unreadable: [],
+      why: 'the friction triage module loaded but no longer exports `triage`/`dispatchable` '
+        + `(saw: ${typeof module.triage}/${typeof module.dispatchable}) — the shape moved, so this reading means nothing`,
+    }
+  }
+
+  const report = module.triage({
+    ...options.frictionsDir === undefined ? {} : { frictionsDir: options.frictionsDir },
+    ...options.judgementsDir === undefined ? {} : { judgementsDir: options.judgementsDir },
+    ...options.occupied === undefined ? {} : { occupied: options.occupied },
+  })
+  const unreadable = [...(report.unreadable ?? [])]
+  const dispatchable = module.dispatchable(report)
+
+  const contracts: ExperienceDispatchCandidate[] = []
+  for (const entry of dispatchable.ready) {
+    const contract = entry.contract
+    /**
+     * ★ 没有契约的 `ready` 条目不进 `contracts` —— 而它**仍计入 `ready` 的条数**（如实）。
+     *   ★ 两者不同形：`ready` 说"判据说它可以派"，`contracts` 说"我拿到了要建的那份契约"。
+     *     一个 `ready` 而拿不到契约 ⇒ 那是**上游的一处缺口**，而它必须在读数里可见
+     *     （把两者合成一个数字会让那种情况彻底消失）。
+     */
+    if (contract !== undefined && typeof contract === 'object') {
+      contracts.push({
+        ...(entry.sourceId === undefined ? {} : { sourceId: entry.sourceId }),
+        ...(entry.tier?.tier === undefined ? {} : { tier: entry.tier.tier }),
+        contract,
+      })
+    }
+  }
+
+  return {
+    /** ★ 有一侧读不到 ⇒ `partial`（**不是** `ok`）—— 那正是"没能读"与"确实没有"分界的地方。 */
+    state: unreadable.length === 0 ? 'ok' : 'partial',
+    unreadable,
+    readout: {
+      ready: dispatchable.ready.length,
+      awaitingRuling: dispatchable.awaitingRuling.length,
+      rejected: dispatchable.rejected.length,
+      cannotEmit: dispatchable.cannotEmit.length,
+      decomposed: dispatchable.decomposed.length,
+      notReadyBecause: dispatchable.notReadyBecause ?? {},
+      contracts,
+    },
+  }
+}
+
+/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那两格（见 `scripts/friction-triage.d.ts`）。 */
+interface FrictionTriageModule {
+  readonly triage?: (options?: Record<string, unknown>) => {
+    readonly unreadable?: readonly string[]
+    readonly [key: string]: unknown
+  }
+  readonly dispatchable?: (report: unknown, options?: Record<string, unknown>) => {
+    readonly ready: readonly {
+      readonly sourceId?: string
+      readonly tier?: { readonly tier?: string }
+      /** ★ 契约**直接挂在条目上**（实测形状）—— 不是嵌在 `emitted` 里。 */
+      readonly contract?: Record<string, unknown>
+    }[]
+    readonly awaitingRuling: readonly unknown[]
+    readonly rejected: readonly unknown[]
+    readonly cannotEmit: readonly unknown[]
+    readonly decomposed: readonly unknown[]
+    readonly notReadyBecause?: Record<string, number>
+  }
+}
+
+/**
+ * ★ 默认装载：**动态 import + `pluginRoot()` 的运行时路径**（与 `quality-gates.ts` 读
+ *   基线清单同一种做法）。静态 `import '../../scripts/…'` 会破 `tsc` 的 `rootDir`。
+ */
+async function loadFrictionTriageModule(): Promise<FrictionTriageModule> {
+  const target = pathToFileURL(join(pluginRoot(), 'scripts', 'friction-triage.mjs')).href
+  return await import(/* @vite-ignore */ target) as FrictionTriageModule
 }
 export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshness()): string {
   if (freshness.status === 'current') return 'this process holds the current build'
