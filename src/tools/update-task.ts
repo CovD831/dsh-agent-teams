@@ -206,6 +206,18 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               status: { type: 'string', enum: ['passed', 'failed'], required: true },
               exitCode: { type: 'number' },
               evidence: { type: 'string' },
+              /**
+               * ── ★★★ 这条命令失败的【是哪几条测试】—— 而它让"新增失败"可判定 ────────
+               *
+               * MEASURED（2026-10-10，`verifier` 在 t40 上逐环查出）：
+               *   此 schema 是 `additionalProperties: false` 且**不含** `failures`
+               *   ⇒ ★ 就算成员想如实交出"哪几条红了"，也会【在建参数那一刻被拒】。
+               *   ⇒ 于是 t19 那条判据（"新增失败 vs 仓库存量红"）永远拿到 `undefined`
+               *     ⇒ 永远 `undecidable` ⇒ ★ **17 条任务仍然不可达 completed**。
+               *
+               * ★ 所以它是 t19 生效的【必要一环】，而不是可选的补充字段。
+               */
+              failures: { type: 'array', items: { type: 'string' } },
             },
           },
           description: 'Verification evidence in contract order: {command, status:"passed"|"failed", exitCode?, evidence?}. Supply one item per verify command.',

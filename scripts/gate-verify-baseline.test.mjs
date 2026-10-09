@@ -27,6 +27,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { evaluateQualityCompletion } from '../lib/quality-gates.js'
+import { parseCommandResults } from '../lib/tools/shared/entities.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const known = JSON.parse(readFileSync(join(ROOT, 'scripts', 'fixtures', 'baseline-known-failures.json'), 'utf8')).knownFailures
@@ -115,5 +116,47 @@ test('★★ 臂 5：基线清单读不出来 ⇒ 判不了（不许读成"基�
     src,
     /return names\.length === 0 \? undefined : names/,
     '★ 空清单必须落 `undefined`（判不了），而不是空数组（"没有存量红"）',
+  )
+})
+
+test('★★★ 臂 6：`failures` 必须【真的送达】判据 —— 而它缺两环（verifier 在 t40 上查出的）', () => {
+  /**
+   * ── ★★★ 而这是"设计对、而它永远收不到数据"的那一格 ────────────────────────────
+   *
+   * MEASURED（2026-10-10）：t19 的判据【设计是对的】，而它拿到的 `failures` 永远是 `undefined`：
+   * ```
+   * ① quality-gates.ts:1148  读 update.commandsRun
+   * ② entities.ts:2531       parseCommandResults —— 只保留 command/status/exitCode/evidence
+   * ③ update-task.ts schema  additionalProperties:false 且【不含】failures
+   * ⇒ ④ classifyVerifyFailures 永远 undecidable ⇒ 永远拒
+   * ```
+   * ★★ 于是"t19 修好了"与"t19 一点也没生效"在读数上**同形** —— 因为那一格没有数据。
+   *
+   * ⇒ 所以本臂【端到端】钉那两环（而不只是钉判据本身）。
+   */
+  const parsed = parseCommandResults([
+    { command: 'pnpm test:gates', status: 'failed', failures: ['★ 某个测试名'] },
+  ])
+  assert.deepEqual(
+    parsed[0].failures,
+    ['★ 某个测试名'],
+    '★ ① 解析器必须【透传】failures —— 丢了它，下游永远判不了',
+  )
+
+  /** ★ ② schema 必须暴露它 —— 否则成员想如实交出"哪几条红了"会在建参数时被拒。 */
+  const source = readFileSync(join(ROOT, 'src', 'tools', 'update-task.ts'), 'utf8')
+  /**
+   * ★ 注意取的是【整个 commandsRun 段】（到 properties 的闭合），而不是到
+   *   `additionalProperties: false` —— ★ 我第一版就停在那一行，于是它拿到的段里
+   *   还没有任何字段 ⇒ 断言假红。★ 而那正是"取错了范围"的经典形态。
+   */
+  const start = source.indexOf('commandsRun: {')
+  assert.ok(start >= 0, '★ 前置：commandsRun 的 schema 段必须在')
+  const schema = source.slice(start, start + 4000)
+  assert.ok(schema, '★ 前置：commandsRun 的 schema 段必须在')
+  assert.match(
+    schema,
+    /failures: \{ type: 'array'/,
+    '★ ② schema 必须含 failures —— 而它是 t19 生效的必要一环，不是可选补充',
   )
 })
