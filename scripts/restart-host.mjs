@@ -194,6 +194,7 @@ if (!gone) {
     process.exit(5)
   }
   try {
+    console.log('  ★ 即将使用 SIGKILL：它不给进程任何收尾机会（不写状态、不关 session.lock）')
     process.kill(target.pid, 'SIGKILL')
     console.log(`  ★ 已发送 SIGKILL  ${target.pid}`)
     console.log('  ⚠ SIGKILL-UNGRACEFUL: SIGKILL 不给进程任何收尾机会（不写状态、不关 session.lock），')

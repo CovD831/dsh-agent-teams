@@ -135,7 +135,15 @@ if (command === 'arm') {
 
 if (command === 'read') {
   const arm = readArm()
-  if (arm === undefined) fail('没有 arm 过。先跑: node scripts/verify-reload.mjs arm', 2)
+  if (arm === undefined) {
+    /**
+     * ★ 说清"为什么失败"和"下一步做什么"：这里读的是哨兵文件，
+     *   而不是判定"改动没生效" —— 别把两种"没有"混为一谈。
+     */
+    console.error('★ 还没有 arm 过任何哨兵：找不到 .agent-teams/reload-check.json。')
+    console.error('  ⇒ 判定必须先种哨兵。请先跑: node scripts/verify-reload.mjs arm')
+    fail('没有 arm 过。先跑: node scripts/verify-reload.mjs arm', 2)
+  }
 
   const i = process.argv.indexOf('--saw')
   const saw = i >= 0 ? process.argv[i + 1] : undefined
