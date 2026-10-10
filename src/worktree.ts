@@ -36,7 +36,7 @@
  * （不是 git 仓库、没有提交）—— **不能与"不需要隔离"同形**（契约 §3.4）。
  */
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -260,7 +260,100 @@ export interface ProvisionOptions {
    * refused: provisioning must never reach outside either root.
    */
   entries: readonly string[]
+  /**
+   * ── ★★ 硬链接原语（可注入）—— 让"退化到拷贝"那条路**可被夹具直接走到**───────
+   *
+   * 缺省是 {@link defaultHardLinkTree}（`cp -al`）。存在的理由不是"为了好测"，
+   * 而是一条**可达性**问题：
+   *
+   *   ★ 生产那条退化路的**后半段**在真实环境里不一定造得出来，而最经典的那个原因
+   *     ——跨设备 EXDEV——在这台机器上就造不出来：它要求源与目标真的在两个文件系统上
+   *     （macOS 上 `/tmp` 是 `/private/tmp`，与工作区**同一个**卷）。
+   *   一条"只能靠运气触发"的分支，等于一条**没被走通的**分支：它坏了也没人知道。
+   *
+   *   ★ 说清楚这里补的是**哪一半**：让 `cp -al` **失败**本身是可达的（源不存在、
+   *     目标的父级是普通文件……），那些走 {@link defaultHardLinkTree} 的**真身**，
+   *     夹具可以真跑。本缝补的是另一半 —— `{ok:false}` **返回之后**那段处置
+   *     （退化到 `cpSync` + 把理由落进两条读数）。
+   *
+   * ⇒ 于是这里留一格**诚实的缝**：夹具可以注入一个"必然报失败"的原语，
+   *   断言【退化真的发生了、理由真的被报出来了】，而**不需要**在这台机器上
+   *   硬造一个第二文件系统（伪造一个跨设备场景比测不到更坏）。
+   *   ★ 注入什么理由由夹具自己定 —— 它**不必**是 EXDEV，因为生产那条路本来
+   *     也不区分 errno（见 {@link defaultHardLinkTree}）。
+   *
+   * ★ 生产调用方**不要**传它 —— 缺省那条就是真的 `cp -al`。
+   */
+  link?: HardLinkTree
 }
+
+/**
+ * 一棵树硬链接进另一棵：**普通文件硬链接、软链原样重建**（`cp -al` 的语义）。
+ * ★ 返回读数而不是抛异常 —— "这个文件系统不支持硬链接"是**预期内的**一条路，
+ *   不是异常（异常留给真的意外）。
+ */
+export type HardLinkTree = (source: string, target: string) => { ok: true } | { ok: false; reason: string }
+
+/**
+ * ── 缺省硬链接原语：`cp -al <source> <target>` ────────────────────────────────
+ *
+ * ★ 为什么是 `cp -al` 而不是自己递归 `linkSync`：
+ *   · `-a`（= `-dR --preserve=all`）里的 `-d` 正是"**不 dereference**、软链原样
+ *     重建" —— 与旧代码 `cpSync(..., {dereference:false})` 逐条同义；
+ *   · `-l` 是"能硬链接就硬链接"；
+ *   · 权限位、时间戳、包内部那些 pnpm 的相对软链，全部按 `cp -a` 的既有语义走 ——
+ *     手写一遍只会多出一堆自己造的边界。
+ *
+ * ★ 为什么走 `spawnSync` + **argv 数组**、绝不是 shell 字符串：源与目标都是
+ *   调用方给的路径，拼进 shell 就是把注入点交给文件名（本仓对这条有明确纪律）。
+ *
+ * ★ 为什么把 stderr **原样**交出去（而不是把它归类成某个 errno）：本原语**不做**
+ *   errno 级别的判别 —— 它只读 `exit status`，非 0 就是失败。
+ *
+ *     · 判据只有一条：`status === 0` ⇒ `{ok:true}`；否则 ⇒ `{ok:false, reason}`。
+ *     · `reason` 里带的是 `cp` **自己的 stderr 原文**（含它写出的路径与错误串）。
+ *
+ *   ⇒ 于是"退化"这条路的触发面**比 EXDEV 宽**：任何让 `cp -al` 失败的原因
+ *     （跨设备、**路径写错**、目标父级不是目录、权限不足、文件系统不支持硬链接……）
+ *     都会落到同一条退化路上。这是**故意**的：真正决定"能不能硬链接"的不是
+ *     我们，而是 `cp` 与文件系统 —— 我们只读它的结论。
+ *
+ *   ★ 而诚实性来自**不翻译**：理由原文照转 ⇒ "路径写错"报出来就是"路径写错"，
+ *     绝不会被我们改写成"跨设备"。一个自作聪明的 errno 判别反而会把
+ *     "`cp` 为什么失败"这件事盖掉（而本仓的纪律是：读数不许被加工成好听的形状）。
+ */
+export const defaultHardLinkTree: HardLinkTree = (source, target) => {
+  const result: SpawnSyncReturns<string> = spawnSync(
+    'cp',
+    ['-al', source, target],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  if (result.error !== undefined && result.error !== null) {
+    return { ok: false, reason: `cp -al could not be started: ${String((result.error as Error).message ?? result.error)}` }
+  }
+  if (result.status === 0) return { ok: true }
+  const stderr = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim()
+  return {
+    ok: false,
+    reason: `cp -al could not hard-link this entry (exit ${String(result.status)}): ${stderr === '' ? 'no output' : stderr}`,
+  }
+}
+
+/**
+ * 一件依赖是【怎么】进的 worktree —— ★ 三态，不许并成一个布尔。
+ *
+ *   · `linked` —— 硬链接进去的：与源【共用同一份物理数据】（inode 相同）。
+ *     ★ 这是常态，也是"多棵 worktree 只占一份磁盘"的来源。
+ *   · `copied` —— 退回到了真拷贝（跨设备 / 硬链接不可用）。★ 它是**次好**的
+ *     结果：依赖在场、调用方可以照常开工，但它**没有**省下磁盘，所以必须
+ *     与 `linked` 分得开 —— 否则"这次占了双倍磁盘"这件事在读日志时消失。
+ *   · `existed` —— 目标已经在场，本次【什么都没做】（幂等分支）。
+ *     ★ 它与前两者不同形：前两者是"我动手了"，它是"早就在了"。
+ *
+ * ★ 为什么不并成一个 `copied: boolean`：本仓记账过的那条 ——
+ *   "链接成功"与"退化成拷贝"在读数上同形时，磁盘为什么没省下来永远不会被发现。
+ */
+export type ProvisionMode = 'linked' | 'copied' | 'existed'
 
 export interface ProvisionResult {
   /** Entries that are now present in the worktree. */
@@ -271,30 +364,100 @@ export interface ProvisionResult {
    *   "工作没做出来"（两者不同形）。
    */
   failed: Array<{ entry: string; reason: string }>
+  /**
+   * ── ★★★ 逐条读数：这一件是【怎么】进场的 ──────────────────────────────────────
+   *
+   * `copied` 只回答"在不在场"，回答不了"省没省磁盘"。而后者正是这次改动的
+   * 【全部目的】（46 棵树 × 1.6G = 23G ⇒ 并发被磁盘卡在 ~6，而不是被
+   * `maxActiveSubagents` 卡住）。所以它必须是一条**自己的**读数。
+   *
+   * ★ 三态见 {@link ProvisionMode}：`linked` / `copied` / `existed`。
+   *   **"退化成真拷贝"不是失败**（依赖确实在场），所以它【不】进 `failed` ——
+   *   但也不能因此消失，它在这里，并带一条可读的 `reason`。
+   */
+  entries: Array<{ entry: string; mode: ProvisionMode; reason?: string }>
+  /**
+   * ── ★ 退化发生过吗：所有**真拷贝**的理由（硬链接没成 —— 跨设备只是其中一种）───
+   *
+   * ★ 它就是调度器要落进任务记录的那一条 —— "这棵树的依赖占了双倍磁盘，
+   *   因为 <cp 的 stderr 原文>"。★ 原文里是**真正的原因**：可能是 `EXDEV`（跨设备），
+   *   也可能是路径写错 / 目标父级不是目录 / 权限不足 —— 本函数不替 `cp` 归类。
+   *   空数组 = 每一件都是硬链接（或早已在场）。
+   */
+  linkFallbacks: Array<{ entry: string; reason: string }>
+  /**
+   * ── ★★ 硬链接语义的诚实边界（不是免责声明，是一条必须被读到的读数）─────────────
+   *
+   * 硬链接 = 同一个 inode 的**又一个名字**。于是：
+   *
+   *   · **替换**一个文件（写新文件 + `rename`，也就是 `pnpm install` 做的事）
+   *     ⇒ 只有做替换的那棵树换了 inode，另一棵树仍指向旧 inode
+   *     ⇒ **两棵树各验证各的**这条前提成立。
+   *   · **就地改写**（`writeFileSync` / `>>` / `sed -i` 不带 rename）
+   *     ⇒ ★ **两棵树同时看见** —— 硬链接去掉了软链的"目录结构写穿"，
+   *       但**去不掉共享 inode 本身**。这条必须明说，不能声称一个已经不成立的隔离。
+   *
+   * ★ 所以本字段在【注入之后】如实给出这条边界，调用方/成员能读到它，
+   *   而不是从一个"复制品"的旧结论里去推断一个已经不成立的性质。
+   */
+  hardLinkCaveat: string
 }
 
+/** 注入之后必须被读到的那条边界（见 {@link ProvisionResult.hardLinkCaveat}）。 */
+const HARD_LINK_CAVEAT =
+  'entries are HARD LINKS to the shared source: replacing a file (new file + rename, what pnpm install does) '
+  + 'stays local to the tree that replaced it, but an IN-PLACE rewrite of a file is visible in every tree that '
+  + 'shares that inode — hard links remove the symlink\'s write-through *path*, not the shared inode itself'
+
 /**
- * ── 依赖按需注入：把测试需要的包【复制】进 worktree ────────────────────────────
+ * ── 依赖按需注入：把测试需要的包【硬链接】进 worktree ──────────────────────────
  *
  * worktree 是干净的检出，gitignore 的 `node_modules` 不在里面（实测边界③）。
- * 成员要在隔离目录里跑验证命令，就必须有依赖。三条路的实测结论：
+ * 成员要在隔离目录里跑验证命令，就必须有依赖。四条路的实测结论：
  *
  *   · 软链（symlink）⇒ ★ **会被写穿**：worktree 里的写入顺着链改到主检出的
  *     依赖树。一条被共享、可被任意改写的依赖树，会让"两个成员各自验证"
  *     在日志里同形，而出问题时无从归因。
  *   · 只读锁（chmod / lockfile）⇒ 不阻止写穿，只把成员换成另一种失败方式。
- *   · 复制品（copy）  ⇒ 代价是磁盘，换来的是【两个检出真的互不影响】。
+ *   · 复制品（copy）  ⇒ 互不影响，代价是**磁盘**：1.6 GiB/棵 ⇒ 46 棵树 = 23 GiB
+ *     ⇒ ★ **并发被磁盘卡在 ~6，而不是被 `maxActiveSubagents` 卡住**。
+ *   · 硬链接（hard link）⇒ ★ 本函数现在的做法。**同一份物理数据的又一个名字**：
+ *         - inode **相同**、`nlink` > 1 ⇒ N 棵树合起来只占**一棵**的大小；
+ *         - 包内部自带的**相对软链原样保留**（`cp -al` 的语义与
+ *           `dereference:false` 一致：硬链接文件、重建软链）；
+ *         - **替换**文件（新文件 + rename，`pnpm install` 所做的）只影响做过
+ *           替换的那棵树 ⇒ "两个成员各自验证"成立；
+ *         - ★ 但**就地改写**会穿到另一棵树 —— 硬链接去掉了软链的写穿*路径*，
+ *           **去不掉共享 inode 本身**。这条写在 `hardLinkCaveat` 里，不藏着。
  *
- * ★ 为什么是选项而【不是】自动执行：复制一棵 node_modules 很贵，静默地做会把
+ * ── ★★★ 硬链接不成：退化，但【不是静默】─────────────────────────────────────────
+ *
+ * 硬链接过不了设备边界（源与目标在同一个文件系统上才可能）—— **跨设备 EXDEV 是
+ * 这条路上最经典的那个原因，但不是唯一的一个**：路径写错、目标父级不是目录、
+ * 权限不足、文件系统不支持硬链接……都会让 `cp -al` 失败，而本原语**只看 exit
+ * status**（见 {@link defaultHardLinkTree}），不区分 errno ⇒ 它们**都**落到这条
+ * 退化路上。这是有意的：**判据归 `cp` 与文件系统，我们只读结论**。
+ *
+ * 不论**哪一种**原因，处置是同一条：退回**本函数原来的** `cpSync` —— 依赖确实
+ * 在场 ⇒ **不算 failed**（失败是"没准备好"，那是另一种形）。但"这次没省下磁盘"
+ * 必须留下**可读的理由** ⇒ 进 `entries[].mode = 'copied'` + `reason`，并汇总进
+ * `linkFallbacks`；`reason` 是 `cp` 的 **stderr 原文**，于是读日志的人看到的是
+ * **真正的原因**（写错路径就报写错路径），而不是一句笼统的"跨设备"。
+ * ★ 不许静默退化：静默之后"说好的共享"与"实际各占一份"在读日志时同形。
+ *
+ * ★ 为什么是选项而【不是】自动执行：注入一棵 node_modules 很贵，静默地做会把
  *   "派发很快"变成"派发很慢"。调用方（调度器）显式要求才做，本函数不猜。
  *
  * ★ 为什么 entries 必须显式给出：我们不读 `.gitignore` 的语义（那是 git 的事），
- *   调用方拿 `missingIgnored` 的结论来喂它 —— 于是"要复制什么"有唯一来源。
+ *   调用方拿 `missingIgnored` 的结论来喂它 —— 于是"要注入什么"有唯一来源。
  */
 export function provisionWorktreeDependencies(options: ProvisionOptions): ProvisionResult {
   const { repo, worktree } = options
   const copied: string[] = []
   const failed: Array<{ entry: string; reason: string }> = []
+  const readings: ProvisionResult['entries'] = []
+  const linkFallbacks: ProvisionResult['linkFallbacks'] = []
+  const link = options.link ?? defaultHardLinkTree
 
   for (const entry of options.entries) {
     const safe = safeRelativeEntry(entry)
@@ -309,26 +472,44 @@ export function provisionWorktreeDependencies(options: ProvisionOptions): Provis
       continue
     }
     if (existsSync(target)) {
-      // 已经在了 ⇒ 不重复复制（重试一个 attempt 不该把依赖树再搬一遍）。
+      // 已经在了 ⇒ 不重复注入（重试一个 attempt 不该把依赖树再搬一遍）。
       copied.push(safe)
+      readings.push({ entry: safe, mode: 'existed', reason: 'the target already existed — nothing was injected again' })
       continue
     }
+    mkdirSync(dirname(target), { recursive: true })
+    /**
+     * ★★★ 先试硬链接（`cp -al`）—— 与 `cpSync(..., {dereference:false})` 的
+     *   语义逐条对齐：普通文件**硬链接**，软链**重建为软链**（包内部那些
+     *   pnpm 的相对软链必须原样保留，dereference 会把 .pnpm 的相对结构弄失真）。
+     *
+     * ★ 失败路径：`cpSync` 自己就是它自己的**兜底**（`-n` 不覆盖已存在的 ⇒
+     *   `force:false`；`errorOnExist:false`）。所以半个目标不会把重试彻底卡死。
+     */
     try {
-      mkdirSync(dirname(target), { recursive: true })
+      const linkedTree = link(source, target)
+      if (linkedTree.ok) {
+        copied.push(safe)
+        readings.push({ entry: safe, mode: 'linked' })
+        continue
+      }
       /**
-       * ★ 普通复制，不是软链、不是 reflink —— 实测：软链会被写穿。
-       *   `dereference: false` 保留包内部自带的相对软链（pnpm 大量使用它们），
-       *   把它们变成真实拷贝会让 .pnpm 的相对结构失真。
+       * 硬链接不成 ⇒ 退回真拷贝，并**留下理由**。★ 触发它的**不**只有跨设备：
+       * 本原语只看 `cp -al` 的 exit status（路径写错、权限不足都会落到这里，
+       * 且理由里报的就是它们自己）——「跨设备」只是最常见的那一种，不是判据。
        */
       cpSync(source, target, { recursive: true, dereference: false, force: false, errorOnExist: false })
+      const reason = linkedTree.reason
+      copied.push(safe)
+      linkFallbacks.push({ entry: safe, reason })
+      readings.push({ entry: safe, mode: 'copied', reason })
     } catch (error) {
       failed.push({ entry: safe, reason: String((error as Error | undefined)?.message ?? error) })
       continue
     }
-    copied.push(safe)
   }
 
-  return { copied, failed }
+  return { copied, failed, entries: readings, linkFallbacks, hardLinkCaveat: HARD_LINK_CAVEAT }
 }
 
 /** 只接受"直接位于根下的普通相对条目"——注入路径不能穿到根外。 */

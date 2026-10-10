@@ -13,7 +13,9 @@
  * 外加两条【接线臂】——模块对了不等于机制生效（上一轮的教训）：
  *
  *   臂 4：worktree 建不出来时 kickMember【不派发】（此前是 warn 后照常派发）
- *   臂 5：依赖按需注入必须是【复制品】（软链会被写穿，实测）
+ *   臂 5：依赖按需注入必须是【硬链接】（t1 起；此前是复制品）—— 软链会被写穿，
+ *         而硬链接是同一个 inode 的又一个名字：**替换**留在本地，
+ *         ★ **就地改写**两棵树都看得见（那是省下 46 × 1.6 GiB 的代价，见该臂）
  *
  * ── 它防的是什么失效 ──────────────────────────────────────────────────────────
  *
@@ -490,7 +492,7 @@ test('★ 接线臂（只读任务）：review 类不需要 worktree ⇒ 照常�
   assert.equal(/Working directory:/.test(deliveries[0]), false, '★ 也不能伪造一个不存在的工作目录')
 })
 
-test('★ 接线臂（依赖注入）：是【复制品】，不是软链 —— 写穿必须被挡住', async () => {
+test('★ 接线臂（依赖注入）：是【硬链接】，不是软链 —— 替换留在本地，就地改写两棵树都看得见', async () => {
   const repo = track(makeRepo())
   mkdirSync(join(repo, 'node_modules', 'dep'), { recursive: true })
   writeFileSync(join(repo, 'node_modules', 'dep', 'index.js'), 'export const v = 1\n')
@@ -503,17 +505,37 @@ test('★ 接线臂（依赖注入）：是【复制品】，不是软链 ——
   const provisioned = provisionWorktreeDependencies({ repo, worktree: created.path, entries: created.missingIgnored })
   assert.deepEqual(provisioned.failed, [], '★ 不该有失败项')
   assert.deepEqual(provisioned.copied, ['node_modules'])
-  assert.equal(lstatSync(join(created.path, 'node_modules')).isSymbolicLink(), false, '★ 必须是复制品，不能是软链（软链会被写穿）')
+  assert.equal(lstatSync(join(created.path, 'node_modules')).isSymbolicLink(), false, '★ 注入的是一棵真目录树，不是一条软链')
 
-  // ★ 写穿测试：在 worktree 里改依赖，主检出必须【没变】。
+  /**
+   * ── ★★★ t1：写穿的形态变了，而这一臂必须说清【哪一种】写穿被挡住了 ──────────────
+   *
+   * 旧读数（t24）：改 worktree 里的依赖 ⇒ 主检出必须【没变】。那在"复制品"
+   * 的语义下成立，而在**硬链接**下**只对"替换"成立** —— 硬链接是同一个 inode
+   * 的又一个名字，**就地改写**（`writeFileSync` 正是就地改写）两棵树都看得见。
+   *
+   * ★ 所以这一臂不再声称一个已经不成立的隔离，而是把【真实的边界】读出来：
+   *   · 替换（新文件 + rename，也就是 `pnpm install` 做的事）⇒ **留在本地**；
+   *   · 就地改写 ⇒ ★ **两棵树同时看见** —— 这是共享 inode 的代价，也是省下
+   *     46 × 1.6 GiB 的代价。不许把它藏起来。
+   */
+  // ★ 就地改写：两棵树【同时】看见（诚实读数，不是被挡住的写穿）。
   writeFileSync(join(created.path, 'node_modules', 'dep', 'index.js'), 'export const v = 999\n')
   const upstream = execFileSync('cat', [join(repo, 'node_modules', 'dep', 'index.js')], { encoding: 'utf8' })
-  assert.match(upstream, /v = 1/, '★ worktree 里的安装/改写绝不允许穿到主检出的依赖树')
+  assert.match(upstream, /v = 999/,
+    '★★ 硬链接下【就地改写】会穿到主检出 —— 这一条必须如实断言。'
+    + '若这里仍然断言 /v = 1/，那是在声称一个硬链接给不了的隔离（旧"复制品"结论）。')
 
-  // ★ 另一个方向：改主检出也不该影响 worktree（两个成员各自验证必须互不干扰）
-  writeFileSync(join(repo, 'node_modules', 'dep', 'index.js'), 'export const v = 2\n')
-  const inside = execFileSync('cat', [join(created.path, 'node_modules', 'dep', 'index.js')], { encoding: 'utf8' })
-  assert.match(inside, /v = 999/)
+  // ★ 而【替换】—— 新文件 + rename，也就是 pnpm install 实际做的事 —— 留在本地。
+  const freshFile = join(created.path, 'node_modules', 'dep', 'index.js.new')
+  writeFileSync(freshFile, 'export const v = 2\n')
+  execFileSync('mv', [freshFile, join(created.path, 'node_modules', 'dep', 'index.js')])
+  const upstreamAfterReplace = execFileSync('cat', [join(repo, 'node_modules', 'dep', 'index.js')], { encoding: 'utf8' })
+  assert.match(upstreamAfterReplace, /v = 999/,
+    '★★★ 替换（新文件 + rename）只影响做过替换的那棵树 —— 这就是"两个成员各自验证"'
+    + '这条前提在硬链接下仍然成立的那一半，也是整个改动的立足点。')
+  const insideAfterReplace = execFileSync('cat', [join(created.path, 'node_modules', 'dep', 'index.js')], { encoding: 'utf8' })
+  assert.match(insideAfterReplace, /v = 2/, '★ 而做替换的那棵树拿到的是新内容')
 })
 
 test('★ 接线臂（依赖注入）：拒绝把路径穿到根外（entries 不能是 ../x 或 /abs）', () => {

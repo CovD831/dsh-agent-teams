@@ -27,7 +27,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { judgeWorktree, planReclaim, listWorktrees, recordReclaim, RECLAIM_OFF_ENV } from './worktree-reclaim.mjs'
@@ -666,4 +666,844 @@ test('★ 臂 T25-5：三态**不同形**（没有两个共用同一组字段）
   } finally {
     f.done()
   }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 接线臂（12-14）：判定写好了，而它【在生产路径上真的会被跑到吗】
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一节防的是什么失效（MEASURED，本任务的由来）───────────────────────────────
+ *
+ * `judgeWorktreeReclaimable`（`src/worktree.ts:528`）与 `scripts/worktree-reclaim.mjs`
+ * 都写好了、都导出了，而**全仓零调用方**：
+ *
+ *     $ grep -rn "judgeWorktreeReclaimable" src/     ⇒ 只有定义处
+ *     $ grep -rn "worktree-reclaim"        src/     ⇒ 0 处
+ *     $ grep -rn "worktreePath"            src/tools*  ⇒ 0 处（那是内存 ticket 的字段）
+ *
+ * ⇒ 后果：46 棵 worktree 只能靠人手动 `node scripts/worktree-reclaim.mjs --apply` 清。
+ * ★ 而"一条**没接线**的判据"与"一条**不存在**的判据"，在"该不该删"这件事上
+ *   **没有区别** —— 这正是本仓反复记账的形态（"机制建好了，中间那一格没接上"）。
+ *
+ * ── ★★ 上面 12 条臂（含 T25 那五条）测的是【判据自己】────────────────────────────
+ *
+ * 它们能证明"这个函数判得对"，**不能**证明"它会被调用"。所以下面这三条臂
+ * 走的是**生产入口**：`lib/tools.js` 的 `registerAgentTeamsTools` → 真工具
+ * `agent_teams_update_task` → `landedTerminal` → `commitWorktree` 成功 → 回收。
+ *
+ * ── ★★★ 为什么必须起【子进程】（而不是在本文件里直接调工具）────────────────────
+ *
+ * `update_task` 是一个注册型工具，装配时会装上退役成员的投递守卫、注册表、
+ * 状态锁 —— 它与本文件其它 12 条臂**共享同一个进程**会互相污染
+ * （MEASURED：`scripts/gate-position-wiring.test.mjs` 整节都在处理这件事）。
+ * ⇒ 子进程还顺带保证了一件事：**判据看到的那份 `lib/` 与生产加载的是同一份**。
+ *
+ * ── ★★★ 为什么子进程跑在【它自己的检出】里（这是本文件最要紧的一条纪律）────────
+ *
+ * 生产路径会 `rmSync` 一棵 worktree，而"哪一棵"由 `workspace` 推导
+ * （`<workspace>/.agent-teams/worktrees/<worktreeDirName(teamId, taskId)>`）。
+ * ★ 若子进程的 `workspace` 就是**本仓**，那它删的就是**本仓的树** ——
+ *   包括**跑这个夹具的那一棵**（本文件自己就住在 `task-concurrency-1-t2/` 里）
+ *   以及**队友的**（`task-concurrency-1-t*`）。⇒ 那是不可逆的自伤。
+ * ⇒ 所以每条臂都 `mkdtempSync` 一个**自己的临时仓库**（`git init -b main`），
+ *   子进程的 `workspace` 指向它 —— 回收动作只可能落在那个临时根之下。
+ *   ★ 而"落在那儿"不是靠约定，是靠**断言前缀**（见下面 `assertReclaimLandedUnderTemp`）。
+ *
+ * ★★ 绝**不** spawn `node scripts/worktree-reclaim.mjs --apply`：那个 CLI 扫的是
+ *   **整棵** `.agent-teams/worktrees/`（`planReclaim` → `listWorktrees(repo)`），
+ *   它会删掉**别的**任务的树 —— 包括正在跑的那个团队自己。
+ *   生产接线只取那个模块里的**纯裁决**（`judgeWorktree`），删除对**一条路径**做。
+ */
+
+const RECLAIM_TEST_ROOT = join(HERE, '..')
+
+/** 被子进程装载的那份插件产物（★ 与生产加载的是同一份 `lib/`）。 */
+const RECLAIM_TEST_LIB = join(RECLAIM_TEST_ROOT, 'lib', 'tools.js')
+
+/**
+ * 子进程的载荷（一个自足的 ESM 脚本，由父进程写进临时目录再跑）。
+ *
+ * ── 它做什么 ──────────────────────────────────────────────────────────────────
+ *   ① 装一个**最小但真**的宿主 ctx（`defineTool` 真的跑、注册表真的填）；
+ *   ② `registerAgentTeamsTools`（**生产那一个入口**）；
+ *   ③ `agent_teams_create` + 建一棵**真的** worktree（走 `createTaskWorktree`）；
+ *   ④ 按臂的形状布置那棵树；
+ *   ⑤ 调 **`agent_teams_update_task`**（真工具）落终态 —— 回收就发生在这一步；
+ *   ⑥ 交回一行 JSON：树还在不在、任务的终态、以及**捕获到的日志**。
+ *
+ * ── ★ 为什么读【日志】而不只读"树在不在"──────────────────────────────────────
+ *   "树不在了"这个读数本身**分不出**是"回收成功"还是"别的什么东西删了它"。
+ *   ⇒ 所以每一臂都同时断言日志里那条**指名这棵树**的话。
+ */
+const RECLAIM_ARM_CHILD = String.raw`
+import { registerAgentTeamsTools } from ${JSON.stringify(RECLAIM_TEST_LIB)}
+import { mkdir, rm } from 'node:fs/promises'
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+
+const ROOT = process.env.ARM_ROOT
+const WORKSPACE = process.env.ARM_WORKSPACE
+const SHAPE = process.env.ARM_SHAPE
+const HOOK = process.env.ARM_INTEGRATOR_HOOK === '1'
+const STATE_DIR = '.agent-teams/arm-state'
+const TEAM = 'arm'
+const TASK = 't1'
+
+const out = (o) => process.stdout.write('__ARM__' + JSON.stringify(o) + '\n')
+const logs = []
+const definitions = new Map()
+const git = (cwd, args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+
+function fakeAgent(workspace) {
+  return {
+    id: 'captain-session',
+    status: 'idle',
+    options: { provider: 'fake', model: 'fake-model' },
+    session: {
+      header: { cwd: workspace, events: [] },
+      events: [],
+      ownEvents() { return this.events },
+      requestHeader() { return { config: { provider: 'fake', model: 'fake-model', reasoningEffort: 'high' } } },
+    },
+    steer() {},
+    followup() {},
+  }
+}
+
+const ctx = {
+  logger: {
+    debug() {},
+    info(m) { logs.push(['info', String(m)]) },
+    warn(m) { logs.push(['warn', String(m)]) },
+    error(m) { logs.push(['error', String(m)]) },
+  },
+  tools: { register(t) { definitions.set(t.name, t) } },
+  subagents: {
+    getProvider() { return undefined },
+    list() { return [] },
+    sendMessage: async () => 'msg-0',
+    [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+  },
+  agents: { get() { return undefined } },
+  llm: { async resolveCallConfig(c) { return c }, async listModels() { return [] } },
+  on() { return () => {} },
+  effect(s) { return s() },
+  inject() { return () => {} },
+}
+
+const call = async (name, args) => {
+  const d = definitions.get(name)
+  if (d === undefined) throw new Error('missing tool ' + name)
+  return await d.execute(args, { agent: fakeAgent(WORKSPACE), signal: new AbortController().signal })
+}
+
+const stateAbs = join(WORKSPACE, STATE_DIR)
+const { worktreeDirName, createTaskWorktree, commitWorktree } = await import(join(ROOT, 'lib/worktree.js'))
+const { readTeam, writeTeam, withTeamLock } = await import(join(ROOT, 'lib/state.js'))
+await rm(stateAbs, { recursive: true, force: true })
+await mkdir(stateAbs, { recursive: true })
+registerAgentTeamsTools(ctx, { stateDir: STATE_DIR, memberProvider: 'spawn', maxMembers: 8, profiles: {} })
+/**
+ * ★ 团队 id 由 "create" **slug 出来**（不是我要的那个字面量）⇒ 从它的返回里读，
+ *   而不是假设它等于 "TEAM" —— 一个假设错的 id 会让 "readTeam" 返回 "undefined"，
+ *   而那会伪装成"回收没跑"（实测：本臂第一版就是这么炸的）。
+ */
+const created = await call('agent_teams_create', { name: 'Reclaim Arm', description: 'worktree reclaim wiring arm' })
+const teamId = created.team_id
+out({ step: 'team', teamId, stateDir: created.state_dir })
+if (teamId === undefined) { out({ fatal: 'no-team-id', created }); process.exit(0) }
+
+/**
+ * ★ 路径用**生产那一个函数**算（与 "update_task" 推导用的同一份真值）——
+ *   而 "teamId" 是**刚从 create 读回来的**那个，不是猜的。
+ */
+const worktree = join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, TASK))
+out({ step: 'paths', worktree, workspace: WORKSPACE })
+
+const provisioned = createTaskWorktree({ repo: WORKSPACE, taskId: TASK, teamId })
+if (teamId === undefined) { out({ fatal: 'no-team-id', created }); process.exit(0) }
+if (provisioned.ok !== true) { out({ fatal: 'provision-failed', provisioned }); process.exit(0) }
+
+/**
+ * ── 臂的形状 ──────────────────────────────────────────────────────────────────
+ *
+ * ★★★ 这里有一件**实测出来的**、必须写下来的事：
+ *
+ *   "commitWorktree" 一旦提交成功，那棵树的 HEAD 就**前进**了 ——
+ *   而判据问的是「HEAD 是不是 "main" 的祖先」（"--is-ancestor"）。
+ *   ⇒ 刚提交出来的那个 commit 按定义**不是** "main" 的祖先。
+ *   ⇒ 所以在"提交后立刻判"这一刻，只有**让 main 已经吸收了这个新提交**，
+ *     判据才会说 "reclaimable" —— 而那正是 integrator 干的事（合流）。
+ *
+ * ★ 生产上这个顺序是**真的会发生的**：产物交付 → integrator 合流进 main →
+ *   这棵树此后**每一次**落终态时判据都会说"已吸收"。
+ *   MEASURED（本夹具实测）：不加这一格时，臂 12 的树**永远**被保住，
+ *   而那个绿是**假的** —— 它证明的是"我没删"，不是"它会删"。
+ *
+ * ★ 所以夹具用**一个 git "post-commit" 钩子**来扮演 integrator：
+ *   它把 "refs/heads/main" 快进到刚提交的那个 commit。
+ *   ⇒ 这不是"绕过判据"：判据读到的仍是**真的 git 事实**
+ *     （"main" 真的包含那个 commit），只是"合流"这件事在夹具里被做成了同步的。
+ *   ★ 而 "commitWorktree" 用的是 "--no-verify"（它跳的是 pre-commit / commit-msg）
+ *     ⇒ "post-commit" **照常执行**（实测）。
+ */
+if (HOOK) {
+  mkdirSync(join(WORKSPACE, '.git', 'hooks'), { recursive: true })
+  writeFileSync(join(WORKSPACE, '.git', 'hooks', 'post-commit'),
+    '#!/bin/sh\ngit update-ref refs/heads/main "$(git rev-parse HEAD)" 2>/dev/null || true\n')
+  execFileSync('chmod', ['+x', join(WORKSPACE, '.git', 'hooks', 'post-commit')])
+}
+
+if (SHAPE === 'absorbed') {
+  /** 已吸收：交付会被提交，而 integrator 钩子把它并进 main ⇒ 判据说 reclaimable。 */
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'delivered.ts'), 'export const delivered = 1\n')
+} else if (SHAPE === 'pre-merged') {
+  /**
+   * ── ★★★★★ 无钩子的"真的会发生"形状（round-2 的发射臂用这一格）───────────────
+   *
+   * 它复刻 "reviewer-1/refire.mjs" 的 probe A —— 而那是**生产上真的会发生的顺序**：
+   *
+   *   ① 这条任务**先**交付过一次（在树里 commit 一个产物）；
+   *   ② integrator **把那个 commit 合进了 main**  ← ★ 这一步在**本臂的 setup 里**
+   *      手工做掉（"git merge --ff-only"），**不**用 "post-commit" 钩子；
+   *   ③ 此后这条任务**再落一次终态**。
+   *
+   * ⇒ 第 ③ 步那一刻，树的 HEAD **就是** main 的 HEAD（已吸收），
+   *   而这次转换**没有新改动**要提交 ⇒ "commitWorktree" 返回 commit: undefined。
+   *   ★ 于是这一格**专门打 round-1 的那个 blocker**：
+   *     旧代码把回收藏在 "commit !== undefined" 里 ⇒ 这一格永远走不到 ⇒ 树留着；
+   *     修好之后 ⇒ 判据说 reclaimable ⇒ **树被删掉**。
+   *
+   * ★★★ 本形状里**没有任何夹具注入的合流步骤在"落终态"那一刻发生** ——
+   *   合流在 setup 里就做完了，落终态时产品**只**做它自己会做的事。
+   */
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'delivered.ts'), 'export const delivered = 1\n')
+  const firstDelivery = commitWorktree({ worktree, taskId: TASK })
+  if (firstDelivery.ok !== true || firstDelivery.commit === undefined) {
+    out({ fatal: 'pre-merge-commit-failed', firstDelivery })
+    process.exit(0)
+  }
+  git(WORKSPACE, ['merge', '-q', '--ff-only', firstDelivery.commit])
+  out({ step: 'pre-merged', commit: firstDelivery.commit, main: git(WORKSPACE, ['rev-parse', '--short', 'HEAD']), treeHead: git(worktree, ['rev-parse', '--short', 'HEAD']) })
+} else if (SHAPE === 'undecidable') {
+  /**
+   * ── ★★★ "判不了"那一格（round-1 只有判据层的覆盖，没有生产路径的）─────────────
+   *
+   * 权威判据对"不是 git 检出 / 读不到 HEAD / 主干引用解析不出来"答 "undecidable"。
+   * ★ 而本臂要证明的是**生产路径不会把它读成"可以删"**。
+   *
+   * ★ 造法：让**主干引用解析不出来** —— 把临时仓库的 "main" 删掉
+   *   （"update-ref -d refs/heads/main"）。那时：
+   *     · 树的 HEAD 读得到（树本身是好的）；
+   *     · 而 "repo" 里 "main^{commit}" 解析不出来 ⇒ 权威答
+   *       "undecidable: the trunk ref "main" could not be resolved"。
+   *   ★ 这正是"判不了" —— 它**不是**"可以删"。
+   *
+   * ★ 树里留一点脏改动，好让"提交"那一支也走到（并证明它**不**影响裁决）。
+   */
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'some.ts'), 'export const some = 1\n')
+  git(WORKSPACE, ['update-ref', '-d', 'refs/heads/main'])
+  out({ step: 'undecidable-setup', mainResolves: (() => { try { git(WORKSPACE, ['rev-parse', '--verify', '--quiet', 'main^{commit}']); return true } catch { return false } })() })
+} else if (SHAPE === 'unique') {
+  /**
+   * 未吸收：树里有一个**主干没有的** commit（在树里提交）。
+   * ★ 于是落终态时那棵树**不再是干净的** —— "commitWorktree" 会提交那点脏改动，
+   *   而**那一点**仍然不在 main 里 ⇒ 判据说 "keep" / "not-absorbed"。
+   * ★ 这正是安全臂要的形状：**产物未并入 ⇒ 绝不删**。
+   */
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'only-here.ts'), 'export const onlyHere = 1\n')
+  git(worktree, ['add', '-A'])
+  git(worktree, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'work only in this tree'])
+  writeFileSync(join(worktree, 'src', 'follow-up.ts'), 'export const followUp = 1\n')
+} else if (SHAPE === 'clean') {
+  /** 干净树："commitWorktree" 报"没有改动" ⇒ 回收那一支**根本不该被走到**。 */
+  void 0
+}
+
+/** ★ 任务的记录必须是**完整形状**（"readTeam" 的强校验要 createdAt/updatedAt）。 */
+await withTeamLock('arm:' + stateAbs + ':' + teamId, async () => {
+  const team = await readTeam(stateAbs, teamId)
+  const now = Date.now()
+  team.tasks = [{ id: TASK, subject: 'arm task', status: 'in_progress', dependencies: [], createdAt: now, updatedAt: now }]
+  team.taskSeq = 1
+  await writeTeam(stateAbs, team)
+})
+
+const before = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
+/** ★ 收窄窗口：只留"落终态那一刻"的日志，免得别处的措辞污染断言。 */
+logs.length = 0
+let threw
+try {
+  await call('agent_teams_update_task', { task_id: TASK, status: 'completed', output: 'arm done' })
+} catch (error) {
+  threw = String(error?.message ?? error).slice(0, 1200)
+}
+const afterMtime = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
+const task = (await readTeam(stateAbs, teamId)).tasks.find((t) => t.id === TASK)
+
+/**
+ * ── ★★ 可选：**再落一次终态**（round-2 的"重发"义务）─────────────────────────────
+ *
+ * ★ 终态结果是**不可变**的（"update_task" 的契约），所以"第二次终态转换"在真实
+ *   生产上发生在**重开之后**（"in_progress" → 再落终态）。
+ *   ⇒ 本夹具照那条路走：把任务置回 "in_progress"，再落一次 "completed"。
+ * ★ 要证明的是：树已经不在 ⇒ 第二次**无害**（不抛、状态照旧、不写 deliveryFailure），
+ *   而且**树不会回来**。
+ */
+let second = null
+if (process.env.ARM_SECOND_TRANSITION === '1') {
+  await withTeamLock('arm2:' + stateAbs + ':' + teamId, async () => {
+    const team = await readTeam(stateAbs, teamId)
+    const t = team.tasks.find((x) => x.id === TASK)
+    t.status = 'in_progress'
+    t.updatedAt = Date.now()
+    await writeTeam(stateAbs, team)
+  })
+  const before2 = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
+  logs.length = 0
+  let threw2
+  try {
+    await call('agent_teams_update_task', { task_id: TASK, status: 'completed', output: 'arm done again' })
+  } catch (error) {
+    threw2 = String(error?.message ?? error).slice(0, 1200)
+  }
+  const t2 = (await readTeam(stateAbs, teamId)).tasks.find((x) => x.id === TASK)
+  second = {
+    threw: threw2,
+    mtimeAdvanced: statSync(join(stateAbs, teamId, 'team.json')).mtimeMs > before2,
+    worktreeExists: existsSync(worktree),
+    taskStatus: t2?.status,
+    deliveryFailure: t2?.deliveryFailure ?? null,
+    logs: [...logs],
+  }
+}
+
+out({
+  step: 'terminal',
+  threw,
+  mtimeAdvanced: afterMtime > before,
+  worktreeExists: existsSync(worktree),
+  worktree,
+  taskStatus: task?.status,
+  deliverableCommit: task?.deliverableCommit ?? null,
+  deliveryFailure: task?.deliveryFailure ?? null,
+  logs,
+  second,
+  envOff: process.env.AGENT_TEAMS_NO_RECLAIM ?? null,
+})
+process.exit(0)
+`
+
+/**
+ * 起一个子进程跑一条臂，把它的读数拿回来。
+ *
+ * ★ 子进程必须落在**能解析 `@deepseek-ai/cordis` 的地方** ⇒ 脚本写进**本仓**
+ *   （那里有 `node_modules` 链接），跑完删掉。
+ * ★ 而**工作目录**是那个临时仓库 —— 判据读的 `workspace` 就是它。
+ */
+function runReclaimArm({ shape, env = {}, hook = false, secondTransition = false }) {
+  /** ★ 脚本落在**临时目录**（不是本仓）—— 免得在本仓根上留下会被误读成"交付"的残渣。 */
+  const scratch = mkdtempSync(join(tmpdir(), 'reclaim-arm-script-'))
+  const guide = join(scratch, 'arm.mjs')
+  const workspace = mkdtempSync(join(tmpdir(), 'reclaim-arm-repo-'))
+  git(workspace, ['init', '-q', '-b', 'main', '.'])
+  git(workspace, ['config', 'user.email', 't@t'])
+  git(workspace, ['config', 'user.name', 't'])
+  writeFileSync(join(workspace, 'README.md'), '# arm fixture repo\n')
+  git(workspace, ['add', '-A'])
+  git(workspace, ['commit', '-qm', 'init'])
+  writeFileSync(guide, RECLAIM_ARM_CHILD)
+  try {
+    /**
+     * ── ★★ 必须清掉 `NODE_TEST*` / `NODE_OPTIONS` ─────────────────────────────
+     *
+     * MEASURED（本仓多个夹具记过同一条）：`node --test` 会给子进程种下
+     * `NODE_TEST_CONTEXT`，那会让**孙**进程变成"子报告器"而不再打印汇总。
+     * 本臂的子进程不是测试套件，但它同样会继承一堆与本次测量无关的环境 ——
+     * 清掉它们，让子进程拿到与生产一致的那一份。
+     */
+    const childEnv = { ...process.env, ARM_ROOT: RECLAIM_TEST_ROOT, ARM_WORKSPACE: workspace, ARM_SHAPE: shape, ARM_INTEGRATOR_HOOK: hook ? '1' : '0', ARM_SECOND_TRANSITION: secondTransition ? '1' : '0', ...env }
+    for (const key of Object.keys(childEnv)) {
+      if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete childEnv[key]
+    }
+    /**
+     * ★ 关掉重定向：`execFileSync` 的 `stdio: 'pipe'` 会在**子进程被信号杀掉**时
+     *   丢掉全部输出 ⇒ 而"没有输出"与"子进程没跑"同形。这里**捕获**它，
+     *   失败时把它**原样打出来**（见下面 `assertArmRan`），而不是让它变成一个空断言。
+     */
+    let stdout = ''
+    let failed = null
+    try {
+      stdout = execFileSync(process.execPath, [guide], {
+        cwd: workspace,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: childEnv,
+        maxBuffer: 32 * 1024 * 1024,
+      })
+    } catch (error) {
+      failed = error
+      stdout = String(error?.stdout ?? '')
+    }
+    if (process.env.ARM_DEBUG === '1') console.log('  [arm stdout]\n' + stdout.slice(-3000) + '\n  [arm stderr]\n' + String(failed?.stderr ?? '').slice(-3000))
+    /**
+     * ★★ 取**最后**那一条 `__ARM__`（不是第一条）——
+     *   MEASURED（本臂实测）：子进程会先报 `paths` / `team` 两条**中间读数**，
+     *   而 `.find()` 拿的是**第一条** ⇒ 解析出来的 `payload` 是那条中间读数，
+     *   于是 `payload.mtimeAdvanced` 恒为 `undefined`。
+     *   ★ 那个红**看起来像**"回收没跑"，其实只是我读错了行 ——
+     *     所以这里显式取最后一条，并在失败诊断里把全部行打出来。
+     */
+    const armLines = stdout.split('\n').filter((entry) => entry.startsWith('__ARM__'))
+    const line = armLines[armLines.length - 1]
+    if (line === undefined) {
+      /**
+       * ★★ 子进程没能交出读数 ⇒ **响亮地失败**，并把它的诊断原样打出来。
+       *   ★ 绝不 `t.skip`：那会把"我测不了"写成"这格没事"，
+       *     而那正是本任务要防的形态（没测到 ≠ 通过）。
+       */
+      throw new Error(
+        `回收接线子进程没有交出读数（这**不是**"机制没问题"）。\n`
+        + `  shape=${shape} hook=${hook} exit=${failed === null ? 0 : (failed.status ?? 'signal')}\n`
+        + `  stderr 尾部：\n${String(failed?.stderr ?? '').slice(-3000)}\n`
+        + `  stdout 尾部：\n${stdout.slice(-3000)}`,
+      )
+    }
+    return { payload: JSON.parse(line.slice('__ARM__'.length)), workspace, stdout, failed }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+    rmSync(workspace, { recursive: true, force: true })
+  }
+}
+
+/**
+ * ★★ 每一臂都要证明：**被删的那条路径落在临时根之下，且它是生产命名**。
+ *
+ * ★ 这一条是本文件最要紧的安全断言 —— 它是"我没有误删队友的树"的**可执行形式**。
+ *   只断言 `existsSync === false` 是不够的：那一条在"删错了别的树"时**同样成立**。
+ */
+function assertReclaimLandedUnderTemp(worktree, workspace, expectation) {
+  assert.ok(
+    worktree.startsWith(join(workspace, '.agent-teams', 'worktrees') + '/'),
+    `★★ 回收目标必须落在【临时仓库】的 .agent-teams/worktrees/ 之下。实测：${worktree}（临时根 ${workspace}）`,
+  )
+  assert.equal(dirname(worktree), join(workspace, '.agent-teams', 'worktrees'),
+    '★ 它的父目录必须是 .agent-teams/worktrees（生产命名的那一格）')
+  assert.match(basename(worktree), /^task-/, `★ 目录名必须以 task- 开头。实测：${basename(worktree)}`)
+  void expectation
+}
+
+/**
+ * ── 子进程的日志里，**指名这棵树**的那一条 ───────────────────────────────────────
+ *
+ * ★★★ MEASURED（本臂实测）：`worktree` 会出现在**不止一条**日志里 ——
+ *   "deliverable committed as … **in <worktree>**" 那条也含它。
+ *   ⇒ 只按"包含路径"找会**拿到提交那条**，于是断言打在了一条不相干的读写上。
+ *   ★ 那个红看起来像"回收读数丢了"，其实是我选错了行。
+ * ⇒ 所以按**关键措辞**筛（调用方给 `match`），而不是只按路径。
+ */
+function logLineFor(payload, worktree, match) {
+  return payload.logs
+    .map(([, message]) => message)
+    .find((message) => message.includes(worktree) && (match === undefined || match.test(message)))
+}
+
+/**
+ * ── ★★★ 回收的读数：**在子进程里读**，不是在父进程里读 ───────────────────────────
+ *
+ * MEASURED（本臂实测）：`runReclaimArm` 会在 `finally` 里删掉那个临时仓库，
+ * 所以父进程在它返回之后 `existsSync(worktree)` 恒为 `false` ——
+ * **包括"回收根本没接线"的那一次**。
+ * ★ 那个读数因此**没有分辨力**：它把"删掉了"与"临时目录被清理了"读成同一件事。
+ * ⇒ 真正的读数必须来自**子进程自己**（在清理之前那一刻读的 `worktreeExists`）。
+ */
+function assertWorktreeState(payload, expected, why) {
+  assert.equal(
+    payload.worktreeExists, expected,
+    `${why}\n  实测（子进程在临时仓库被清理【之前】读的）：worktreeExists=${String(payload.worktreeExists)}`
+    + `\n  路径：${payload.worktree}\n  日志：${JSON.stringify(payload.logs, null, 1)}`,
+  )
+}
+
+test('★★★ 臂 12（接线臂 · 它真的会发生）：落终态且交付已吸收 ⇒ 生产路径【真的删掉】那棵树', async () => {
+  /**
+   * ── 本臂问的问题是"接线"，不是"判据对不对"────────────────────────────────────
+   *
+   * 上面 12 条臂能证明 `judgeWorktree` 判得对；它们**不能**证明它会**被调用**。
+   * 而本任务的缺口恰恰是后者：判据零调用方 ⇒ 46 棵树只能手动清。
+   *
+   * ⇒ 所以这一臂走**生产入口**：真的 `registerAgentTeamsTools`、真的
+   *   `agent_teams_create`、真的 `agent_teams_update_task ... status: 'completed'`，
+   *   然后断言**那棵树真的不在了**。
+   *
+   * ── ★★★ 定向突变（这条臂靠什么变红）────────────────────────────────────────────
+   *
+   *   ① 把 `src/tools/update-task.ts` 里那一句 `await reclaimWorktreeAfterDelivery(...)`
+   *      删掉 ⇒ 树留着 ⇒ **本臂红**（`worktreeExists` 仍是 true）。
+   *   ② 把 `reclaimWorktreeAfterDelivery` 的删除那一句删掉（只判定不动手）⇒ 同上红。
+   *   ③ 把 `verdict.status === 'reclaimable'` 那一支改成无条件删 —— 臂 14 红。
+   *   ④ 把 `.git/hooks/post-commit` 那一格（扮演 integrator）去掉 ⇒ 树留着 ⇒ 红。
+   *      ★ 而那个红**是对的**：交付刚提交出来、还没被合流 ⇒ 不该删（见子进程里那段）。
+   *
+   * ── ★★★★★ 本臂的地位在 round 2 被**降级**了（读的人必须先看这一句）───────────
+   *
+   * 它注入的 `post-commit` 钩子**替 integrator 做了合流** —— 而那是
+   * **产品在那一刻从不做的一步**。⇒ 所以本臂证明的是
+   * 「**接线、删除、归属**在"产物已经被合流"的前提下正确」，
+   * 它**不**证明"产品自己能走到那一刻"。
+   *
+   * ★ 而"产品自己能走到那一刻"由**臂 15**（无钩子、合流在 setup 里就做完）证明。
+   *   ⇒ 两条臂都要留：臂 15 钉**可达性**，本臂钉"钩子形状下的接线"。
+   *   ★★★ 而 round 1 的 blocker 正是**只有本臂**（那条假的绿）——
+   *     它让一个**生产上不可达**的删除看起来被证明了。
+   *
+   * ── ★★ 干扰隔离 ──────────────────────────────────────────────────────────────
+   *   子进程跑在 `mkdtempSync` 出来的**临时仓库**里 ⇒ 回收只可能落在它下面。
+   *   本臂用 `assertReclaimLandedUnderTemp` **断言**这一点，而不是"我以为"。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'absorbed', hook: true })
+
+  assert.equal(payload.threw, undefined, `★ 落终态不许抛（回收失败更不能改判）。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了（否则本臂测的是"没跑到"）')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务真的落了终态。实测：${payload.taskStatus}`)
+  assert.equal(payload.deliverableCommit !== null, true, '★ 前置：交付真的被提交了（回收挂在那一支上）')
+
+  const worktree = payload.worktree
+  /** ★ 先证明"删的那条路径"是**生产命名**、且落在临时根之下。 */
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /**
+   * ★★ 核心断言：**那棵树真的没了**（不是"日志说回收了"）。
+   *   ★ 读数取自**子进程**（它在临时仓库被清理之前读的，见 `assertWorktreeState`）。
+   */
+  assertWorktreeState(payload, false, '★★★ 交付已吸收 ⇒ 生产路径必须真的删掉那棵树')
+  /** ★ 而"没了"必须有**归属**：日志里那一条要指名这棵树、并复述判据自己的话。 */
+  const line = logLineFor(payload, worktree, /reclaimed the worktree/)
+  assert.notEqual(line, undefined, `★ 日志里必须有一条指名这棵树的回收读数。实测日志：${JSON.stringify(payload.logs)}`)
+  assert.match(line, /reclaimed the worktree for task "t1"/, `★ 那一条必须说清"回收了哪条任务的哪棵树"。实测：${line}`)
+  assert.match(line, /safe to reclaim/, `★ 而它必须复述【判据自己的话】（不是调用方另写的一句）。实测：${line}`)
+
+  /** ★ 而它**没有**改判这条任务（回收是记账之外的清理，不是裁决）。 */
+  assert.equal(payload.deliveryFailure, null, '★ 回收不许写 deliveryFailure')
+})
+
+test('★★★ 臂 13（反向臂 · 开关）：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ 同一套输入下那棵树【必须还在】', async () => {
+  /**
+   * ── 一个自动删除的机制若不能停，在它误判时会造出**不可逆**的损失 ────────────────
+   *
+   * ★ 臂 11 测的是**脚本自己的 CLI** 那个开关；本臂测的是**生产接线**上的同一个开关。
+   *   两件事必须分开测：一个只在 CLI 里生效的开关，在生产上等于没有开关。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `if (off) { … return }` 那一支删掉 ⇒ 树被删 ⇒ **本臂红**。
+   *   ② 把 `RECLAIM_OFF_ENV` 换成一个**重打的字面量**（而模块导出的是另一个名字）
+   *      ⇒ 开关拨不动 ⇒ 同上红。
+   *      ★ 这正是"名字必须来自模块导出"那一格的**可执行形式**。
+   *
+   * ── ★★ 它必须与臂 12 **用同一套输入** ────────────────────────────────────────
+   *   否则"停了"与"这条输入本来就不可清"同形 —— 那样本臂会**恒绿**而毫无分辨力。
+   *   所以形状、钩子、任务全都一样，**只有环境变量不同**。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'absorbed', hook: true, env: { AGENT_TEAMS_NO_RECLAIM: '1' } })
+
+  assert.equal(payload.threw, undefined, `★ 开关打开时落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
+  assert.equal(payload.taskStatus, 'completed', '★ 前置：任务照常落终态（开关只管回收，不管裁决）')
+  assert.equal(payload.deliverableCommit !== null, true, '★ 前置：交付照常被提交（开关不拦交付）')
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：开关拨上 ⇒ 树**仍在**（与臂 12 的同一套输入、相反的读数）。 */
+  assertWorktreeState(payload, true, '★★★ 开关打开时那棵树【必须】还在（否则那个"可关闭"是假的）')
+  /** ★ 而"跳过了"必须**可读** —— 否则它与"压根没接线"同形。 */
+  const line = logLineFor(payload, worktree, /reclaim skipped/)
+  assert.notEqual(line, undefined, `★ 开关生效时必须留下一条可读的话。实测日志：${JSON.stringify(payload.logs)}`)
+  assert.match(line, /reclaim skipped for task "t1"/, `★ 那一条必须说清"跳过的是回收"。实测：${line}`)
+  assert.match(line, /AGENT_TEAMS_NO_RECLAIM=1/, `★ 且要点名【哪个开关】拨到了什么值。实测：${line}`)
+  /** ★ 而它不该同时说"回收了"（自相矛盾的两句会让读的人不知道信哪句）。 */
+  assert.doesNotMatch(line, /reclaimed the worktree/, `★ 跳过的措辞不许与"回收了"同形。实测：${line}`)
+})
+
+test('★★★ 臂 14（安全臂 · 不许误删）：产物【未并入主干】⇒ 生产钩子必须保住那棵树', async () => {
+  /**
+   * ── 这条臂防的是"回收"最贵的那种失效：**删掉唯一的那份产物** ──────────────────
+   *
+   * MEASURED（本仓，t89 普查）：只看 `--is-ancestor` 会在本仓删掉 **7 份唯一产物**
+   *   （`task-t64` 有 7 个源码文件，68KB/69KB 级，内容不在任何提交里）。
+   * ⇒ 所以本臂把那个形状**造出来**：树里有一个主干没有的 commit，
+   *   而落终态时它还有一点脏改动（会被 `commitWorktree` 提交）——
+   *   **那一点仍然不在 main 里** ⇒ 判据必须说 `keep` / `not-absorbed` ⇒ **不删**。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `verdict.status === 'reclaimable'` 那一支改成"无条件删"（或读错字段）
+   *      ⇒ 树被删 ⇒ **本臂红**。
+   *   ② 把 `keep` / `undecidable` 并进 `reclaimable`（三态同形）⇒ 同上红。
+   *   ③ 把 `judgeWorktree` 换成"只看脏不脏"的手写判定 ⇒ 红。
+   *
+   * ── ★★ 顺带钉住"不改判"这一格 ────────────────────────────────────────────────
+   *   回收**不**参与裁决 ⇒ 任务照常 `completed`，且**没有** `deliveryFailure`。
+   *   把"没回收"写成"交付失败"，会让成员去重做已经做对的工作。
+   */
+  /**
+   * ★★ `hook: false` —— 这一臂**刻意不装**那个扮演 integrator 的钩子。
+   *
+   * MEASURED（本臂实测）：第一版装上了钩子，于是"提交后 main 前进到新提交"
+   * ⇒ 判据说 `reclaimable` ⇒ 树被删 ⇒ 本臂红。
+   * ★ 而那个红**不是缺陷**：装了钩子就等于"integrator 已经把它合流了"，
+   *   那时删树是**对的**。⇒ 安全臂要问的场景恰恰是**还没合流**，
+   *   所以这里不能装钩子（装了它，本臂测的就是另一件事）。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'unique', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务照常落终态。实测：${payload.taskStatus}`)
+  assert.equal(payload.deliverableCommit !== null, true, '★ 前置：交付真的被提交了（回收挂在那一支上）')
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：产物未并入 ⇒ **不许删**。 */
+  assertWorktreeState(payload, true, '★★★ 产物未并入主干 ⇒ 那棵树必须还在（删掉就等于丢了那份工作）')
+  /** ★ 而"留着"必须给出**理由**，且理由是判据自己的话。 */
+  const line = logLineFor(payload, worktree, /was NOT reclaimed/)
+  assert.notEqual(line, undefined, `★ 保住时必须留下一条可读的话。实测日志：${JSON.stringify(payload.logs)}`)
+  assert.match(line, /was NOT reclaimed/, `★ 那一条必须说清"没有回收"。实测：${line}`)
+  assert.match(line, /not absorbed|not-absorbed/, `★ 而理由必须是判据给的那一个（"未并入"）。实测：${line}`)
+  /** ★ 而它绝不与"回收了"同形。 */
+  assert.doesNotMatch(line, /deleted /, `★ 保住的措辞不许说"删了"。实测：${line}`)
+
+  /** ★★ "没回收" ≠ "交付失败"：任务状态与 `deliveryFailure` 都不许被动过。 */
+  assert.equal(payload.deliveryFailure, null, '★★ 保住一棵树不许写 deliveryFailure（那不是交付失败）')
+})
+
+test('★★★★ 臂 14b（无新改动臂 · 修正后）：树干净且已吸收 ⇒ 落终态**照样判**，且这一次真的删掉它', async () => {
+  /**
+   * ── ★★★★★ 这一臂在 round 2 被**反转**了 —— 而那个反转正是 blocker 的修法 ─────────
+   *
+   * round 1 的本臂断言的是：「没有改动 ⇒ `commitWorktree` 不产 commit
+   * ⇒ 回收那一支根本不该被走到 ⇒ 树必须留着」。
+   *
+   * ★★ MEASURED（reviewer 的 `refire.mjs` probe A，本轮独立复现）：**那条断言是错的** ——
+   *   它把 round-1 那个 **blocker**（回收不可达）当成了**正确行为**钉了下来。
+   *
+   *   而真相是：**树干净且已吸收**恰恰是**唯一可达**的那种"该回收"的形状 ——
+   *   产物早先已被 integrator 合流，这次终态转换本来就没有新东西要提交。
+   *   ⇒ round-1 把它挡在门外（藏在 `commit !== undefined` 里）⇒ 删除永远不发生。
+   *
+   * ⇒ 修好之后：**树在就判**。这一格于是变成**发射格的第二份证据**
+   *   （与臂 15 同源，但形状更朴素：连"先交付一次"都没有 —— 树从头就是干净的）。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   把入口条件改回 round-1（只在 `committed.commit !== undefined` 那一支调用）
+   *   ⇒ 本臂的树是干净的（没有新改动）⇒ 回收**根本不被调用** ⇒ 树留着 ⇒ **本臂红**。
+   *   ★ 而 round-1 的绿恰恰说明：**一条按旧语义写的臂会为一个缺陷作证**。
+   *
+   * ── ★ 它同时钉住"提交与回收是两件事"──────────────────────────────────────────
+   *   `deliverableCommit` 缺席（没东西可提交）而回收**照样发生** ——
+   *   两者**不同形**，也不互相依赖。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'clean', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 干净树落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.taskStatus, 'completed', '★ 前置：任务照常落终态')
+  /** ★ 前置：真的没有新改动要提交（这一格是"提交"与"回收"解耦的证据）。 */
+  assert.equal(payload.deliverableCommit, null, '★ 前置：没有改动 ⇒ 不产 commit（`deliverableCommit` 缺席）')
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：干净 + 已吸收 ⇒ **真的删掉**（而"没有新提交"不是障碍）。 */
+  assertWorktreeState(payload, false, '★★★★ 干净且已吸收的树 ⇒ 落终态照样回收（"没有改动"不许挡住回收）')
+  const line = logLineFor(payload, worktree, /reclaimed the worktree/)
+  assert.notEqual(line, undefined, `★ 必须有一条回收读数。实测日志：${JSON.stringify(payload.logs)}`)
+  /** ★ 而措辞要说清这一格是"重判"（没有新改动），不是"刚交付" —— 两种情形不同形。 */
+  assert.match(
+    line, /safe to reclaim/,
+    `★ 必须复述判据自己的话。实测：${line}`,
+  )
+  /**
+   * ★★ 而"没有新改动"这件事**本来就有它自己的读数**（`had no worktree changes to commit`）——
+   *   它与回收那条**并列**而不是嵌在一起：两件事各自可读 ⇒ 读的人能分出
+   *   "这次只是重判"与"这次刚交付了一个 commit"。
+   *   ★ MEASURED（本臂第一版在这一点上红过）：我把 `commitOutcome` 的措辞
+   *     断言在**回收那条**上，而它只出现在 `keep`/`undecidable` 的措辞里 ——
+   *     回收成功那条不需要它（"删了"本身已经说清了结果）。
+   *     ⇒ 断言改成核**两条并列的读数**都在，而不是要求它们合成一条。
+   */
+  const noChangeLine = payload.logs.map(([, m]) => m).find((m) => /had no worktree changes to commit/.test(m))
+  assert.notEqual(
+    noChangeLine, undefined,
+    `★ "这一次没有新改动"必须有自己的读数（与回收那条并列）。实测：${JSON.stringify(payload.logs)}`,
+  )
+  assert.notEqual(
+    noChangeLine, line,
+    '★ 两条读数必须是**不同的两行** —— 合成一条会让"刚交付"与"只是重判"同形',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★★★ round-2：入口条件那一格（round-1 的 blocker 就在这里）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── round 1 的 blocker（reviewer 两次实测，**已确认成立**）─────────────────────────
+ *
+ * round-1 的回收挂在 `commitWorktree` **成功**那一支上。而实测（`reviewer-1/sequence.mjs`
+ * 与 `reviewer-1/refire.mjs`）说明：
+ *
+ *   ① `commitWorktree` **只在 worktree 里**提交，它**从不**合进 `main`
+ *      ⇒ 提交刚成功那一刻，树 HEAD 是全新 commit、按定义**不是** `main` 的祖先
+ *      ⇒ 权威判据**必然**答 `keep / not-absorbed`
+ *      ⇒ ★ 入口被设在了**唯一一个判据必然说不的时刻** ⇒ **删除在生产上不可达**。
+ *
+ *   ② 而**唯一可达**的"已吸收"形状恰恰是**没有新改动**的那一次
+ *      （`committed.commit === undefined`）：产物早先已被合流、这次本来就没东西提交
+ *      ⇒ ★ 它藏在 `commit !== undefined` 里 ⇒ 也**永远走不到**。
+ *
+ * ⇒ 修法（round 2）：**树在 ⇒ 就判**，与"这一轮提交成了没有"无关。
+ *   而"能不能删"仍然只由 `judgeWorktree` 说（本层不新增任何第二条判据）。
+ *
+ * ★ 下面臂 15（发射）与臂 17（重发）钉的就是**这一格**：
+ *   把入口条件改回 round-1 那个"只在提交成功那一支"⇒ **臂 15 与臂 17 都红**。
+ */
+
+test('★★★★★ 臂 15（发射臂 · 无钩子）：已吸收的树落终态 ⇒ 生产路径**真的删掉**它（合流在 setup 里做完）', async () => {
+  /**
+   * ── 本臂与臂 12 的分工（★ 读之前先分清这两条）─────────────────────────────────
+   *
+   *   臂 12：注入 `post-commit` 钩子 ⇒ 合流与提交**同一刻**发生（**模拟后续阶段**）。
+   *   臂 15：**不注入任何钩子** ⇒ 合流在 **setup 里**就做完了，
+   *          落终态时产品**只**做它自己会做的事。⇒ 它证明**可达性**。
+   *
+   * ── ★★★ 定向突变（这条臂靠什么变红）────────────────────────────────────────────
+   *
+   *   ① ★ **把入口条件改回 round-1**（`reclaimWorktreeAfterDelivery` 只在
+   *      `committed.ok === true && committed.commit !== undefined` 那一支里调用）
+   *      ⇒ 本臂的树是**干净的**（没有新改动）⇒ 那一支不成立 ⇒ 回收**根本不被调用**
+   *      ⇒ 树留着 ⇒ **本臂红**。★ 这就是 round-1 的 blocker 的可执行形式。
+   *   ② 把 `verdict.status === 'reclaimable'` 改成不删 ⇒ 红。
+   *   ③ 把 `remove(worktree)` 那一句删掉 ⇒ 红。
+   *
+   * ── ★★ 它为什么必须是**子进程 + 临时仓库**（与其它臂同一条纪律）─────────────────
+   *   生产路径会 `rmSync` 一棵树，路径由 `workspace` 推导 ⇒ 子进程的 workspace
+   *   必须是**它自己的**临时仓库（否则删的是本仓、乃至队友的树）。
+   *   ⇒ 而"删的那条路径落在临时根下"由 `assertReclaimLandedUnderTemp` **断言**。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'pre-merged', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了（否则本臂测的是"没跑到"）')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务真的落了终态。实测：${payload.taskStatus}`)
+  /**
+   * ★★ 前置必须钉住"这一轮**没有**新提交" —— 否则本臂会退化成臂 12 那种形状，
+   *   也就**测不到** round-1 那个 blocker。
+   *   MEASURED：`pre-merged` 那一格的树在落终态时是干净的 ⇒ `deliverableCommit` 缺席。
+   */
+  assert.equal(
+    payload.deliverableCommit, null,
+    `★★ 前置：本臂必须是"没有新改动"的那一次终态转换（否则它测的不是 round-1 那个 blocker）。`
+    + `实测 deliverableCommit=${JSON.stringify(payload.deliverableCommit)}`,
+  )
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：**那棵树真的没了**（读数取自子进程，见 `assertWorktreeState`）。 */
+  assertWorktreeState(payload, false, '★★★★★ 已吸收的树落终态 ⇒ 生产路径必须真的删掉它（无钩子）')
+  const line = logLineFor(payload, worktree, /reclaimed the worktree/)
+  assert.notEqual(line, undefined, `★ 必须有一条指名这棵树的回收读数。实测日志：${JSON.stringify(payload.logs)}`)
+  assert.match(line, /safe to reclaim/, `★ 而它必须复述【判据自己的话】。实测：${line}`)
+  /** ★ 而它**没有**改判这条任务。 */
+  assert.equal(payload.deliveryFailure, null, '★ 回收不许写 deliveryFailure')
+})
+
+test('★★★★★ 臂 17（重发臂）：树被删之后**再落一次终态** ⇒ 无害，且树不会回来', async () => {
+  /**
+   * ── 它防的是什么（"删掉之后那一步会不会炸"）───────────────────────────────────
+   *
+   * 删树发生在**终态转换之中**，而同一个任务**还会再落终态**（重开、修复、再交付）。
+   * ★ 若第二次转换会因为"树不在了"而抛错、或改判、或写 `deliveryFailure`，
+   *   那条接线就是**把一次清理变成了一个缺陷** —— 而那正是"记账失败 vs 交付失败"
+   *   这条纪律要防的形态。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把入口条件改回 round-1（只在提交成功那一支调用）⇒ 第一次**根本不删**
+   *      ⇒ 本臂的"树在不在"那一格从"第一次就没了"变成"还在" ⇒ **本臂红**。
+   *   ② 让回收失败时 `throw`（或写 `deliveryFailure`）⇒ 第二次转换那几格红。
+   *
+   * ── ★★ 终态不可变 ⇒ "第二次终态"走的是**重开之后再落**那条真实的路 ──────────────
+   *   子进程把任务置回 `in_progress`，再落一次 `completed`（与生产上的重开同形）。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'pre-merged', hook: false, secondTransition: true })
+
+  assert.equal(payload.taskStatus, 'completed', '★ 前置：第一次真的落了终态')
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+  /** ★ 前置：第一次真的删掉了（否则本臂测的是"没删之后又没删"）。 */
+  assertWorktreeState(payload, false, '★ 前置：第一次终态转换真的删掉了那棵树')
+
+  const second = payload.second
+  assert.notEqual(second, null, '★ 前置：子进程必须真的跑过第二次终态转换')
+
+  /** ★★ 核心：第二次**不许抛**、状态照旧、不写 deliveryFailure。 */
+  assert.equal(second.threw, undefined, `★★ 第二次终态转换不许抛。实测：${second.threw}`)
+  assert.equal(second.mtimeAdvanced, true, '★ 前置：第二次更新真的落盘了')
+  assert.equal(second.taskStatus, 'completed', `★★ 第二次的终态必须照旧。实测：${second.taskStatus}`)
+  assert.equal(second.deliveryFailure, null, '★★★ 第二次不许写 deliveryFailure（回收失败≠交付失败）')
+  /** ★★ 而**树不会回来**（第二次那一刻它仍然不在）。 */
+  assert.equal(
+    second.worktreeExists, false,
+    '★★ 树被删之后不许"回来" —— 第二次终态转换时它必须仍然不在',
+  )
+  /** ★ 而第二次**仍然留下了可读的读数**（它又判了一次，只是判据说"没有那棵树"）。 */
+  assert.equal(second.logs.length > 0, true, '★ 第二次转换也必须有日志（不许静默）')
+})
+
+test('★★★ 臂 16（判不了臂 · 生产路径）：主干引用解析不出来 ⇒ 【绝不】删，且说清"没测到"', async () => {
+  /**
+   * ── round-1 的覆盖缺口（reviewer 点名）────────────────────────────────────────
+   *
+   * round 1 只在**判据层**（T25-3 / T25-5）钉过 `undecidable`，
+   * **没有**一条**生产路径**的臂。⇒ 而"判据层判得对"与"生产路径不把它读成可删"
+   * 是两件事 —— 后者才是会删错东西的那一步。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `verdict.status === 'reclaimable'` 改成"不是 keep 就删"（把 undecidable
+   *      并进可删）⇒ **本臂红**（树被删）。
+   *   ② 把判据换成"读不到主干就当可清" ⇒ 红。
+   *
+   * ── ★★ 造法：删掉临时仓库的 `main` 引用 ──────────────────────────────────────
+   *   那时树本身是好的（HEAD 读得到），而 `repo` 里 `main^{commit}` 解析不出来
+   *   ⇒ 权威判据答 `undecidable: the trunk ref "main" could not be resolved`。
+   *   ★ 这正是"没测到" —— 它**不是**"可以删"。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'undecidable', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 判不了时落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务照常落终态。实测：${payload.taskStatus}`)
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：判不了 ⇒ **绝不删**。 */
+  assertWorktreeState(payload, true, '★★★ "判不了"绝不许被读成"可以删"')
+  const line = logLineFor(payload, worktree, /was NOT reclaimed/)
+  assert.notEqual(line, undefined, `★ 判不了时必须留下一条可读的话。实测日志：${JSON.stringify(payload.logs)}`)
+  /** ★ 而措辞必须把"没测到"与"可以删"**分开**（三态不同形）。 */
+  assert.match(
+    line, /could NOT be decided|not measured/i,
+    `★ 判不了的措辞必须说清"没能测量"。实测：${line}`,
+  )
+  assert.doesNotMatch(line, /deleted /, `★ 判不了时不许出现"删了"。实测：${line}`)
+  /** ★ 而它同样没有改判。 */
+  assert.equal(payload.deliveryFailure, null, '★ 判不了不许写 deliveryFailure')
 })
