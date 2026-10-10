@@ -300,6 +300,125 @@ export function worktreePromptLine(path: string | undefined): string {
   return `Working directory: ${path.trim()}\nWork only inside this directory: it is your isolated worktree (a clean checkout of the parent revision). Do not edit files in the captain's workspace.`
 }
 
+/**
+ * ── ★★★ 把一棵 worktree 上的改动【提交】成一个 commit ────────────────────────────
+ *
+ * ── 它补的是什么（2026-10-10 实测出来的缺口）────────────────────────────────────
+ *
+ * 在此之前，本插件**只建树、不提交**：
+ *
+ *     scheduler.ts:839  createTaskWorktree(...)     ← 建了
+ *     （成员在里面干活）
+ *     （……没有任何地方 commit）
+ *
+ * MEASURED（2026-10-10，用 48 棵 worktree 普查）：
+ *     46 棵 worktree 里，目标文件**一个都没有** —— 因为 worktree 是 checkout
+ *     产物，只含**已提交**内容，而成员改动从未被提交。
+ * ⇒ ★ 后果：integrator **没有任何东西可合**。
+ *   「合并 ≥2 棵 worktree」这个承诺在机制上**无法成立** —— 不是没做，是没有载体。
+ *
+ * ── ★ 为什么"改动没提交"是一个静默的缺口 ────────────────────────────────────────
+ *
+ * 它不报错、不失败、每一项读数都正常：
+ *   · 成员在树里改了文件 ⇒ `git status` 在**那棵树里**看得见；
+ *   · 任务可以照常 completed（判据读的是成员自报的 changedPaths）；
+ *   · 而**从外面看**（主仓、integrator、下游）什么都看不到。
+ *
+ * ⇒ 与本仓记过的那条同族：**"我改了"与"改动在版本控制里"是两件事**，
+ *   而两者在"任务 completed"这个读数上同形。
+ *
+ * ── 三条设计约束（各自都有理由）─────────────────────────────────────────────────
+ *
+ * ① **只提交，不推送、不合并。** 合流是 integrator 的事（它要看到**多棵**树
+ *    才能发现"各自自洽、合起来冲突"的那一类问题）。这里只负责让产物**有载体**。
+ * ② **没有改动 ⇒ 不产出空 commit。** 空 commit 会让"这次什么都没改"与
+ *    "改了但被提交了"同形 —— 而 integrator 会把它当成一条真实的产物去合。
+ * ③ **失败要能说出是哪一种失败**（三态）：没有改动 / 提交成功 / 提交失败（带原因）。
+ *    把它们合成一个布尔，就是本仓反复记账的那个合流。
+ */
+export type CommitWorktreeResult =
+  /** 提交成功，`commit` 是新 commit 的短 id。 */
+  | { ok: true; commit: string; filesChanged: number }
+  /** 树里没有改动 ⇒ **不产出空 commit**（这不是失败，是一个结论）。 */
+  | { ok: true; commit: undefined; filesChanged: 0; reason: 'no changes to commit' }
+  /** 提交失败，带原因（调用方据此上报，不许静默）。 */
+  | { ok: false; reason: string }
+
+export interface CommitWorktreeOptions {
+  /** worktree 的绝对路径。 */
+  worktree: string
+  /** 任务 id —— 进 commit message，让产物**可归属**到是哪一条任务造的。 */
+  taskId: string
+  /**
+   * 归属信息（可选）。★ 有它才能回答"这个 commit 是哪一次尝试造的" ——
+   * 而 `attempt_id` 是 capability，它一换代，旧 commit 的归属就说不清了。
+   * ⇒ 缺省时不编造，直接不写这一行。
+   */
+  attemptId?: string
+  /** 谁干的（成员名 / 临时工标识）。同样：缺省不编。 */
+  author?: string
+}
+
+/**
+ * 提交一棵 worktree 上的全部改动。
+ *
+ * ★ 用 `git add -A`（含新增与删除）。**不**只加 tracked 文件 ——
+ *   实测过的形态：新建文件是任务产物里最常见的一类，而 `git add -u`
+ *   会静默漏掉它们，于是"提交成功"与"提交了个空"同形。
+ */
+export function commitWorktree(options: CommitWorktreeOptions): CommitWorktreeResult {
+  const { worktree, taskId } = options
+  if (!existsSync(join(worktree, '.git'))) {
+    return { ok: false, reason: `not a worktree (no .git): ${worktree}` }
+  }
+
+  /** ① 先问"有没有改动" —— 没有就**不产出空 commit**（约束 ②）。 */
+  const status = tryGit(worktree, ['status', '--porcelain'])
+  if (!status.ok) return { ok: false, reason: `could not read the worktree status: ${status.message}` }
+  const lines = status.value.split('\n').filter((line) => line.trim() !== '')
+  if (lines.length === 0) {
+    return { ok: true, commit: undefined, filesChanged: 0, reason: 'no changes to commit' }
+  }
+
+  const added = tryGit(worktree, ['add', '-A'])
+  if (!added.ok) return { ok: false, reason: `git add -A failed: ${added.message}` }
+
+  /**
+   * ★ 归属行：**有才写，没有就不写**。编一个 `attempt=unknown` 会让
+   *   "我不知道归属"与"归属就是 unknown"同形。
+   */
+  const trailer = [
+    options.attemptId === undefined || options.attemptId === '' ? undefined : `Attempt: ${options.attemptId}`,
+    options.author === undefined || options.author === '' ? undefined : `Author: ${options.author}`,
+  ].filter((line): line is string => line !== undefined)
+
+  const message = [
+    `task(${taskId}): worktree deliverable`,
+    '',
+    'Committed by agent-teams when the task reached a terminal state.',
+    '★ 这条 commit 是【那棵 worktree 上的原始产物】—— 合流由 integrator 负责，',
+    '  它要看到多棵树才能发现"各自自洽、合起来冲突"的那一类问题。',
+    ...trailer.length === 0 ? [] : ['', ...trailer],
+  ].join('\n')
+
+  const committed = tryGit(worktree, [
+    '-c', 'user.name=agent-teams',
+    '-c', 'user.email=agent-teams@localhost',
+    'commit', '--no-verify', '-m', message,
+  ])
+  if (!committed.ok) return { ok: false, reason: `git commit failed: ${committed.message}` }
+
+  const head = tryGit(worktree, ['rev-parse', '--short', 'HEAD'])
+  if (!head.ok) {
+    /**
+     * ★ 提交**成功了**而读不到 id —— 这两件事必须分开。
+     *   报 `ok:false` 会让调用方以为没提交，于是可能重复提交。
+     */
+    return { ok: false, reason: `the commit succeeded but its id could not be read: ${head.message}` }
+  }
+  return { ok: true, commit: head.value.trim(), filesChanged: lines.length }
+}
+
 /** 一个便于诊断的单行描述。 */
 export function describeWorktree(result: WorktreeResult): string {
   const ignored = result.missingIgnored.length === 0

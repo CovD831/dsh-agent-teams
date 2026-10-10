@@ -41,6 +41,8 @@ import { collectArchivedTeamsActivity, collectTeamsActivity } from './snapshot.t
 import { findTeamByCaptain } from './state.ts'
 import { formatProfilesForPrompt, type TeamProfileConfig } from './profiles.ts'
 import { installTeamCapabilities } from './capabilities.ts'
+import { installHmrTrace } from './hmr-trace.ts'
+import { pluginRoot } from './tools/shared/entities.ts'
 import { TEAM_TOOL_NAMES } from './tool-names.ts'
 
 import { authenticatedWebRoutes, readJsonRequest, RequestBodyError, type BrowserRequestGate, type WebRouteHost } from './web-routes.ts'
@@ -144,7 +146,7 @@ export function usageSectionText(toolNames: string, profilesText = ''): string {
 5. The scheduler dispatches ready tasks after approval. Delegate; do not duplicate slow work or send messages merely to start a stage. Handle reports/user work, then yield when waiting is all that remains: reports wake you automatically. Use status after a delivery or user request, never busy-poll or wait for unassigned members.
 6. Tasks carry attempt_id capabilities. Use the current attempt_id; stale means ownership changed. Pause members only on explicit request; later guidance via send_message continues that same attempt. Retry, transfer or take over through reassign_task first; it revokes the old attempt and waits for quiescence. Prefer a member. Captain implementation/review takeover requires a user request. Every takeover is one ready task at a time, finished in this turn; never yield with captain-owned work open.
 7. In a running team, correct never-started pending tasks with edit_plan update_task; preserve dependency and ownership contracts instead of cancelling and recreating the graph. A captain can cancel a never-started pending task directly. Active attempts still require reassign_task. Quality kinds (requirements, implementation, verification, review, repair, integration) require objective + acceptance; implementation/repair also require inScope + verify. Derive paths/commands from the workspace/profile, never assume src/ or pnpm test. Review/requirements complete only with verdict=pass; needs_revision/reject fail with findings. Never approve your own implementation or ask for a deliberate failure. When a quality contract itself is wrong (a verify command that cannot pass, an inScope that forbids the file the objective requires), fix it with agent_teams_amend_task — captain-only, non-terminal tasks only, frozen after a passing review, and every amendment is recorded in the task's revisions ledger — instead of letting the worker dead-lock or game the gate.
-8. When full quality mode is requested: requirements → implementation → verification → review → integration. Plan the entire DAG while staged, including implementation before requirements finishes and integration depending on review round 1. Failed review automatically adds repair + next review and rewires pending downstream gates. Do not recreate this loop, omit integration or depend on a failed task. Review acceptance judges the latest implementation. Do not put smoke-test scripts into task instructions.
+8. When full quality mode is requested: requirements → implementation → verification → review → integration. Plan the entire DAG while staged, including implementation before requirements finishes and integration depending on review round 1. Failed review automatically adds repair + next review and rewires pending downstream gates. Do not recreate this loop, omit integration or depend on a failed task. Review acceptance judges the latest implementation. Do not put smoke-test scripts into task instructions. The worker does not hand its context to the captain on finishing: it reaches a terminal state, a reviewer judges that state, a repair answers the findings, and the SAME reviewer re-judges the repair — carrying reviewedTaskId and reviewedAttempt so "which revision was judged" is answerable. Only a passing review hands anything onward, and what it hands the integrator is changedPaths plus baseRevision, not the reasoning that produced them.
 9. Halted means the user stopped work (including the captain turn). Resume only on a later explicit user request with a reason, via agent_teams_resume or create_task({resume:true,resumeReason}); creating tasks alone never resumes. Escalated means the review loop hit its limit, not a halt. Deployment requires explicit user confirmation.
 10. Wait for all required tasks to be terminal and members idle/ready, present results, then delete/archive unless the user wants to continue. Never discard unfinished work without authorization.
 Tools: ${toolNames}${profilesText === '' ? '' : `\n\n${profilesText}`}`
@@ -169,6 +171,28 @@ export function apply(ctx: Context, config: Config): void {
   // settled, rather than here.
 
   const agentTeamsRuntime = registerAgentTeamsTools(ctx, resolved)
+  /**
+   * ── HMR 重载的痕迹（见 `src/hmr-trace.ts` 的文件头）─────────────────────────────
+   *
+   * ★ 它在这里接，而不是在 `hmr` 服务上 `inject`：**这个探针不许成为
+   *   宿主能不能起来的一个条件**。事件名不存在时它永不触发，plugin 照常工作。
+   *
+   * ★ 落盘位置是**插件自己的目录**（`pluginRoot()`），而**不是** `process.cwd()`。
+   *
+   * MEASURED（2026-10-10，本条的作者自己踩的）：第一版写的是
+   * `join(process.cwd(), resolved.stateDir)`，而**宿主进程的 `cwd` 是 profile 目录**
+   * （实测：`lsof -p <host> -a -d cwd` ⇒ `~/.dsh/profiles/desktop`，而不是仓库）。
+   * ⇒ 痕迹写去了 `~/.dsh/profiles/desktop/.agent-teams/`，
+   *   而**找它的人在仓库里找** —— 实测找了两轮才找到。
+   *
+   * ★★ 这正是本仓记过的同一条形状：**"写对了"与"写在别人会去看的地方"是两件事**，
+   *    而两者在"文件确实存在"这个读数上同形。
+   *
+   * ★ `pluginRoot()` 是**模块位置**推出的常量，不随 cwd 变
+   *   （实测：插件的 `cwd` 与仓库根不同，而 `pluginRoot()` 恒为仓库根）
+   *   ⇒ 于是痕迹与它描述的那个 `lib/` 永远在同一棵树里。
+   */
+  installHmrTrace(ctx, join(pluginRoot(), resolved.stateDir))
   installTeamCapabilities(ctx, {
     stateDir: resolved.stateDir,
     isPendingMember: agentTeamsRuntime.isPendingMember,

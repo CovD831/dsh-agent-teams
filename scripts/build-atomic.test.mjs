@@ -45,9 +45,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { dirname, join, relative } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -426,4 +427,145 @@ test('★ 臂 5 结构臂：build 里【不存在】"先删目标再重建"的�
   assert.ok(iTsc1 < iPublish, '★ publish 必须在第一个 tsc 之后')
   assert.ok(iTsc2 < iPublish, '★ publish 必须在第二个 tsc 之后')
   assert.ok(iPublish < iTsdown, '★ publish 必须在 tsdown 之前 —— 否则 tsdown 会去读旧的 lib/client/index.js 而 bundle 出【旧代码】')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 臂 6-9：构建锁的四态（2026-10-10，由合并级实测引入）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一组进来的路（值得记，因为它是"合并才暴露"的样本）───────────────────────
+ *
+ * 实测：两条链各自在自己的 worktree 上改 `clean-build.mjs` ——
+ *   链 A 给 `clear()` 加 `lib.tmp.LOCK` 守卫，链 B 给 `publish()` 加一行日志。
+ * 合并**零冲突**，而 integrator 在【合并后的语义】上发现：
+ *
+ *   ★ 陈旧的 `lib.tmp.LOCK` ⇒ **构建永久死锁**。
+ *
+ * 三条成因，各自单条链都看不到：
+ *   ① 全仓【没有任何代码创建或删除】这个文件 —— 守卫把"没人写的文件"
+ *      当成了"另一个构建在跑"；
+ *   ② 没有任何路径清理它，而 `clear` 恰是唯一能复位它、又被它挡住的入口
+ *      ⇒ 一次崩溃 = 永久死锁，仓库无法自愈；
+ *   ③ 守卫位于 `rm` 循环【之后】⇒"拒绝"发生时，`lib.tmp`/`lib.old` 已被删掉。
+ *
+ * ── 本组臂钉住修法 ────────────────────────────────────────────────────────────
+ *   臂 6：陈旧（持有者已死）⇒ **自愈**（清掉并继续）
+ *   臂 7：持有者活着 ⇒ **拒绝**（不许把"活着"读成"陈旧"）
+ *   臂 8：★ 读不出持有者 ⇒ **按持有处理**（"没测到"不许并进"没有锁"）
+ *   臂 9：★ 守卫在 `rm` **之前**（拒绝时不许造成破坏）
+ */
+
+/** 造一个最小项目根：`scripts/clean-build.mjs` + `lib/`。 */
+function lockFixture() {
+  const base = mkdtempSync(join(tmpdir(), 'build-lock-'))
+  mkdirSync(join(base, 'scripts'), { recursive: true })
+  mkdirSync(join(base, 'lib'), { recursive: true })
+  copyFileSync(join(ROOT, 'scripts', 'clean-build.mjs'), join(base, 'scripts', 'clean-build.mjs'))
+  return base
+}
+
+/** 在 fixture 里跑一次 clear，取回退出码与两个流。 */
+function runClear(base) {
+  const r = spawnSync('node', ['scripts/clean-build.mjs', 'clear'], { cwd: base, encoding: 'utf8' })
+  return { code: r.status ?? 1, stdout: String(r.stdout ?? ''), stderr: String(r.stderr ?? '') }
+}
+
+test('★★★ 臂 6（自愈臂）：陈旧的构建锁必须被清掉并继续 —— 否则构建永久死锁', () => {
+  /**
+   * ── 这条就是那个死锁的修复 ────────────────────────────────────────────────────
+   *
+   * MEASURED（修之前，用合并后的产物）：植入一个持有者不存在的 LOCK 之后，
+   * `clear` 连续两次都 `exit 1`、LOCK 仍在 ⇒ **每一次构建都在第一步失败**。
+   *
+   * ★ 判据是**两半**：退出码为 0 **且** LOCK 真的没了。
+   *   只看退出码会让"没拒绝但也没清"照样绿（那是另一种死锁）。
+   *
+   * 定向突变：把 `state === 'stale'` 那一支删掉（改成一律 held）⇒ 本臂红。
+   */
+  const base = lockFixture()
+  try {
+    /** pid 选一个**必定不存在**的：Linux/macOS 的 pid 上限远低于它。 */
+    writeFileSync(join(base, 'lib.tmp.LOCK'), '999999')
+    const r = runClear(base)
+    assert.equal(r.code, 0, `★ 陈旧锁必须自愈（实际 exit=${r.code}）—— exit!=0 就是永久死锁`)
+    assert.equal(existsSync(join(base, 'lib.tmp.LOCK')), false, '★★ 而且 LOCK 必须真的被清掉')
+    /** ★ 而它不静默：要说清"我清掉了一个谁的锁"。 */
+    assert.match(r.stderr, /陈旧/, '★ 自愈必须留下可读的一句话（否则与"没有过锁"同形）')
+    assert.match(r.stderr, /999999/, '★ 且指名持有者 pid')
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('★★ 臂 7（拒绝臂）：持有者【活着】⇒ 必须拒绝 —— 不许把"活着"读成"陈旧"', () => {
+  /**
+   * ★ 反向半边。没有它，"自愈"会被写成"无条件删锁"——
+   *   而那把互斥本身取消了（两个构建照样会互相踩）。
+   *
+   * ★ 用 **当前进程自己的 pid** 当持有者：它在测试运行期间必然活着。
+   */
+  const base = lockFixture()
+  try {
+    writeFileSync(join(base, 'lib.tmp.LOCK'), String(process.pid))
+    const r = runClear(base)
+    assert.equal(r.code, 1, '★★ 持有者活着 ⇒ 必须拒绝')
+    assert.equal(existsSync(join(base, 'lib.tmp.LOCK')), true, '★ 拒绝时不许删掉别人的锁')
+    assert.match(r.stderr + r.stdout, /另一个构建正在进行/, '★ 拒绝的话要说清是什么在跑')
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('★★★ 臂 8（三态臂）：LOCK 存在但持有者读不出 ⇒ 按【持有】处理，不是"没有锁"', () => {
+  /**
+   * ── 这一条是本仓那条最贵的纪律在这一格的落点 ──────────────────────────────────
+   *
+   * "LOCK 里没有可用的 pid"是一件**没能测量**的事，而它有两种读法：
+   *   · 读成 `free`（没有锁）⇒ ★ "没测到"并进了"通过" —— 两个构建会互相踩；
+   *   · 读成 `held`（保守）  ⇒ 正确，且**措辞要说清是哪一种**。
+   *
+   * ★ 与本仓「未测量不得并进通过」逐字同源。
+   *   定向突变：把 `unreadable` 那一支并进 `free` ⇒ 本臂红。
+   */
+  const base = lockFixture()
+  try {
+    /** 空文件：一个"存在但什么也没说"的锁。 */
+    writeFileSync(join(base, 'lib.tmp.LOCK'), '')
+    const r1 = runClear(base)
+    assert.equal(r1.code, 1, '★★ 读不出持有者 ⇒ 保守拒绝（不许当成没有锁）')
+    assert.equal(existsSync(join(base, 'lib.tmp.LOCK')), true, '★ 也不许删掉它')
+
+    /** ★ 而措辞必须与"持有者活着"**不同形** —— 两者的处置不一样。 */
+    writeFileSync(join(base, 'lib.tmp.LOCK'), 'not-a-pid')
+    const r2 = runClear(base)
+    assert.equal(r2.code, 1, '★ 非数字内容同样保守')
+    assert.match(r2.stderr + r2.stdout, /could not be determined|无法确定|读不出/,
+      '★ 必须说清是"读不出持有者"，而不是"有人在跑"（两者不同形）')
+  } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+test('★★★ 臂 9（顺序臂）：守卫必须在 `rm` 【之前】—— 拒绝时不许造成破坏', () => {
+  /**
+   * ── 这条来自链 A 审核工那条被降级的 low finding（F1）──────────────────────────
+   *
+   * 它当时写的是"守卫在 rm 循环之后，故 LOCK 存在时 lib.tmp/lib.old 已被删"，
+   * 而它被判为"契约字面已满足"（契约只说 before the mkdir）。
+   * ★ 而它其实是一条**真的**顺序错误：一次"拒绝"造成了一半的破坏，
+   *   而它读起来像"我拦住了"。⇒ 合并级实测把它变成了必须修的一条。
+   *
+   * 判据：植入一个**活着**的持有者 ⇒ clear 拒绝，而 `lib.tmp` 与 `lib.old`
+   *   **必须都还在**（若守卫在 rm 之后，它们已经被删了）。
+   */
+  const base = lockFixture()
+  try {
+    mkdirSync(join(base, 'lib.tmp'), { recursive: true })
+    writeFileSync(join(base, 'lib.tmp', 'keep-me.txt'), 'x')
+    mkdirSync(join(base, 'lib.old'), { recursive: true })
+    writeFileSync(join(base, 'lib.old', 'keep-me-too.txt'), 'x')
+    writeFileSync(join(base, 'lib.tmp.LOCK'), String(process.pid))
+
+    const r = runClear(base)
+    assert.equal(r.code, 1, '★ 有活锁 ⇒ 拒绝')
+    assert.equal(existsSync(join(base, 'lib.tmp', 'keep-me.txt')), true,
+      '★★★ 拒绝时 lib.tmp 必须【原样未动】—— 守卫在 rm 之后就做不到这一点')
+    assert.equal(existsSync(join(base, 'lib.old', 'keep-me-too.txt')), true,
+      '★★★ lib.old 同理')
+  } finally { rmSync(base, { recursive: true, force: true }) }
 })

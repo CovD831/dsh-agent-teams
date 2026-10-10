@@ -399,7 +399,28 @@ test('★★★ 臂 13（真实读数臂）：对本仓跑一次干跑，如实�
     + `\n  预计回收 ${mib(result.projectedBytes)} MiB（干跑 —— 没有删除任何东西）`
     + `\n  保留的原因：${JSON.stringify(result.keep.reduce((acc, e) => { acc[e.reason ?? '?'] = (acc[e.reason ?? '?'] ?? 0) + 1; return acc }, {}))}\n`,
   )
-  assert.ok(result.scanned > 0, '★ 目录在就必须真的扫到 worktree')
+  /**
+   * ── ★ 三种状态必须分开（MEASURED 2026-10-10）─────────────────────────────────
+   *
+   * 本臂此前只有"目录不存在 ⇒ 跳过"与"目录在 ⇒ 必须扫到"两种。
+   * 而清理之后出现**第三种**：目录在、里面**空的** —— 那是**正常**的（全回收完了）。
+   *
+   * ★ 它把"清扫结果"与"机制性质"混淆了：`scanned > 0` 说的是
+   *   "我这一轮恰好有东西可扫"（偶然事实），不是这条机制的性质。
+   *   ⇒ 空目录会让本臂红，而那个红与"回收机制坏了"同形
+   *     （其实刚刚正常工作了 46 次）。
+   *   ⇒ 处置：空目录时**如实报出来并跳过**（与"目录不存在"分开措辞），
+   *     而不是假装扫到了东西。
+   */
+  if (result.scanned === 0) {
+    // eslint-disable-next-line no-console
+    console.log('\n[回收读数] worktrees 目录在、但里面没有 worktree（已回收干净）⇒ 本臂跳过。')
+    // eslint-disable-next-line no-console
+    console.log('  ★ 这不是缺陷：`scanned > 0` 是"这一轮恰好有东西可扫"，不是机制的性质。\n')
+    assert.equal(result.removed.length, 0, '★★ 干跑绝不许删任何东西（空目录也一样）')
+    return
+  }
+  assert.ok(result.scanned > 0, '★ 目录在且非空 ⇒ 必须真的扫到 worktree')
   assert.equal(result.removed.length, 0, '★★ 这一臂是干跑 —— 绝不许删任何东西')
 })
 
