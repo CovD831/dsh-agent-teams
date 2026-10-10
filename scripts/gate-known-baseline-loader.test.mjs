@@ -48,12 +48,16 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { parseKnownBaselineFailures } from '../lib/gates/completion/backtest.js'
+/**
+ * ★ 注入给装载器的 `pluginRoot`：复用**主树自己**的那一个（见 `makeLoader` 里的 MEASURED）。
+ */
+import { pluginRoot } from '../lib/tools/shared/entities.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 /** ★ 清单的**真实路径**：断言不写死条数，而是从这一份现读（见文件头"避免白跑的读法"）。 */
@@ -134,8 +138,24 @@ function makeLoader() {
   `
   try {
     // eslint-disable-next-line no-new-func
-    return new Function('join', 'dirname', 'fileURLToPath', 'parseKnownBaselineFailures', body)(
-      join, dirname, fileURLToPath, parseKnownBaselineFailures)
+    return new Function('join', 'dirname', 'fileURLToPath', 'parseKnownBaselineFailures', 'pluginRoot', body)(
+      join, dirname, fileURLToPath, parseKnownBaselineFailures,
+      /**
+       * ── ★★★ `pluginRoot` 的注入值必须是【主树里真的存在】的那一个（2026-10-10 修）───
+       *
+       * MEASURED（本轮）：装载器的锚点从"相对 `import.meta.url` 数层数"改成了
+       * **`pluginRoot()`** —— 因为旧的两条候选**都落空**（候选 ① 少一层 ⇒
+       * `<仓库根>/lib/scripts/…` 不存在；候选 ② 是 `process.cwd()` ⇒ profile 目录）。
+       * ⇒ 这一格的被测对象多了一个自由变量，而它必须被**喂真值**。
+       *
+       * ★ 喂真值、而不是喂桩：下面每一臂都用受控的 `fakeRead` 决定"读得到什么"，
+       *   所以这里传什么路径其实不影响那些断言 —— 但**传一个不存在的目录**会让
+       *   本文件与主树在"锚点是什么"这件事上分叉，而那正是 t23 记的形状。
+       *   ⇒ 直接复用**主树自己的** `pluginRoot()`（从 `lib/tools/shared/entities.js`
+       *     导入）—— 它是真值，且没有第二份层数知识会漂移。
+       */
+      pluginRoot,
+    )
   } catch (error) {
     throw new Error(
       '★ 接线臂：装载器那一段源码剥类型之后仍不能求值 —— '
@@ -277,22 +297,58 @@ test('臂 5 ★★★ 三态两两不同形：在场 / 缺席 / 在场但读不�
   assert.notEqual(typeof thrown, typeof absent, '★ ②与③不同形（一个是值，一个是抛出）')
 })
 
-// ── 臂 6 ★★ 候选列表语义：第一个不存在 ⇒ 试第二个（不许因"第一个没有"就报错）─────
-test('臂 6 ★★ 候选列表：第一个候选不存在时【必须继续试下一个】', () => {
-  let calls = 0
-  const contents = () => { calls += 1; return realText }
-  const load = makeLoader()
-  // 先让第一次读抛 ENOENT，第二次给出真实文本
-  let first = true
-  const planfulRead = (path) => {
-    if (first) { first = false; const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e }
-    return contents(path)
-  }
-  const result = runLoader(load, planfulRead)
-  assert.equal(calls, 1, '★ 前置：第二个候选真的被读了')
-  assert.ok(Array.isArray(result) && result.length === realCount,
-    '★★ "试下一个候选"这条语义必须保住：候选列表里第一个不存在是【正常】的。'
-    + '⇒ 只有 ENOENT 才 continue；别的失败一律不许静默。')
+// ── 臂 6 ★★★ 锚点必须是 `pluginRoot()`，且它推出来的路径【真的存在】─────────────
+test('臂 6 ★★★ 锚点：装载器必须从 `pluginRoot()` 读，而那个路径必须真的存在', () => {
+  /**
+   * ── ★★★ 本臂为什么这么写（2026-10-10 改，原臂测的是一个已删除的兜底）──────────
+   *
+   * MEASURED（本轮）：装载器原本有**两个候选**，而**两个都落空**：
+   *   ① `join(dirname(import.meta.url), '..','..','scripts',…)`
+   *      ⇒ `here = lib/tools/update-task/` ⇒ 得 `<仓库根>/lib/scripts/…`
+   *      ⇒ ★ 而 `lib/` 下**没有** `scripts/`（实测 No such file）⇒ 永远失败；
+   *      ★ 根因是**少一层**：到仓库根是三级（update-task → tools → lib → 仓库根）。
+   *   ② `join(process.cwd(), 'scripts', …)` ⇒ 宿主 cwd 是 **profile 目录** ⇒ 永远失败。
+   *   ⇒ 恒 `undefined` ⇒ 判据走第三态 ⇒ **pin 清单多少条都扣不掉任何已知失败**。
+   *
+   * ★ 而"层数错"这件事的读数是【读不到】—— 与"这个文件不在这儿"**同形**
+   *   （`quality-gates.ts:1093` 记的同一个坑）。所以本臂**不**断言"那个函数返回什么字符串"，
+   *   而是断言两件**不依赖层数知识**的事实：
+   *     (a) 源码里那一个候选**由 `pluginRoot()` 推出**（而不是数层数 / 用 cwd）；
+   *     (b) 它推出来的**那个路径真的存在** —— 一条只依赖结果的判据。
+   *
+   * ★ 定向突变：
+   *   · 把锚点改回 `join(here, '..','..','scripts',…)` ⇒ (a) 红（且 (b) 也为红：
+   *     `lib/scripts/…` 不存在）；
+   *   · 把锚点改成 `process.cwd()` ⇒ (a) 红；
+   *   · 保留 `pluginRoot()` 但把 `'scripts'` 写错一层 ⇒ (b) 红。
+   */
+  const source = readFileSync(join(ROOT, 'src', 'tools', 'update-task', 'completion.ts'), 'utf8')
+  const start = source.indexOf('function loadKnownBaselineFailures')
+  const end = source.indexOf('return undefined', start)
+  assert.ok(start > 0 && end > start, '★ 前置：装载器那一段必须能在源码里定位到')
+  const loaderSource = source.slice(start, end)
+
+  assert.match(
+    loaderSource, /pluginRoot\(\)/u,
+    '★★★ 锚点必须是 `pluginRoot()`（插件自己的树 —— 这份清单跟着源码走，与用户 workspace 无关）。'
+    + '★ 不许改回"相对 import.meta.url 数层数"：层数错的表现是【读不到】，'
+    + '与"文件不在这儿"同形 —— 而那正是本条缺陷的成因。',
+  )
+  assert.doesNotMatch(
+    loaderSource, /process\.cwd\(\)/u,
+    '★★ 候选 ②（`process.cwd()`）必须删掉：宿主 cwd 是 profile 目录（实测），'
+    + '这条候选【永远失败】；更坏的是它把"读到了【错地方】的那一份文件"与"读到了"做成同形 ——'
+    + '若 profile 下恰好也有一份同名文件，判据会拿别人家的清单去扣本队的已知失败，且不报错。',
+  )
+
+  /**
+   * (b) 结果判据：`pluginRoot()/scripts/fixtures/baseline-known-failures.json` 必须**真的存在**。
+   * ★ 用主树自己的 `pluginRoot()`（与 `makeLoader` 注入的是同一个），
+   *   而**不**在夹具里重算层数 —— 那会复制一份会漂移的层数知识。
+   */
+  const anchor = join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json')
+  assert.equal(existsSync(anchor), true,
+    `★★ "层数错"的表现是【读不到】而不是报错 ⇒ 本臂只认结果：${anchor} 必须真的存在。`)
 })
 
 // ── 臂 7 ★★ 反向半边：非 ENOENT 的读失败【不许】被当成"下一个候选" ──────────────

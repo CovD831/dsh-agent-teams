@@ -34,13 +34,12 @@
  */
 
 import { inputSurfaceOf, deriveCoverageInput, deriveScanDirs } from '../shared/entities.ts'
-import { resolveBaseRevision, readWorkspaceFileSync, runVerifyCommand, runVerifyCommandCaptured, writeWorkspaceFileSync, loadVerifyCommandRules, runInDetachedRevision } from '../shared/entities.ts'
+import { resolveBaseRevision, readWorkspaceFileSync, runVerifyCommand, runVerifyCommandCaptured, writeWorkspaceFileSync, loadVerifyCommandRules, runInDetachedRevision, pluginRoot } from '../shared/entities.ts'
 import { TERMINAL_TASK_STATUSES, type ReviewVerdict } from '../../types.ts'
 import type { GateEvaluation } from '../../gates/registry.ts'
 import { parseKnownBaselineFailures } from '../../gates/completion/backtest.ts'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 
 /**
  * ── ★★★ t92：这一格是 t70 的拆分【丢掉】的那条接线（t76 的修复）───────────────────
@@ -88,11 +87,93 @@ function isMissingFileError(error: unknown): boolean {
     && (error as { code?: unknown }).code === 'ENOENT'
 }
 
+/**
+ * ── ★★★ 锚点：`pluginRoot()`，而**不是** `import.meta.url` 的相对层数（2026-10-10 修）──
+ *
+ * MEASURED（本轮实测；这条缺陷正挡着全队终态写入）：
+ *
+ *   旧写法是**两个候选**，而**两个都落空** ⇒ 恒返回 `undefined`：
+ *
+ *   ① `join(here, '..', '..', 'scripts', …)`，`here = lib/tools/update-task/`
+ *      ⇒ 得 `<仓库根>/lib/scripts/fixtures/…`
+ *      ★ 而 `lib/` 下面**没有** `scripts/`（实测 `ls lib/scripts` ⇒ No such file）
+ *        ⇒ 候选 ① **永远失败**。
+ *      ★ 根因是**少一层**：从 `lib/tools/update-task/` 到仓库根是**三级**
+ *        （update-task → tools → lib → 仓库根），需要 `'..','..','..'`。
+ *      ★★ 而它**不报错** —— 层数错的表现是"读不到"，与"这个文件不在这儿"同形。
+ *        这正是 `quality-gates.ts:1093` 记的那个坑（"层数抄错不会报错、
+ *        只会指向一个不存在的目录"），本条是它的**第二个实例**。
+ *
+ *   ② `join(process.cwd(), 'scripts', …)` ⇒ 宿主 cwd 是 **profile 目录**
+ *      ⇒ 也**永远失败**。★ 而它比"失败"更坏：它把"读到了**错地方**的那一份文件"
+ *      与"读到了"做成同形 —— 若哪天 profile 下恰好也有一份同名文件，
+ *      判据会拿**别人家的清单**去扣本队的已知失败，而那**不会报错**。
+ *
+ *   ⇒ 后果：见 `undefined` ⇒ 判据走第三态「attribution is impossible」
+ *     ⇒ **pin 清单无论多少条都扣不掉任何已知失败**（18 条与 0 条同形）。
+ *
+ * ── 为什么这里 `pluginRoot()` 是**对的**锚点（与上面 `tools.ts` 那一处相反）──────
+ *
+ *   因为**这份文件是【插件自己的】数据文件**（`scripts/fixtures/baseline-known-failures.json`
+ *   随源码走）—— 它不是被审对象的属性，与**用户的工作区无关**。
+ *   ★ 这与 `tools/shared/entities.ts` 的 `loadVerifyCommandRules`（"数据文件跟着源码走"）
+ *     是**同一族**，而与本文件隔壁 `tools.ts` 里那个 `stateRoot`（要的是 workspace）
+ *     是**相反**的一族。⇒ 两处结论**相反而不是矛盾**：问的是"这是谁的树"。
+ *
+ * ── ★★★ 但它**不随包自动到达**：这条数据文件靠 `package.json` 的 `files` 显式收录 ────
+ *
+ *   MEASURED（本任务实测，独立审核工先发现、本处复核）：
+ *
+ *     · `scripts/git-artifacts.mjs` **没有任何 copy/拷贝动作**（`grep -n 'cp|copy|copyFile|mkdir'`
+ *       ⇒ 零匹配）；`tsconfig.json` 的 `rootDir = "src"` ⇒ **`lib/` 里根本不会有 `scripts/`**。
+ *     · 实测 `ls lib/scripts` ⇒ `No such file or directory`（**从未存在过**）。
+ *     ⇒ ★ 所以"`lib/` 里也有一份副本被 build 拷进去"这句**是假的**，本注释此前写错了它。
+ *
+ *   ⇒ 对**这份文件**而言，真实的到达路径**只有一条**：`package.json` 的 `files` 白名单里显式列了
+ *     `"scripts/fixtures/baseline-known-failures.json"`（本任务新增那一行）
+ *     ⇒ 它才与 `lib/` 一起进 npm 包。
+ *
+ *   ★ 措辞精度（审核工指出，免得后人读错）：`"lib"` 那一项是**整树收录**，所以**任何**放进
+ *     `lib/` 的文件都会随包走（实测：丢一个 `lib/scripts-probe.json` 进去 ⇒ 随包）。
+ *     ⇒ 所以"只能靠 `files`"这句话**只对这份文件成立** —— 它之所以不能走 `lib/` 那条路，
+ *       是因为 build 不拷贝而 `lib/scripts` 从不存在（上一段那两条实测）。
+ *       ★ 别把它读成"包里任何文件都只能靠 `files` 白名单"。
+ *
+ *   ★ 不收录会怎样（这就是"为什么必须显式收录"）：用户机器上**只有 `lib/`**
+ *     ⇒ `pluginRoot()/scripts/fixtures/baseline-known-failures.json` 不存在
+ *     ⇒ 装载器返回 `undefined` ⇒ 判据第三态「attribution is impossible」
+ *     ⇒ ★ **pin 清单 18 条与 0 条重新同形** —— 也就是本文件头刚刚修好的那一态，
+ *       会在**发行形态**下原样复活。
+ *
+ *   ★★ 而本机**测不出来**：profile 用 `link:` 指向仓库 ⇒ `scripts/` 就躺在 `lib/` 隔壁
+ *     （**巧合**，不是设计）⇒ 仓库内测试对"包缺文件"这一类缺陷是**盲**的。
+ *     ⇒ 所以这类缺陷必须在【只有 `lib/` 的插件家】那种形态下验（见 `files` 那一行）。
+ *
+ * ── ★ 同族未修的一处（队长裁定：本处不修，如实记在这里）─────────────────────────
+ *
+ *   `tools/shared/entities.ts` 的 `loadVerifyCommandRules` 读的是
+ *   `lib/gates/contract/verify-command-rules.json` —— ★ 该文件**同样不存在**，
+ *   它的两个候选在**安装形态下都落空**（`lib/gates/contract/` 不是构建产物）。
+ *   ⇒ 那是**同一族的缺陷**：本处（`baseline-known-failures.json`）已修，
+ *     **那一处未修、另记**（不在本任务范围内，未改 `entities.ts` 的任何代码）。
+ *
+ * ★ `pluginRoot()` 已经把层数钉死了（`lib/tools/shared/entities.js` ⇒ ×4，
+ *   见 `entities.ts` 那条 t39 注释），且已被 stamp 读数在生产里跑通
+ *   ⇒ 比在这里自己数层数安全：**数层数这件事本身已经错过两次**。
+ *
+ * ── ★★ 为什么可以直接 import（不必照 `quality-gates.ts` 本地化）─────────────────
+ *
+ *   `src/quality-gates.ts` 的本地化先例是"**新增**一条能把既存环闭合的边"⇒ TDZ。
+ *   这里不是：`completion.ts → shared/entities.ts` **早就存在两条边**
+ *   （本文件第 36 / 37 行的顶层具名导入），本轮只是往第 37 行的**具名列表**里
+ *   加了 `pluginRoot` 一个名字 ⇒ **模块图一字未变**。
+ *   （★ 与 `tools.ts:98` 的情形完全同族：那也是"往既有边上加一个名字"。）
+ *   ★ 而本地化在这里反而更危险：层数要按**本文件自己的位置**（`lib/tools/update-task/`
+ *     ⇒ 三级）重算，而重算正是已经错过两次的那件事。
+ */
 function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailures> | undefined {
-  const here = dirname(fileURLToPath(import.meta.url))
   const candidates = [
-    join(here, '..', '..', 'scripts', 'fixtures', 'baseline-known-failures.json'),
-    join(process.cwd(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
+    join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'),
   ]
   for (const candidate of candidates) {
     let text: string
@@ -118,7 +199,7 @@ function loadKnownBaselineFailures(): ReturnType<typeof parseKnownBaselineFailur
     /** ★ 判据拒收（形状坏了）⇒ 让它抛出去，**不吞** —— 那正是 `backtest.ts:192` 的意图。 */
     return parseKnownBaselineFailures(raw)
   }
-  /** ★ 两个候选都**不存在** ⇒ 这才是"清单缺席"（不是"没有已知失败"）⇒ 判据落回第三态。 */
+  /** ★ 候选**不存在** ⇒ 这才是"清单缺席"（不是"没有已知失败"）⇒ 判据落回第三态。 */
   return undefined
 }
 

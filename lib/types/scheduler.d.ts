@@ -75,8 +75,27 @@ export interface SchedulerConfig {
      * ★ 这是 R5 / 回测唯一的父版本来源。判据层在成员【汇报完成】时需要它，
      *   而那时派发已经结束 ⇒ 由调用方在这里记下来。
      *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
+     *
+     * ── ★★★ 第三个参数 `stateRoot`：把"团队住在哪"由【调用方猜】改成【调度器交】──
+     *
+     * MEASURED（2026-10-10 实测，本轮）：只有 `taskId` / `base` 时，调用方
+     * （`tools.ts` 的 `persistTaskBaseRevision`）**必须自己推出 stateDir 的根**，
+     * 而它手上没有 workspace ⇒ 两版实现都锚错了地方：
+     *   · 第一版 `process.cwd()` ⇒ 跟着**宿主进程的工作目录**走。实测宿主 cwd 是
+     *     profile 目录（`profiles/desktop`），而团队住在用户的仓库里
+     *     ⇒ `readdir` 不抛错、只是候选集为空 ⇒ **零错误、零日志、零迹象**；
+     *   · 第二版 `pluginRoot()` ⇒ 那是**插件自己的**目录，与 workspace **无关**；
+     *     两者相等**当且仅当插件恰好装在 workspace 里**（本机正是这个巧合）。
+     * ⇒ 两版的共同错误不是"层数算错了"，而是**这一格上根本没有可用的锚点**：
+     *   调用方拿不到 workspace，就永远只能猜。
+     *
+     * ★ `stateRoot` 已经在 `kickMember` 的作用域里（`stateRootOf(workspace, config)`），
+     *   而它与 web 路由 / 判据读的是**同一个**解析结果 ⇒ 这里交出去，锚点就只剩一个。
+     * ★ 为什么是"追加第三个位置参数"而不是改成一个对象：既有调用方只有一处
+     *   （`tools.ts`），位次追加是最小改动；而 `stateRoot` 声明为**必填**，
+     *   于是任何旧的两参实现会在**编译期**报错，而不是静默拿到一个错的值。
      */
-    readonly onWorktree?: (taskId: string, base: string) => void;
+    readonly onWorktree?: (taskId: string, base: string, stateRoot: string) => void;
     /**
      * ── ★ runtime 位置的接线点：一个成员【真的被派发出去】了 ─────────────────────
      *

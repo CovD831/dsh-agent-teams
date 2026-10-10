@@ -29,6 +29,7 @@
     "compatibility.json",
     "scripts/doctor.mjs",
     "scripts/compatibility.mjs",
+    "scripts/fixtures/baseline-known-failures.json",
     "pnpm-workspace.yaml"
   ],
   "license": "MIT",
