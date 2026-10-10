@@ -18,7 +18,7 @@ export const MAX_PROFILE_TASKS = 32
 /** Protocol excerpt length in the usage / prompt listing. */
 export const PROFILE_PROTOCOL_PROMPT_LIMIT = 240
 
-const PROFILE_KEYS = ['description', 'protocol', 'executionPrompt', 'fallback', 'members', 'tasks', 'taskPlanning', 'reviewPolicy'] as const
+const PROFILE_KEYS = ['description', 'protocol', 'executionPrompt', 'fallback', 'model', 'reasoning_effort', 'members', 'tasks', 'taskPlanning', 'reviewPolicy'] as const
 const REVIEW_POLICY_KEYS = ['requirementsMinRounds', 'requirementsMaxRounds', 'codeMaxRounds', 'maxRepairAttempts', 'requiredReviewers'] as const
 const MEMBER_KEYS = ['name', 'role', 'provider', 'model', 'reasoning_effort', 'executionPrompt', 'fallback'] as const
 const FALLBACK_KEYS = ['provider', 'model'] as const
@@ -55,6 +55,27 @@ export interface TeamProfileConfig {
   protocol?: string
   executionPrompt?: string
   fallback?: TeamModelFallbackConfig
+  /**
+   * ── ★★★ t15：这个花名册的**默认模型** —— 配一次，凡是这份 profile 建的队都照它起步 ──
+   *
+   * ★ 它补的是**粒度**上的一个缺口，而不是机制上的：`TeamProfileMemberConfig` 早就有
+   *   `provider`/`model`/`reasoning_effort`，而且逐成员那条路**本来就是通的**
+   *   （本任务实测：`members:[{name:'architect',model:'claude-opus'}]` 一路走到
+   *   member 记录上是 `model: 'claude-opus'`）。
+   *   但**没有**一个"这一队人默认都用某个模型"的落点 ⇒ 一支 8 人的花名册要把同一个
+   *   模型名抄 8 遍，而**抄第 8 遍时漏一个**的表现是"那一个成员悄悄跑在队长的路由上"。
+   *
+   * ★★ 优先级（**从宽到窄**，而窄的一定赢）：
+   *     成员显式声明 > 这份 profile 的默认 > 插件级 `memberModel` > 队长当前路由
+   *   ⇒ 前两级是"配置说了算"，后两级是**今天的既有行为**（一行没动）。
+   *
+   * ★ 三态：给了 ⇒ 该 profile 里**没有自己声明 model 的**成员拿它当默认；
+   *   不给 ⇒ **这一格不参与**，那些成员照旧走插件级/队长路由 ——
+   *   "没配默认"绝不能被实现成"默认是一个空路由"。
+   */
+  model?: string
+  /** 与 `model` 成对的默认推理档位。★ 只在成员自己没声明时生效。 */
+  reasoning_effort?: string
   members: TeamProfileMemberConfig[]
   /**
    * `captain` means the profile supplies people and guardrails only; the
@@ -297,6 +318,15 @@ function normalizeListedProfile(
   const protocol = optionalNonEmptyString(raw['protocol'], `${path}.protocol`)
   const executionPrompt = optionalNonEmptyString(raw['executionPrompt'], `${path}.executionPrompt`)
   const fallback = normalizeFallback(raw['fallback'], `${path}.fallback`)
+  /**
+   * ── ★★★ t15：这份 profile 的默认路由（两格，各自可选）──────────────────────────
+   *
+   * ★ 逐格读、**不合并成一个对象**：模型与档位是两件事，而"配了档位没配模型"是
+   *   一个**真实的**配置（它只对**已经由别处定下模型**的成员有意义）。
+   *   合成一个对象会让那种配置要么被拒、要么被静默丢掉一半。
+   */
+  const defaultModel = optionalNonEmptyString(raw['model'], `${path}.model`)
+  const defaultReasoningEffort = optionalNonEmptyString(raw['reasoning_effort'], `${path}.reasoning_effort`)
   const taskPlanning = normalizeTaskPlanning(raw['taskPlanning'], `${path}.taskPlanning`)
   const reviewPolicy = normalizeReviewPolicy(raw['reviewPolicy'], `${path}.reviewPolicy`)
   const membersRaw = raw['members']
@@ -313,7 +343,18 @@ function normalizeListedProfile(
   const memberByName = new Map<string, NormalizedProfileMember>()
   const memberByKey = new Map<string, NormalizedProfileMember>()
   for (let index = 0; index < membersRaw.length; index += 1) {
-    const member = normalizeMember(membersRaw[index], `${path}.members[${index}]`, listed.name)
+    /**
+     * ── ★★★ t15：先归一化，再**并入这份 profile 的默认** ────────────────────────
+     *
+     * ★ 顺序是要紧的：默认必须在**逐成员校验之后**才叠加。
+     *   反过来（先并默认再校验）会让"profile 默认了 provider"这类配置
+     *   得到一个**本来该被拒绝**的成员 —— 而那种配置的错处是真实的
+     *   （`provider` 必须与 `model` 成对），不该被默认值掩盖。
+     */
+    const member = applyProfileModelDefaults(
+      normalizeMember(membersRaw[index], `${path}.members[${index}]`, listed.name),
+      { ...defaultModel === undefined ? {} : { model: defaultModel }, ...defaultReasoningEffort === undefined ? {} : { reasoningEffort: defaultReasoningEffort } },
+    )
     const key = sanitizeKey(member.name)
     const colliding = memberByKey.get(key)
     if (colliding !== undefined) {
@@ -441,6 +482,50 @@ function optionalPositiveInt(value: unknown, path: string): number | undefined {
     throw new Error(`${path} must be a positive integer`)
   }
   return value as number
+}
+
+/**
+ * ── ★★★ t15：把 profile 的默认路由**并进**一个成员 —— 而"显式的一定赢" ────────────
+ *
+ * 优先级（从宽到窄，窄的赢）：
+ *
+ *     成员显式声明  >  这份 profile 的默认  >  插件级 `memberModel`  >  队长当前路由
+ *     └────────── 本函数管这一段 ──────────┘   └──── 今天已有的行为，一行不动 ────
+ *
+ * ★★ 它只**填空白**，绝不覆盖：一个成员自己写了 `model` ⇒ 那两格**原样返回**。
+ *   这一点是整个任务里最容易写错的一处 —— 写成"默认总是覆盖"的表现是
+ *   **显式的逐成员选择被静默丢掉**，而那种错误在读数上与"默认生效了"同形
+ *   （两边都得到一个不是用户要的模型）。
+ *
+ * ★ 而"没配默认"与"配了默认"必须**不同形**：`defaultModel === undefined` 时
+ *   返回的成员**一个键都不加**，于是它照旧走插件级/队长那条链 ——
+ *   绝不能把它变成 `model: undefined` 或空串（那会是一个**空路由**，
+ *   而"没配"的本意是"照旧"）。
+ *
+ * ★ 档位**独立**判断：成员自己写了 `reasoning_effort` 就留着它，哪怕它的模型
+ *   来自 profile 默认 —— 因为档位是"在这个模型上花多少算力"的**独立**选择。
+ *
+ * @param member - 已归一化的成员（`provider` 与 `model` 的配对已经校验过）。
+ * @param defaults - 这份 profile 的默认（两格各自可选）。
+ * @returns 该成员最终的路由片段；没有任何一格被填 ⇒ 原样返回。
+ */
+export function applyProfileModelDefaults(
+  member: NormalizedProfileMember,
+  defaults: { model?: string; reasoningEffort?: string },
+): NormalizedProfileMember {
+  /**
+   * ★ 只在成员**完全没声明 model** 时才填。
+   *   （`provider` 无 `model` 的组合在 `normalizeMember` 里已经被拒绝，
+   *   所以这里不必再处理"有 provider 没 model"那一种。）
+   */
+  const model = member.model ?? defaults.model
+  const reasoningEffort = member.reasoningEffort ?? defaults.reasoningEffort
+  /**
+   * ★ 三态落地：填不出任何东西时**返回原对象**（连一个键都不加）。
+   *   这是"没配默认 ⇒ 照旧走既有链条"的机械形式。
+   */
+  if (model === undefined && reasoningEffort === undefined) return member
+  return omitUndefined({ ...member, model, reasoningEffort })
 }
 
 function normalizeMember(

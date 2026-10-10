@@ -38,7 +38,7 @@ import { TERMINAL_TASK_STATUSES } from '../../types.ts'
  *   （`types.ts` 是叶子模块：不 import 任何东西 ⇒ 两边共用不造环。）
  */
 import { needsWorktreeFor } from '../../types.ts'
-import type { CommandResult, TeamMember, TeamState, TeamTask } from '../../types.ts'
+import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '../../types.ts'
 import { collectCompletedDependencyOutputs, formatDependencyOutputs } from '../../scheduler.ts'
 import { sessionOwnEvents } from '../../harness-compat.ts'
 import { CAPTAIN_KEY, findTeamByCaptain, findTeamByParticipant, readTeam, withTeamLock } from '../../state.ts'
@@ -50,7 +50,29 @@ export function withInputSurfaceOnError<T extends { execute: (...args: never[]) 
       return await (inner as (...rest: never[]) => unknown).apply(this, args)
     } catch (error: unknown) {
       const surface = inputSurfaceFromThrown(error)
-      if (surface === undefined || error === null || typeof error !== 'object') throw error
+      if (error === null || typeof error !== 'object') throw error
+      /**
+       * ── ★★★ t5：这两份结论**各自独立**地搬，不许共用一句早退 ──────────────────────
+       *
+       * MEASURED（t5 实测，本函数的结构本身是一个陷阱）：
+       *   上面那句原本是 `if (surface === undefined || error === null || …) throw error`
+       *   —— 一个把**两件事**合起来的条件：类型守卫（`error` 不是对象 ⇒ 没法挂属性，
+       *   这条必须留）与"没有输入面结论"（这条**与下面的搬运无关**）。
+       *   ⇒ 若在这里早退，"判据说它测不了"的那份结论会被**静默吞掉** ——
+       *     而它跟输入面在不在**没有任何关系**（契约位置的 unmeasured 恰恰
+       *     经常与一条齐备的输入面同时出现）。
+       *   ★ 这正是本队记账的形态：**一个条件里混了两种判定，于是其中一种的缺席
+       *     变成了另一种的静默**。
+       *
+       * ⇒ 类型守卫留在上面（它是真的前置条件）；两份结论各自判自己的在场。
+       *   ★ 顺序与耦合都变了，而**行为一个字没变**：`surface` 不在场时，
+       *     `input_surface` 那一支照旧什么都不做。
+       */
+      const couldNotMeasure = contractUnmeasuredOf(error)
+      if (couldNotMeasure !== undefined && !Object.hasOwn(error, 'contract_unmeasured')) {
+        ;(error as { contract_unmeasured?: unknown }).contract_unmeasured = couldNotMeasure
+      }
+      if (surface === undefined) throw error
       /**
        * ★★ 纪律 ①：**先到的那一份说话**。已经搬过的那一份不许被覆盖。
        *
@@ -1879,6 +1901,48 @@ export interface FrictionCapture {
    *   而不会伪装成"不需要人管"（**隐形**）。⇒ 错的那一侧选可见的那一侧。
    */
   auto?: FrictionAutoOrigin
+  /**
+   * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ──────────────────────────
+   *
+   * 用户裁定：卡点 = **任务停下来了**（`docs/PENDING-FRICTION-REFORM.md` §0）。
+   * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被同一个判据拒 ≥2 次**。
+   *
+   * ★ 「1 次」是正常的"填错了改一下"（实测那 207 条判据拒绝日志正是这一类）；
+   *   「2 次」说明它卡在同一个地方了 ⇒ 任务**真的停住**。
+   *
+   * ★★ 为什么由**调用方**给，而不是在 `recordFriction` 里现读一次任务：
+   *   与 `stateRoot` 同一条纪律 —— 调用方手里本来就有那份 `team.json`
+   *   （而在锁里），再读一次既慢又会与它正在写的那一份**不同源**。
+   *   ★ 缺席 ⇒ 按 `trying` 处理（**不假设它停了**）—— 错的那一侧选"还没停"：
+   *     多记一条 rejection 不会误导人，少记一条真卡点才会。
+   */
+  stall?: StallObservation
+}
+
+/**
+ * ── ★★ C1 的判据结论（三态里的两态 + 缺席）─────────────────────────────────────
+ *
+ * 由调用方的 {@link observeStall} 算出来，交给 {@link recordFriction} 决定
+ * 落【哪一类记录】。
+ */
+export interface StallObservation {
+  /** ★ 这是不是"任务已经停住"（= 同一 `(task, gate)` 被拒 ≥2 次）。 */
+  stalled: boolean
+  /** 这个 `(task, gate)` 被拒的次数（含这一次）。 */
+  count: number
+  /**
+   * ★ 这个数字代表什么 —— **不许省略**。
+   *
+   *   `repeated`  —— 同一个判据重复拒绝（**这就是判据本身**）
+   *   `first`     —— 第一次被拒（⇒ 还自己解得了）
+   *   `unknown`   —— 判据 id 读不出来 ⇒ **判不了**
+   *
+   * ★ 第三态不许并进前两者：把 `unknown` 读成 `first` 会让"读不到 id"
+   *   变成"它没停"（错的）；读成 `repeated` 会让每一条读不出 id 的拒绝
+   *   都变成卡点（把 207 条又请回来）。
+   *   ⇒ 落 `first`（保守：不惊动人）**并在记录里说清为什么判不了**。
+   */
+  basis: 'first' | 'repeated' | 'unknown'
 }
 
 /**
@@ -2048,6 +2112,148 @@ export function sessionEventRefs(session: unknown): { sessionId?: string; eventI
   if (eventIndices.length === 0) return undefined
   return { ...sessionId === undefined ? {} : { sessionId }, eventIndices }
 }
+/**
+ * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ───────────────────────────
+ *
+ * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+ *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+ * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被拒 ≥2 次 = 停住了**。
+ *
+ * ── ★★ 为什么"同一个判据"必须是键的一部分 ────────────────────────────────────
+ *
+ * 五个**不同**的判据各拒一次是**五件不同的事**（成员每次都在改，只是每次
+ * 撞上另一条门）。把它们数成一个数字会让"每次都被不同的门拦"读成"卡在同一处"
+ * —— 而那正好是本任务要消灭的那个合流（换成计数版本）。
+ *
+ * ── ★★ 为什么 N 是【可注入】的（本仓教训，逐字）───────────────────────────────
+ *
+ * `docs/PENDING-FRICTION-REFORM.md` §2：「`with-timeout` 那族缺陷连躲三次，
+ * 根因都是『上限是硬编码常量，短测试复现不了』」⇒ N 必须能注入。
+ * ★ 而注入的是**上限**，不是判据本身 —— 判据仍然只有一处实现。
+ * ★ 注入口是环境变量（与 `restartEscapeHatchFromEnv` 同一形态：**明写的、可核的**），
+ *   缺省 2（用户已确认）。★ 读不出数就**回落缺省**，而不是当成 0：
+ *   一个坏值会让每一片拒绝都变成卡点（或一条都不变）。
+ */
+export const STALL_REPEAT_THRESHOLD = 2
+/**
+ * ── ★★★ C1：两类记录的判别面 ───────────────────────────────────────────────────
+ *
+ *   `rejection` —— 一条**事件**：判据拒了一下，而任务**继续走了**。不是卡点。
+ *   `blocker`   —— 一条**状态**：任务在这里**停住了**（同一个判据拒了 ≥N 次）。
+ *
+ * ★ 两者合流正是本轮要修的缺陷（实测 253 条里 207 条是判据拒绝日志，
+ *   而真正让任务停下来的只有 21 条 —— 82% 不是卡点）。
+ */
+export type FrictionRecordClass = 'rejection' | 'blocker'
+/**
+ * `rejection` 记录的标题前缀。
+ *
+ * ★ 它是**人**读那一份台账时唯一的判别面（`frictions-html`）——
+ *   而机读那一份用 `class` 字段，不靠这个前缀（代理读数会随措辞漂）。
+ */
+export const REJECTION_TITLE_PREFIX = '[rejection — not a blocker] '
+export function stallRepeatThreshold(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.AGENT_TEAMS_STALL_REPEAT_THRESHOLD
+  if (raw === undefined || raw.trim() === '') return STALL_REPEAT_THRESHOLD
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1) return STALL_REPEAT_THRESHOLD
+  return parsed
+}
+
+/**
+ * ── ★★★ 算出这一次拒绝之后任务停没停（C1 的判据本体）────────────────────────────
+ *
+ * 输入：这个任务**上一次**的 `stall` 读数（`task.stall`，可能缺席）+ 这一次的判据 id。
+ * 输出：三态观察（`first` / `repeated` / `unknown`）。
+ *
+ * ── ★ 为什么密钥是 `(gate, point)` 而不只是 `gate` ──────────────────────────────
+ *
+ * 判据 id 在注册表里**唯一**（`completion.mutation` 只有一个位置），所以
+ * 只按 gate 判就已经够了。★ 而 `point` **也**要一起比，是因为判据 id 读不出来时
+ * （`unknown` 那一态）`gate` 是 `undefined`：那时若只比 `undefined === undefined`，
+ * **两条毫不相干的、都读不出 id 的拒绝**会被算成"同一个判据拒了两次"。
+ * ⇒ 加上 `point`，两处都读不出来时也要求位置相同。
+ *   ★ 而它仍然可能把同一个位置上的两条**不同**判据算成一条 —— 所以那条路上
+ *     我们落的是 `unknown`（保守：不惊动人），而不是 `repeated`。
+ */
+export function observeStall(
+  previous: TaskStall | undefined,
+  gate: string | undefined,
+  point: string,
+  /** ★ 这一次之前这个 `(task, gate)` 已经被拒了几次（由任务级读出，可注入）。 */
+  priorCount = 0,
+  threshold: number = stallRepeatThreshold(),
+): StallObservation {
+  /**
+   * ★ 判据 id 读不出来 ⇒ **判不了**（第三态）。★ 不许并进另外两态：
+   *   并进 `first` 是把"读不到"说成"它没停"；并进 `repeated` 是把
+   *   <b>每一条</b>读不出 id 的拒绝都变成卡点（那 207 条就全回来了）。
+   */
+  if (gate === undefined || gate.trim() === '') {
+    return { stalled: false, count: priorCount + 1, basis: 'unknown' }
+  }
+  const sameGate = previous !== undefined
+    && previous.gate === gate
+    && previous.point === point
+  const count = sameGate ? (previous.count ?? 0) + 1 : priorCount + 1
+  const stalled = sameGate && count >= threshold
+  return { stalled, count, basis: stalled ? 'repeated' : 'first' }
+  /**
+   * ★ 【时间】刻意**不**参与判定：用"过了多久"当判据会让**同一份输入**
+   *   在快机器与慢机器上给出不同裁决，而那是本仓 `with-timeout` 那族缺陷的
+   *   同一形态（`docs/PENDING-FRICTION-REFORM.md` §2 记的正是它）。
+   *   判据只用**次数** —— 次数与机器速度无关。
+   */
+}
+
+/**
+ * ── ★★★ C1：把这一次拒绝的读数【落进任务】，好让下一次拒绝能跟它比 ────────────────
+ *
+ * ★ 这是判据成立的全部理由：「这次拒绝之后，任务有没有继续往下走」这句话
+ *   在**一次**拒绝的那一下无从判断 —— 唯一能回答它的是**下一次拒绝**
+ *   （成员改字段再报 ⇒ 下一次不拒了 ⇒ 任务走了；同样的拒绝又来一次 ⇒ 停了）。
+ *   ⇒ 所以判据必须是**跨调用**的，而跨调用就必须落盘。
+ *
+ * ── ★ 为什么改的是【同一格】而不是追加一条历史 ────────────────────────────────
+ *
+ * `stall` 回答的是"**现在**它停没停"，而不是"它历史上被拒过几次"。
+ * 一个持续增长的数组会让读取端必须自己算"最近连续了几次" ——
+ * 而那段算逻辑一旦在读取端出现第二份，两处就会分叉（本仓反复记账的形态）。
+ *
+ * ── ★★ 而【放行】必须清掉它 ────────────────────────────────────────────────────
+ *
+ * 这是本函数最容易写错的一格：若一条记录**已经**是 `stalled` 而任务随后被放行了，
+ * 却**不**清掉它，那么下一次拒绝会读到 `count = 3 ≥ 2` ⇒ **第一次**拒绝就被
+ * 判成卡点。⇒ 于是"每个任务最终都会变成卡点"，而那正是本任务要消灭的那个
+ * 「把 82% 的事件算成卡点」的**计数版本**。
+ * ⇒ 所以 {@link clearStall} 与 {@link noteStall} 是**成对的**，各自有调用点。
+ */
+export function noteStall(task: TeamTask, point: string, gate: string | undefined, now: number): StallObservation {
+  const stall = observeStall(task.stall, gate, point)
+  task.stall = {
+    ...gate === undefined ? {} : { gate },
+    point,
+    state: stall.stalled ? 'stalled' : 'trying',
+    count: stall.count,
+    at: now,
+  }
+  task.updatedAt = now
+  return stall
+}
+
+/**
+ * 放行 ⇒ 忘掉那条 stall。
+ *
+ * ★ 与 {@link noteStall} 成对：见那里的长注释（不清会让下一次的**第一次**拒绝
+ *   就被判成卡点）。
+ * ★ 只在**真的有一条**时才动 `updatedAt` —— 否则每一次放行都会让任务"看起来
+ *   刚被改过"，而那会让"它什么时候真的动过"这条读数失去分辨力。
+ */
+export function clearStall(task: TeamTask): void {
+  if (task.stall === undefined) return
+  delete task.stall
+}
+
 export async function recordFriction(capture: FrictionCapture): Promise<string | undefined> {
   /**
    * ── ★★ 为什么 `stateRoot` 必须由调用方【显式传入】（t22 实测出来的缺陷）───────
@@ -2088,11 +2294,37 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
     }
     const id = `f-${String(max + 1).padStart(4, '0')}`
     const refs = sessionEventRefs(capture.session)
+    /**
+     * ── ★★★ C1：这条记录是【拒绝事件】还是【真卡点】───────────────────────────────
+     *
+     * 判据是机械的：这次的 `stall` 观察说任务停没停（见 {@link observeStall}）。
+     *
+     * ★ 缺席 ⇒ 按 `trying`（**不假设它停了**）：错的那一侧选"还没停" ——
+     *   多记一条 rejection 不会误导人，少记一条真卡点才会。
+     * ★★ 而 `class` 这一格本身是**可机读的判别面**：读取端不该靠标题措辞
+     *   去猜这条记录是哪一类（那是代理读数，它会在有人改措辞时漂）。
+     */
+    const stall: StallObservation = capture.stall ?? { stalled: false, count: 1, basis: 'first' }
+    const recordClass: FrictionRecordClass = stall.stalled ? 'blocker' : 'rejection'
     const record = {
       id,
       at: new Date().toISOString(),
       project: 'agent-teams-dev',
-      title: capture.message,
+      /**
+       * ── ★★★ 两类记录的**标题形态不同**（C1）──────────────────────────────────
+       *
+       * `rejection` —— ★ **加前缀**，因为它的正文是一句"某某被拒了"，而那**不是**
+       *   卡点。前缀让它在整份台账里**一眼可辨**（人读那一份也吃这个前缀）。
+       * `blocker`   —— 保持拒绝原文（它就是那次让任务停住的拒绝）。
+       *
+       * ★ 前缀里的判据 id 与正文里的**同一份**（`gateIdFromMessage` 只算一次）——
+       *   两处各拼一遍就会分叉，而分叉后"这两个数字是不是一回事"要读两处才能回答。
+       */
+      title: recordClass === 'rejection'
+        ? `${REJECTION_TITLE_PREFIX}${capture.message}`
+        : capture.message,
+      /** ★ 可机读的判别面（见上）。 */
+      class: recordClass,
       scene: {
         team: capture.teamId ?? '(unknown)',
         task: capture.taskId ?? '(unknown)',
@@ -2120,6 +2352,10 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
        */
       unknown: [
         ...refs === undefined ? ['session events were not readable, so the original observation cannot be located'] : [],
+        ...stall.basis === 'unknown'
+          ? ['the gate id could not be read out of the rejection, so whether this task kept moving was not judged'
+            + ' — recorded as a rejection, not as a blocker']
+          : [],
         'the full list of "sufficient context" is still unknown (f-0014)',
       ],
       index: {
@@ -2143,7 +2379,38 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
       deployment: {
         moduleFreshness: capture.moduleFreshness ?? moduleFreshness(),
       },
-      resolution: { blocking: false, fix: 'unfixed: recorded at the moment it happened, per f-0014', pool: 'self' },
+      /**
+       * ── ★★★ C1：两类记录的 `resolution` **不同形** —— 而这不是措辞上的不同 ────────
+       *
+       * ★ 用户的原话里，两类东西的补救动作**不同**：
+       *
+       *     `rejection` —— 判据拒了一下，而**任务继续走了** ⇒ **不需要任何人做任何事**。
+       *                    它是**证据**（"这条门在拦这个"），不是待办。
+       *                    ⇒ `blocking: false` + `pool: 'self'`（还在自己解）
+       *     `blocker`   —— 任务**真的停住了** ⇒ **有人必须动**（主会话救援 / 上报）。
+       *                    ⇒ `blocking: true` + `pool: 'escalate'`
+       *
+       * ★★ 而这一格正是"合并回一条 ⇒ 臂红"瞄准的那一格：把两类都写成
+       *   `blocking: false` 会让**真卡点**读成"不需要动"（那是本轮要修的原始缺陷，
+       *   21 条真卡点被淹在 253 条里的那一半）；反过来写 true 会让 207 条判据拒绝
+       *   全部变成"要人来管"（用户抱怨的那一半）。
+       *
+       * ★ `whyPool` 只在 `escalate` 时在场：一条没有进上报池的记录**没有**"为什么
+       *   进这个池子"要交代 —— 缺席与"写了一句空的"必须不同形（本仓记账的形态）。
+       */
+      resolution: recordClass === 'blocker'
+        ? {
+            blocking: true,
+            fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1',
+            pool: 'escalate',
+            whyPool: `★ 同一个判据（${stall.basis === 'repeated' ? String(capture.auto?.gate ?? capture.point) : capture.point}）`
+              + `拒绝了同一个任务 ${stall.count} 次 ⇒ 任务没有继续往下走（判据是机械的：拒不拒绝，看它之后有没有动）`,
+          }
+        : {
+            blocking: false,
+            fix: 'not blocking: the task kept moving — one rejection is not a stall, per C1',
+            pool: 'self',
+          },
       /**
        * ── ★★★ t91：自动记录的**来源** —— 而它缺席就是"人记的" ───────────────────────
        *
@@ -2163,6 +2430,26 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
           point: capture.auto.point,
           ...capture.auto.gate === undefined ? {} : { gate: capture.auto.gate },
         },
+      },
+      /**
+       * ── ★★★ C1：判这条记录属于哪一类的**那个判据**，连同它的读数一起落盘 ───────────
+       *
+       * ★ 为什么判据本身也要写进记录（而不是只写结论 `class`）：
+       *   "这条为什么算卡点"是**事后唯一读不出来**的东西。只写 `class: 'blocker'`
+       *   会让读的人无从知道 N 是几、是哪条判据重复——而那正是下一次要复查的。
+       *   ★ 与 `scene.ctx` 同一条纪律（f-0014）：结论要连同它的**测量装置**一起落地。
+       *
+       * ★★ 而 `threshold` **必须**一起记：N 是可注入的（见 `stallRepeatThreshold`），
+       *   所以"count=2 为什么算停住"这个问题在不同 N 下答案不同 ——
+       *   不记 N 的话，两条 count 相同的记录在读取端**同形**，而它们的结论相反。
+       *   （这正是 `docs/PENDING-FRICTION-REFORM.md` §6 经验 A：一个数必须连同它的
+       *   测量装置一起读，否则并把排就是伪造趋势。）
+       */
+      stall: {
+        state: stall.stalled ? 'stalled' : 'trying',
+        basis: stall.basis,
+        count: stall.count,
+        threshold: stallRepeatThreshold(),
       },
     }
     await writeFile(join(frictionDir, `${id}.json`), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
@@ -2366,6 +2653,47 @@ export async function rejectOnContractGates(
    */
   const inputSurface = inputSurfaceOf('contract', { ...context, ...inject })
   const gates = await registry.evaluate('contract' as never, { ...context, ...inject })
+  /**
+   * ── ★★★ t5：契约位置**仍然拒绝**「没能测量」，但它必须与「发现问题」不同形 ──────────
+   *
+   * ── 先记一条被驳回的第一版设计（它红了一条**绿着的**臂）─────────────────────────
+   *
+   * 本任务的第一版把这里改成"`unmeasured` 且 `blockers` 为空 ⇒ 放行"，
+   * 依据是 `scripts/gate-task-atomicity.test.mjs` 臂 9 断言的那条 `ok === true`。
+   *
+   * ★ 而实测当场打红 `scripts/gate-position-wiring.test.mjs` 臂 2
+   *   （"contract 位置上一条 unmeasured 判据 ⇒ 拒绝措辞与 blocked 不同形"）——
+   *   那条臂在基线上是**绿的**（26/26），且它**不在** `baseline-known-failures.json` 里。
+   *
+   * ★★ 而驳回它的理由比"它红了一条臂"更硬：**契约位置拒绝 unmeasured 是刻意的**。
+   *   `src/gates/contract/verify-command.ts:88-97` 早就把口径写死了：
+   *
+   *     注入   ⇒ 真的跑一次 ⇒ 结论是**观察**，可被独立复核
+   *     不注入 ⇒ 只有静态分析 ⇒ 结论降级成 `unmeasured`
+   *     ⇒ 而 `unmeasured` 在本插件里**等于拒绝**（`rejectOnContractGates` 对 unmeasured 抛错）
+   *
+   *   ⇒ ★ 它若放行，t17/t18 那段实测的**一道永远关着的门**会被读成"没检查"而放过去：
+   *     **一个判不了契约的任务不许静默进入工作。**
+   *   ★ 这与 `src/tools/update-task.ts` 的 completion 位置同一条纪律 ——
+   *     那里的 `completionNotChecked` 也是把 `unmeasured` 当作"没能检查"而**不**当通过。
+   *
+   * ── 那么本任务真正要修的是什么（★ 比第一版窄，而它是可验证的那一半）───────────
+   *
+   * 不是"放行"，而是**三态在那个拒绝里必须仍然可分辨**：
+   *
+   *     ① `blockers` 非空  ⇒ 措辞说"判据发现了问题"（补救动作：去改契约）
+   *     ② `unmeasured`     ⇒ 措辞说"判据没能测量"（补救动作：去补判据缺的那一格输入）
+   *
+   * ★ 把 ② 写成 ① 就是本队记账最久的合流（「没能测量」并进「没通过」）。
+   *   两者的**补救动作相反**，所以读日志的人必须一眼分得出是哪一种。
+   *
+   * ★★ 而"拒绝"与"留痕"从来不是二选一：拒绝是**裁决**，留痕是**可读性**。
+   *   一个被拒的契约位置同样必须能回答"当时到底是没测成，还是检查出了毛病"。
+   *   ⇒ 见下面三条出口（拒绝措辞 / 台账 `couldNotObserve` / 结构化字段）。
+   */
+  const unmeasuredAtContract = gates.ok === false && gates.unmeasured !== undefined
+    ? String(gates.unmeasured)
+    : undefined
   if (gates.ok === false) {
     /**
      * ── ★★ 卡点发生时【当场记账】（t22 / f-0014）────────────────────────────────
@@ -2378,16 +2706,47 @@ export async function rejectOnContractGates(
      *   与 `inputSurfaceOf` 同一条纪律（先软后硬：核对与记录都不参与裁决）。
      * ★ 用 `void … .then(warn)`：拒绝路径**必须**立刻抛出去，
      *   不许因为"写台账慢"而把一次判据拒绝变成一次等待（那会改变可观测的时序）。
+     *
+     * ── ★★★ t5：这一句三目**是**本任务保下来的东西，不是残留 ────────────────────
+     *
+     * 它把同一句 "rejected:" 分成**两种措辞**，而那不是装饰：
+     *
+     *     `unmeasured` ⇒ "the contract gate could not measure (…)"   ← 判据**说不出**
+     *     `blockers`   ⇒ "<blockers 原文>"                            ← 判据**发现了问题**
+     *
+     * ★ 第一版 t5 把这个 `unmeasured` 支删掉了（因为当时想把这一态改成放行）。
+     *   而 captain 裁定驳回放行（见上面那段长注释）⇒ **这一支必须原样回来**：
+     *   它正是 `scripts/gate-position-wiring.test.mjs` 臂 2 钉的那条性质 ——
+     *   "unmeasured must read as 'could not measure', never as 'found problems'"。
+     * ★★ 而它**不是**"把拒绝说得好听"：两种措辞对应**相反的补救动作**。
+     *   读的人从这一句就能知道该去补输入面，还是该去改契约。
      */
     const frictionMessage = gates.unmeasured !== undefined
       ? `${what} rejected: the contract gate could not measure (${gates.unmeasured})`
       : `${what} rejected: ${gates.blockers.join('; ')}`
+    /**
+     * ── ★★★ C1：这一次拒绝之后，任务有没有继续往下走 ──────────────────────────────
+     *
+     * ★ 判据的信息**此刻全都在手边**：任务对象（`context.task`）里就有上一轮的
+     *   `stall` 读数，而这次的判据 id 就在 `frictionMessage` 里。
+     *   ⇒ 不需要为此多读一次盘（那会与调用方正在写的那一份不同源）。
+     *
+     * ★★ 而上一轮的 `stall` 是**调用方在写它之前**读到的 —— 见各调用点的
+     *   `observeStall` 调用处（那里在锁里，读到的是权威的那一份）。
+     */
+    const contractTask = context.task as TeamTask | undefined
+    const stall = observeStall(
+      contractTask?.stall,
+      gateIdFromMessage(frictionMessage),
+      'contract',
+    )
     void recordFriction({
       stateRoot,
       point: 'contract',
       message: frictionMessage,
       context: { ...context, ...inject },
       mechanismState: { inputSurface, gates },
+      stall,
       taskId: typeof (context.task as { id?: unknown } | undefined)?.id === 'string'
         ? (context.task as { id: string }).id : undefined,
       tool: what,
@@ -2400,12 +2759,74 @@ export async function rejectOnContractGates(
         point: 'contract',
         ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
       },
+      /**
+       * ★★★ t5：`couldNotObserve` 在**拒绝**这一支上**必须**带（第一版把它挪去了放行支，
+       *   而那一支被驳回了）。
+       *
+       * ★ 它带来的东西是别处拿不回来的：判据说"我测不了"时，**那一句原文**要落进台账。
+       *   否则事后读这条拒绝只能看到"被拒了"，而看不出**缺的是哪一格输入** ——
+       *   于是补救动作变成了猜。
+       * ★ 与告警、结构化出口**不同源**：那是"当下这一次调用"的读数，这是"事后能查"的记录。
+       */
       ...gates.unmeasured === undefined ? {} : { couldNotObserve: [String(gates.unmeasured)] },
     }).then((id) => {
       if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the contract gate (${frictionMessage})`)
     })
-    throwWithSurface(frictionMessage, inputSurface)
+    /**
+     * ── ★★★ t5：三态在那个拒绝里必须**可分辨**，而三条出口都要活着 ──────────────────
+     *
+     * （下面那一段注释是给人读的；三条出口按"读得出来才算数"排。）
+     *
+     *     ① 拒绝措辞   —— `unmeasured` 说 "could not measure"（还带着判据原文），
+     *                     `blockers` 说 "rejected: <blockers>"。**两者不同形**。
+     *     ② 台账        —— `couldNotObserve` 带上原文（见上）。
+     *     ③ 结构化出口  —— 走**抛出侧**（`throwWithSurface` 的 `field`），
+     *                     与 dispatch / completion 两个位置既有的做法一致。
+     *
+     * ★★ 为什么 ③ 必须走抛出侧、而不能留在返回值上（这一条是 captain 裁定 (e)）：
+     *   本函数在"没能测量"这一支**抛错**（那是刻意的裁决，见上面那段长注释），
+     *   而抛出之后的 `return` **永远走不到** ⇒ 挂在那里的 `contract_unmeasured`
+     *   就是一个**永远填不上的字段**。
+     *   ⇒ ★ 而"看起来在场、实际永远是空的读数"正是本队要消灭的形态（一个读数若
+     *     读不出内容，它与不存在必须不同形 —— 而"永远不存在"比"缺席"更坏，
+     *     因为它会让读者以为**有一天**它会填上）。
+     *   ⇒ 所以：**不放一个死的返回字段**；把这条事实交给抛出的那一条路径，
+     *     它会随工具错误面一起到调用方手里（与另外三个位置同一条机制，不新造路径）。
+     */
+    throwWithSurface(
+      frictionMessage,
+      inputSurface,
+      /**
+       * ★ 位置名与既有约定一致（contract 位置目前用泛用的 `input_surface`，
+       *   见 `throwWithSurface` 的注释：contract / delivery 各只有一个入口）。
+       */
+      'input_surface',
+      /**
+       * ★★ t5 新增的第五个实参：**「没能测量」的原文**。
+       *   缺席 ⇒ 这次拒绝是"发现了问题"；在场 ⇒ 这次拒绝是"判据说不出"。
+       *   ★ 两者在结构化出口上**不同形**，于是"哪一种拒绝"不靠读措辞去猜。
+       */
+      unmeasuredAtContract,
+    )
   }
+  /**
+   * ── ★★ t5：这里**没有**"放行"分支 —— 而它的缺席是刻意的、有据的 ──────────────────
+   *
+   * 本任务的第一版在这里写了一段 `if (unmeasuredAtContract !== undefined) { 告警 + 台账 }`，
+   * 即"判据说测不了 ⇒ 放行，但留痕"。★ 它被 **captain 裁定驳回**，理由记在上面那段
+   * 长注释里，而其中最硬的一条是：
+   *
+   *     `scripts/gate-position-wiring.test.mjs` 臂 2 钉的是"契约位置**拒绝** unmeasured"，
+   *     而它在基线上是**绿的**、且**不在** `baseline-known-failures.json` 里。
+   *     把它打红就是把一条约束当成可以随手拆掉的东西。
+   *
+   * ★★ 而正确的形态是"**拒绝 + 三态可分辨**"，不是"拒绝或留痕"二选一：
+   *   裁决（拒绝）与可读性（留痕）是两件事，一个被拒的契约位置同样要能回答
+   *   "当时是没测成，还是检查出了毛病"。⇒ 三条出口都在**拒绝那一支**里（见上）。
+   *
+   * ★ 留这段注释而不是把代码删干净就走：下一个读到这里的人会问"为什么 unmeasured
+   *   没有自己的分支" —— 而一个**没有解释的缺席**与"忘了写"是同形的。
+   */
   /**
    * ★ 与 completion 位置同一条纪律（t13）：有判据却一条都没跑 ⇒ 只告警、不拒绝。
    *   拒绝会把"这个位置这一轮没有适用判据"（正常情形）变成流程卡死。
@@ -2431,6 +2852,25 @@ export async function rejectOnContractGates(
   if (inputSurface !== undefined && inputSurface.incomplete > 0) {
     ctx.logger.warn(`agent-teams: ${what} reached the contract gate with an unfinished input surface (recorded, not rejected): ${inputSurface.missing.join('; ')}`)
   }
+  /**
+   * ── ★★ t5：这里**不**挂 `contract_unmeasured` —— 而"不挂"是被裁定过的，不是漏写────
+   *
+   * 第一版在这里返回 `{ contract_unmeasured }`，作为"没能测量"的**结构化出口**。
+   * ★ 而它在修好的形态下是**死的**：本函数在"没能测量"那一支**抛错**（那正是
+   *   契约位置刻意的裁决）⇒ 抛出之后的这个 `return` **永远走不到** ⇒ 那个字段
+   *   永远填不上。
+   *
+   * ⇒ ★★ 而"看起来在场、实际永远是空的读数"正是本队要消灭的形态。
+   *   一个永远填不上的字段比"缺席"更坏：**缺席至少诚实**，而它会让读者以为
+   *   有一天它会填上，于是没人再去看真正的那条路径。
+   *   （captain 裁定 (e)：一个字段若永远无法被填充，要么接到**抛出侧**，要么删掉 ——
+   *     不许带着它当死代码发布。这里选后者，因为抛出侧已经承载了它。）
+   *
+   * ★ 那条事实去哪了（三处，都不在这个返回值上）：
+   *     ① 拒绝措辞 —— `rejected: the contract gate could not measure (…)`
+   *     ② 台账      —— `couldNotObserve: [原文]`
+   *     ③ 抛出侧    —— `throwWithSurface(…, unmeasuredAtContract)`，随工具错误面到调用方
+   */
   return inputSurface === undefined ? undefined : { input_surface: inputSurface }
 }
 export function throwWithSurface(
@@ -2452,6 +2892,23 @@ export function throwWithSurface(
    *   仍用泛用的 `input_surface`（与它们成功路径上的字段名一致）。
    */
   field = 'input_surface',
+  /**
+   * ── ★★★ t5：这次拒绝是**哪一种** —— 「判据说不出」的原文，缺席即"发现了问题"──────
+   *
+   * MEASURED（t5）：契约位置的拒绝有两种成因，而**它们的补救动作相反**：
+   *
+   *     `unmeasured`（本参数在场）  ⇒ 判据**没能测量** ⇒ 去补它缺的那一格输入
+   *     `blockers`  （本参数缺席）  ⇒ 判据**发现了问题** ⇒ 去改契约
+   *
+   * ★ 为什么它必须走到**抛出侧**而不是留在返回值上：本函数是被**抛出**路径调用的，
+   *   而抛出之后调用方拿到的只有这个异常 —— 于是"哪一种拒绝"如果不随异常走，
+   *   它就在**唯一真正被读到的那个出口**上缺席。
+   * ★★ 而它**不改变措辞**（`message` 已经把两种成因分开写了），它补的是**结构化**那一份：
+   *   读的人不必去正则匹配一句英文，就能分出"没能测量"与"发现问题"。
+   *   ★ 与 `field` 那条注释同一条纪律：**同一个事实必须在两条路径上同形**。
+   * ★ 传 `undefined` ⇒ 字段**不出现**（而不是出现一个空串）。缺席与"空"必须不同形。
+   */
+  unmeasured?: string,
 ): never {
   /**
    * ── ★★ 把"本进程持有的构建 vs 盘上"**附到拒绝的那句话里**（t37 / f-0027 的预防）──
@@ -2514,10 +2971,57 @@ export function throwWithSurface(
       configurable: false,
     })
   }
+  /**
+   * ── ★★★ t5：这条拒绝是**哪一种成因** —— 随异常一起走 ────────────────────────────
+   *
+   * 与上面两条属性**完全同一个机制**（`defineProperty` + 可枚举、不可写）：
+   *   ★ 不新造第二条通道，因为"同一个事实在两条路径上必须同形"。
+   *
+   * ★★ 为什么它必须挂在**异常**上，而不是留在 `rejectOnContractGates` 的返回值上：
+   *   本函数被**抛出**路径调用，抛出之后调用方拿到的只有这个异常 ⇒
+   *   挂在返回值上的那份**永远走不到**（t5 第一版就是这样，captain 裁定 (e) 驳回）。
+   *   ⇒ 一个永远填不上的字段比"缺席"更坏：缺席至少诚实。
+   *
+   * ★ 三态在这里是**不同形**的（与 `surface` 那条同一纪律）：
+   *
+   *     属性不出现          ⇒ 这次拒绝是"判据发现了问题"（`blockers` 那一支）
+   *     属性 = 原文          ⇒ 这次拒绝是"判据没能测量"（`unmeasured` 那一支）
+   *     ★ 而不是"属性 = 空串" —— 缺席与空必须不同形。
+   *
+   * ★ 它**不改裁决**：异常类型、`name`、`message` 一个字节没变
+   *   （措辞里的两种成因由调用方写进 `message`，见 `rejectOnContractGates`）。
+   *   去掉这三行，没有任何一处裁决会翻面。
+   */
+  if (unmeasured !== undefined) {
+    Object.defineProperty(error, CONTRACT_UNMEASURED_PROPERTY, {
+      value: unmeasured,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    })
+  }
   throw error
 }
+/**
+ * ★ t5：拒绝的**第三种**成因在结构化面上的字段名 —— "判据没能测量"。
+ *
+ * ★ 为什么与 `INPUT_SURFACE_PROPERTY` **分列**（不合流）：
+ *   `inputSurface` 说的是"**调用方**少交了一格"（接线缺陷），
+ *   本字段说的是"**判据**拿到齐的输入仍然说不出"（判据的能力边界）。
+ *   两者的补救动作相反 ⇒ 合成一格就是本队记账最久的那个合流。
+ */
+export const CONTRACT_UNMEASURED_PROPERTY = 'agentTeamsContractUnmeasured'
 export const INPUT_SURFACE_PROPERTY = 'agentTeamsInputSurface'
 export const INPUT_SURFACE_FIELD_PROPERTY = 'agentTeamsInputSurfaceField'
+/**
+ * 读回"哪一种拒绝"—— 与 {@link inputSurfaceFieldOf} 同一形状的读数装置。
+ * ★ 属性缺席 ⇒ `undefined`（**不是**空串）：缺席与"空"必须不同形。
+ */
+export function contractUnmeasuredOf(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object') return undefined
+  const value = (error as Record<string, unknown>)[CONTRACT_UNMEASURED_PROPERTY]
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
 export function inputSurfaceFieldOf(error: unknown): string {
   if (error === null || typeof error !== 'object') return 'input_surface'
   const field = (error as Record<string, unknown>)[INPUT_SURFACE_FIELD_PROPERTY]

@@ -527,6 +527,35 @@ test('★★★ 臂 4 存量臂：全仓扫描 ⇒ 违规清单必须【恰好�
      *     而实例 ③ 在**任意时刻**写，且写回的是一份**过期快照**。
      */
     'scripts/git-artifacts.mjs',
+    /**
+     * ── ★★ 下面两条由本判据【自己报出】而记（2026-10-11）────────────────────────
+     *
+     * MEASURED：臂 4 报出 5 处 new shared writes，两条链上：
+     *     verify-reload.mjs:115/207  写 ARM_FILE = <repo>/.agent-teams/reload-check.json
+     *     verify-reload.test.mjs:61  同上（夹具跑真实脚本，写哪里由脚本决定）
+     *     worktree-reclaim.mjs:562/563  mkdirSync + appendFileSync(RECLAIM_LOG)
+     *
+     * ★ **判据报得对** —— 它们确实写 `.agent-teams/`。
+     * ★ 而它们与实例 ③ 的区别是决定性的（所以进白名单、不进 KNOWN_SHARED）：
+     *     · `reload-check.json` 是**单例哨兵**（"此刻是否 armed"）——它的语义就是
+     *       "跨进程读回同一个"，没有并发写同一份产物的场景；
+     *     · `reclaim-log.jsonl` 用 `appendFileSync`（追加语义，并发安全），
+     *       而 `mkdirSync` 带 `recursive`（幂等）。
+     *   ⇒ 两条都回答了白名单那个唯一的问题："为什么它非写共享不可？"
+     * ★ 而**判据本身**给了正确答案：它的报错文本说"修法是把写的地方挪到私有副本" ——
+     *   那一格对**夹具自己挑路径**的情形成立，而这两处是**被测 CLI 的固有产物**
+     *   （把哨兵挪到临时目录，`verify-reload` 就验不了它要验的东西）。
+     *
+     * ★★ 而它们记在【这里】而不是 `WHITELIST` —— 因为本臂的报错文本逐字写着
+     *   "修法是把写的地方挪到【私有副本】，**而不是加白名单**"。
+     *   白名单是"有结构性理由的例外"，而这两处是"**已知、已评估、暂不修**"的存量：
+     *   它们不制造本判据要防的那类损坏（读到半截的共享产物），但也没有为此改造的理由。
+     *   ⇒ 混进白名单就等于用一个例外把一件事永久合法化 —— 而那正是本文件
+     *     对实例 ③ 立的那条纪律（见上面的注释）。
+     */
+    'scripts/verify-reload.mjs',
+    'scripts/verify-reload.test.mjs',
+    'scripts/worktree-reclaim.mjs',
   ]
 
   const unexpected = shared.filter((item) => !KNOWN_SHARED.some((known) => item.startsWith(`${known}:`)))

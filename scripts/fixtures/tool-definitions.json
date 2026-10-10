@@ -505,6 +505,14 @@
           "description": "Member name when an owner is specified. Omission puts this task in the shared pool; roles, subjects and descriptions do not assign an owner.",
           "type": "string"
         },
+        "bindModelReasoningEffort": {
+          "description": "Optional reasoning effort for the rebind requested by bindModelTo.",
+          "type": "string"
+        },
+        "bindModelTo": {
+          "description": "Rebind the model of an EXISTING task id. Fail-closed: refused once that task has executed (attempt > 0, claimed/in_progress, or settled).",
+          "type": "string"
+        },
         "coverageOf": {
           "description": "User-constraint / goal items this task covers.",
           "items": {
@@ -550,6 +558,10 @@
           ],
           "type": "string"
         },
+        "model": {
+          "description": "The model that runs THIS task. Recorded on the task record so the result keeps a single, answerable attribution even though one durable member executes many tasks across rounds. A review task may declare a different model from the implementation it judges.",
+          "type": "string"
+        },
         "nonGoals": {
           "description": "Explicit non-goals.",
           "items": {
@@ -567,6 +579,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "reasoning_effort": {
+          "description": "Optional reasoning effort for this task's model binding. Only meaningful together with model; \"default\" forces the target model's own default.",
+          "type": "string"
         },
         "resume": {
           "description": "If true, clear halted in the same lock before creating the task.",
@@ -710,6 +726,54 @@
           },
           "kind": {
             "type": "string"
+          },
+          "model_binding": {
+            "additionalProperties": false,
+            "properties": {
+              "enforced": {
+                "type": "boolean"
+              },
+              "member_model": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "note"
+            ],
+            "type": "object"
+          },
+          "model_binding_refused": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "task_id",
+              "reason"
+            ],
+            "type": "object"
           },
           "runtime_gates": {},
           "status": {
@@ -1389,7 +1453,26 @@
           "members": {
             "items": {
               "additionalProperties": true,
-              "properties": {},
+              "properties": {
+                "liveness": {
+                  "type": "string"
+                },
+                "liveness_readout": {
+                  "type": "string"
+                },
+                "liveness_reason": {
+                  "type": "string"
+                },
+                "stranded": {
+                  "type": "boolean"
+                },
+                "stranded_tasks": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
               "type": "object"
             },
             "type": "array"
@@ -1445,10 +1528,59 @@
             "type": "object"
           },
           "runtime_gates": {},
+          "stranded_work": {
+            "additionalProperties": false,
+            "properties": {
+              "checked": {
+                "type": "number"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "worktrees": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "dirty": {
+                      "type": "number"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "name",
+                    "dirty"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "status",
+              "message"
+            ],
+            "type": "object"
+          },
           "tasks": {
             "items": {
               "additionalProperties": true,
-              "properties": {},
+              "properties": {
+                "failure_kind": {
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             "type": "array"

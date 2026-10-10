@@ -19,7 +19,7 @@
     {
       "test": "臂 4 ★★ 全仓读数（如实报出）：合格多少、不合格多少、判不了多少",
       "fixture": "scripts/gate-producer-consumer.test.mjs",
-      "because": "全仓普查的记账值漂了：实测「完全无消费」的产出 14，而 scripts/gate-producer-consumer.test.mjs 里 pin 的记账值是 12 ⇒ 别的任务的交付在 src/tools/** 里新增了 2 条产出。⇒ 本条是【会随全仓改动增长】的读数，与清单改动无关。"
+      "because": "（成因面：scripts/gate-producer-consumer.test.mjs 臂 4 的两条上限）★ t7 复核并【改正了本条前面那段已经过时的实录】—— 它原写\"「完全无消费」实测 14、pin 12\"，而 t7 实测：`unconsumed` 现在**恰好是 12**（那条上限**已不再红**，原文的漂移已经不存在了），真正红的是**另一条**上限：`fixtureOnly` 实测 **21** > 记账值 **20**。★ 而多出来的那一条**不是**可以记账的存量：臂 4 自己的长注释（④）逐字判定它是`readContractGateVerdict`（`src/quality-gates.ts:1301`），形状正是 t41 —— 该做的是【去接线】，**不许**把上限调成 21。★★ t7 实测：`src/` 全仓对它的引用为【零】（只出现在 `quality-gates.ts` 自己的定义处），于是\"这条读数从未上过生产\"是可核的。★★★ 而 t7 **没有**接线，因为它现在被另一条已生效的裁定挡住（如实报告，不是没做）：`readContractGateVerdict` 对 `unmeasured` 的处置是 `rejects: false`（放行、但留痕），而 t5 的裁定（A.5）明确要求契约位置**保留拒绝** `unmeasured`（见 `src/gates/contract/verify-command.ts:88-97`，以及 `scripts/gate-position-wiring.test.mjs` 臂 2）。⇒ 直接把生产接到这条读数上，会让\"判不了契约的任务静默进入工作\" —— 那是 t5 刚裁定不许做的事。★ 修它需要先裁定【这条读数的口径】与【t5 的裁定】哪一个是对的，而那是一个跨 src/tools/shared/entities.ts 与 src/quality-gates.ts 的语义变更，两者都在 t7 的 inScope 之外 ⇒ 归 t21（它正是\"契约位置合并策略\"那条任务）。"
     },
     {
       "test": "scripts/gate-readout-uniform.test.mjs",
@@ -37,19 +37,9 @@
       "because": "（成因面：scripts/gate-runtime-liveness.test.mjs）runtime 位置「成员上报那一刻」的活动观察接线缺口（该臂明确独立于 t5 的夹具）。⇒ 属运行时接线面，与清单改动无关。"
     },
     {
-      "test": "★★★ 臂 4 存量臂：全仓扫描 ⇒ 违规清单必须【恰好】等于已知存量（新增即红）",
-      "fixture": "scripts/gate-shared-artifact-writes.test.mjs",
-      "because": "实测新增了 2 条共享写入：`scripts/worktree-reclaim.mjs:319/320` → shared alias。★ 那是 worktree 回收脚本里的写，由**别的任务**引入；本臂的语义恰是「新增即红」，所以它红得对。⇒ 成因在 scripts/worktree-reclaim.mjs，与清单改动无关。"
-    },
-    {
       "test": "★★ 臂 1（★★ 核心臂）：全仓普查，把\"多少处直接读 src/**、其中多少处该走统一口径\"如实报出",
       "fixture": "scripts/gate-source-reading-convention.test.mjs",
       "because": "全仓普查臂：它找的是「有夹具直接读 src/tools/** 的文本」这种写法。⇒ 随别的任务新增夹具而漂，与清单改动无关。"
-    },
-    {
-      "test": "臂 3 ★ 结构臂：import 图无环，且工具模块之间不许互相 import",
-      "fixture": "scripts/gate-tool-split.test.mjs",
-      "because": "（成因面：scripts/gate-tool-split.test.mjs）实测存在工具模块互相 import（`update-task.ts` ↔ `update-task/` 一族）。⇒ 这是【结构】上的既有违规，与清单改动无关；属 t19/t17 那一族要处理的接线面。"
     },
     {
       "test": "臂 1 ★ 文档点名的每一个 f-XXXX 都真的存在于台账里",
@@ -107,5 +97,6 @@
   "_not_self": "★ 本清单**不许**包含它自己的夹具（`scripts/gate-baseline-known-failures.test.mjs`）的臂 —— 否则会自指：该夹具一红就被 pin，于是\"它红\"这件事再也不被发现。这是一条可断言的规则（见该夹具的臂 5/臂 6），而不是一句忠告。",
   "_snapshot_caveat": "★ 本清单是【某一时刻的集合比对结果】，不是不变量 —— 见 `_measured_caveat`。⇒ 因此夹具断言的是【结构】（每条 because 具体、三态不同形、装载器可达、不含自己的臂），而「与当前红的差集」只作【报告】不作【断言】：那个量会随队友的并发 build 抖动。",
   "_retiring": "退一条的判据（写给下一个人）：那条失败【已经被修好了】—— 你能指出是哪个提交/哪次交付让它转绿，并且实测它在当前 HEAD 上确实不红了。★ 退场与加入【方向相反、风险也相反】：加入的风险是把新造成的失败洗成已知的；退场的风险是把一条【仍然红着】的红说成好了，于是它下次再红时会被读成已知的。⇒ 退一条必须【附上实测的绿读数】与【是哪个交付让它转绿的】，且只在它真的不红了之后才退。宁可留着，也不要凭我猜它该好了退。★ 本条的由来：t3 把臂 4 从判字符串末字符修成真结构判断，臂 4 由红转绿 ⇒ 它那条 pin 就此过时。（在此之前，本文件只写了 _adding 那一半，退场无人被授权 —— 那本身是一个缺口。）",
-  "_repaired_at": "981cb4f（2026-10-11，t10 终态写入被拒后由 captain 补）。MEASURED：这两条在 pristine a176e5d 上逐字复现 ⇒ 属存量，而 _verified_at=ba32130 的快照漏收了它们。★ 这正是本文件 _measured_caveat 预言的『清单腐化』第四次兑现（前三次是 inScope 漏构建产物：t1 漏 .d.ts、t9/t10 漏 stamp+client.js）。共同形状：『手写清单』与『工具生成的集合』靠人肉对齐必然漏。"
+  "_repaired_at": "981cb4f（2026-10-11，t10 终态写入被拒后由 captain 补）。MEASURED：这两条在 pristine a176e5d 上逐字复现 ⇒ 属存量，而 _verified_at=ba32130 的快照漏收了它们。★ 这正是本文件 _measured_caveat 预言的『清单腐化』第四次兑现（前三次是 inScope 漏构建产物：t1 漏 .d.ts、t9/t10 漏 stamp+client.js）。共同形状：『手写清单』与『工具生成的集合』靠人肉对齐必然漏。",
+  "_retired_at": "t7（2026-10-11）：19 条 → 17 条。★ 按本条上面那条 _retiring 判据退场，两条各附实测绿读数。（1）`scripts/gate-tool-split.test.mjs` 臂 3（结构臂：import 图无环、工具模块之间不许互相 import）—— ★ 实测当前 HEAD 上该文件 **6/6 绿**；让它的那条【结构违规】不再成立：`update-task/` 一族（`dispatch.ts` / `completion.ts`）现在是 `update-task.ts` 自己的私有子目录，是【同一个单元】而不是 A↔B；该臂自己的注释已写明这层分辨（由 `e7c889c` 提取）。★ 反证：把 `src/tools/status.ts` 加一行 `import … from \"./update-task.ts\"` ⇒ 臂 3 立刻红（实测）⇒ 该臂仍然可证伪，不是恒绿。（2）`scripts/gate-shared-artifact-writes.test.mjs` 臂 4（全仓扫描 ⇒ 违规清单恰好等于已知存量）—— ★ 该臂此前红是对的：实测 **5 条**新增共享写入（不是 pin 里记的 2 条），是 t7 在【成因处】修掉它们、而不是把上限往上抬：① `scripts/worktree-reclaim.mjs` 的 `recordReclaim` 收了 `repo=` 却【从未使用】，一律写模块级 `RECLAIM_LOG` ⇒ 夹具传私有树也落在共享树上（这正是 t68 那个\"两个动作在同一共享资源上没有序关系\"的形状）；改成由 `repo` 算出落点（缺省 `REPO_ROOT` ⇒ 生产落点逐字节不变）。② `scripts/verify-reload.mjs` + `verify-reload.test.mjs` 把 marker/backup 写死在 `ROOT/.agent-teams/` ⇒ 新增 `AGENT_TEAMS_RELOAD_STATE_DIR` 注入点，夹具注入 `mkdtemp` 私有树（缺省仍退回原行为：手工三阶段跨进程共享 marker 的性质一个字未变）。★ 实测退场后：该文件 **5/5 绿**，`verify-reload` 8/8 绿，`worktree-reclaim` 36/36 绿。★ 反证：把 `recordReclaim` 写回 `RECLAIM_LOG` ⇒ 臂 4 立刻红（实测）⇒ 扫到的确实是那条违规。★★ 另如实记一笔（本任务实测发现的【扫描器本身的】边界，未修，见 knownFailures 之外的记账）：该扫描器的共享别名解析只有【一层】—— `const logPath = RECLAIM_LOG` 之后写 `logPath`，它读不出那是共享落点（实测：把修复改成这种间接写法，臂 4 不红）。⇒ 本修**没有**用它来规避判据（落点是用 `join(repo, …)` 直接算出来的）；但这是一条真实的漏报面，应另立任务，不要以为\"绿了\"就等于\"这一格被封住\"。"
 }

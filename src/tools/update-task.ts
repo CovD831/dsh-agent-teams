@@ -140,7 +140,7 @@ import { existsSync, readFileSync } from 'node:fs'
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
-import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
+import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, noteStall, clearStall, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
 import { wireCompletion } from './update-task/completion.ts'
@@ -1410,12 +1410,42 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              */
             /** ★ 同 dispatch 位置：只剩 `blockers` 一种成因（见那里的注释）。 */
             const frictionMessage = `update_task rejected: ${completionGates.blockers.join('; ')}`
+            /**
+             * ── ★★★ C1：判「任务停下来了」而不是「判据报错了」───────────────────────
+             *
+             * ★ 位置：**在锁里**，且 `task` 就是权威的那一份 ⇒ 读到的 `task.stall`
+             *   与下面写回去的**同源**（再读一次盘就会读到另一个时刻的事实）。
+             *
+             * ★★ 顺序是刻意的：先 `noteStall`（把这次的次数落盘），再 `recordFriction`
+             *   （按那个次数决定这条记录是哪一类）。反过来会让记录读到**上一次**的
+             *   数字 —— 于是"第二次拒绝"这条记录会说自己是第一次，而卡点永远差一拍。
+             */
+            const stall = noteStall(task, 'completion', gateIdFromMessage(frictionMessage), Date.now())
+            /**
+             * ── ★★★ C1：这一次拒绝的读数必须【当场落盘】—— 否则判据根本不成立 ────────
+             *
+             * MEASURED（本任务第一版就撞了）：`noteStall` 只改了内存里的 `task`，
+             * 而下面的 `throwWithSurface` 会**在 `writeTeam` 之前**抛出去 ⇒
+             * `team.json` 里从来没有 `stall` ⇒ 下一次拒绝读到的仍是 `undefined`
+             * ⇒ **第一次永远判成第一次** ⇒ `stalled` 这个状态**永不可达**。
+             *
+             * ★ 而它是最难发现的一种坏法：`observeStall` 本身是纯函数、单测全绿、
+             *   `recordFriction` 也照常落一条记录 —— 只是**每一条都是 `rejection`**。
+             *   也就是"改动看起来装上了，而行为与改动前逐字相同"（差别只在多了一格字段）。
+             *
+             * ★★ 所以这里显式落盘，且**在抛出之前**：本判据的全部意义就是"跨调用"，
+             *   而跨调用 = 上一次的事实真的在盘上。
+             * ★ 放在锁里（本函数就是锁体）⇒ 与正在写的那一份**同源**，
+             *   不会与别人的并发改动互相覆盖。
+             */
+            await writeTeam(stateRoot, fresh)
             void recordFriction({
               stateRoot,
               point: 'completion',
               message: frictionMessage,
               context: completionContext,
               mechanismState: { inputSurface: completionInputSurface, gates: completionGates },
+              stall,
               session: caller.session,
               taskId: task.id,
               teamId: team.id,
@@ -1448,6 +1478,19 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * 判据【通过时】交出的产出：把判据层亲眼看到的 exitCode 并回 commandsRun，
            * 让落盘的是它看到的那个，而不是成员自报的。
            */
+          /**
+           * ── ★★★ C1：放行 ⇒ 忘掉那条 stall（与上面 `noteStall` **成对**）───────────
+           *
+           * ★ 不清它的后果是**单向**的：一条已经是 `stalled` 的记录留着，下一次
+           *   拒绝会读到 `count = 3 ≥ 2` ⇒ **第一次**拒绝就被判成卡点
+           *   ⇒ 于是每个任务最终都会变成卡点，而那正是本任务要消灭的
+           *   「把 82% 的事件算成卡点」的**计数版本**。
+           *
+           * ★ 位置：放在这里（判据放行之后、`evaluateQualityCompletion` 之前）——
+           *   它记的是「**这道门**放行了」这个事实，而不是"整条 update 成功"。
+           *   放在更后面会让后面任何一条拒绝都留下一个过期的 stall。
+           */
+          clearStall(task)
           const producedReruns = (completionGates.outputs['completion.verify-rerun']?.reruns ?? []) as CommandResult[]
           const mergedCommandsRun = producedReruns.length > 0
             ? mergeRerunIntoCommandsRun(commandsRun ?? task.commandsRun, producedReruns)

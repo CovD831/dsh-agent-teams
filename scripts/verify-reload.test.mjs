@@ -31,20 +31,45 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, existsSync, rmSync } from 'node:fs'
+import { readFileSync, existsSync, rmSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPT = join(ROOT, 'scripts', 'verify-reload.mjs')
 const STATE_SRC = join(ROOT, 'src', 'state.ts')
-const ARM_FILE = join(ROOT, '.agent-teams', 'reload-check.json')
-const BACKUP = join(ROOT, '.agent-teams', 'state.ts.reload-check.bak')
+
+/**
+ * ── ★★★ 本夹具的落点必须是【私有树】（t7）───────────────────────────────────────
+ *
+ * MEASURED（t7，`scripts/gate-shared-artifact-writes.test.mjs` 臂 4）：
+ *   本文件此前把 marker / backup 的落点写死成 `join(ROOT, '.agent-teams', …)`
+ *   —— 而 `ROOT` 是**仓库根**。⇒ 它每跑一次就在**共享树**上写两次
+ *   （`run(['arm'])` / `clean()` 的 `rmSync`），而那正是本判据要抓的形状：
+ *   **两个夹具同时跑就在同一个 marker 上互相踩**。
+ *
+ * ★ 修法：注入 `AGENT_TEAMS_RELOAD_STATE_DIR`（`verify-reload.mjs` t7 新增的注入点），
+ *   把三个落点全部挪进一棵 `mkdtemp` 出来的私有树。
+ * ★★ 而 `STATE_SRC`（`src/state.ts`）**仍然**是共享的 —— 那是这个工具**被测的东西**
+ *   （它种哨兵就是为了改一行源码、看改动穿不穿过工具边界）。
+ *   ⇒ 它由 `clean()` 与 `finally` 保证还原，而"它必须被改"是这个工具存在的理由，
+ *     不是一条可以搬去私有副本的写入。这一点如实写在这里，别让下一个人以为漏了。
+ */
+const STATE_DIR = mkdtempSync(join(tmpdir(), 'reload-check-'))
+const ARM_FILE = join(STATE_DIR, 'reload-check.json')
+const BACKUP = join(STATE_DIR, 'state.ts.reload-check.bak')
 
 /** 跑脚本，把**退出码与两个流**都取回来（判据靠退出码分形，所以必须收下它）。 */
 function run(args) {
   try {
-    const stdout = execFileSync('node', [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    const stdout = execFileSync('node', [SCRIPT, ...args], {
+      cwd: ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      /** ★ t7：注入私有落点 —— 缺了这一行，本夹具又在共享树上写了。 */
+      env: { ...process.env, AGENT_TEAMS_RELOAD_STATE_DIR: STATE_DIR },
+    })
     return { code: 0, stdout, stderr: '' }
   } catch (error) {
     return {

@@ -556,11 +556,46 @@ export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef = 'main
   return { scanned, reclaimable, kept, undecidable }
 }
 
-/** 一行痕迹。★ 没有它，「清理过」与「没清理」在观测上同形。 */
+/**
+ * 一行痕迹。★ 没有它，「清理过」与「没清理」在观测上同形。
+ *
+ * ── ★★★ 落点必须跟着 `repo` 走（t7 修；此前 `repo` 被【解构了却没用】）────────────
+ *
+ * MEASURED（t7，`scripts/gate-shared-artifact-writes.test.mjs` 臂 4）：
+ *   本函数此前签名收 `repo`，而函数体里写的是**模块级**的 `RECLAIM_LOG`
+ *   —— `repo` 一个字节都没被读过。⇒ 后果是一条**看起来被隔离、其实没有**的写：
+ *
+ *     `scripts/worktree-reclaim.test.mjs` 臂 12 传 `repo: f.repo`（一个 mkdtemp 私有树），
+ *     还专门写了一句「★ 落到一个临时路径（不污染真实仓库）」
+ *     —— ★ 而它实际写的是**仓库根的** `.agent-teams/reclaim-log.jsonl`。
+ *
+ * ★ 这正是本队记账最久的形态的一种：**一个参数在场，于是读的人以为那条路被堵住了**
+ *   —— 「写了 `repo:` 」与「真的写到 `repo` 去了」在源码上同形。
+ *   ★ 而它还有第二重危害：**并发**。多个夹具同时跑 ⇒ 它们全都在追加**同一个**共享文件
+ *     —— 那正是本判据（t68）存在的理由：两个动作在同一个共享资源上没有序关系。
+ *
+ * ── 修法：把落点**从参数算出来**，而不是从模块常量拿 ──────────────────────────────
+ *
+ * `join(repo, '.agent-teams', 'reclaim-log.jsonl')` —— 与 `RECLAIM_LOG` 的构造**同一个形状**
+ * （见上面它的定义：`join(ROOT, '.agent-teams', …)`），于是：
+ *
+ *   · 生产路径（不传 `repo`）⇒ `repo = REPO_ROOT` ⇒ 落点**逐字节等于**原来的 `RECLAIM_LOG`
+ *     ⇒ ★ 痕迹的用途（"清理过"读得出来）**一个字都没变**，我**没有**把它改成私有副本。
+ *   · 夹具路径（传 `repo: f.repo`）⇒ 落进那棵**私有树** ⇒ 不再与任何人共享。
+ *
+ * ★★ 为什么不是"把 `RECLAIM_LOG` 整个换成 tmpdir"：那是**错的修法** ——
+ *   这条痕迹的价值就在于它是**生产可读**的（`reclaim:worktrees` 跑完要在仓库里留一行）。
+ *   判据要的是"**别在共享树上写**"，而生产 CLI 的 `repo` **就是**它自己的仓库 ——
+ *   那不是"共享"，那是"它自己的落点"。★ 所以修的是**参数被忽略**，不是"别再写了"。
+ */
 export function recordReclaim({ repo = REPO_ROOT, result, reason }) {
   try {
-    mkdirSync(dirname(RECLAIM_LOG), { recursive: true })
-    appendFileSync(RECLAIM_LOG, `${JSON.stringify({
+    /**
+     * ★ 落点由 `repo` 算出（默认 `REPO_ROOT` ⇒ 与原 `RECLAIM_LOG` 逐字节相同）。
+     */
+    const logPath = join(repo, '.agent-teams', 'reclaim-log.jsonl')
+    mkdirSync(dirname(logPath), { recursive: true })
+    appendFileSync(logPath, `${JSON.stringify({
       at: new Date().toISOString(),
       reason,
       scanned: result.scanned,

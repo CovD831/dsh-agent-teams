@@ -54,7 +54,34 @@ import { fileURLToPath } from 'node:url'
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const STATE_SRC = join(ROOT, 'src', 'state.ts')
 const STATE_LIB = join(ROOT, 'lib', 'state.js')
-const ARM_FILE = join(ROOT, '.agent-teams', 'reload-check.json')
+/**
+ * ── ★★★ 落点的选择：跟着【调用方】走，而不是跟着【模块】走（t7）─────────────────
+ *
+ * MEASURED（t7，`scripts/gate-shared-artifact-writes.test.mjs` 臂 4）：
+ *   本文件此前把三个落点都写死成 `join(ROOT, '.agent-teams', …)` —— 而 `ROOT` 是
+ *   **本文件所在的那棵树**。⇒ `scripts/verify-reload.test.mjs`（它在 CI 里跑）调本脚本时，
+ *   每一次 `arm` / `clear` 都在**共享树**上写：
+ *
+ *     :115  writeFileSync(ARM_FILE)                       ← 夹具桶里的一条共享写入
+ *     :207  writeFileSync(ARM_FILE)
+ *     + `verify-reload.test.mjs:61` 的 `rmSync(ARM_FILE)`
+ *
+ * ★ 而本判据（t68）全部的意义就是"两个动作在同一个共享资源上没有序关系" ——
+ *   上面三条正是那个形状：**两个夹具同时跑，就在同一个 marker 上互相踩**。
+ *
+ * ── 修法：把落点做成【可注入】的（与 `worktree-reclaim.mjs` 的 `repo` 同一条纪律）──
+ *
+ * `AGENT_TEAMS_RELOAD_STATE_DIR` 在场 ⇒ 三个落点**全部**落进那个目录（夹具传
+ * `mkdtempSync` 出来的私有树）。缺席 ⇒ 逐字节退回原行为（**手工用的那三个阶段
+ * 必须跨进程共享同一个 marker** —— `arm` 与 `read` 是两次独立的 CLI 调用）。
+ *
+ * ★★ 为什么不是"把 marker 改成 tmpdir 就完事"：那会**改坏**这个工具的用法。
+ *   它的三个阶段（`arm` → 人去看 → `read` → `clear`）是**跨进程**的，
+ *   marker 必须活过中间那一步。⇒ 修的是"**夹具跑去写共享树**"，
+ *   不是"这个工具不该有 marker"。判据要的正是这个分辨。
+ */
+const STATE_DIR = process.env['AGENT_TEAMS_RELOAD_STATE_DIR'] ?? join(ROOT, '.agent-teams')
+const ARM_FILE = join(STATE_DIR, 'reload-check.json')
 
 /** 哨兵：一个绝不可能与代码里任何既有字符串碰撞的标记。 */
 const SENTINEL_PREFIX = 'RELOAD-CHECK-'
@@ -89,7 +116,14 @@ const command = process.argv[2]
 
 if (command === 'arm') {
   const existing = readArm()
-  if (existing !== undefined && existsSync(join(ROOT, '.agent-teams', 'state.ts.reload-check.bak'))) {
+  /**
+   * ★ t7：这条守卫也要看**同一个落点**（`STATE_DIR`），而不是写死的 `ROOT/.agent-teams/`。
+   *   MEASURED（t7 实测，本任务自己撞上）：改注入点后漏了这一行 ⇒ 幂等臂（臂 6）
+   *   当场红（拿到 3 而不是 2）—— 因为"arm 过没有"读的是私有树，
+   *   而这条守卫去共享树找那个 `.bak`，找不到 ⇒ 于是它**放行**第二次 arm。
+   *   ★ 而这正是本队记账的形态：**同一个事实在两处各写了一遍，改了一处就分叉**。
+   */
+  if (existing !== undefined && existsSync(join(STATE_DIR, 'state.ts.reload-check.bak'))) {
     fail(`已经种过一次了（哨兵 ${existing.sentinel}）。先跑 clear 再 arm。`, 2)
   }
   if (!existsSync(STATE_SRC)) fail(`找不到 ${STATE_SRC}`)
@@ -107,8 +141,10 @@ if (command === 'arm') {
   /**
    * ★ 备份放在**仓库内**（而不是 /tmp）：这样"忘了 clear"是可发现的 ——
    *   一个留在 `src/` 旁边的 `.bak` 会被 `git status` 看见。
+   * ★ t7：落点同样跟着 `STATE_DIR` 走（夹具注入私有树 ⇒ 不写共享树；
+   *   缺省仍是仓库内 `.agent-teams/` ⇒ 手工用法的"可发现"性质一个字没变）。
    */
-  const backup = join(ROOT, '.agent-teams', 'state.ts.reload-check.bak')
+  const backup = join(STATE_DIR, 'state.ts.reload-check.bak')
   copyFileSync(STATE_SRC, backup)
   writeFileSync(STATE_SRC, source.replace(TARGET_SRC, `${TARGET_SRC.slice(0, -1)} [${sentinel}]`))
 

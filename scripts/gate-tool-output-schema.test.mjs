@@ -57,6 +57,12 @@ import { fileURLToPath } from 'node:url'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
+/**
+ * ★ t12：`FAILURE_KINDS` 是**判据那一侧的权威清单**（`src/state.ts` 导出）。
+ *   ★ 从**构建产物**导入而不是在夹具里手抄一份：手抄的第二份真相会与产品慢慢分叉，
+ *     而"夹具说三种"与"产品只产出两种"在断言层面就不再同形 —— 那正是本队记账的形态。
+ */
+import { FAILURE_KINDS } from '../lib/state.js'
 // ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
 import { toolsSource } from './tools-source.mjs'
 
@@ -809,3 +815,259 @@ test('★ 臂 6（t35 的对照臂）：delivery 报 unmeasured 时，**它不�
     '★ 调用点把那条 unmeasured 完全丢掉了 —— 那比读错更坏：静默与"测过了"同形',
   )
 })
+
+/**
+ * ── ★★★ 臂 7 / 8 / 9（t12）：`failure_kind` 必须**到达读者**，且三种取值不同形 ────────
+ *
+ * ── 这一节修的是什么（MEASURED，t12 开工时的普查）────────────────────────────────
+ *
+ * `src/state.ts` 的 `failureKindOf()` **早就**实现了三态细分（t26 做的），顺序是
+ * "最确定 → 最保守"：
+ *
+ *     ① `inconclusive`     —— 有 verdict 的失败（`needs_revision` / `reject`）
+ *     ② `failed_delivery`  —— 有实测证据说交付物坏了（验收项 failed / verify 非 0）
+ *     ③ `failed_context`   —— 都不成立 ⇒ 最保守的缺省
+ *
+ * ★ 而 `grep -rn failureKindOf src/` 只命中 `state.ts` **自己**（`src/` 里
+ *   **一个消费者都没有**；唯一的读者是一条测试）。而 `agent_teams_status` 投影任务时
+ *   此前只交 `status: task.status` ⇒
+ *
+ *     **正确的区分被算出来，然后在到达任何读者之前被丢掉。**
+ *
+ * ── 为什么这一节属于【本文件】──────────────────────────────────────────────────
+ *
+ * 本文件守的是「工具的输出 schema 必须接受它自己会返回的东西」。t12 的修法正是在
+ * 这一层：`status` 的 `tasks[]` 拿到了一个新字段 `failure_kind`。★ 若只改产出、
+ * 不改 schema，宿主会在 `createSuccessResult` 里当场拒掉那一次返回 ——
+ * 那正是本文件臂 1 存在的理由（t14 那一类，已经发生过一次）。
+ *
+ * ★ 而它必须走**真实的** `agent_teams_status` 调用（不是只调 `failureKindOf`）：
+ *   后者在 `state.ts` 里本来就是对的（t26 的臂已经钉过它）。本任务要修的是
+ *   **它在读取路径上被丢掉** —— 而"被丢掉"只有从**读取出口**看才看得见。
+ */
+
+/** 一个带**真实 failed 任务**的 status 夹具（`statusFixture` 的 t12 变体）。 */
+async function failureFixture() {
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { execFileSync } = await import('node:child_process')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const ws = mkdtempSync(join(tmpdir(), 't12-failure-kind-'))
+  const git = (args) => execFileSync('git', args, { cwd: ws, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git(['init', '-q', '.'])
+  writeFileSync(join(ws, 'a.ts'), 'a\n')
+  git(['add', '-A'])
+  git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+
+  /**
+   * ★ 三条 `failed` 任务，**唯一变量**是"有没有 verdict / 有没有实测证据" ——
+   *   于是三条断言各自只测它声称的那一格（不是靠 id 猜，见下面 `byId`）。
+   * ★ 另加一条 `completed` 任务：它是**对照**，钉住"缺席 ≠ 这一格是空的"
+   *   （见臂 7 的反向半边）。
+   */
+  await createTeamDir(join(ws, '.agent-teams'), {
+    phase: 'running', id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 0,
+    members: [{ id: 'm1', name: 'w', status: 'idle', joinedAt: 1 }],
+    tasks: [
+      {
+        id: 'review-found-problems', subject: 'review task that did its job', status: 'failed',
+        assignee: 'w', dependencies: [], createdAt: 1, updatedAt: 1,
+        verdict: 'needs_revision',
+      },
+      {
+        id: 'broke-delivery', subject: 'task that broke its deliverable', status: 'failed',
+        assignee: 'w', dependencies: [], createdAt: 1, updatedAt: 1,
+        commandsRun: [{ command: 'pnpm build', status: 'failed', exitCode: 2 }],
+      },
+      {
+        id: 'no-evidence', subject: 'failure with no measured evidence', status: 'failed',
+        assignee: 'w', dependencies: [], createdAt: 1, updatedAt: 1,
+        output: 'the environment has no git; I could not run verify',
+      },
+      { id: 'fine', subject: 'a completed task', status: 'completed', assignee: 'w', dependencies: [], createdAt: 1, updatedAt: 1 },
+    ],
+  })
+
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined }, list() { return [] },
+      sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+  const agent = { id: 'cap', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} }
+  const result = await tools.get('agent_teams_status').execute({}, { agent, signal: new AbortController().signal })
+  return { result, tools, byId: new Map(result.tasks.map((task) => [task.id, task])) }
+}
+
+test('★ 臂 7（t12）：三种 failure_kind 都**到了** status 的读取出口，且三态不同形', async () => {
+  const { result, byId } = await failureFixture()
+
+  /**
+   * ★★ 这是本任务的核心断言：`inconclusive` —— 一次 review 任务**给出了**
+   *   `needs_revision`，那是它**做完了它的活**（找出问题），不是"它坏了"。
+   *   而读者此前只拿得到 `status === 'failed'`，与"交付物烂了"同形。
+   */
+  const review = byId.get('review-found-problems')
+  assert.ok(review !== undefined, '★ 前置：那条 review 失败必须出现在 status 的投影里')
+  assert.equal(
+    review.failure_kind, 'inconclusive',
+    '★ 一条 `needs_revision` 的失败必须报 `inconclusive`（它找到了问题＝它交付了）——'
+    + `实测 ${JSON.stringify(review.failure_kind)}（投影字段：${Object.keys(review).join(', ')}）`,
+  )
+
+  /** ★ 交付物真的坏了 ⇒ `failed_delivery`（这里有 verify 非 0 退出的实测证据）。 */
+  assert.equal(
+    byId.get('broke-delivery')?.failure_kind, 'failed_delivery',
+    '★ 有实测证据（verify 非 0 退出）的失败必须报 `failed_delivery`',
+  )
+
+  /** ★ 没有结论、没有实测 ⇒ 缺省 `failed_context`（最保守的那一个，**不许**被放宽）。 */
+  assert.equal(
+    byId.get('no-evidence')?.failure_kind, 'failed_context',
+    '★ 没有 verdict、也没有任何 failed 实测的失败必须报 `failed_context` —— 缺省是最保守的，不是 failed_delivery',
+  )
+
+  /**
+   * ★★ 反向半边 ①（防恒真）：三种取值必须**互不相同**。
+   *   缺了这一半，一个"永远返回同一个字符串"的实现会让上面三条里的一或两条绿。
+   *   这正是"把两种相反的事实压成同一个形状"的**可执行形式**。
+   */
+  const kinds = [review.failure_kind, byId.get('broke-delivery').failure_kind, byId.get('no-evidence').failure_kind]
+  assert.equal(new Set(kinds).size, 3, `★ 三种失败必须报出三个**不同**的 failure_kind，实测：${JSON.stringify(kinds)}`)
+
+  /**
+   * ★★ 反向半边 ②（防"缺席被读成一种取值"）：一条 `completed` 任务上
+   *   `failure_kind` **必须缺席** —— 它不是"某一类失败"，而是"这一格不适用"。
+   *   缺了这一半，一个"给每条任务都挂上 failed_context"的实现会全绿，
+   *   而那会让"成功"与"没有证据说它坏了"在读者眼里同形。
+   */
+  const done = byId.get('fine')
+  assert.equal(
+    Object.hasOwn(done, 'failure_kind'), false,
+    '★ `failure_kind` 只对 `failed` 任务在场；一条 completed 任务上也挂着它，等于把"不适用"读成一种失败',
+  )
+
+  /** ★ 它必须过得了自己的 schema（本文件的看家本领）——与臂 5 同一条纪律。 */
+  const schema = toolsUnderTest().get('agent_teams_status').output.schema
+  assert.deepEqual(
+    violationsOf(schema, result), [],
+    '★ status 的返回值过不了自己的 output schema（`tasks[].failure_kind` 是不是没进 properties？）',
+  )
+})
+
+test('★ 臂 8（t12 的定向突变臂）：把三种失败**塌缩成同一种** ⇒ 必须有臂变红', async () => {
+  /**
+   * ── ★ 这是"定向突变能打红"的可执行形式（本队纪律）──────────────────────────────
+   *
+   * 验收要求："三种 kind 不同形，且一条定向突变臂证明**塌缩任意两者**都会让臂红"。
+   *
+   * ★ 这里**不**真去改 `src/tools/status.ts` 再重建（那会让本文件无法与其它夹具
+   *   并行跑）。做法是把塌缩**施加在真实返回值上**，然后重跑臂 7 的**同一组断言**
+   *   —— 那正是"读的人看到的那份东西被塌缩了"的最小复现。
+   *
+   * ★ 三种塌缩各自要红（两两合并 3 选 2 = 3 种），一个都不许漏：
+   *     `inconclusive` + `failed_delivery` 合并 ⇒ "找到了问题"与"东西坏了"同形
+   *     `inconclusive` + `failed_context`  合并 ⇒ "找到了问题"与"没证据"同形
+   *     `failed_delivery` + `failed_context` 合并 ⇒ "东西坏了"与"没证据"同形
+   */
+  const { result } = await failureFixture()
+  const kindsOf = (value) => value.tasks
+    .filter((task) => task.status === 'failed')
+    .map((task) => task.failure_kind)
+
+  /** 未被突变时，三条 failed 任务必须给出三个不同的 kind（突变臂的前置）。 */
+  assert.deepEqual(
+    [...new Set(kindsOf(result))].sort(),
+    [...FAILURE_KINDS].sort(),
+    '★ 前置：未突变时三种 kind 必须都出现且互不相同 —— 否则下面的突变断言是恒真的',
+  )
+
+  const collapse = (value, from, to) => ({
+    ...value,
+    tasks: value.tasks.map((task) => task.failure_kind === from ? { ...task, failure_kind: to } : task),
+  })
+
+  const survived = []
+  for (const [from, to] of [
+    ['inconclusive', 'failed_delivery'],
+    ['inconclusive', 'failed_context'],
+    ['failed_delivery', 'failed_context'],
+  ]) {
+    const mutated = collapse(result, from, to)
+    const stillDistinct = new Set(kindsOf(mutated)).size === 3
+    if (stillDistinct) survived.push(`${from} → ${to}`)
+  }
+  assert.deepEqual(
+    survived, [],
+    '★ 把两种 failure_kind 塌缩成一种之后，三种取值**仍然**互不相同 ⇒ 上面那条"不同形"的'
+    + '断言测的不是它声称的东西（规则二后半句）：\n' + survived.join('\n'),
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：塌缩**确实改变了读数** —— 即突变不是空操作。
+   *   缺了这一半，一个"内部没有真的替换任何东西"的突变体会让上面那句恒真。
+   */
+  const collapsed = collapse(result, 'inconclusive', 'failed_delivery')
+  assert.notDeepEqual(
+    kindsOf(collapsed), kindsOf(result),
+    '★ 突变是空操作 —— 它没有真的替换任何一格，所以"塌缩后仍然不同形"是恒真的',
+  )
+  assert.equal(
+    collapsed.tasks.find((task) => task.id === 'review-found-problems').failure_kind, 'failed_delivery',
+    '★ 塌缩必须**真的**落到那一格上（把 review 的失败写成了"交付物坏了"）',
+  )
+})
+
+test('★ 臂 9（t12 的反向臂）：`failure_kind` 不许被 `status` 之外的东西凭空虚报', async () => {
+  /**
+   * ── 这一臂钉的是"声明面"那一半（本文件的老本行）────────────────────────────────
+   *
+   * 加了这一格之后最容易走的一条歪路是：把它声明成 `additionalProperties: true`
+   * 的裸字段就完事 —— 那时"产出了"与"声明了"重新同形，下一次改它没人会被炸出来。
+   * ⇒ 两条一起问：① 它**真的被产出**（不是只声明）；② 它**过得了**
+   *   `additionalProperties: false` 那一层的校验。
+   *
+   * ★ 而 ① 必须从**源码产出面**读（不是从 schema 读 —— 那是恒真）：
+   *   `execute` 的返回里必须真的有一句 `failure_kind:` 的产出语句。
+   */
+  const block = sourceBlockOf('agent_teams_status')
+  assert.ok(
+    /[{,]\s*failure_kind\s*:/.test(block),
+    '★ `agent_teams_status` 的源码产出面里找不到 `failure_kind:` 的产出语句 —— '
+    + '只声明不产出，与"没这一格"在读者眼里同形',
+  )
+
+  /**
+   * ★★ 而产出必须**条件化在 `status === 'failed'` 上**：无条件挂上去会让每一条
+   *   `completed` 任务都带着一个 `failed_context`（臂 7 的反向半边钉的就是它的后果）。
+   *   这里从源码面再问一次，两条读法一起才钉得住。
+   */
+  assert.ok(
+    /task\.status\s*!==\s*'failed'\s*\?\s*\{\}\s*:\s*\{\s*failure_kind/.test(block),
+    '★ `failure_kind` 的产出没有条件化在 `status === \'failed\'` 上 —— '
+    + '无条件挂上去会让"这一格不适用"与"这是一类失败"同形',
+  )
+
+  /** ★ 判据只有一份：`status` **不重算** failureKindOf 的规则，它只调用它。 */
+  assert.ok(
+    /failureKindOf\s*\(/.test(block),
+    '★ `status` 没有调用 `failureKindOf` —— 自己重算一份会造出第二份真相，而两份会慢慢分叉',
+  )
+  for (const leaked of ['needs_revision', 'failed_delivery', 'failed_context']) {
+    assert.ok(
+      !new RegExp(`['"]${leaked}['"]`).test(block),
+      `★ \`status\` 的源码里出现了字面量 "${leaked}" —— 判据属于 \`state.ts\`（唯一一份），`
+      + '在这里重写一份等于把同一条规则说两遍',
+    )
+  }
+})
+

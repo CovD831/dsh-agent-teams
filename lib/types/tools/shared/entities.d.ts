@@ -13,7 +13,7 @@ import { type RulesLoad } from '../../gates/contract/verify-command.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
-import type { CommandResult, TeamMember, TeamState, TeamTask } from '../../types.ts';
+import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '../../types.ts';
 import { CAPTAIN_KEY } from '../../state.ts';
 export declare function withInputSurfaceOnError<T extends {
     execute: (...args: never[]) => unknown;
@@ -674,6 +674,47 @@ export interface FrictionCapture {
      *   而不会伪装成"不需要人管"（**隐形**）。⇒ 错的那一侧选可见的那一侧。
      */
     auto?: FrictionAutoOrigin;
+    /**
+     * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ──────────────────────────
+     *
+     * 用户裁定：卡点 = **任务停下来了**（`docs/PENDING-FRICTION-REFORM.md` §0）。
+     * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被同一个判据拒 ≥2 次**。
+     *
+     * ★ 「1 次」是正常的"填错了改一下"（实测那 207 条判据拒绝日志正是这一类）；
+     *   「2 次」说明它卡在同一个地方了 ⇒ 任务**真的停住**。
+     *
+     * ★★ 为什么由**调用方**给，而不是在 `recordFriction` 里现读一次任务：
+     *   与 `stateRoot` 同一条纪律 —— 调用方手里本来就有那份 `team.json`
+     *   （而在锁里），再读一次既慢又会与它正在写的那一份**不同源**。
+     *   ★ 缺席 ⇒ 按 `trying` 处理（**不假设它停了**）—— 错的那一侧选"还没停"：
+     *     多记一条 rejection 不会误导人，少记一条真卡点才会。
+     */
+    stall?: StallObservation;
+}
+/**
+ * ── ★★ C1 的判据结论（三态里的两态 + 缺席）─────────────────────────────────────
+ *
+ * 由调用方的 {@link observeStall} 算出来，交给 {@link recordFriction} 决定
+ * 落【哪一类记录】。
+ */
+export interface StallObservation {
+    /** ★ 这是不是"任务已经停住"（= 同一 `(task, gate)` 被拒 ≥2 次）。 */
+    stalled: boolean;
+    /** 这个 `(task, gate)` 被拒的次数（含这一次）。 */
+    count: number;
+    /**
+     * ★ 这个数字代表什么 —— **不许省略**。
+     *
+     *   `repeated`  —— 同一个判据重复拒绝（**这就是判据本身**）
+     *   `first`     —— 第一次被拒（⇒ 还自己解得了）
+     *   `unknown`   —— 判据 id 读不出来 ⇒ **判不了**
+     *
+     * ★ 第三态不许并进前两者：把 `unknown` 读成 `first` 会让"读不到 id"
+     *   变成"它没停"（错的）；读成 `repeated` 会让每一条读不出 id 的拒绝
+     *   都变成卡点（把 207 条又请回来）。
+     *   ⇒ 落 `first`（保守：不惊动人）**并在记录里说清为什么判不了**。
+     */
+    basis: 'first' | 'repeated' | 'unknown';
 }
 /**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
@@ -750,6 +791,98 @@ export declare function sessionEventRefs(session: unknown): {
     sessionId?: string;
     eventIndices: number[];
 } | undefined;
+/**
+ * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ───────────────────────────
+ *
+ * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+ *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+ * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被拒 ≥2 次 = 停住了**。
+ *
+ * ── ★★ 为什么"同一个判据"必须是键的一部分 ────────────────────────────────────
+ *
+ * 五个**不同**的判据各拒一次是**五件不同的事**（成员每次都在改，只是每次
+ * 撞上另一条门）。把它们数成一个数字会让"每次都被不同的门拦"读成"卡在同一处"
+ * —— 而那正好是本任务要消灭的那个合流（换成计数版本）。
+ *
+ * ── ★★ 为什么 N 是【可注入】的（本仓教训，逐字）───────────────────────────────
+ *
+ * `docs/PENDING-FRICTION-REFORM.md` §2：「`with-timeout` 那族缺陷连躲三次，
+ * 根因都是『上限是硬编码常量，短测试复现不了』」⇒ N 必须能注入。
+ * ★ 而注入的是**上限**，不是判据本身 —— 判据仍然只有一处实现。
+ * ★ 注入口是环境变量（与 `restartEscapeHatchFromEnv` 同一形态：**明写的、可核的**），
+ *   缺省 2（用户已确认）。★ 读不出数就**回落缺省**，而不是当成 0：
+ *   一个坏值会让每一片拒绝都变成卡点（或一条都不变）。
+ */
+export declare const STALL_REPEAT_THRESHOLD = 2;
+/**
+ * ── ★★★ C1：两类记录的判别面 ───────────────────────────────────────────────────
+ *
+ *   `rejection` —— 一条**事件**：判据拒了一下，而任务**继续走了**。不是卡点。
+ *   `blocker`   —— 一条**状态**：任务在这里**停住了**（同一个判据拒了 ≥N 次）。
+ *
+ * ★ 两者合流正是本轮要修的缺陷（实测 253 条里 207 条是判据拒绝日志，
+ *   而真正让任务停下来的只有 21 条 —— 82% 不是卡点）。
+ */
+export type FrictionRecordClass = 'rejection' | 'blocker';
+/**
+ * `rejection` 记录的标题前缀。
+ *
+ * ★ 它是**人**读那一份台账时唯一的判别面（`frictions-html`）——
+ *   而机读那一份用 `class` 字段，不靠这个前缀（代理读数会随措辞漂）。
+ */
+export declare const REJECTION_TITLE_PREFIX = "[rejection \u2014 not a blocker] ";
+export declare function stallRepeatThreshold(env?: Record<string, string | undefined>): number;
+/**
+ * ── ★★★ 算出这一次拒绝之后任务停没停（C1 的判据本体）────────────────────────────
+ *
+ * 输入：这个任务**上一次**的 `stall` 读数（`task.stall`，可能缺席）+ 这一次的判据 id。
+ * 输出：三态观察（`first` / `repeated` / `unknown`）。
+ *
+ * ── ★ 为什么密钥是 `(gate, point)` 而不只是 `gate` ──────────────────────────────
+ *
+ * 判据 id 在注册表里**唯一**（`completion.mutation` 只有一个位置），所以
+ * 只按 gate 判就已经够了。★ 而 `point` **也**要一起比，是因为判据 id 读不出来时
+ * （`unknown` 那一态）`gate` 是 `undefined`：那时若只比 `undefined === undefined`，
+ * **两条毫不相干的、都读不出 id 的拒绝**会被算成"同一个判据拒了两次"。
+ * ⇒ 加上 `point`，两处都读不出来时也要求位置相同。
+ *   ★ 而它仍然可能把同一个位置上的两条**不同**判据算成一条 —— 所以那条路上
+ *     我们落的是 `unknown`（保守：不惊动人），而不是 `repeated`。
+ */
+export declare function observeStall(previous: TaskStall | undefined, gate: string | undefined, point: string, 
+/** ★ 这一次之前这个 `(task, gate)` 已经被拒了几次（由任务级读出，可注入）。 */
+priorCount?: number, threshold?: number): StallObservation;
+/**
+ * ── ★★★ C1：把这一次拒绝的读数【落进任务】，好让下一次拒绝能跟它比 ────────────────
+ *
+ * ★ 这是判据成立的全部理由：「这次拒绝之后，任务有没有继续往下走」这句话
+ *   在**一次**拒绝的那一下无从判断 —— 唯一能回答它的是**下一次拒绝**
+ *   （成员改字段再报 ⇒ 下一次不拒了 ⇒ 任务走了；同样的拒绝又来一次 ⇒ 停了）。
+ *   ⇒ 所以判据必须是**跨调用**的，而跨调用就必须落盘。
+ *
+ * ── ★ 为什么改的是【同一格】而不是追加一条历史 ────────────────────────────────
+ *
+ * `stall` 回答的是"**现在**它停没停"，而不是"它历史上被拒过几次"。
+ * 一个持续增长的数组会让读取端必须自己算"最近连续了几次" ——
+ * 而那段算逻辑一旦在读取端出现第二份，两处就会分叉（本仓反复记账的形态）。
+ *
+ * ── ★★ 而【放行】必须清掉它 ────────────────────────────────────────────────────
+ *
+ * 这是本函数最容易写错的一格：若一条记录**已经**是 `stalled` 而任务随后被放行了，
+ * 却**不**清掉它，那么下一次拒绝会读到 `count = 3 ≥ 2` ⇒ **第一次**拒绝就被
+ * 判成卡点。⇒ 于是"每个任务最终都会变成卡点"，而那正是本任务要消灭的那个
+ * 「把 82% 的事件算成卡点」的**计数版本**。
+ * ⇒ 所以 {@link clearStall} 与 {@link noteStall} 是**成对的**，各自有调用点。
+ */
+export declare function noteStall(task: TeamTask, point: string, gate: string | undefined, now: number): StallObservation;
+/**
+ * 放行 ⇒ 忘掉那条 stall。
+ *
+ * ★ 与 {@link noteStall} 成对：见那里的长注释（不清会让下一次的**第一次**拒绝
+ *   就被判成卡点）。
+ * ★ 只在**真的有一条**时才动 `updatedAt` —— 否则每一次放行都会让任务"看起来
+ *   刚被改过"，而那会让"它什么时候真的动过"这条读数失去分辨力。
+ */
+export declare function clearStall(task: TeamTask): void;
 export declare function recordFriction(capture: FrictionCapture): Promise<string | undefined>;
 export declare function evaluateRuntimeGates(ctx: Context, event: string, context: unknown, clock?: () => number): Promise<JsonValue | undefined>;
 export declare function rejectOnContractGates(ctx: Context, context: Record<string, unknown>, what: string, 
@@ -773,9 +906,40 @@ export declare function throwWithSurface(message: string, surface: ReturnType<ty
  *   `completion_input_surface`，其余位置（contract / delivery 各只有一个入口）
  *   仍用泛用的 `input_surface`（与它们成功路径上的字段名一致）。
  */
-field?: string): never;
+field?: string, 
+/**
+ * ── ★★★ t5：这次拒绝是**哪一种** —— 「判据说不出」的原文，缺席即"发现了问题"──────
+ *
+ * MEASURED（t5）：契约位置的拒绝有两种成因，而**它们的补救动作相反**：
+ *
+ *     `unmeasured`（本参数在场）  ⇒ 判据**没能测量** ⇒ 去补它缺的那一格输入
+ *     `blockers`  （本参数缺席）  ⇒ 判据**发现了问题** ⇒ 去改契约
+ *
+ * ★ 为什么它必须走到**抛出侧**而不是留在返回值上：本函数是被**抛出**路径调用的，
+ *   而抛出之后调用方拿到的只有这个异常 —— 于是"哪一种拒绝"如果不随异常走，
+ *   它就在**唯一真正被读到的那个出口**上缺席。
+ * ★★ 而它**不改变措辞**（`message` 已经把两种成因分开写了），它补的是**结构化**那一份：
+ *   读的人不必去正则匹配一句英文，就能分出"没能测量"与"发现问题"。
+ *   ★ 与 `field` 那条注释同一条纪律：**同一个事实必须在两条路径上同形**。
+ * ★ 传 `undefined` ⇒ 字段**不出现**（而不是出现一个空串）。缺席与"空"必须不同形。
+ */
+unmeasured?: string): never;
+/**
+ * ★ t5：拒绝的**第三种**成因在结构化面上的字段名 —— "判据没能测量"。
+ *
+ * ★ 为什么与 `INPUT_SURFACE_PROPERTY` **分列**（不合流）：
+ *   `inputSurface` 说的是"**调用方**少交了一格"（接线缺陷），
+ *   本字段说的是"**判据**拿到齐的输入仍然说不出"（判据的能力边界）。
+ *   两者的补救动作相反 ⇒ 合成一格就是本队记账最久的那个合流。
+ */
+export declare const CONTRACT_UNMEASURED_PROPERTY = "agentTeamsContractUnmeasured";
 export declare const INPUT_SURFACE_PROPERTY = "agentTeamsInputSurface";
 export declare const INPUT_SURFACE_FIELD_PROPERTY = "agentTeamsInputSurfaceField";
+/**
+ * 读回"哪一种拒绝"—— 与 {@link inputSurfaceFieldOf} 同一形状的读数装置。
+ * ★ 属性缺席 ⇒ `undefined`（**不是**空串）：缺席与"空"必须不同形。
+ */
+export declare function contractUnmeasuredOf(error: unknown): string | undefined;
 export declare function inputSurfaceFieldOf(error: unknown): string;
 export declare function inputSurfaceFromThrown(error: unknown): ReturnType<typeof inputSurfaceOf>;
 export type MemberConvergenceObservation = {

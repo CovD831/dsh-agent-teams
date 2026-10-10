@@ -27,9 +27,24 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { registerAgentTeamsTools } from '../lib/tools.js'
+import { registry } from '../lib/gates/index.js'
+import { contractUnmeasuredOf } from '../lib/tools/shared/entities.js'
+import { createTeamDir } from '../lib/state.js'
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 
 const GATE = await import('../lib/gates/contract/task-atomicity.js')
+
+/** 臂 7/8 造的临时工作区（进程退出时清掉，与 `verify-unmeasured-consumers` 同构）。 */
+const cleanups = []
+process.on('exit', () => {
+  for (const dir of cleanups) { try { rmSync(dir, { recursive: true, force: true }) } catch {} }
+})
 
 /** 把一个裁决读成它的出口名 —— **这是本文件唯一的读数装置**。 */
 function exitOf(verdict) {
@@ -1016,5 +1031,356 @@ test('臂 6 真实语料分布（独立重算）：它在这批真实任务上�
   assert.equal(
     counts.ok + counts.blocked + counts.unmeasured + counts.skipped, tasks.length,
     '★ 五态之和不等于语料条数 —— 有输入落进了没有名字的出口',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 7（t5）：★★★ 「没能测量」在【契约位置】不许被读成「拒绝」—— 走真实入口
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一臂补的是一整类缺口：**判据全对，而读它的那一层读错了**──────────────────
+ *
+ * 本文件上面六条臂全部走 `GATE.gate(...)`（**判据级**）—— 它们证明的是
+ * 「这条判据的三个出口是诚实且不同形的」。★ 而 t5 的实测缺口**不在这条判据里**：
+ *
+ *     MEASURED（t5，两次独立；`scripts/gate-task-atomicity.test.mjs` 臂 9 复现）：
+ *
+ *       registry.evaluate('contract', { task: { kind: 'review', objective: '…' } })
+ *         ⇒ ok = false · unmeasured = YES
+ *
+ *   ⇒ 而 `review` 这一类**过得了契约层**（`WRITE_KINDS` 只有 implementation / repair
+ *     ⇒ 它**不被要求**有 inScope）⇒ 它会真的走到契约位置 ⇒ 上一层把「我说不出」
+ *     读成了「不行」⇒ **一个合法的 review 任务建不出来**。
+ *
+ * ★★ 而这是本队记账最久的合流：**「没能测量」并进「没通过」**。
+ *   它也是 `src/tools/delivery.ts:96-100` 早就定过口径的那一条 ——
+ *   "一个安全约束**不触发**时，应当放行并留下它没被检查的痕迹"。
+ *
+ * ── ★ 为什么这一臂必须走【工具入口】而不是直呼注册表 ──────────────────────────
+ *
+ * 与 `scripts/verify-unmeasured-consumers.test.mjs` 同一条纪律：
+ * **直呼 `registry.evaluate` 证明不了"读它的那一层怎么读"** ——
+ * 注册表本身一直是对的（它如实报了 `unmeasured`）。缺口在调用方。
+ * ⇒ 本臂走 `agent_teams_create_task`，因为那才是"一个 review 任务能不能建出来"的真问题。
+ *
+ * ★ 而"能建出来"不是唯一要钉的：**那条事实必须仍然读得出来**（验收第 2 条）。
+ *   三处出口逐处断言 —— 只钉"没被拒"会放过"静默丢掉"这个更坏的形态：
+ *   **放行 + 无声** = 一条可见的缺口被换成一条看不见的缺口。那正是本队禁止的合流，
+ *   只是这次它藏在"修好了一个 bug"里面。
+ */
+
+/** 一个最小但【真的】插件 ctx —— 与 `verify-unmeasured-consumers.test.mjs` 同构。 */
+async function pluginFixture() {
+  const workspace = mkdtempSync(join(tmpdir(), 't5-reader-'))
+  cleanups.push(workspace)
+  /**
+   * ★ 契约要能走到 contract 位置，团队里必须先有一个可被 review 的任务
+   *   （`review` 这类要求 `reviewedTaskId` 指向一个真实存在的任务）。
+   */
+  await createTeamDir(join(workspace, '.agent-teams'), {
+    id: 'team', name: 'T5Reader', captainSessionId: 'captain-session',
+    createdAt: 1, taskSeq: 1, members: [],
+    tasks: [{
+      id: 't1', seq: 1, subject: 'the target being reviewed', kind: 'implementation',
+      status: 'completed', objective: 'x', acceptance: ['a'],
+      inScope: ['src/a.ts'], verify: ['true'], createdAt: 1, updatedAt: 1, dependencies: [],
+    }],
+  })
+  const tools = new Map()
+  /** 告警是"放行时留痕"的出口之一 ⇒ 必须真的收集，而不是丢掉。 */
+  const warnings = []
+  const ctx = {
+    logger: {
+      debug() {}, info() {},
+      warn(message) { warnings.push(String(message)) },
+      error(message) { warnings.push(String(message)) },
+    },
+    tools: { register(tool) { tools.set(tool.name, tool) } },
+    subagents: {
+      getProvider() { return undefined },
+      list() { return [] },
+      sendMessage: async () => 'msg-0',
+      [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
+    },
+    agents: { get() { return undefined } },
+    on() { return () => {} },
+    effect(setup) { return setup() },
+    inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, {
+    stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined,
+  })
+  const call = async (name, args) => {
+    const tool = tools.get(name)
+    if (tool === undefined) throw new Error(`tool "${name}" was not registered`)
+    return await tool.execute(args, {
+      agent: { id: 'captain-session', status: 'idle', session: { header: { cwd: workspace }, events: [] }, steer() {} },
+      signal: new AbortController().signal,
+    })
+  }
+  return { call, warnings, workspace }
+}
+
+/**
+ * 跑一次调用并把它抛出的错读回来 —— **不抛错同样是一个读数**。
+ *
+ * ★ t5：`error` 本体也要交出来，而不是只交一句 message。
+ *   理由：结构化痕迹（`contract_unmeasured`）挂在**异常对象**上，而
+ *   "只读 message"的读者会把它整条丢掉 —— 那样本臂就只能靠正则匹配措辞，
+ *   分辨不出"这条痕迹真的到得了调用方"与"它只是被写进了一句话里"。
+ */
+async function attempt(fn) {
+  try { return { threw: false, value: await fn() } } catch (error) {
+    return {
+      threw: true,
+      error,
+      message: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+test('★★★ 臂 7（t5·真实入口）：契约位置「没能测量」必须**拒绝且可分辨** —— 三种成因在工具结果上不同形', async () => {
+  const fixture = await pluginFixture()
+  /**
+   * ── ★★★ 这一臂的形状**改过一次**，而改口的理由必须写在臂里 ─────────────────────
+   *
+   * 第一版断言的是"一个没有 inScope 的 `review` 任务**不该被拒**"（放行 + 留痕），
+   * 依据是 `scripts/gate-task-atomicity.test.mjs` 臂 9 里那条 `ok === true`。
+   *
+   * ★ 而实测当场打红 `scripts/gate-position-wiring.test.mjs` 臂 2 —— 那条臂在基线上
+   *   是**绿的**（26/26）且**不在** `baseline-known-failures.json` 里 ⇒ 那是回归。
+   * ★★ 更硬的理由：**契约位置拒绝 unmeasured 是刻意的**。
+   *   `src/gates/contract/verify-command.ts:88-97` 写死了这个口径，并指出它若放行，
+   *   t17/t18 实测过的**一道永远关着的门**会被读成"没检查"而放过去：
+   *   **一个判不了契约的任务不许静默进入工作。**
+   *
+   * ⇒ 本臂因此**换成**它真正该钉的东西（★ 而它比第一版更宽，不是更窄）：
+   *
+   *     ① 拒绝**保留**（那个决定是刻意的，不许被随手拆掉）
+   *     ② 而拒绝必须**可分辨**：「没能测量」读起来**不许**像「发现了问题」
+   *     ③ 而那条事实必须**留痕**，三处出口都要活着
+   *
+   * ★ 为什么这不是"把断言改软"：第一版只钉了"没被拒"这一件事，
+   *   而它**完全可以**在一个"一律放行"的坏实现上通过。本版钉的三条**互相约束**：
+   *   ① 与臂 8（真 blocked 仍然拒）成对，"一律放行"与"一律拒"两侧都被夹住；
+   *   ② 是措辞的分辨率；③ 是"留痕"不许退化成静默。
+   *   ⇒ 一个坏实现现在**没有**能同时过这三条的自由度。
+   */
+  const unmeasuredProbe = `t5.probe.unmeasured.${Math.random().toString(36).slice(2)}`
+  registry.register({
+    id: unmeasuredProbe,
+    point: 'contract',
+    description: 't5 probe: a contract gate that honestly cannot measure',
+    gate: () => ({ ok: false, unmeasured: 'the t5 probe could not measure this contract' }),
+  })
+  let thrown
+  try {
+    const created = await attempt(() => fixture.call('agent_teams_create_task', {
+      subject: 'probe: a review task with no inScope',
+      kind: 'review',
+      objective: 'probe: a review task with no inScope',
+      acceptance: ['the contract position must keep rejecting, but legibly'],
+      reviewedTaskId: 't1',
+      reviewed: reviewedStamp(),
+    }))
+    thrown = created
+  } finally {
+    registry.unregister(unmeasuredProbe)
+  }
+
+  console.log(`    ℹ create_task(unmeasured 探针在场) ⇒ threw=${thrown.threw}`
+    + `${thrown.threw ? ` · ${thrown.message.split('\n')[0].slice(0, 130)}` : ''}`)
+
+  /**
+   * ── ① 拒绝**保留** ──────────────────────────────────────────────────────────
+   *   ★ 反向半边：这条在"放行"的实现上红。而"放行"是被裁定驳回的那一版。
+   *   ★ 并指出这是**刻意**的，不是漏改：见 `verify-command.ts:88-97`。
+   */
+  assert.equal(
+    thrown.threw, true,
+    '★ 契约位置没有拒绝「没能测量」—— 而那是**刻意保留**的口径：\n'
+    + '   一个判不了契约的任务不许静默进入工作（见 src/gates/contract/verify-command.ts:88-97，'
+    + '   以及 t17/t18 实测过的"一道永远关着的门"）。',
+  )
+
+  /**
+   * ── ② **可分辨**：「没能测量」不许读成「发现了问题」────────────────────────────
+   *   ★ 这正是 `gate-position-wiring.test.mjs` 臂 2 钉的同一条性质 —— 本臂在
+   *     **真实入口**上再钉一次（那条臂在别的文件、别的 ctx 上）。
+   *   ★ 两种成因的**补救动作相反**（补输入面 vs 改契约）⇒ 读的人不能靠猜。
+   */
+  assert.match(
+    thrown.message, /could not measure/,
+    '★★★ 这次拒绝**没有说**"判据没能测量" —— 而它与"判据发现了问题"的补救动作相反：\n'
+    + '   前者去补判据缺的那一格输入，后者去改契约。\n'
+    + `   实测：${thrown.message.split('\n')[0].slice(0, 200)}`,
+  )
+  assert.doesNotMatch(
+    thrown.message, /found problems/i,
+    '★ 这次拒绝把"没能测量"说成了"发现了问题" —— 那是本队记账最久的合流（「没能测量」并进「没通过」）',
+  )
+
+  /**
+   * ── ③ 三处出口都活着（★ 与 `verify-unmeasured-consumers` 同一条纪律：
+   *       只有一条出口时，"没留痕"与"留了痕但没读到"同形）───────────────────────
+   *
+   *   ★★ 而第三处（结构化）之所以走**异常**而不是返回值：本函数在"没能测量"这一支
+   *     是**抛错**的 ⇒ 抛出之后的 `return` 永远走不到 ⇒ 挂在返回值上的那份是**死**的。
+   *     captain 裁定 (e)：一个永远填不上的字段要么接到抛出侧，要么删掉。
+   *   ⇒ 下面断言它真的随**异常**走到了调用方（那个异常就是 `attempt` 抓到的那个）。
+   */
+  const unmeasuredText = contractUnmeasuredOf(thrown.error)
+  assert.equal(
+    typeof unmeasuredText, 'string',
+    '★ 异常上没有 `contract_unmeasured` —— "判据说它测不了"在**结构化出口**上缺席。\n'
+    + '   于是读的人只能去正则匹配一句英文才能分辨这到底是哪一种拒绝。\n'
+    + '   ★ 而它必须挂在**异常**上：本函数在"没能测量"这一支抛错，返回值那一份永远走不到。',
+  )
+  assert.match(
+    String(unmeasuredText), /t5 probe could not measure/,
+    '★ 那条结构化痕迹里必须带着**判据的原话** —— 一句只有类型没有内容的字段，读的人无从补救',
+  )
+})
+
+test('★★★ 臂 8（t5·反向半边）：契约真的报 blocked 时，仍然必须拒 —— 放行不许变成"一律放行"', async () => {
+  const fixture = await pluginFixture()
+  /**
+   * 造一条**真的会被判 blocked** 的契约：`inScope` 里有目录条目 ⇒
+   * `contract.task-atomicity` 判"不原子"（那是它的 blocked 出口，不是 unmeasured）。
+   * ★ 用 `kind: 'implementation'`（`WRITE_KINDS` 之一）—— 它本来就要求 inScope/verify，
+   *   于是这次拒绝**不依赖**本任务的改动，它是这条判据一直以来的正常开火。
+   */
+  const rejected = await attempt(() => fixture.call('agent_teams_create_task', {
+    subject: 'probe: a genuinely non-atomic contract',
+    kind: 'implementation',
+    objective: 'split src/tools.ts and rewire the dependents',
+    acceptance: ['x'],
+    inScope: ['src/tools.ts', 'src/tools/', 'lib/tools/'],
+    verify: ['true'],
+    reviewed: reviewedStamp(),
+  }))
+
+  console.log(`    ℹ create_task(真不原子的契约) ⇒ threw=${rejected.threw}`
+    + `${rejected.threw ? ` · ${rejected.message.slice(0, 130)}` : ` · task_id=${rejected.value?.task_id}`}`)
+
+  assert.equal(
+    rejected.threw, true,
+    '★ 一条**真的不原子**的契约没有被拒 —— 那说明改动把"放行没能测量"做成了"一律放行"。\n'
+    + '   ★ 这是本臂存在的全部理由：臂 7 单独存在时，一个"永远不拒"的实现能通过它。',
+  )
+  assert.match(
+    rejected.message, /rejected/i,
+    '★ 真拒绝的措辞里必须有 "rejected" —— 那与臂 7 放行时的 "was NOT checked" 必须不同形',
+  )
+  /**
+   * ★ 反向半边之二：这次拒绝**不许**自称"没能测量"。
+   *   `blockers` 与 `unmeasured` 是互斥的两个主张（"发现了问题" vs "我说不出"），
+   *   混起来会让读的人去补一个其实不缺的输入面。
+   */
+  assert.doesNotMatch(
+    rejected.message, /could not measure/i,
+    '★ 一次真拒绝自称"没能测量" —— 两个出口合流了。补救动作相反：这条该去改契约，'
+    + '而不是去补输入面。',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 9（t5）：★★★ 位置归属 —— **completion 位置那一条是刻意不同的，且必须被钉住**
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 验收第 4 条：**completion 位置「unmeasured 也拒」的行为必须可证不变**────────────
+ *
+ * ★★ 这一条最容易被改错，所以值得把两处的**同名不同义**写清楚：
+ *
+ *     契约位置（本任务改的）      unmeasured ⇒ **放行** + 留痕
+ *     completion 位置             unmeasured ⇒ 算进 `completionNotChecked` ⇒ **放行**
+ *
+ *   ⇒ 两处**恰恰是同一条口径**（"没能检查"不是"拒绝"），不是相反的。
+ *     t42 早就把 completion 那一处改成了这样，并把理由写进代码：
+ *
+ *       MEASURED（2026-10-09，verifier 报的两个终态拒绝原文）：
+ *         completed ⇒ rejected: the completion gate could not measure (…)
+ *         failed    ⇒ ★ 同一条，逐字相同
+ *       ⇒ 判据说"我是报告，不是拒绝"，而调用方读成了 "rejected"。
+ *
+ * ── ★ 那么"刻意不同"的是哪一条？── 是【dispatch 位置的 not-checked 语义】与
+ *    【`blockers` 那一半】—— 而它们**都不归本任务**（见下）。
+ *
+ * ── ★★ 钉它的臂是哪一条（验收要求指名）────────────────────────────────────────
+ *
+ *     ★ `scripts/gate-update-task-unmeasured.test.mjs` 的**臂 2**
+ *       （`completionNotChecked` 必须同时认 `skippedAll` 与 `unmeasured`）
+ *       与**臂 4**（`blockers` 仍然拒 —— 反向半边）
+ *     ★ 而 `scripts/gate-update-task-unmeasured.test.mjs` 的**臂 3** 钉"两处形状一致"
+ *
+ *   ⇒ 本臂**不重复**它们（重复的守卫生出两份真相）。它做的是另一件事：
+ *     **把"哪一条臂钉的是哪一处"写成一份可核对的归属表**，并当场验证那份表指向的
+ *     文件与臂**真的存在** —— 否则"它由别处钉住"会退化成一句主张。
+ */
+test('★★★ 臂 9（t5·归属表）：completion 位置的 unmeasured 语义由**哪条臂**钉住 —— 可核对，不是一句主张', async () => {
+  const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+  const guard = join(ROOT, 'scripts', 'gate-update-task-unmeasured.test.mjs')
+
+  /**
+   * ★ 归属表：每一条写清"哪一处语义 / 由哪个夹具的哪条臂钉住 / 判据是什么"。
+   *   三条**互不重复**，因为它们钉的是三件不同的事。
+   */
+  const ownership = [
+    {
+      site: 'completion 位置：unmeasured ⇒ 算进 completionNotChecked ⇒ 放行',
+      fixture: 'scripts/gate-update-task-unmeasured.test.mjs',
+      arm: '★★★ 臂 2：completion 位置同样（两处同一口径）',
+      why: '断言 `completionNotChecked` 的定义里认了 `unmeasured` —— 即 completion 对"测不了"的处置是放行而不是拒绝',
+    },
+    {
+      site: 'completion 位置：blockers ⇒ 仍然拒（反向半边）',
+      fixture: 'scripts/gate-update-task-unmeasured.test.mjs',
+      arm: '★★★ 臂 4：`blockers` 仍然拒（那一半不许放宽）',
+      why: '断言拒绝点仍存在且只在 `!completionNotChecked && ok === false` 时触发 —— 缺了它，一个"一律放过"的实现照样绿',
+    },
+    {
+      site: 'dispatch 与 completion 两处的口径必须一致（只改一处会分叉）',
+      fixture: 'scripts/gate-update-task-unmeasured.test.mjs',
+      arm: '★★★ 臂 3：两处的定义【形状一致】',
+      why: '取出两处的定义比较"认了哪几种成因"—— 分叉后「哪一处放行」在日志里同形',
+    },
+  ]
+
+  /** ★ 前置：那份夹具必须**真的在盘上** —— 否则归属表指着一个不存在的守卫。 */
+  assert.ok(
+    existsSync(guard),
+    `★ 归属表指向 ${'scripts/gate-update-task-unmeasured.test.mjs'}，而它不存在 ⇒ "由别处钉住"是一句空话`,
+  )
+  const guardSource = readFileSync(guard, 'utf8')
+  for (const entry of ownership) {
+    assert.ok(
+      guardSource.includes(entry.arm),
+      `★ 归属表里这条臂在 ${entry.fixture} 里找不到：${entry.arm}\n`
+      + '   ★ 一条被改名/删掉的臂会让"它由别处钉住"变成一句**无法复核的主张** —— '
+      + '而本队对归属的纪律是：**能指出来源才算数**。',
+    )
+  }
+  for (const entry of ownership) console.log(`    ℹ ${entry.arm} → ${entry.fixture}`)
+
+  /**
+   * ★★ 并**当场独立复核** completion 那一处的口径（不采信上面那张表）：
+   *   读源码里 `completionNotChecked` 的定义，断言它认 `unmeasured` 且**不认** `blockers`。
+   *   ★ 读的是**定义本身**，不是整个文件 —— 文件里别处提到 `blockers` 不构成本条的读数。
+   */
+  const updateTaskSource = readFileSync(join(ROOT, 'src', 'tools', 'update-task.ts'), 'utf8')
+  const definition = /const completionNotChecked = ([\s\S]{0,300}?\)\n)/.exec(updateTaskSource)
+  assert.ok(definition !== null, '★ 找不到 `completionNotChecked` 的定义 —— 归属表里那三条臂钉的东西不在原位了')
+  assert.match(
+    definition[1], /unmeasured !== undefined/,
+    '★★★ completion 位置不再把 `unmeasured` 算作"没能检查" ⇒ 它**开始拒绝**"测不了"的完工报告。\n'
+    + '   ★ 那是 t42 明确修掉的形态（"判据说我是报告不是拒绝，而调用方读成 refused"），'
+    + '     ⇒ 本任务对契约位置的改动**不许**把它顺手翻回去。',
+  )
+  assert.doesNotMatch(
+    definition[1], /blockers/,
+    '★ `blockers` 被算进了 `completionNotChecked` ⇒ 一次**真实的问题发现**被读成"没能检查"而放行。\n'
+    + '   ★ 那一半是刻意保留的（臂 4 钉住它），不许因为本任务而放宽。',
   )
 })

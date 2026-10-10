@@ -232,4 +232,234 @@ export declare function installMemberDelegationGuard(ctx: Context, stateDir: str
  * @returns child id → live activity.
  */
 export declare function memberActivity(ctx: Context, memberIds: readonly string[]): Map<string, 'running' | 'idle' | 'ready'>;
+/**
+ * ── ★★★ 这一格修的是什么（DISPATCH-RULES §39，MEASURED）─────────────────────────
+ *
+ * 用户说「没有成员在跑」，而检测器说「在推进（成员 working: pipeline-author,
+ * decompose-author, wire-author）」—— 两种读数矛盾，而**用户是对的**。
+ *
+ * 判别的过程逐字是：
+ *
+ *   ① team.json 说三个 member `status = working`
+ *   ② 而他们的 inbox 15+ 分钟没写
+ *   ③ 而三条任务都停在 claimed、9–33 分钟无更新
+ *   ④ 队长发探针给 pipeline-author ⇒ **`active teammate not found`**
+ *   ⇒ 所以【那个会话不在了】，而 team.json 里的 `working` 是**残留**。
+ *
+ * ── 为什么它此前【结构上】看不见 ────────────────────────────────────────────────
+ *
+ * 检测器已有的信号是「成员被占着」：`member.status === 'idle'` 而名下有未完成。
+ * 而残留 `working` 是**反过来**的：`status === 'working'` 而**会话不在了**。
+ * ⇒ `team.json` 里**没有**任何一格表示「那个会话还活着」，所以检测器在结构上
+ *   看不到它。原文：唯一可靠的判据是**能不能给那个成员发消息**。
+ *
+ * ── ★★ 而"发探针"不能是队长【手工】做的那件事 ─────────────────────────────────
+ *
+ * 手工探针有两个致命性质，缺一条都够：
+ *   · 它**要求队长已经怀疑**了。而"我该不该怀疑"正是这一格要回答的问题 ——
+ *     那是循环：要发现问题必须先发现它。
+ *   · 它**在发出去那一刻改变系统**（一条真实的消息进了成员的 inbox，冷启动一个
+ *     会话、消耗一次模型调用）。一个会改变被观测对象的观测不是一次读数。
+ *
+ * ⇒ 这一个读数是**旁路的**：它只问"这个插件进程里还有没有那个 Agent 驱动" ——
+ *   `ctx.agents.get(id)`。那正是 `deliverToMemberDetailed` 会走的那条路
+ *   （投递失败的时刻就是 `active teammate not found`），只是**不投递**。
+ *   ⇒ 队长一个键都不用按。
+ *
+ * ── ★★★ 三态，且"判不了"绝不并进"在跑"（本队反复记账的那条）────────────────────
+ *
+ * ```
+ * working            —— 驱动在场且 running。**只有这一态**支持"它在跑"这个读法。
+ * not-live           —— 驱动【不在场】。会话没了。（探针会答 active teammate not found）
+ * could-not-measure  —— 驱动在场，但它的生命周期状态不是 running/idle 两态之一
+ *                       ⇒ 说不出它到底在不在跑。★ 不许圆成 working。
+ * ```
+ *
+ * ★ 三种"没在跑"的理由**各自不同形**，因为它们要人去修的东西不同：
+ *
+ *   `never-spawned` ⇒ 等依赖 / 看 `spawnError`（**不是**一次故障）
+ *   `not-live`      ⇒ 那个成员死了 ⇒ **抢救它 worktree 里的产物**（§39.2）
+ *   `could-not-measure` ⇒ 这个插件的驱动状态面变了 ⇒ 去看 Harness 边界
+ *
+ * ── ★★ 它【为什么不能】拒绝一个任务（验收第 3 条）────────────────────────────────
+ *
+ * 见下面 {@link LivenessReadout} 的两条纪律：`rejects` 恒为 `false` 字面量，
+ * 且 `readout` 是 `never` —— 于是**类型系统**保证它进不了任何拒绝路径。
+ * 那不是"约定上不许用"，是"用它当拒绝理由的代码**编译不过**"。
+ */
+export type MemberLiveness = {
+    readonly state: 'working';
+    readonly readout: 'live-running';
+    readonly rejects: false;
+} | {
+    readonly state: 'idle';
+    readonly readout: 'live-idle';
+    readonly rejects: false;
+} | {
+    readonly state: 'not-live';
+    readonly readout: 'driver-absent';
+    readonly rejects: false;
+} | {
+    readonly state: 'never-spawned';
+    readonly readout: 'never-spawned';
+    readonly rejects: false;
+} | {
+    readonly state: 'could-not-measure';
+    readonly readout: 'driver-status-unreadable';
+    /** ★ 说清**是什么**读不到 —— 一句"未能测量"没有成因就是一句空话。 */
+    readonly reason: string;
+    readonly rejects: false;
+};
+/**
+ * ── ★★ 一条"只报告"的读数在类型上的写法 ────────────────────────────────────────
+ *
+ * `rejects: false` 是一个**字面量类型**，不是 `boolean`。于是：
+ *
+ *   · 生产者写不出 `rejects: true`（编译不过）；
+ *   · 消费者若写 `if (liveness.rejects)`，那个分支的类型是 `never` ——
+ *     即"这一支在类型上不可达"，而不是"这一支运行时不会走到"。
+ *
+ * ★ 与"约定"的区别是决定性的：约定只在**写的时候**有效，而类型在**改的时候**
+ *   也有效 —— 下一次有人想让存活读数参与拒绝，他会在 `pnpm build` 那一步被拦住，
+ *   而不是在被拒绝的那个成员那边被发现。
+ *
+ * ★ 与 `deployment` / `reload` 那两格同一条纪律（见 `src/tools/status.ts`）：
+ *   它们是**读数**，不是**判据**；让它们有否决权会把"我去看一眼"变成"你这次失败"。
+ */
+export interface LivenessReadout {
+    readonly rejects: false;
+}
+/** 拿不到 `agent.status` 两态时的成因（诊断面，不改变裁决）。 */
+export declare const DRIVER_STATUS_UNREADABLE = "the live Agent driver is present but reports a lifecycle status that is neither \"running\" nor \"idle\"";
+/** `never-spawned` 的成因：它**没有**起来过，与"起来了又死了"必须不同形。 */
+export declare const MEMBER_NEVER_SPAWNED = "this member was never spawned (no child session id), so whether it is alive is not a question that can be asked of it";
+/**
+ * 读一个成员的**会话存活**（t4）。
+ *
+ * @param ctx - 插件上下文（注入 `agents`）。
+ * @param member - 成员的持久记录（只要 `id` 与 `spawnError`）。
+ * @returns 五态读数。★ 没有任何一态是"拒绝"。
+ *
+ * ── ★ 为什么它不读 `member.status` ───────────────────────────────────────────────
+ *
+ * **这正是本格的全部意义**：`member.status` 是**持久记录**，它会在成员死掉之后
+ * 继续写 `working`（残留）。若这个函数读它，它读到的就是那个残留 —— 而它与
+ * "真的在跑"同形。⇒ 这里只问**驱动在不在**，而 `member.status` 由调用方
+ * **并列**交出去，两格合起来读的人才能看见「记录说 working，而驱动不在」。
+ */
+export declare function memberLiveness(ctx: Context, member: {
+    readonly id: string;
+    readonly spawnError?: string;
+}): MemberLiveness;
+/**
+ * 一个成员**名下在飞、而那个会话已经不在了** —— 也就是 §39 那个残留状态。
+ *
+ * ── ★★ 为什么"在飞"要用【任务】判，而不是用 `member.status` ──────────────────────
+ *
+ * 因为 `member.status` 正是那个**会残留**的东西。用它当自变量，等于拿被质疑的
+ * 读数去解释它自己。而任务记录是**另一份**数据：一个停在 `claimed`/`in_progress`
+ * 的任务 + 一个不在场的驱动 = 有一份工作被悬在半空。
+ *
+ * ★ 而在飞的任务还**指得出**它悬在哪棵树里 —— 那是抢救的落点（§39.4 ①）。
+ */
+export declare function strandedWork(liveness: MemberLiveness, openTasks: readonly string[]): boolean;
+/**
+ * ── ★★★ 残留 `working` 的**后果面**：产物冻在 worktree 里（§39.2）───────────────
+ *
+ * §39.2 逐字记着那个代价：
+ *
+ *     t39 的树: 12 个文件未提交（含 create-task.ts + update-task.ts 的 300 行改动）
+ *     t28 的树:  7 个文件未提交
+ *     ⇒ 而若我按 "working" 当它在跑而等着 ⇒ 那些改动会【永远冻在那儿】
+ *
+ * ── ★ 为什么"会话没了"还不够，必须同时报出这一格 ─────────────────────────────────
+ *
+ * 「那个成员死了」这句事实本身**不改变任何人的下一步** —— 队长会想"那我重派一次"，
+ * 而**重派救不回那棵树的产物**：新会话从当前 HEAD 起，那个 worktree 里的未提交
+ * 改动仍然只有那一棵树上有。⇒ 真正决定下一步动作的是**"有没有东西会因此丢掉"**。
+ *
+ * ★ 而这正是本队那条纪律的又一次实例：
+ *   **一个读数只有在它能改变【下一步动作】时才有价值。**
+ *   `not-live` 说"出事了"，这一格说"去抢救 /tmp/salvage-<时间>/ 之前别动它"。
+ *
+ * ── ★★ 三态，且"读不到"绝不并进"没有产物" ──────────────────────────────────────
+ *
+ * ```
+ * { status: 'frozen', worktrees: [...] }       —— 有活儿的树冻着，逐棵报出
+ * { status: 'clear' }                          —— 读了：没有任何处于该状态的树
+ * { status: 'could-not-measure', reason }      —— 读不到（git 缺席 / 目录不可读）
+ * ```
+ *
+ * ★ 后两态**必须不同形**：`clear` 是"我去看过了，没有"，`could-not-measure` 是
+ *   "我没能去看"。把后者读成前者，会让一次 git 故障变成一句"没有东西会丢"——
+ *   而那句话正是抢救那一步的唯一依据（§39.4 ①）。
+ *
+ * ── ★ 诚实边界：它只说"这一棵树在【此刻】是脏的" ─────────────────────────────────
+ *
+ * 它**不说**这些改动是那个死掉的成员写的（git 不知道是谁改的 —— 与
+ * `gitChangedPaths` 的诚实边界逐字相同）。它说的是："这几棵树上有未落盘的改动，
+ * 而它们所属的成员已经不在了 ⇒ 没有任何人会把它们提交上来。"
+ * ⇒ 归属仍由会话事件回答，两格合起来才完整。
+ */
+export type StrandedWorktrees = {
+    readonly status: 'clear';
+    readonly checked: number;
+} | {
+    readonly status: 'frozen';
+    readonly checked: number;
+    readonly worktrees: readonly FrozenWorktree[];
+} | {
+    readonly status: 'could-not-measure';
+    readonly reason: string;
+};
+/** 一棵冻着的树：路径 + 有几个路径脏了。★ 不报文件名 —— 那可能很长，且抢救要的是整棵树。 */
+export interface FrozenWorktree {
+    /** 那棵树的绝对路径（抢救的落点）。 */
+    readonly path: string;
+    /** 它相对工作区的名字（`task-t39` 那一格，人读的）。 */
+    readonly name: string;
+    /** 脏路径的条数。★ `0` 的树**不会**出现在这里（见下）。 */
+    readonly dirty: number;
+}
+/** 一棵**可能的**冻树：它的成员名 + 它的绝对路径（由调用方算出，见下）。 */
+export interface FrozenCandidate {
+    /** 处于 `not-live` 且名下有在飞任务的那个成员。 */
+    readonly member: string;
+    /** 那棵树的绝对路径。★ 目录名由调用方用 `worktreeDirName` 算 —— 见下。 */
+    readonly path: string;
+    /** 它在磁盘上的名字（`task-<team>-<id>`），人读的。 */
+    readonly name: string;
+}
+/**
+ * 找出**冻着的树**：某一棵成员 worktree 里有未提交改动，而它的成员已经不在了。
+ *
+ * @param candidates - 处于 `not-live` 且名下有在飞任务的成员，连同它们各自的树路径。
+ * @param dirtyOf - 树路径 → 脏路径条数（**由调用方注入**，见下）。
+ *
+ * ── ★★ 为什么路径由调用方给出，而不是这里用成员名拼 ────────────────────────────
+ *
+ * MEASURED（本函数第一版，实测打红）：我按**成员名**去拼
+ * `.agent-teams/worktrees/<memberName>` —— 而真实的目录名是
+ * `worktreeDirName(teamId, taskId)` = `task-<team>-<task>`（见 `src/worktree.ts`）。
+ * ⇒ 于是每一棵**真的存在的**树都读不到，而整个格子恒报 `could-not-measure`。
+ *
+ * ★ 这正是本队记账的形态：**一个拼错的路径会让"读不到"与"没有东西"同形** ——
+ *   而这一格的 `could-not-measure` 救了它（没有圆成 `clear`），所以它当场可见。
+ *   ⇒ 修法是让**唯一知道那个名字的人**（调用方，它已经 import 了
+ *     `worktreeDirName`）把路径算好，而不是在这里再拼一份**第二份真相**。
+ *
+ * ── ★ 为什么 `dirtyOf` 也由调用方注入 ──────────────────────────────────────────
+ *
+ * 本文件（`members.ts`）到目前为止**不碰 git**：它管的是子代理生命周期。
+ * 而"哪棵树脏了"是一次**文件系统查询**（`git status --porcelain`，可能慢、
+ * 可能失败）。把它合进来会让"读一个成员的存活"这件事需要一次 git 调用 ——
+ * 而存活读数会**在每一次 `status` 上对每一个成员**跑一遍。
+ * ⇒ 注入让调用方决定**要不要**付这笔钱、以及**付几次**。
+ *
+ * ★ 这与 `mutation-guard.ts` 的划分逐字同源：那里也是"纯数据变换留在模块里，
+ *   读文件/跑 git 全部由调用方注入"。
+ */
+export declare function strandedWorktrees(candidates: readonly FrozenCandidate[], dirtyOf: (worktreePath: string) => number | undefined): StrandedWorktrees;
+/** 把那一格说成一句人话（含**补救动作** —— 只说"冻着"不改变任何人的下一步）。 */
+export declare function describeStrandedWorktrees(readout: StrandedWorktrees): string;
 export {};

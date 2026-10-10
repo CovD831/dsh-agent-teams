@@ -354,6 +354,26 @@ export interface TeamTask {
      *   而这一个记的是"**审的结果**"（逐条 checks）。两者可以各自在场、各自缺席。
      */
     reviewed?: ReviewedStamp;
+    /**
+     * ── ★★★ t14：这条任务由**哪个模型**执行（每一次执行的绑定）──────────────────────
+     *
+     * ★ 为什么挂在**任务**上而不是**成员**上：一个持久成员在**多轮里执行许多不同的
+     *   任务** ⇒ "这个成员的模型"**指不出"这条结果是谁产出的"**。
+     *   而绑定挂在这里 ⇒ 每一条结果的归属**有唯一答案**。
+     *   来源：@linxin666/dsh-web-all 的 task-board（每条 task 自带 model +
+     *   `executions[]` —— **一次运行是历史里的一个元素，而不是一次状态转换**）。
+     *
+     * ★ 三态（与全仓纪律同源）：
+     *   · 有值   —— 这条任务声明了由这个模型执行
+     *   · 缺席   —— **没声明**（走该成员自己的路由；这是合法状态，不是错误）
+     *
+     * ★★ 而它一旦**执行过**就是**封条**：`modelBindingIsSealed` 判它，改 ⇒ **拒绝**。
+     *   理由：改一条已跑过的任务的模型会**毁掉归属** ——
+     *   "这条结果是谁产出的"从那一刻起没有唯一答案。用户明确接受**推迟**那件事。
+     */
+    model?: string;
+    /** 本条任务绑定的推理档位。★ 只有与 `model` **同时**在场才有意义。 */
+    reasoningEffort?: string;
     /** Repair source: the implementation / previous successful artifact. */
     sourceTaskId?: string;
     sourceFindingIds?: string[];
@@ -363,8 +383,63 @@ export interface TeamTask {
     revisions?: TaskRevision[];
     createdAt: number;
     updatedAt: number;
+    /**
+     * ── ★★★「这次拒绝之后，任务有没有继续往下走」—— C1 的机械判据 ──────────────────
+     *
+     * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+     *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+     * ⇒ 卡点记的是【状态：任务停住了】，不是【事件：判据报错了】。
+     *
+     * ── 为什么它是一格【持久状态】而不是当场算出来的一个布尔 ──────────────────────
+     *
+     * 「有没有继续往下走」这句话在**一次**拒绝的那一下**无从判断** ——
+     * 唯一能回答它的东西是【下一次拒绝】。一次拒绝之后成员改了字段再报，
+     * 任务就继续走了；同样的拒绝再来一次，它才停住了。
+     * ⇒ 所以判据必须是**跨调用**的，而跨调用就必须落盘（本格）。
+     *
+     * ── ★★ 三态（★ 而它们的补救动作不同 ⇒ 必须不同形）────────────────────────────
+     *
+     *     `trying`   —— 第一次被这条判据拒（★ 默认：自己先解，见 C2）
+     *                   ⇒ 记 `rejections`（保留证据，**不是卡点**），不惊动人
+     *     `stalled`  —— **同一个 `(taskId, gateId)`** 又拒了一次
+     *                   ⇒ ★ 这才记 `frictions`（真卡点：任务确实停住了）
+     *     （缺席）    —— 从未被拒过，或最近一次已放行
+     *
+     * ★ 三者不许合流：把 `trying` 并进 `stalled` 就是本任务要修的那个缺陷
+     *   （207 条判据拒绝日志 ≠ 21 条真卡点）；把 `stalled` 并进 `trying`
+     *   会让真正停住的任务**永远不产生卡点**（另一个方向的同一类错误）。
+     *
+     * ★ N = 2（用户已确认）：1 次是正常的"填错了改一下"，2 次说明它卡在同一个地方了。
+     * ★ 本字段是**落盘的读数**，不是判据的输入 —— 判据看的是它，但改判据的 N
+     *   不该需要改这里（见 `STALL_REPEAT_THRESHOLD`）。
+     */
+    stall?: TaskStall;
 }
-/** Member lifecycle status. */
+/**
+ * ── ★★ 同一条判据把同一件事拒了几次（C1）──────────────────────────────────────
+ *
+ * 键是 `(taskId, gateId)`：**同一个判据**重复拒绝**同一个任务**才算"停住"。
+ * ★ 不是"被拒了几次" —— 五个不同判据各拒一次是**五件不同的事**，
+ *   而把它们数成一个数字会让"每次都被不同的门拦"读成"卡在同一处"。
+ */
+export interface TaskStall {
+    /** 最近一次拒绝它的判据 id（`completion.mutation` 那一类）。读不出来 ⇒ 缺席，不猜。 */
+    gate?: string;
+    /** 判据位置（`contract` / `dispatch` / `completion` / …）。 */
+    point: string;
+    /** ★ 三态：`trying`（还自己解得了）/ `stalled`（停住了）。 */
+    state: StallState;
+    /** 这个 `(task, gate)` 被拒的次数（含第一次）。 */
+    count: number;
+    /** 最近一次被拒的时刻（墙钟）。 */
+    at: number;
+}
+/**
+ * ★ 三态里的**【两态】** —— 这里刻意没有第三态：本字段**缺席**就是第三态
+ *   （"从未被拒"），而"缺席"与"记着一个值"必须不同形（本仓反复记账的那条）。
+ */
+export type StallState = 'trying' | 'stalled';
+/** 成员生命周期状态。 */
 export type MemberStatus = 'idle' | 'working' | 'removed';
 /** One team member: a continuable subagent plus its team-side record. */
 export interface TeamMember {

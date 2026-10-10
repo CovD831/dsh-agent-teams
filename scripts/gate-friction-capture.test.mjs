@@ -99,10 +99,11 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { createTeamDir } from '../lib/state.js'
@@ -348,6 +349,555 @@ async function rejectViaContractBlock(f) {
 async function settle() {
   await new Promise((resolve) => setTimeout(resolve, 300))
 }
+
+/**
+ * ─── ★★★ C1（本段是 2026-10-11 加的）：判据拒绝 ≠ 卡点 ──────────────────────────
+ *
+ * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+ *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+ *
+ * 实测动机（同文件 §1）：253 条卡点里 **207 条（82%）是判据拒绝日志**
+ * （标题形如 `update_task rejected: …`），而真正让任务停下来的只有 **21 条**。
+ * ⇒ 记的是【事件：判据报错了】，而用户的定义是【状态：任务卡住了】。
+ *
+ * ── 机械判据（本段四条臂瞄准的东西）────────────────────────────────────────────
+ *
+ * **同一条判据把同一个任务拒 ≥2 次 ⇒ 任务停住了。**
+ *   1 次 = 正常的"填错了改一下"（那 207 条正是这一类）；
+ *   2 次 = 它在同一个地方卡住了。
+ *
+ * ── ★★ 为什么这四条臂必须落在本文件（而不是一个只读记录形状的臂）──────────────
+ *
+ * 一个"记录里有 `class` 字段"的臂**测不出**这个改动：
+ *   把两类合并回一条（`class` 恒为 `'rejection'`、`blocking` 恒 false）之后，
+ *   那个臂照样绿 —— 因为形状还在，只是**结论全错**。
+ * ⇒ 必须有一条臂喂【该产生卡点】的输入（真的停两次）与一条【该不产生】的
+ *   （拒一次就走）。这正是 `PENDING-FRICTION-REFORM.md` §6 经验 B：
+ *   「正向臂只喂『该被拒』的输入，所以它测不出『一律拒绝』」。
+ */
+
+/**
+ * ── 读一个任务的 `stall` 读数（C1 的判据落在这一格上）──────────────────────────
+ *
+ * ★ 读的是**盘上那份 `team.json`**，不是工具返回值 —— 判据必须是**落盘的**，
+ *   否则它在"下一次调用"里就不存在了（而那正是本判据赖以成立的东西）。
+ */
+function stallOf(stateRoot, taskId) {
+  /**
+   * ★ 路径是 `stateRoot/<teamId>/team.json`（见 `src/state.ts` 的 `createTeamDir`）——
+   *   本夹具的团队 id 恒为 `team`。
+   */
+  const team = JSON.parse(readFileSync(join(stateRoot, 'team', 'team.json'), 'utf8'))
+  const task = (team.tasks ?? []).find((candidate) => candidate.id === taskId)
+  return task?.stall
+}
+
+/** 走**真工具**做一次完工上报（返回错误原文，或被放行时返回 undefined）。 */
+async function reportCompletion(f, taskId, attemptId, overrides = {}) {
+  const { restore } = nestedTestEnv()
+  try {
+    return await f.tools.get('agent_teams_update_task').execute(
+      {
+        task_id: taskId, attempt_id: attemptId, status: 'completed',
+        changedPaths: ['a.ts', 'scripts/suite.test.mjs'],
+        acceptanceResults: [{ criterion: 'c', status: 'passed' }],
+        commandsRun: [{ command: 'node --test scripts/suite.test.mjs', status: 'passed', exitCode: 0 }],
+        ...overrides,
+      },
+      { agent: f.member('m1'), signal: new AbortController().signal },
+    ).then(
+      () => undefined,
+      (error) => String(error.message),
+    )
+  } finally {
+    restore()
+  }
+}
+
+/**
+ * ── 第 1 次拒绝：★ 这一次之后任务**还会往下走**（成员只是填错了一个字段）────────
+ *
+ * 用的仍是**真的** `completion.mutation` 拒绝（见 `rejectViaCompletionBlock`），
+ * 所以"拒"这件事本身没有变松 —— 变的是**它算不算卡点**。
+ */
+const rejectOnce = rejectViaCompletionBlock
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 6（★★ 核心臂 · 正向半边）：一次「拒绝后成员改字段再报」⇒ **不产生卡点**
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 6（C1 正向半边）：「拒绝一次，成员改了字段再报」⇒ 台账里【不产生卡点】', async () => {
+  /**
+   * ── ★★ 本臂喂的是【该被放行（不记卡点）】的输入 ─────────────────────────────────
+   *
+   * 见本段头：只喂"该记卡点"的输入的臂**测不出**"一律记卡点"，而"一律记卡点"
+   * 正是改动前的实际行为（207 条判据拒绝全被记成卡点）。
+   */
+  const f = fixture()
+  await seedTeam(f.stateRoot, 't1', { baseRevision: f.baseRevision })
+
+  /** ① 第一次上报：真的被拒（前置 —— 否则本臂测的是"一次成功调用有没有写台账"）。 */
+  const first = await rejectOnce(f, 't1')
+  assert.match(
+    String(first), /^update_task rejected: /,
+    `★ 前置：第一次必须真的被拒。实测：${String(first).slice(0, 200)}`,
+  )
+  assert.match(
+    String(first), /\[completion\.mutation\]/,
+    `★ 而拒绝它的必须是完工位那条变异判据。实测：${String(first).slice(0, 200)}`,
+  )
+
+  /**
+   * ★ 判据层：这一次之后，任务**还在自己解**（`trying`），不是 `stalled`。
+   */
+  const afterFirst = stallOf(f.stateRoot, 't1')
+  assert.equal(
+    afterFirst?.state, 'trying',
+    `★ 一次拒绝 ⇒ 任务还在自己解（\`trying\`）—— 它**不是**卡点。实测：${JSON.stringify(afterFirst)}`,
+  )
+  assert.equal(
+    afterFirst?.count, 1,
+    `★ 而这一次是第 1 次。实测：${JSON.stringify(afterFirst)}`,
+  )
+  await settle()
+
+  /** ② 台账里那一条必须是 `rejection`，而**不是** `blocker`。 */
+  const records = frictionRecords(f.stateRoot)
+  assert.equal(records.length, 1, `★ 一次拒绝 ⇒ 恰好一条记录。实测 ${records.length} 条`)
+  assert.equal(
+    records[0].class, 'rejection',
+    `★★ 判据拒绝记的是【事件】—— \`class\` 必须是 \`rejection\`。实测：${JSON.stringify(records[0].class)}`,
+  )
+  assert.equal(
+    records[0].resolution?.blocking, false,
+    '★★ 而它**不阻塞** —— `blocking: true` 会让读的人以为任务停住了（那正是本任务要修的那一半）',
+  )
+  assert.notEqual(
+    records[0].resolution?.pool, 'escalate',
+    '★★ 而一次判据拒绝**不许**进「要上报给人」的池子 —— 用户抱怨的正是"一堆本来不需要人的事被推给了人"',
+  )
+
+  /**
+   * ── ★★★ 第二半：**任务继续走了** ────────────────────────────────────────────
+   *
+   * 「这次拒绝之后，任务有没有继续往下走」—— 本判据的名字就是它，所以必须有
+   * 一条臂**真的让任务走起来**，然后断言"走起来之后不再产生卡点"。
+   *
+   * ★ 走起来的形式：成员把拒它的那件事改好（这里用一条**只有那一门会拦**的
+   *   `status: 'failed'` —— 质量门放行失败态，而变异门只看证据不看 status）。
+   *   ★ 用同一个 attempt、同一个任务 ⇒ 若实现把状态挂在任务上而**没在放行时清掉**，
+   *     这一条会读到 `count: 2` 并错判成卡点 ⇒ 本臂当场红。
+   */
+  const second = await reportCompletion(f, 't1', 'a1', { status: 'failed' })
+  /**
+   * ★ 前置：这一次**不该**被完工判据拒（否则它就成了一次真卡点，
+   *   而本臂测的"走起来了"这件事没成立）。
+   */
+  assert.ok(
+    second === undefined || !/^update_task rejected: /u.test(String(second)),
+    `★ 前置：改好之后再报，完工判据**不许**再拒它一次（否则任务没走起来）。实测：${String(second).slice(0, 200)}`,
+  )
+  const afterMove = stallOf(f.stateRoot, 't1')
+  assert.equal(
+    afterMove, undefined,
+    `★★★ 任务继续走了 ⇒ 那条 \`stall\` 必须被【清掉】。留着它会让下一次拒绝读到 `
+    + `count=2 而被误判成卡点（"每个任务最终都会变成卡点"）。实测：${JSON.stringify(afterMove)}`,
+  )
+  await settle()
+  const after = frictionRecords(f.stateRoot)
+  assert.equal(
+    after.filter((record) => record.class === 'blocker').length, 0,
+    `★★★ 一次「拒绝 → 改 → 再报 → 放行」的完整回合，**一条卡点都不许产生**。`
+    + ` 实测卡点数：${after.filter((record) => record.class === 'blocker').length}`,
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 7（★★ 核心臂 · 反向半边）：任务**真的停住** ⇒ 必须产生卡点
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 7（C1 反向半边）：同一条判据拒 ≥2 次 ⇒ 任务真的停住，台账里**产生卡点**', async () => {
+  /**
+   * ── ★★ 为什么这一半必须有 ──────────────────────────────────────────────────────
+   *
+   * 一个"**永远**记 rejection（一个卡点都不产生）"的实现会让臂 6 全绿 ——
+   * 而它把用户设定的东西整个删掉了（21 条真卡点再也不被记出来）。
+   * ⇒ 唯一能把它和正确实现分开的，是喂**该产生卡点**的输入。
+   */
+  const f = fixture()
+  await seedTeam(f.stateRoot, 't1', { baseRevision: f.baseRevision })
+
+  const first = await rejectOnce(f, 't1')
+  assert.match(String(first), /^update_task rejected: /, '★ 前置：第一次必须真的被拒')
+  await settle()
+  const afterFirst = frictionRecords(f.stateRoot)
+  assert.equal(
+    afterFirst.filter((r) => r.class === 'blocker').length, 0,
+    '★ 前置：**第一次**拒绝不许产生卡点（这与臂 6 是同一条判据，这里当对照）',
+  )
+
+  /** ② 什么都不改，再报一次 —— 同一 `(task, gate)` 的第二次拒绝。 */
+  const second = await rejectOnce(f, 't1')
+  assert.match(
+    String(second), /^update_task rejected: /,
+    `★ 前置：第二次也必须真的被拒（成员什么都没改）。实测：${String(second).slice(0, 200)}`,
+  )
+  assert.match(
+    String(second), /\[completion\.mutation\]/,
+    '★ 而拒它的必须**还是同一条**判据 —— 换了一条就不是"卡在同一个地方"（见 `observeStall` 的键）',
+  )
+
+  const afterSecond = stallOf(f.stateRoot, 't1')
+  assert.equal(
+    afterSecond?.state, 'stalled',
+    `★★ 同一条判据拒了第二次 ⇒ 任务**停住了**。实测：${JSON.stringify(afterSecond)}`,
+  )
+  assert.equal(afterSecond?.count, 2, `★ 而次数要如实记成 2。实测：${JSON.stringify(afterSecond)}`)
+  assert.equal(
+    afterSecond?.gate, 'completion.mutation',
+    '★ 而"是哪条判据"必须一起落盘 —— 否则读的人无从复查（也不许猜，见 `observeStall`）',
+  )
+  await settle()
+
+  const blockers = frictionRecords(f.stateRoot).filter((record) => record.class === 'blocker')
+  assert.equal(
+    blockers.length, 1,
+    `★★★ 第二次拒绝 ⇒ 必须**恰好一条**卡点记录。实测 ${blockers.length} 条`,
+  )
+  const blocker = blockers[0]
+  /**
+   * ── ★★★ 两类记录必须【不同形】—— 这是"合并回一条 ⇒ 臂红"瞄准的那一格 ───────────
+   *
+   * ★ 判据不是"有没有 `class` 这个字段"（那是形状），而是**三格结论**：
+   *   `class` / `resolution.blocking` / `resolution.pool`。
+   *   把两类合并回一条（三格都写成 rejection 的取值）会让这里当场红。
+   */
+  assert.notEqual(
+    blocker.resolution?.blocking, false,
+    '★★★ 真卡点必须 `blocking: true` —— 与 rejection 的 `false` **不同形**。'
+    + ' 合并回一条（都写 false）会让**真卡点**读成"不需要动"，那正是本任务要修的那一半',
+  )
+  assert.equal(
+    blocker.resolution?.blocking, true,
+    '★★★ 而它必须是 `true` 本身（不是缺席、不是别的真值）—— 三态不许合流',
+  )
+  assert.equal(
+    blocker.resolution?.pool, 'escalate',
+    '★★★ 真卡点进「上报」池子（有人必须动）；rejection 进 `self`。'
+    + ' 两者同池 = 那 207 条又和 21 条混在一起了',
+  )
+  assert.ok(
+    typeof blocker.resolution?.whyPool === 'string' && blocker.resolution.whyPool !== '',
+    '★★ 而"为什么进这个池子"必须写出来（不是一句空话）—— 缺席与写了一句话必须不同形',
+  )
+  assert.notEqual(
+    blocker.class, 'rejection',
+    '★★ 而 `class` 这一格也必须是另一类',
+  )
+  /**
+   * ★ 判据本身（连同 N）也要落盘：见 `recordFriction` 里那段
+   *   （`PENDING-FRICTION-REFORM.md` §6 经验 A：一个数必须连同它的测量装置一起读）。
+   */
+  assert.equal(blocker.stall?.basis, 'repeated', '★ 判据要说清它是靠什么判的')
+  assert.equal(blocker.stall?.count, 2, '★ 而次数要落进记录')
+  assert.equal(
+    typeof blocker.stall?.threshold, 'number',
+    '★★ N 是**可注入**的 ⇒ 它必须一起落盘 —— 不记 N 的话，两条 count 相同的记录在读取端同形，而它们的结论相反',
+  )
+  /**
+   * ★ 两类记录的受控对照：同一份夹具、同一个任务、同一条判据 —— 唯一变的是**次数**。
+   *   ⇒ 两条记录的 `class` 必须不同（这就把"形状不同"钉在**同一条判据**上，
+   *     而不是"两个不同的夹具碰巧长得不一样"）。
+   */
+  const all = frictionRecords(f.stateRoot)
+  assert.equal(all.length, 2, `★ 两次拒绝 ⇒ 两条记录。实测 ${all.length} 条`)
+  assert.deepEqual(
+    all.map((record) => record.class), ['rejection', 'blocker'],
+    '★★★ 同一个任务、同一条判据、唯一变的自变量是【次数】⇒ 两条记录必须分属两类。'
+    + ` 实测：${JSON.stringify(all.map((record) => record.class))}`,
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 8（★★★ 定向突变臂）：把两类【合并回一条】⇒ 本臂必须红
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 8（C1 定向突变臂）：合并回一条的变异体会让臂 6/7 红 —— 逐条实测', async () => {
+  /**
+   * ── ★★ 为什么要有这一条「对定向突变的读数」─────────────────────────────────────
+   *
+   * 契约的第三条验收是：**「两类不同形（定向突变：合并回一条 ⇒ 臂红）」**。
+   * ★ 而"我声称它会长红"是一个**关于动作的猜想**（`PENDING-FRICTION-REFORM.md`
+   *   §6 经验 F：「动作发生了」与「事实建立了」不同形，只有后者可测）。
+   * ⇒ 所以这里不猜：**当场施加突变、当场跑、当场读回**那两条臂的裁决。
+   *
+   * ── 它怎么做（不碰 `src/`，也不碰盘上的 `lib/`）──────────────────────────────
+   *
+   * ★ 本文件的硬约束是"不碰 src/ 也不碰 lib/"。而这条臂要读的正是
+   *   **被突变之后的产物** ⇒ 做法是在**临时目录**里造一份 `lib/` 的副本，
+   *   在副本上做变异，然后**在子进程里**让那两条臂跑在副本上。
+   *
+   * ★★ 而"合并回一条"必须是一个**真的**变异体，不是改一个断言：
+   *   它改的是 `lib/tools/shared/entities.js` 里那两个决定 `class` 的表达式
+   *   （`blocker` ⇒ `rejection`，`blocking` ⇒ `false`）。
+   *   这正是"把两类合并回一条"的**最小形态**。
+   */
+  const libRoot = fileURLToPath(new URL('../lib', import.meta.url))
+  const recordsPath = join(libRoot, 'tools', 'shared', 'entities.js')
+  const source = readFileSync(recordsPath, 'utf8')
+
+  /**
+   * ★ 定位那两个**真的**决定类别的表达式（而不是按行号猜）：
+   *   `PENDING-FRICTION-REFORM.md` §3 记过那条教训 ——「夹具用 indexOf 应用变异体
+   *   （打到别的行）+ 基线红」，四个 mutation score 全是坏的。
+   *   ⇒ 这里按**内容**定位，且找不到就**当场红**（不静默跳过）。
+   */
+  const classExpr = /stall\.stalled \? 'blocker' : 'rejection'/u
+  const blockingExpr = /recordClass === 'blocker'/u
+  assert.match(source, classExpr, '★ 突变臂前置：要在产物里找到决定 `class` 的那一句（找不到就不能声称"施加了突变"）')
+  assert.match(source, blockingExpr, '★ 突变臂前置：要在产物里找到决定 `resolution` 那一句')
+
+  /** 突变体：把两类**合并回一条**（恒 rejection / 恒 blocking:false）。 */
+  const mutated = source
+    .replace(classExpr, "'rejection'")
+    .replace(blockingExpr, 'false')
+
+  /**
+   * ── 副本树：只改那一个文件，其余**软链**回真的 `lib/` ─────────────────────────
+   *
+   * ★ 复制整棵 `lib/` 会很慢且会与队友的并发 build 抢盘；软链让它是一棵
+   *   **除那一格之外逐字相同**的树 —— 于是"臂红了"这件事只能归因于那一格。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'friction-mutant-'))
+  try {
+    const mutantLib = join(dir, 'lib')
+    /**
+     * ── ★★★ 用**复制**而不是软链（MEASURED，本臂第三版）─────────────────────────────
+     *
+     * ★ 第一版用软链 + 默认解析 ⇒ 软链被 **realpath 解开** ⇒ 变异的
+     *   `entities.js` **在盘上而没有任何代码读它**（静默：读数与未突变逐字相同）。
+     * ★ 第二版改用 `--preserve-symlinks` 修好了那一格 —— **而它把别的东西弄坏了**：
+     *   保留了软链之后，`node_modules` 的**嵌套解析**（`@deepseek-ai/cordis` →
+     *   它自己的 `node_modules/@deepseek-ai/cosmokit`）也走了副本树，
+     *   于是 `ERR_MODULE_NOT_FOUND` ⇒ 子进程根本起不来。
+     *
+     * ⇒ 修法是**不引入软链**：`lib/` 只有 3.3 MB，整棵**真复制**过来，
+     *   而 `node_modules` 保持各引用方的正常解析（不在副本树里放它 ——
+     *   Node 会从副本树往上找到主树的 `node_modules`）。
+     * ★ 于是"副本树"这件事**不需要任何 flag** ⇒ 少一个会悄悄改变解析语义的变量。
+     */
+    cpSync(libRoot, mutantLib, { recursive: true })
+    writeFileSync(join(mutantLib, 'tools', 'shared', 'entities.js'), mutated, 'utf8')
+
+    /**
+     * ★★ 在子进程里跑**臂 7**（反向半边）：突变体把 `blocker` 也记成 `rejection`
+     *   ⇒ 「真卡点产生卡点记录」这条断言必须红。
+     *
+     * ★ 用 `--test-name-pattern` 只跑那一条：本臂要读的是**这一条**的裁决，
+     *   不是整份文件的（整份里还有一半臂是绿的，那会盖住这个读数）。
+     * ★ 子进程的 cwd 是**副本的父目录** —— 但 `--test` 跑的是主树的那个测试文件
+     *   （它 import `../lib/` 是**相对它自己**解析的）… ⇒ 所以不能只换 cwd。
+     *   做法：把测试文件也**软链**进副本树，让它 `../lib` 解析到副本的 `lib/`。
+     */
+    const mutantScripts = join(dir, 'scripts')
+    mkdirSync(join(mutantScripts, 'fixtures'), { recursive: true })
+    for (const name of ['gate-friction-capture.test.mjs']) {
+      writeFileSync(join(mutantScripts, name), readFileSync(new URL(name, import.meta.url), 'utf8'), 'utf8')
+    }
+    cpSync(
+      join(fileURLToPath(new URL('../scripts', import.meta.url)), 'fixtures'),
+      join(mutantScripts, 'fixtures'),
+      { recursive: true },
+    )
+    /**
+     * ★ `src/` 里的 JSON 表（kind-requirements.json 等）也要可达 —— 那几处
+     *   在夹具里是**相对测试文件**或**相对仓库根**读的（`src/` 只有几百 KB）。
+     */
+    cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(dir, 'src'), { recursive: true })
+    /**
+     * ── ★★ `node_modules`：**一条软链** —— 而它与上面那个坑不同形 ─────────────────
+     *
+     * ★ 不能复制（1.6 GB），也不能不放（副本树在系统临时目录里，Node 逐级向上
+     *   **永远走不到**本仓的 `node_modules` ⇒ `ERR_MODULE_NOT_FOUND:
+     *   @deepseek-ai/dsh-agent`，MEASURED 已撞两次）。
+     *
+     * ★★ 而**软链这一个目录是安全的**，与第一版那个坑有一处决定性差别：
+     *   第一版软链的是 `lib/` 里的**每一个文件**，于是"我在副本树里改的那个模块"
+     *   与"运行时加载的那个模块"是两个不同的 realpath。
+     *   这里副本树的 `lib/` 是**真文件**（改的就是被加载的那一份），
+     *   软链只解决"去哪儿找第三方包" —— 那一格**本来就是共享的**，不是被测对象。
+     */
+    symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(dir, 'node_modules'))
+
+    const run = (pattern) => {
+      const result = spawnSync(
+        'node',
+        [
+          '--test', '--test-reporter=tap',
+          `--test-name-pattern=${pattern}`,
+          'scripts/gate-friction-capture.test.mjs',
+        ],
+        /**
+         * ★★ 子进程必须拿到**剥掉递归标记**的环境 —— 否则 `node --test` 判它是递归
+         *   并把整个文件**静默跳过**，于是 exit=0、而"突变没造成红"这件事
+         *   与"子进程根本没跑"同形（MEASURED：本臂第一版就撞了这个 ——
+         *   exit=0 且输出里只有那句 "skipping running files"）。
+         *   共享件仍然是唯一出处：`recursionFreeEnv`。
+         */
+        { cwd: dir, encoding: 'utf8', env: recursionFreeEnv(process.env), maxBuffer: 32 * 1024 * 1024 },
+      )
+      return { code: typeof result.status === 'number' ? result.status : -1, out: `${result.stdout ?? ''}\n${result.stderr ?? ''}` }
+    }
+
+    /**
+     * ── ★★★ 前置断言：**子进程读到的到底是哪一份实体** ───────────────────────────
+     *
+     * ★ 本臂第一版栽的那个坑是**静默**的（软链被 realpath 解开 ⇒ 变异体在盘上而
+     *   没有任何代码读它）⇒ 它必须有一条**自己的**断言，而不是相信"我把文件写对了"。
+     * ★ 这正是本队那条纪律的可执行形式：**每一次「这样就该好了」都必须配一个
+     *   【读回那个事实】的动作**，否则它只是一个关于动作的猜想。
+     */
+    const controlLib = join(dir, 'lib')
+    /** 先放**未突变**的那一份，好让下面这个行为探针有一个可对照的读数。 */
+    writeFileSync(join(controlLib, 'tools', 'shared', 'entities.js'), source, 'utf8')
+    /**
+     * ── ★★ 前置②：**突变体真的被加载了**（不是"我写了那个文件"）────────────────────
+     *
+     * ★ 判据是机械的、且读的是**被加载的那一份的行为**（而不是盘上文件的内容）：
+     *   在副本树里跑一个最小脚本，让它**真的走一遍** `recordFriction`，
+     *   然后读回那条记录的 `class`。
+     *
+     * ★★ 为什么不能用"读盘上文件里有没有 `'rejection'` 字面量"：
+     *   那正是本臂第一版栽的那个坑 —— 变异体**在盘上**，而没有任何代码读它
+     *   （软链被 realpath 解开）⇒ 盘的读数是绿的，行为却与未突变**逐字相同**。
+     *   ⇒ 所以这一条必须**从行为读**，不能从盘读。
+     */
+    const behaviorProbe = () => {
+      const result = spawnSync(
+        'node',
+        [
+          '--input-type=module', '-e',
+          [
+            `const { recordFriction } = await import(${JSON.stringify(join(dir, 'lib', 'tools', 'shared', 'entities.js'))})`,
+            `const { mkdtempSync, readFileSync, readdirSync } = await import('node:fs')`,
+            `const { tmpdir } = await import('node:os')`,
+            `const { join } = await import('node:path')`,
+            `const root = mkdtempSync(join(tmpdir(), 'c1-probe-'))`,
+            `await recordFriction({ stateRoot: root, point: 'completion', message: 'update_task rejected: [completion.mutation] probe',`,
+            `  context: {}, mechanismState: {},`,
+            `  stall: { stalled: true, count: 2, basis: 'repeated' } })`,
+            `const dir2 = join(root, 'frictions')`,
+            `const name = readdirSync(dir2)[0]`,
+            `const record = JSON.parse(readFileSync(join(dir2, name), 'utf8'))`,
+            `process.stdout.write(JSON.stringify({ class: record.class, blocking: record.resolution?.blocking }))`,
+          ].join('\n'),
+        ],
+        { cwd: dir, encoding: 'utf8', env: recursionFreeEnv(process.env) },
+      )
+      return { code: typeof result.status === 'number' ? result.status : -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+    }
+    /**
+     * ★ 未突变的副本：`stalled: true` ⇒ `class` 必须是 `blocker`、`blocking` 必须是 `true`。
+     *   （★ 这是**行为**读数 —— 它证明"副本树读的是副本树的那一份"。）
+     */
+    const liveBefore = behaviorProbe()
+    assert.equal(
+      liveBefore.code, 0,
+      `★ 突变臂前置：行为探针必须在副本树里跑得起来。实测：${liveBefore.out.slice(0, 400)}`,
+    )
+    assert.match(
+      liveBefore.out, /"class":"blocker"/,
+      '★★★ 突变臂前置：**未突变**的副本树上，一个 `stalled: true` 的输入必须落 `class: "blocker"`。'
+      + ' 若这里是 `rejection`，说明**副本树根本没被读到**（变异体在盘上而没人读它）——'
+      + ' 而那正是本臂第一版栽的那个静默坏法。实测：' + liveBefore.out,
+    )
+    /**
+     * ── ★★★ 而这一条是本臂**真正的**前置：突变**必须改变行为** ───────────────────
+     *
+     * ★ 它把"突变体被加载了"这件事从**猜想**变成**读数**：
+     *   同一个输入、同一棵树，只改那一格 ⇒ 输出必须**不同形**。
+     * ★ 缺了它，"臂 7 在突变下变红"可能只是**副本树坏了**（那边 读数 ① 也在防，
+     *   但两者防的不是同一件事：这一个防"突变没生效"，那一个防"树本来就不行"）。
+     */
+
+    /**
+     * ── 读数 ①（前置）：副本树的**未突变**基线必须绿 ─────────────────────────────
+     *
+     * ★ 缺了这一半，"突变之后红了"可能只是因为**副本树本身**是坏的
+     *   （`PENDING-FRICTION-REFORM.md` §6 经验 A 那四个 mutation score 里的第 2 个
+     *   正是这个坏法：同一个坏 harness，基线红）。
+     */
+    const control = run('C1 反向半边')
+    assert.equal(
+      control.code, 0,
+      `★ 突变臂前置：**未突变的副本树**上，臂 7 必须是绿的（否则本臂分不清"突变造成的红"与"副本树本来就是坏的"）。`
+      + ` 实测 exit=${control.code}\n${control.out.slice(-2000)}`,
+    )
+
+    /** ── 读数 ②（★ 交付读数）：施加突变 ⇒ 臂 7 **必须**红 ─────────────────────── */
+    writeFileSync(join(controlLib, 'tools', 'shared', 'entities.js'), mutated, 'utf8')
+    /**
+     * ★★★ 前置：同一个输入在突变体上必须**变成另一类** ─────────────────────────────
+     *
+     * ⇒ 这一条把"突变真的生效了"证完；下面那条红才有资格归因于它。
+     */
+    const liveAfter = behaviorProbe()
+    assert.equal(liveAfter.code, 0, `★ 突变臂前置：突变体上的行为探针必须跑得起来。实测：${liveAfter.out.slice(0, 400)}`)
+    assert.match(
+      liveAfter.out, /"class":"rejection"/,
+      '★★★ 突变臂前置：**合并回一条**的突变体上，同一个 `stalled: true` 的输入必须落 `rejection`'
+      + '（这就是"两类被合成一类"的可执行形式）。若它仍是 `blocker`，说明突变**没有生效**，'
+      + ` 而下面的红就不能归因于它。实测：${liveAfter.out}`,
+    )
+    const mutant = run('C1 反向半边')
+    assert.notEqual(
+      mutant.code, 0,
+      '★★★ 定向突变：把两类**合并回一条**（`blocker` ⇒ `rejection`，`blocking` ⇒ `false`）之后，'
+      + ' 臂 7（"任务真的停住 ⇒ 产生卡点"）**必须变红** —— 若它还是绿的，说明那两条臂测不出这个区别，'
+      + ' 而"两类不同形"这句话就没有证据。'
+      + ` 实测 exit=${mutant.code}\n${mutant.out.slice(-2000)}`,
+    )
+    /**
+     * ★★ 而红的必须是**那一条断言**（不是"整个文件跑不起来"那种红）——
+     *   否则"臂红了"与"夹具坏了"同形。
+     *
+     * ★ 判据用**断言正文里的那些词**（"卡点"/"blocking"/"不同形"），
+     *   而不是"exit≠0"或"有没有异常"：一个加载期崩溃也会让 exit≠0，
+     *   而它与"这条臂逮住了这个突变"在退出码上**同形**。
+     */
+    assert.match(
+      mutant.out, /卡点|blocking|不同形/u,
+      '★★ 而突变造成的红必须落在**关于两类记录不同形的那些断言**上，而不是一个加载期崩溃'
+      + ` （后者也会让 exit≠0 ⇒ 两者在退出码上同形）。实测输出尾部：\n${mutant.out.slice(-2000)}`,
+    )
+    /** ★ 反向半边：红的**不许**是"模块找不到 / 语法错"那类（那说明副本树坏了，不是突变有效）。 */
+    assert.doesNotMatch(
+      mutant.out, /ERR_MODULE_NOT_FOUND|SyntaxError|Cannot find package/u,
+      `★★ 反向半边：这个红**不许**是副本树自身的坏法（加载失败 / 找不到包）—— 那与"突变被逮住"不同形。`
+      + ` 实测输出尾部：\n${mutant.out.slice(-1500)}`,
+    )
+
+    /**
+     * ── 读数 ③（★ 反向半边 · 定向）：突变**臂 6**（正向半边）也必须是红的 ─────────
+     *
+     * ★ 只突变一半（`blocker` ⇒ `rejection`）会让臂 6**更绿**（一个卡点都不产生，
+     *   而臂 6 要的正是"不产生卡点"）⇒ **臂 6 单独测不出这个突变**。
+     *   ⇒ 这就是为什么两类**各自**都需要一条臂，而这一条读数把那个"为什么"钉住：
+     *     只突变"该记卡点"的那一半 ⇒ 臂 7 红、臂 6 绿。
+     * ★ 它是本臂最有价值的一格：它证明了**两条臂都不是冗余的**。
+     */
+    const arm6Only = run('C1 正向半边')
+    assert.equal(
+      arm6Only.code, 0,
+      '★★ 定向读数：把"该记卡点"的那一半合并掉**不影响**臂 6（一次拒绝 ⇒ 不产生卡点）——'
+      + ' 这正说明**正向臂单独测不出这个缺陷**（本队经验 B），所以臂 7 不是冗余的。'
+      + ` 实测 exit=${arm6Only.code}\n${arm6Only.out.slice(-1500)}`,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1（★ 隔离臂）：台账必须落在【这个团队自己的】目录里

@@ -11,12 +11,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { memberActivity } from './members.ts'
+import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, type MemberLiveness, type StrandedWorktrees } from './members.ts'
+import { gitChangedPaths } from './harness-compat.ts'
+import { worktreeDirName } from './worktree.ts'
 import {
   CAPTAIN_KEY, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
   taskDepthsById, taskVisualState,
 } from './state.ts'
-import type { MemberStatus, TeamState, TeamTask } from './types.ts'
+import { TERMINAL_TASK_STATUSES, type MemberStatus, type TeamState, type TeamTask } from './types.ts'
 
 /** Visual task state for the activity panel. */
 export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -32,6 +34,23 @@ export interface TeamActivityMember {
   readonly executionPrompt: string
   readonly status: MemberStatus
   readonly activity: 'working' | 'idle' | 'unknown'
+  /**
+   * ── ★★★ t4：会话存活读数（与 `activity` **并列**，不是它的替代）──────────────
+   *
+   * `activity` 回答的是「这个驱动此刻忙不忙」；这一格回答的是「**还有没有**那个
+   * 驱动」。MEASURED（DISPATCH-RULES §39）：后者缺席时，`activity` 会读成
+   * `idle`（驱动不见 ⇒ `ready` ⇒ 面板画成"闲着"）—— 而"闲着"与"那个会话已经
+   * 没了、它的产物冻在 worktree 里"在面板上**同形**。
+   *
+   * ★ 两格不合并的理由与顶层 `status` 那处逐字相同：它们要人做的动作不同
+   *   （"忙不忙" ⇒ 等；"还活着吗" ⇒ 去抢救）。
+   */
+  readonly liveness: MemberLiveness['state']
+  readonly livenessReadout: MemberLiveness['readout']
+  /** ★ 未能测量时的成因（`could-not-measure` 时在场）。 */
+  readonly livenessReason?: string
+  /** ★ 名下有在飞任务而会话已不在 ⇒ 有一份工作悬在半空。 */
+  readonly stranded: boolean
   readonly progress: number
   readonly done: number
   readonly total: number
@@ -75,6 +94,14 @@ export interface TeamActivitySnapshot {
   readonly halted?: boolean
   readonly members: readonly TeamActivityMember[]
   readonly tasks: readonly TeamActivityTask[]
+  /**
+   * ── ★★★ t4：残留 `working` 的**后果面**（DISPATCH-RULES §39.2）───────────────
+   *
+   * t39 的树 12 个文件未提交（含 300 行改动），而"按 working 当它在跑而等着"
+   * ⇒ 那些改动永远冻在那儿。这一格就是那句后果的出口。
+   * ★ `clear` 与 `could-not-measure` **必须不同形**（见 `StrandedWorktrees`）。
+   */
+  readonly strandedWork: StrandedWorktrees
   readonly messageCount: number
   readonly captainInbox: readonly TeamActivityMessage[]
 }
@@ -139,6 +166,13 @@ export async function assembleTeamSnapshot(
   const members: TeamActivityMember[] = roster.map((member) => {
     const owned = tasks.filter((task) => task.assignee === member.name)
     const done = owned.filter((task) => task.status === 'completed').length
+    /**
+     * ★ t4：存活读数与 `activity` **并列**。历史（归档）团队没有"活着"可言
+     *   —— 它的会话按定义已经停了，所以那一支**不读**（读它会报一整队 `not-live`，
+     *   而那是一条关于"它是历史"的已知事实，不是一次故障）。
+     */
+    const live = options.historic === true ? undefined : memberLiveness(ctx, member)
+    const open = owned.filter((task) => !TERMINAL_TASK_STATUSES.includes(task.status)).map((task) => task.id)
     return {
       id: member.id,
       name: member.name,
@@ -157,12 +191,46 @@ export async function assembleTeamSnapshot(
                 ? 'idle'
                 : 'unknown')
           : 'idle',
+      /**
+       * ★ 归档团队支：`liveness` 报 `could-not-measure` 而不是 `not-live` ——
+       *   因为"历史团队的会话停了"是**可判定的**（它是历史），而 `not-live` 的
+       *   含义是"它本该在跑而现在不在" ⇒ 把那件事报成 `not-live` 会让每一份
+       *   历史快照都带着一整队假死亡告警（而那正是"恒常告警会被永久忽略"）。
+       */
+      liveness: live === undefined ? 'could-not-measure' : live.state,
+      livenessReadout: live === undefined ? 'driver-status-unreadable' : live.readout,
+      ...live?.state !== 'could-not-measure' ? {} : {
+        livenessReason: live?.reason ?? 'this is an archived team, so whether its member sessions are alive is not a question about the present',
+      },
+      stranded: live !== undefined && strandedWork(live, open),
       progress: owned.length === 0 ? 0 : Math.round((done / owned.length) * 100),
       done,
       total: owned.length,
       currentTask: currentTaskOf(member.name, tasks),
       unread: unreadByMember.get(member.name) ?? 0,
     }
+  })
+  /**
+   * ★ 冻着的树：只有**真的有**死掉的成员时才去读 git（干净的情形零成本）。
+   *
+   * ★ 用 `workspace`（面板显示的那个工作区根）而不是 `stateRoot` 去拼路径：
+   *   `.agent-teams/worktrees/<name>` 的父目录是**工作区**，而 `stateRoot` 可能
+   *   被配置到别处（`stateDir`）。两者在缺省下相同，但用错了那一格会在一次
+   *   自定义 `stateDir` 下静默地读一个不存在的目录 ⇒ 恒报"没有东西会丢"。
+   * ★ 树名用 `worktreeDirName`（与建树、找树同一个函数）—— 按成员名拼是第二份真相。
+   */
+  const frozenCandidates = members
+    .filter((member) => member.liveness === 'not-live' && member.stranded)
+    .flatMap((member) => tasks
+      .filter((task) => task.assignee === member.name && !TERMINAL_TASK_STATUSES.includes(task.status))
+      .map((task) => ({
+        member: member.name,
+        path: join(workspace, '.agent-teams', 'worktrees', worktreeDirName(state.id, task.id)),
+        name: worktreeDirName(state.id, task.id),
+      })))
+  const strandedWorkReadout: StrandedWorktrees = strandedWorktrees(frozenCandidates, (tree) => {
+    const dirty = gitChangedPaths(tree)
+    return dirty === undefined ? undefined : dirty.length
   })
   const captainInbox = await readUnreadMailbox(stateRoot, state.id, CAPTAIN_KEY)
   return {
@@ -177,6 +245,7 @@ export async function assembleTeamSnapshot(
       : {},
     ...state.halted === true ? { halted: true } : {},
     members,
+    strandedWork: strandedWorkReadout,
     tasks: tasks.map((task) => ({
       id: task.id,
       subject: task.subject,
