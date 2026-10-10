@@ -59,6 +59,11 @@ import { toolsSource } from './tools-source.mjs'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
+/**
+ * ★ plan-reviewed 门要求 reviewed 戳（详见该文件头）。
+ *   本夹具测的是输入面接线，不是那条门 ⇒ 盖一个全 pass 的戳让它过。
+ */
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const cleanups = []
@@ -208,7 +213,7 @@ test('★ 臂 1（对照臂）：输入面齐 ⇒ 核对不报 —— contract �
    */
   const probe = withProbe('contract', ['task', 'execVerifyCommand'])
   try {
-    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.equal(typeof result?.task_id, 'string', 'create_task must return')
     assert.equal(gapsFromLogs(warnings).length, 0, '★ 输入面齐时【一句缺格告警都不许有】（不是"少几句"，是零）')
   } finally {
@@ -229,7 +234,7 @@ test('★ 臂 2（对照臂）：缺一格 ⇒ 恰好报那一格；在场的那
    */
   const probe = withProbe('contract', ['task', 'execVerifyCommandThatWasNeverInjected'])
   try {
-    await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     const lines = gapsFromLogs(warnings)
     assert.equal(lines.length, 1, '★ 缺格时必须**恰好**报一次（报零次 = 没抓到；报多次 = 每个调用点各报一遍）')
     assert.match(lines[0], /execVerifyCommandThatWasNeverInjected/, '★ 一个【一定不在】的格子必须被报出来 —— 否则核对根本没读 ctx')
@@ -311,7 +316,7 @@ test('★ 臂 3（历史缺口 ①）：inScope 缺席 —— 核对报出它（
     workspace,
     probePoint: 'contract',
     requires: ['task.inScope'],
-    invoke: () => call('agent_teams_create_task', { subject: 'w', kind: 'work' }),
+    invoke: () => call('agent_teams_create_task', { subject: 'w', kind: 'work', reviewed: reviewedStamp() }),
     warnings,
   })
   /**
@@ -394,6 +399,8 @@ test('★ 臂 5（历史缺口 ③）：执行器缺席 —— 两个位置各�
     await call('agent_teams_create_task', {
       subject: 'w', kind: 'implementation', objective: 'o', inScope: ['src/a.ts', 'lib/a.js'],
       acceptance: ['a'], verify: ['node -e "process.exit(0)"'],
+      /** ★ 同上传记：本夹具测的是输入面接线，不是 plan-reviewed 那条门。 */
+      reviewed: reviewedStamp(),
     })
     assert.doesNotMatch(
       logsText(warnings), /execVerifyCommand/,
@@ -405,7 +412,7 @@ test('★ 臂 5（历史缺口 ③）：执行器缺席 —— 两个位置各�
 
   const absent = withProbe('contract', ['execVerifyCommandThatWasNeverInjected'])
   try {
-    await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.match(
       logsText(warnings), /execVerifyCommandThatWasNeverInjected/,
       '★ 漏报方向：一个没有被注入的执行器必须被报出来（否则这个机制抓不住"输入面没接"）',
@@ -567,12 +574,12 @@ test('★ 臂 8（噪音臂）：不适用的事件上缺失清单为空 —— 
   const { call, warnings } = pluginFixture(workspace)
 
   /** ★ 基线：不挂探针时，create_task 上【一条缺格告警都没有】。 */
-  await call('agent_teams_create_task', { subject: 'w0', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+  await call('agent_teams_create_task', { subject: 'w0', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
   assert.equal(gapsFromLogs(warnings).length, 0, '★ 基线：不挂探针时这个位置一条缺格都没有（否则下面的"恰好一次"读的是别人的话）')
 
   const probe = withProbe('contract', ['task', 'noSuchFieldAtAll'], () => false)
   try {
-    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     /**
      * ★ 构造：一条 `appliesTo: () => false` 的判据，声明一组**真实 ctx 上一格都没有**
      *   的路径（其中 `noSuchFieldAtAll` 是任何 ctx 上都不存在的哨兵）。
@@ -593,7 +600,7 @@ test('★ 臂 8（噪音臂）：不适用的事件上缺失清单为空 —— 
     probe.dispose()
     const active = withProbe('contract', ['task', 'noSuchFieldAtAll'], () => true)
     try {
-      await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+      await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
       assert.equal(gapsFromLogs(warnings).length, 1, '★ 同一个声明、闸门翻成"适用"之后必须**恰好**报一次')
       assert.match(logsText(warnings), /noSuchFieldAtAll/, '★ 且要报出那个一定不存在的哨兵')
       assert.doesNotMatch(logsText(warnings), /\btask\b(?!\.)/, '★ 在场的那一格（`task`）仍然不许被报成缺（误报方向）')
@@ -638,10 +645,10 @@ test('★ 臂 9（先软后硬）：核对报缺时流程照常走完 —— 删
   const workspace = track(mkdtempSync(join(tmpdir(), 'input-soft-')))
   await seedRunningTeam(workspace)
   const { call, warnings } = pluginFixture(workspace)
-  const before = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+  const before = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
   const probe = withProbe('contract', ['definitelyNotAContextPath', 'neitherIsThis'])
   try {
-    const after = await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const after = await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.equal(typeof after?.task_id, 'string', '★ 核对报缺【不得】拒绝流程（先软后硬）：create_task 必须照常返回')
     assert.equal(typeof before?.task_id, 'string', '★ 对照：不挂探针时也返回 —— 两次同形，差别只能在核对结论里')
     const lines = gapsFromLogs(warnings)
@@ -852,7 +859,7 @@ test('★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是
       label: 'contract',
       point: 'contract',
       run: async ({ call }) => {
-        const r = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+        const r = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
         assert.equal(typeof r?.task_id, 'string', '★ contract 位置：核对报缺时 create_task 必须照常返回')
       },
     },

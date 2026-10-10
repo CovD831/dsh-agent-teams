@@ -836,7 +836,12 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         let worktreeMissingIgnored: readonly string[] | undefined
         let worktreeUnavailable: string | undefined
         if (needsWorktree) {
-          const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId })
+          /**
+           * ★ `teamId` 必须传：任务 id 按团队重新计数（每个团队的 t1 都叫 t1），
+           *   而只用 `task-<id>` 会让新团队命中上一轮的树 —— 实测过，
+           *   见 `worktreeDirName` 上面那段。
+           */
+          const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId, teamId: team.id })
           if (created.ok !== true && created.unsupported === true) {
             /**
              * ── ★ 这个仓库【没有】隔离能力 ⇒ 降级派发，但留下痕迹 ──────────────

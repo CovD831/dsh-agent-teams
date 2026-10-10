@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { registerAgentTeamsTools, runtimeGateLogSnapshot } from '../lib/tools.js'
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { registry } from '../lib/gates/index.js'
 import { installTeamScheduler } from '../lib/scheduler.js'
 import { createTeamDir, readTeam } from '../lib/state.js'
@@ -252,7 +253,7 @@ test('★ 伪造臂：contract 位置上一条 blocked 判据 ⇒ create_task �
   )
   try {
     await assert.rejects(
-      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] }),
+      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] , reviewed: reviewedStamp() }),
       (error) => {
         assert.match(error.message, /create_task rejected/, 'the rejection must say which step was refused')
         assert.match(error.message, /grep -qx is whitespace-broken/, '★ the judge must have entered the decision: its own words must be in the rejection')
@@ -281,7 +282,7 @@ test('★ 未测量臂：contract 位置上一条 unmeasured 判据 ⇒ 拒绝�
   const probe = withGate('contract', { ok: false, unmeasured: 'the gate could not parse the verify command statically' })
   try {
     await assert.rejects(
-      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] }),
+      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] , reviewed: reviewedStamp() }),
       (error) => {
         assert.match(error.message, /could not measure/, '★ unmeasured must read as "could not measure", never as "found problems"')
         assert.match(error.message, /parse the verify command statically/, '★ the probe\'s own words must be in the rejection (otherwise another judge spoke)')
@@ -314,7 +315,7 @@ test('★ 对照臂：contract 位置【一条判据都没挂】⇒ create_task 
    * ★ 所以输入要带上一份合法的 inScope：`contract.build-artifact-scope` 在"没拿到
    *   inScope"时说 unmeasured（那是它诚实的样子），而本臂测的是调用点本身。
    */
-  const created = await call('agent_teams_create_task', { subject: 'ordinary work', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'ordinary work', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   assert.equal(created.subject, 'ordinary work')
   assert.equal(created.status, 'pending')
 })
@@ -506,7 +507,7 @@ test('★ runtime 位置的硬要求：blocked 判据【被记录但不得阻止
      * ★ 契约带上一份 inScope：这是这个位置真实会收到的形状（一个质量任务），
      *   而其余 contract 判据只有在拿到 inScope 时才安静（见文件顶部那条 MEASURED）。
      */
-    const created = await call('agent_teams_create_task', { subject: 'work under a blocked runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under a blocked runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending', '★ a blocked runtime gate must NOT block the flow')
     assert.ok(probe.calls.length >= 1, '★ the runtime gate must actually have been evaluated (not merely written in the source)')
     const log = runtimeGateLogSnapshot().slice(before)
@@ -538,7 +539,7 @@ test('★ runtime 位置：unmeasured 与 blocked 不同形，且同样不阻止
   const before = runtimeGateLogSnapshot().length
   const probe = withGate('runtime', { ok: false, unmeasured: 'no clock available for this member' })
   try {
-    const created = await call('agent_teams_create_task', { subject: 'work under an unmeasured runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under an unmeasured runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending')
     assert.equal(created.runtime_gates?.ok, false)
     assert.equal(created.runtime_gates?.blockers?.length ?? 0, 0, 'unmeasured must NOT be reported as blockers')
@@ -565,7 +566,7 @@ test('★ runtime 位置：判据【自己抛错】也要被记录，且不把�
      *   就又是一个"装了但从不生效"的形态。所以：记下来、发出警告、**但不把异常
      *   抛回调用方**（过程约束不得中断流程）。
      */
-    const created = await call('agent_teams_create_task', { subject: 'work under a throwing runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under a throwing runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending', 'a throwing runtime gate must not break the caller')
     assert.equal(created.runtime_gates?.threw, 'probe exploded')
     assert.ok(runtimeGateLogSnapshot().slice(before).some(entry => entry.outcome.includes('probe exploded')))
@@ -594,7 +595,7 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
    *   它被 `appliesTo` 跳过 —— 位置不再为空，但这一轮**没有任何判据适用**，
    *   于是 `evaluated === 0`。★ 那是"没检查"的读数，**不是**"检查通过了"。
    */
-  const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   assert.equal(created.status, 'pending')
   /**
    * ── ★★★ t66：这条臂的【性质】对，措辞错（实测抓出来的）─────────────────────
@@ -1086,8 +1087,7 @@ test('★ t18 臂 5（finding A 的守门臂）：contract 位置必须注入执
     objective: 'Ship it',
     acceptance: ['it is shipped'],
     inScope: ['docs/plan.md'],
-    verify: ['node -e "process.exit(0)"'],
-  })
+    verify: ['node -e "process.exit(0)"'], reviewed: reviewedStamp() })
   assert.equal(created.status, 'pending', '★ implementation 契约必须能建出来 —— 这要求 contract 位置拿得到执行器')
   assert.equal(created.kind, 'implementation')
 })

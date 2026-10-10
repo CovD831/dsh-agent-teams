@@ -252,12 +252,21 @@ test('★★ 臂 7（接线臂）：`update_task` 在落终态时调用 commitWo
    */
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
 
-  assert.match(code, /import \{ commitWorktree \} from '\.\.\/worktree\.ts'/, '★ import 要在场')
+  assert.match(code, /import \{ commitWorktree(, worktreeDirName)? \} from '\.\.\/worktree\.ts'/, '★ import 要在场')
   assert.match(code, /commitWorktree\(\{/, '★ 必须真的被调用')
+  /**
+   * ★★ 路径由 `worktreeDirName` 算（**建树与找树共用那一份真值**）。
+   *
+   * MEASURED（本臂第二版在这里红）：第一版断言的是内联的
+   *   ``join(workspace, '.agent-teams', 'worktrees', `task-${safeId}`)``,
+   * 而后团队前缀那一位被抽出成 `worktreeDirName(fresh.id, task.id)` ——
+   * **夹具跟着实现漂移了**。改成钉"用了那个共享函数"，而不是钉字面写法。
+   *   定向突变：把它改回自己拼字符串 ⇒ 臂 12 红（而本臂也红）。
+   */
   assert.match(
     code,
-    /join\(workspace, '\.agent-teams', 'worktrees', `task-\$\{safeId\}`\)/,
-    '★ 路径必须由 repo + taskId 【推导】出来（task.worktreePath 不存在）',
+    /join\(workspace, '\.agent-teams', 'worktrees', worktreeDirName\(fresh\.id, task\.id\)\)/,
+    '★ 路径必须由 repo + taskId 【推导】，且经 worktreeDirName（与建树共用一份真值）',
   )
   assert.doesNotMatch(code, /task\.worktreePath/, '★★ 不许依赖那个不存在的字段')
   /** ★ 而 deliverableCommit 要落进任务记录（否则产物不可寻址）。 */
@@ -323,4 +332,77 @@ test('★★ 臂 8（纪律臂）：提交失败不许把任务改判，且不�
   assert.doesNotMatch(region, /task\.status = 'failed'/, '★★ 不许改判')
   /** ★ 而"没有改动"与"失败"两支必须分开。 */
   assert.match(region, /had no worktree changes to commit/, '★ 没有改动是一支独立的话')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 10-11：★★★ 任务 worktree 的【归属】（2026-10-10，两条链独立报出的缺陷）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这两条臂钉的是什么 ────────────────────────────────────────────────────────
+ *
+ * MEASURED：新团队 merge-e2e 的 t1/t2，成员拿到的树里**没有任务的靶子文件**。
+ * 实测它们的 HEAD：
+ *     task-t1 = d623cbd   ← 上一轮 integrate-probe2 的链 A 产物
+ *     task-t2 = 451c06d   ← 上一轮 integrate-probe2 的链 B 产物
+ *     而当时 HEAD = c70cf12
+ *
+ * ★ 根因：**任务 id 按团队重新计数**（每个团队的 t1 都叫 `t1`），
+ *   而路径名只用 `task-<taskId>` ⇒ 新团队的同名任务命中
+ *   `createTaskWorktree` 的「已建过 ⇒ 复用」分支 ⇒ **拿到上一轮那棵树**。
+ *   而 `delete` 一个团队**不清理 worktree**（目录留着）。
+ *
+ * ★★ 最坏的地方是它在读数上完全正常：`ok: true`、`base` 有值、目录在 ——
+ *   **"复用了对的树"与"复用了别人的树"同形。**
+ *
+ * ★ 修法：把 `teamId` 编进路径（在根上避免重名，而不是事后校验归属）。
+ */
+
+const { worktreeDirName } = await import(join(ROOT, 'lib', 'worktree.js'))
+
+test('★★★ 臂 10（归属臂）：两个团队的同名任务必须落到【不同的】目录', () => {
+  /**
+   * ── 这一条就是那个缺陷的判据 ──────────────────────────────────────────────────
+   *
+   * 定向突变：把 `worktreeDirName` 里的 teamId 去掉（回到 `task-<taskId>`）
+   *   ⇒ 两条断言都红。
+   */
+  const a = worktreeDirName('merge-e2e', 't1')
+  const b = worktreeDirName('integrate-probe2', 't1')
+  assert.notEqual(a, b, '★★★ 同名任务在不同团队下必须落到不同目录（否则会复用别人的树）')
+  assert.match(a, /merge-e2e/, '★ 目录名必须带上 teamId（可读，人能从 ls 看出归属）')
+  assert.match(b, /integrate-probe2/, '★ 另一个团队同理')
+
+  /** ★ 而同一团队的同一任务必须**稳定** —— 否则重试会另建一棵树。 */
+  assert.equal(a, worktreeDirName('merge-e2e', 't1'), '★ 同一 (team, task) 必须得到同一个名字')
+})
+
+test('★★ 臂 11（兼容臂）：不给 teamId 时保持旧形状 —— 且仍然是 task- 前缀', () => {
+  /**
+   * ★ 两件事都要：
+   *   ① 缺省形状不变（夹具与老调用方依赖 `task-<id>`）；
+   *   ② 仍以 `task-` 开头 —— 因为 `team-stall-check.mjs` 与 reclaim 的扫描
+   *      用 `startsWith('task-')` 数盘上的树。改了前缀会让那些读数静默变成 0。
+   */
+  assert.equal(worktreeDirName(undefined, 't1'), 'task-t1', '★ 无 teamId ⇒ 保持旧形状')
+  assert.equal(worktreeDirName('', 't1'), 'task-t1', '★ 空串同理（不编假前缀）')
+  assert.ok(worktreeDirName('merge-e2e', 't1').startsWith('task-'),
+    '★★ 新形状也必须以 task- 开头 —— 否则盘上 worktree 的扫描会静默变成 0')
+})
+
+test('★★ 臂 12（接线臂）：两个调用点都用【同一个】函数算路径', () => {
+  /**
+   * ★ 建树（scheduler）与找树（update_task 的自动提交）必须用同一份真值。
+   *   两处各写一遍会在团队前缀那一位上分叉，而分叉的表现是"找不到树"——
+   *   与"这条任务本来就不建树"同形（本仓记账过的那条）。
+   */
+  const scheduler = readFileSync(join(ROOT, 'src', 'scheduler.ts'), 'utf8')
+  assert.match(scheduler, /createTaskWorktree\(\{ repo: workspace, taskId: ticket\.taskId, teamId: team\.id \}\)/,
+    '★ scheduler 必须把 teamId 传给建树')
+
+  const updateTask = readFileSync(join(ROOT, 'src', 'tools', 'update-task.ts'), 'utf8')
+  assert.match(updateTask, /worktreeDirName\(fresh\.id, task\.id\)/,
+    '★★ update_task 必须用【同一个】worktreeDirName 算路径，而不是自己拼字符串')
+  assert.doesNotMatch(updateTask, /`task-\$\{safeId\}`/,
+    '★★ 不许自己拼 task-<id>（那正是分叉的来源）')
 })

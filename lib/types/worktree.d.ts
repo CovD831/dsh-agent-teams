@@ -90,9 +90,47 @@ export interface CreateWorktreeOptions {
     repo: string;
     /** Task id — used to name the directory so parallel members never collide. */
     taskId: string;
+    /**
+     * ── ★★★ 团队 id —— 路径名的一部分（2026-10-10 实测加的）───────────────────────
+     *
+     * 缺省时可省略（老调用方/夹具），但**生产调用方必须给** —— 见
+     * {@link worktreeDirName} 上面那段：任务 id 按团队重新计数，
+     * 只用 `task-<id>` 会让新团队命中上一轮的树。
+     */
+    teamId?: string;
     /** Where worktrees live; defaults to `<repo>/.agent-teams/worktrees`. */
     root?: string;
 }
+/**
+ * ── ★★★ 一棵任务 worktree 的目录名 ───────────────────────────────────────────────
+ *
+ * MEASURED（2026-10-10，两条链独立报出同一个现象）：
+ *
+ *   新团队 merge-e2e 的 t1/t2，成员拿到的树里**没有任务的靶子文件**。
+ *   实测：
+ *     task-t1 HEAD = d623cbd   ← 上一轮 integrate-probe2 的链 A 产物 commit
+ *     task-t2 HEAD = 451c06d   ← 上一轮 integrate-probe2 的链 B 产物 commit
+ *     而当前 HEAD = c70cf12
+ *
+ * ── 根因：任务 id 按团队【重新计数】，而路径名只用 taskId ──────────────────────────
+ *
+ *   每个团队的 t1 都叫 `t1` ⇒ 都想要目录 `task-t1`。
+ *   而 `delete` 一个团队**不清理 worktree**（目录留着），
+ *   于是新团队的同名任务命中复用分支 ⇒ **拿到上一轮那棵树**。
+ *
+ * ★★ 而它在读数上完全正常：`ok: true`、`base` 有值、目录在、`missingIgnored`
+ *   也算得出来 —— **"复用了对的树"与"复用了别人的树"同形。**
+ *
+ * ── 修法：把 teamId 编进路径（在【根上】避免重名，而不是事后检测）───────────────
+ *
+ *   `task-<teamId>-<taskId>` ⇒ 两个团队的同名任务天然落到不同目录。
+ *   ★ 为什么不做"事后校验归属"：那需要在树里再存一份归属记录，
+ *     而**多一份会漂移的拷贝**正是本仓记账过多次的形态。
+ *     名字本身就能分清的，不要再存一遍。
+ *
+ * ★ `safe()` 对两段都做：teamId 可能带用户输入的形状（它来自团队名/id）。
+ */
+export declare function worktreeDirName(teamId: string | undefined, taskId: string): string;
 /**
  * 给一个任务建一个 detached worktree。
  *

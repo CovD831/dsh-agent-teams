@@ -53,6 +53,7 @@
  *     而不是写一条"期望 ok"的断言（那会把"判据没跑"伪装成"跑过了"）。
  */
 
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, execFile } from 'node:child_process'
@@ -329,8 +330,7 @@ const created = await call('agent_teams_create_task', {
   objective: 'replay t1 completion with a real base',
   inScope: ['scripts/friction-triage.mjs', 'scripts/friction-triage.test.mjs'],
   acceptance: ['the pipeline skeleton is the single trunk'],
-  verify: ['node --test scripts/friction-triage.test.mjs'],
-})
+  verify: ['node --test scripts/friction-triage.test.mjs'], reviewed: reviewedStamp() })
 const taskId = created.task_id
 const stateRoot = join(WORKSPACE, STATE_DIR)
 let team = await readTeam(stateRoot, 't13-probe')

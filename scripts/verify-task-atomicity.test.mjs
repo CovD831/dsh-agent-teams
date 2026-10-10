@@ -403,19 +403,42 @@ test('臂 5 ★ 定向突变：去掉 blocked 分支 / 去掉 ok 分支 ⇒ 臂 
  *     ② 分布必须是**可读的**（五态分开数，尤其 `skipped` 不许并进 `ok`）。
  */
 test('臂 6 真实语料分布（独立重算）：它在这批真实任务上是什么形状', async () => {
-  const corpusPath = '.agent-teams/planning-loop/team.json'
+  /**
+   * ── ★★ 语料位置：给【候选】而不是一个死路径（2026-10-10 修）────────────────────
+   *
+   * MEASURED：此前写死 `.agent-teams/planning-loop/team.json`，而那棵团队后来被
+   * **归档**到 `.agent-teams/archive/planning-loop/team.json` ⇒ 本臂永久红。
+   * ★ 而它红的原因与"判据对真实语料的分布"**无关** —— 是路径没跟上归档。
+   *
+   * ⇒ 修法：按顺序试候选（活跃位置 → 归档位置）。
+   *   ★ 而**纪律一字不变**：全都读不到时仍然 `assert.fail`，
+   *     **绝不**静默跳过 —— 一个"读不到就跳过"的臂是恒真的（见下面那段注释）。
+   */
+  const corpusCandidates = [
+    '.agent-teams/planning-loop/team.json',
+    '.agent-teams/archive/planning-loop/team.json',
+  ]
   let tasks
-  try {
-    const document = JSON.parse(readFileSync(corpusPath, 'utf8'))
-    tasks = document.tasks ?? document
-  } catch {
+  let foundPath
+  for (const candidate of corpusCandidates) {
+    try {
+      const document = JSON.parse(readFileSync(candidate, 'utf8'))
+      tasks = document.tasks ?? document
+      foundPath = candidate
+      break
+    } catch { /* 试下一个候选 */ }
+  }
+  if (foundPath === undefined) {
     /**
      * ★ 语料读不到时**必须报出来**，而不是静默跳过 —— 否则本臂会变成"永远绿"。
-     *   用 `assert.ok` 而不是 `return`：一个"读不到就跳过"的臂是恒真的。
+     *   用 `assert.fail` 而不是 `return`：一个"读不到就跳过"的臂是恒真的。
      */
-    assert.fail(`★ 读不到语料 ${corpusPath} —— 本臂无法成立（而"读不到就跳过"正是恒真写法）`)
+    assert.fail(
+      `★ 读不到语料（试过 ${corpusCandidates.join(' / ')}）`
+      + ` —— 本臂无法成立（而"读不到就跳过"正是恒真写法）`,
+    )
   }
-  assert.ok(Array.isArray(tasks) && tasks.length > 0, '★ 语料为空')
+  assert.ok(Array.isArray(tasks) && tasks.length > 0, `★ 语料为空（${foundPath}）`)
 
   const counts = { ok: 0, blocked: 0, unmeasured: 0, skipped: 0, threw: 0, appliesThrew: 0 }
   const blockedIds = []

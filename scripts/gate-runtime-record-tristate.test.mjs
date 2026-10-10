@@ -26,6 +26,7 @@
  *     否则它们会分叉 —— 而分叉之后，"调用点放过了、记录说被拒了"会在日志里同形。
  */
 
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -203,7 +204,7 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
     signal: new AbortController().signal,
   }))
 
-  const created = await call('agent_teams_create_task', { subject: 'a work task with no runtime probe', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'a work task with no runtime probe', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   const outcome = String(created?.runtime_gates?.outcome)
   console.log(`    ℹ 真实路径 outcome = ${JSON.stringify(outcome.slice(0, 90))}`)
 
