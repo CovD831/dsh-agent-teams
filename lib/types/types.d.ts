@@ -306,6 +306,21 @@ export interface TeamTask {
         /** 投递是怎么失败的（底层错误原文）。 */
         reason: string;
     };
+    /**
+     * ── ★★★ 这条任务的产物落在哪个 commit 上（2026-10-10 加的）──────────────────────
+     *
+     * MEASURED：在此之前本插件只建树、不提交 ⇒ integrator **没有东西可合**。
+     * ⇒ 落终态时把 worktree 的改动提交，并把 commit 短 id 记在这里。
+     *
+     * ★ 它的用处是**具体的**：integrator 要合"哪些东西"这个问题，
+     *   答案必须是一个**可寻址的 commit**，而不是"某棵树上曾经有过一些改动"。
+     *
+     * ★ 三态（与全仓纪律同源）：
+     *   · 有值     —— 提交成功，这是它的短 id
+     *   · 缺席     —— 要么不建树（review/requirements），要么树里没有改动
+     *   · `deliveryFailure` 在场 —— ★ 那是**提交失败**，必须与上面两种不同形
+     */
+    deliverableCommit?: string;
     /** Quality-gate kind. Missing values are treated as `work`. */
     kind?: TaskKind;
     /** Review / requirements / repair loop index, 1-based when present. */
