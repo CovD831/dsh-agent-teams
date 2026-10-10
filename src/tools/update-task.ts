@@ -151,7 +151,14 @@ import { AgentTeamsRuntime, applyQualityFollowUp, parseAcceptanceResults, parseC
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { pathToFileURL } from 'node:url'
-import { rmSync } from 'node:fs'
+/**
+ * ★★ 本文件**不再** import `rmSync`（defect 1 的修法）：
+ *   删除只有**一个**出处 —— `scripts/worktree-reclaim.mjs` 的 `removeWorktree`。
+ *   留一句 `rmSync` 在这里就是第二份实现，而它会把 `git worktree list` 里
+ *   那条记录留成 `prunable` 幽灵（目录没了、台账还在，且不会自己消失）。
+ *   ★ 删掉这个 import 本身也是那条纪律的**可执行形式**：想让删除回来，
+ *     就得先把这一行加回来 —— 而那一步看得见。
+ */
 import { pluginRoot } from './shared/entities.ts'
 
 /**
@@ -256,14 +263,33 @@ export async function reclaimWorktreeAfterDelivery(options: {
   env?: Record<string, string | undefined>
   /** ★ 注入点（夹具用）：默认动态 import 那个脚本。 */
   loadJudge?: () => Promise<ReclaimJudgeModule>
-  /** ★ 注入点（夹具用）：默认 `rmSync`。 */
+  /**
+   * ★ 注入点（夹具用）：默认走 {@link ReclaimJudgeModule.removeWorktree}。
+   *
+   * ★★ 签名【不变】（`(path: string) => void`）—— 既有的夹具臂照旧注入，
+   *   而**默认值**换了出处：它不再是这里的一句裸 `rmSync`，而是模块里那个
+   *   「连 git 台账一起清」的唯一出处（见 `removeWorktree` 的文件头）。
+   */
   remove?: (path: string) => void
   /** 主干引用（默认 `main`，与权威实现一致）。 */
   mainRef?: string
 }): Promise<ReclaimOutcome> {
   const { worktree, repo, taskId, status, logger } = options
   const env = options.env ?? process.env
-  const remove = options.remove ?? ((path: string) => rmSync(path, { recursive: true, force: true }))
+  /**
+   * ── ★★★ 默认删除器：**等模块加载完**再取它（这里先留一个占位）──────────────────
+   *
+   * ★ 为什么不能就地写成 `options.remove ?? ((p) => rmSync(...))`：
+   *   删除的**唯一出处**是 `scripts/worktree-reclaim.mjs` 的 `removeWorktree`
+   *   （它同时删目录与 git 台账条目 —— 见那个函数的文件头）。
+   *   在这里再写一句 `rmSync` 就是**第二份实现**，而它会留下 `prunable` 幽灵
+   *   （本任务修的 defect 1 正是这么来的）。
+   *   ⇒ 所以默认值必须在拿到 `module` 之后才成立（见下面 `remove` 那一处赋值）。
+   *
+   * ★ 而 `options.remove` 这个注入点**签名不变**（`(path: string) => void`）：
+   *   既有夹具臂照旧注入，它们测的是"删除会不会发生"，与出处无关。
+   */
+  let remove = options.remove
 
   /**
    * ── ① 开关：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ **什么都不做**（连模块都不加载）────────
@@ -301,6 +327,19 @@ export async function reclaimWorktreeAfterDelivery(options: {
     )
     return { outcome: 'skipped-off-switch', worktree, why: `off:${offSwitch}` }
   }
+
+  /**
+   * ── ★★★ 默认删除器（现在可以定了）：模块里的 `removeWorktree` ────────────────────
+   *
+   * 它一条命令做完两件事：删目录、**清 git 的 worktree 台账**。
+   * ★ 此前这里是裸 `rmSync` —— 它只删目录，而 `git worktree list` 里那一条
+   *   会一直留着（标成 `prunable`），且**不会自己消失**。
+   *   ⇒ 那不是洁癖：此后每一次 `git worktree list` 都在报告一棵不存在的树，
+   *     而那与"我删干净了"在读数上同形。
+   * ★★ 走**同一个函数引用**（不是"再写一遍同样的删除"）：两份实现分叉时，
+   *   其中一份会把幽灵留下，而**没有任何东西会发现**（本仓记账过的形态）。
+   */
+  remove ??= (path: string) => module.removeWorktree({ repo, worktree: path })
 
   /**
    * ── ② 拿裁决 —— **只有**这一个来源（见上面"判据只有一份真值"）───────────────────
@@ -391,6 +430,182 @@ function describeError(error: unknown): string {
   return String(error)
 }
 
+/**
+ * ── ★★★★★ 扫一遍**已经终态**的任务，把它们早已被吸收的树收掉（defect 2）─────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED，本任务的由来）───────────────────────────────────
+ *
+ * {@link reclaimWorktreeAfterDelivery} 只在**终态转换那一刻**被判一次。而它的
+ * `keep / not-absorbed` 那条读数里**自己写着**"将在下一次终态转换时重判"。
+ *
+ * ★★ 而对一条**已经**终态、此后不再更新的任务，那个"下一次"**永远不会来**：
+ *   没有 `update_task` 调用 ⇒ 没有终态转换 ⇒ 没有任何时刻会重判它
+ *   ⇒ 一棵产物早已被合流进主干的树，**永久**留在盘上，
+ *     而盘上的读数与"这条任务还在跑"同形。
+ *
+ * ── ★★★ 判据仍然只有一份真值 ────────────────────────────────────────────────────
+ *
+ * 本函数**一行"吸收与否"的推理都没有**：它把每一棵终态任务的树交给模块的
+ * `scanTerminalWorktrees`（它再交给 `judgeWorktree` → `judgeWorktreeReclaimable`）。
+ * ⇒ 与 CLI、与逐任务那条接线，三条路的答案来自**同一个函数引用**。
+ *
+ * ── ★★ 它在**名单层面**就保证"非终态不判、不删"─────────────────────────────────
+ *   `scanTerminalWorktrees` 在判定之前就把非终态剔掉（见模块里那一节）。
+ *   本层**不重做**那个筛选 —— 再筛一遍就是第二个出处。
+ *
+ * ── ★★ 三态不同形：只有 `reclaimable` 被删 ──────────────────────────────────────
+ *   `keep`（未吸收 / 有唯一产物）与 `undecidable`（没测到）**绝不**被删。
+ *   ★ 而它把三者的**数量**如实交出去（`kept` / `undecidable`），
+ *     否则"扫了 0 棵"与"扫了 20 棵但一棵都不该删"在读数上同形。
+ *
+ * ── ★★★ 它【不】改任何任务状态，而且【绝不】往外抛 ──────────────────────────────
+ *
+ * 模块加载失败、判据抛错、删除抛错 —— 一律只记一条**可读的 warn** 并记进读数。
+ * ★ 理由与逐任务那条逐字相同：回收是**记账之外**的清理，不是裁决。
+ *   把"清理没成"读成"交付失败"，会让成员去重做已经做对的工作。
+ * ★ 而"删不掉"必须留下可读痕迹（`failures`）——一个静默失败的删除与"没删"同形，
+ *   而盘上留下的那棵树没人会知道。
+ *
+ * @returns 一条**可读的**读数（也给夹具断言用）；任何失败都不改变它的返回形状。
+ */
+export async function reclaimTerminalWorktrees(options: {
+  /** 主仓库根 —— 权威判据的 `repo`，也是 `.agent-teams/worktrees/` 的父目录。 */
+  repo: string
+  /** 这一轮**落盘之后**的任务清单（★ 传 `fresh.tasks`，不是调用前那份）。 */
+  tasks: readonly { id: string; status: string }[]
+  /** 团队 id —— 路径名的那一位（见 `worktreeDirName`）。 */
+  teamId?: string
+  /** ★ 只用于日志。 */
+  logger: { info: (message: string) => void; warn: (message: string) => void }
+  /** ★ 注入点（夹具用）：默认 `process.env`。 */
+  env?: Record<string, string | undefined>
+  /** ★ 注入点（夹具用）：默认动态 import 那个脚本。 */
+  loadJudge?: () => Promise<ReclaimJudgeModule>
+  /**
+   * ★ 注入点（夹具用）：默认走 {@link ReclaimJudgeModule.removeWorktree}。
+   *   签名与 {@link reclaimWorktreeAfterDelivery} 的那一格**刻意保持一致**。
+   */
+  remove?: (path: string) => void
+  /** 主干引用（默认 `main`，与权威实现一致）。 */
+  mainRef?: string
+}): Promise<{ scanned: number; reclaimed: string[]; kept: number; undecidable: number; skipped: string }> {
+  const { repo, tasks, teamId, logger } = options
+  const env = options.env ?? process.env
+  /** ★ 这条读数**只在开关拨上时**非空 —— 见下。 */
+  const nothing = { scanned: 0, reclaimed: [] as string[], kept: 0, undecidable: 0 }
+
+  /**
+   * ── ① 开关：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ **什么都不做**（连模块都不加载）────────
+   *
+   * ★ 名字来自**模块的导出**（`RECLAIM_OFF_ENV`），不是在这里重打一遍字面量：
+   *   两处各写一个字符串，改名那天会**静默分叉** —— 而分叉的表现是
+   *   "开关拨了却没停"，那正是本机制最不能出的错。
+   * ★★ 所以这里要**先**把模块加载起来才读得到那个名字 —— 这是本函数唯一一次
+   *   为了开关而加载模块的地方，而它是**必要**的（与逐任务那条同一个道理）：
+   *   一个用猜测的字面量去读的开关，在名字改了之后**只会静默失效**。
+   */
+  let module: ReclaimJudgeModule
+  try {
+    module = await (options.loadJudge ?? loadWorktreeReclaimModule)()
+  } catch (error) {
+    logger.warn(
+      'agent-teams: could not scan terminal tasks for reclaimable worktrees: '
+      + `the reclaim judge module could not be loaded (${describeError(error)}) — nothing was deleted`,
+    )
+    return { ...nothing, skipped: 'module-unloadable' }
+  }
+
+  const offSwitch = module.RECLAIM_OFF_ENV
+  const off = env[offSwitch] === '1' || env[offSwitch] === 'true'
+  if (off) {
+    /**
+     * ★ 一行可读的话，然后**什么都不碰**。
+     *   ★ 措辞必须说清"没有扫描"，否则"停了"与"扫了但没有可清的"同形 ——
+     *     而后者会让人以为机制在正常工作。
+      */
+    logger.info(
+      `agent-teams: terminal worktree scan skipped because ${offSwitch}=${String(env[offSwitch])} is set — `
+      + 'no worktree was judged and nothing was deleted '
+      + '(an automatic delete that cannot be stopped is irreversible when it misfires)',
+    )
+    return { ...nothing, skipped: `off:${offSwitch}` }
+  }
+
+  /**
+   * ── ② 纯规划：哪些终态的树**已被吸收** ─────────────────────────────────────────
+   *
+   * ★ 模块那一半是**纯规划器**（它不删）—— 删除是本函数下一步的事，且只有一处。
+   * ★ 判据抛错 ⇒ 不删任何东西（一个"没测得"的扫描不许被读成"没有可清的"）。
+   */
+  let verdict = { scanned: [] as readonly ReclaimVerdict[], reclaimable: [] as readonly ReclaimVerdict[], kept: [] as readonly ReclaimVerdict[], undecidable: [] as readonly ReclaimVerdict[] }
+  try {
+    verdict = module.scanTerminalWorktrees({
+      repo,
+      tasks: tasks.map((task) => ({ id: task.id, status: task.status, ...teamId === undefined ? {} : { teamId } })),
+      ...options.mainRef === undefined ? {} : { mainRef: options.mainRef },
+    })
+  } catch (error) {
+    logger.warn(
+      'agent-teams: could not scan terminal tasks for reclaimable worktrees: '
+      + `the judge threw (${describeError(error)}) — that is "not measured", not "nothing to reclaim"; nothing was deleted`,
+    )
+    return { ...nothing, skipped: 'judge-threw' }
+  }
+
+  /**
+   * ── ③ 只有 `reclaimable` 才删，而**每一条失败都要留痕** ────────────────────────
+   *
+   * ★ 路径取自判据自己的 `worktree` 那一格（**不重算** —— 重算就是第二个出处，
+   *   而两份路径分叉时删的是另一棵树）。
+   */
+  const remove = options.remove ?? ((path: string) => module.removeWorktree({ repo, worktree: path }))
+  const reclaimed: string[] = []
+  for (const entry of verdict.reclaimable) {
+    const path = entry.worktree
+    if (typeof path !== 'string' || path === '') {
+      logger.warn(
+        'agent-teams: a terminal worktree was judged reclaimable but the judge gave no path for it — '
+        + 'it was left untouched (deleting a path this layer computed would be a second source of truth)',
+      )
+      continue
+    }
+    try {
+      remove(path)
+      reclaimed.push(path)
+      logger.info(
+        `agent-teams: reclaimed a terminal task's worktree at ${path} — the judge said: `
+        + `${entry.human ?? entry.reason ?? entry.why ?? '(the module gave no reason)'}`,
+      )
+    } catch (error) {
+      /**
+       * ★ 删不掉 ⇒ 只记 warn，**不改判任何任务**、**不往外抛**。
+       *   ★ 而它与"删掉了"必须**不同形** —— 否则盘上留着树、日志却说回收了。
+       */
+      logger.warn(
+        `agent-teams: could not reclaim the terminal worktree at ${path} (${describeError(error)}) — `
+        + 'the judge said it was safe to delete, but the delete itself failed; '
+        + 'the tree was left on disk and this does NOT change any task result',
+      )
+    }
+  }
+
+  /**
+   * ★ 扫了 0 棵也留一行 —— 否则"扫描跑了、没有可清的"与"扫描根本没跑"同形。
+   */
+  logger.info(
+    `agent-teams: terminal worktree scan — judged ${verdict.scanned.length} terminal task tree(s): `
+    + `reclaimed ${reclaimed.length}, kept ${verdict.kept.length}, undecidable ${verdict.undecidable.length}`,
+  )
+
+  return {
+    scanned: verdict.scanned.length,
+    reclaimed,
+    kept: verdict.kept.length,
+    undecidable: verdict.undecidable.length,
+    skipped: '',
+  }
+}
+
 /** `scripts/worktree-reclaim.mjs` 里本调用方**真正用到**的那几格（见该模块的导出）。 */
 interface ReclaimJudgeModule {
   /** ★ 关掉它的开关**名字**（本函数从这里取，不重打字面量）。 */
@@ -401,11 +616,49 @@ interface ReclaimJudgeModule {
     worktree: string
     mainRef?: string
   }) => ReclaimVerdict | Promise<ReclaimVerdict>
+  /**
+   * ── ★★★ 删除的**唯一出处**：删目录 ∧ 清 git 的 worktree 台账 ────────────────────
+   *
+   * ★ 为什么删除也要走模块（而不是在这里写 `rmSync`）：
+   *   裸 `rmSync` 会在 `git worktree list` 里留下一条 `prunable` 幽灵
+   *   （目录没了、台账还在，而且它不会自己消失）——
+   *   那正是本任务修的 defect 1，而它有**两处**删除点。
+   *   ⇒ 两份实现分叉时，"哪一处留下了幽灵"在下游完全读不出来。
+   *
+   * ★ 它是**同步**的：契约就是"删完才算完"，而调用方在它抛出时要留痕
+   *   （见下面 `reclaimable` 那一支的 catch）。★ 它会**抛**，绝不静默失败。
+   */
+  readonly removeWorktree: (options: { repo: string; worktree: string }) => void
+  /**
+   * ★★ 生产扫描器用的那一格（`scanTerminalWorktrees` → `isTerminalTask` 已在
+   *   模块内部用它）—— 这里只借 `worktreeDirName` 之外的那份**纯规划**能力：
+   *   见下面 `reclaimTerminalWorktrees`。
+   */
+  readonly scanTerminalWorktrees: (options: {
+    repo: string
+    tasks: readonly { id: string; status: string; teamId?: string }[]
+    mainRef?: string
+  }) => {
+    scanned: readonly ReclaimVerdict[]
+    reclaimable: readonly ReclaimVerdict[]
+    kept: readonly ReclaimVerdict[]
+    undecidable: readonly ReclaimVerdict[]
+  }
 }
 
 /** 权威裁决的三态 —— 字段**互不共用**（`reclaimable` 没有 `reason`，`undecidable` 没有 `detail`）。 */
 type ReclaimVerdict = {
   readonly status: 'reclaimable' | 'keep' | 'undecidable'
+  /**
+   * ★★ 被判的那条**绝对路径** —— 由 `judgeWorktree` 原样填（见 `scripts/worktree-reclaim.mjs`）。
+   *
+   * ★ 为什么扫描器**必须**用它、而不自己再算一遍路径：
+   *   扫描器（`scanTerminalWorktrees`）已经在模块里用 `worktreeDirName` 算过一次
+   *   ⇒ 再算一遍就是第二个出处，而它与第一个分叉时删的是**另一条路径**
+   *   （那正是"删错树"这种最贵的失效的形态）。
+   *   ★ 这里只**读**它，不重算。
+   */
+  readonly worktree?: string
   readonly reason?: string
   readonly why?: string
   readonly detail?: string
@@ -1416,6 +1669,52 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             ))
           }
           await writeTeam(stateRoot, fresh)
+          /**
+           * ── ★★★★★ 终态转换是**唯一**必然发生的时刻 ⇒ 在这里扫一遍已终态的任务（defect 2）──
+           *
+           * ── 它补的是上一段那根线的**缺口** ────────────────────────────────────────
+           *
+           * 逐任务那条回收（上面的 `reclaimWorktreeAfterDelivery`）只判**这条**任务、
+           * 且只在它落终态的那一刻判。而它答 `keep / not-absorbed` 时**自己就写着**
+           * "将在**下一次**终态转换时重判"。
+           *
+           * ★★ 而对一条**已经**终态、此后不再被更新的任务，那个"下一次"**永远不会来**：
+           *   没有更新 ⇒ 没有终态转换 ⇒ 没有任何时刻会重判它 ⇒ 一棵产物早已被合流
+           *   进主干的树**永久**留在盘上。这与"任务已终态"是两件事 ——
+           *   判据仍然是「产物已被吸收」，变的只是"谁在什么时刻去问它"。
+           *
+           * ── ★ 为什么**必须**落在这里（`writeTeam` 之后）────────────────────────────
+           *
+           * 判据读的是**盘上**的 `team.json` 吗？不是 —— 它读的是**git**。
+           * 但"这条任务已终态"这件事是**本工具刚写下去的**，而扫描的输入就是它。
+           * ⇒ 放在 `writeTeam` **之前**会让"扫描看到的世界"与"落盘的世界"不一致
+           *   （一次崩溃之后，日志里说扫过、而盘上那条任务还没落终态）。
+           *   ⇒ 所以：**先落盘，再扫描**。
+           *
+           * ── ★★ 它【只】在终态转换时跑 ────────────────────────────────────────────────
+           *
+           * 一次全扫要判**每一条**终态任务的树（每条判据都是几次 git 查询）——
+           * 挂在**每一次** `update_task` 上会让一个高频动作变成一次全仓扫。
+           * ★ 而"刚刚发生了一次终态转换"正是**必然会发生**的那个时刻：
+           *   它是这件事被触发的唯一天然时机（与文件头那条"自动化必须挂在必然发生的
+           *   时刻"逐字一致）。
+           *
+           * ── ★★ 它【不】影响本工具的返回值，也【不】改任何任务记录 ────────────────────
+           *
+           * `void` 掉读数（与上面 `reclaimWorktreeAfterDelivery` 同一写法）；
+           * 传的是 `fresh.tasks`（**已落盘**的那一份，不是调用前那份）；
+           * 而它自己保证不抛、不写 `task.status` / `task.deliveryFailure`。
+           * ★ 少一样，一次清理就会变成一次**改判** —— 那是本仓记过的那类最贵的浪费。
+           */
+          if (landedTerminal) {
+            const scan = await reclaimTerminalWorktrees({
+              repo: workspace,
+              tasks: fresh.tasks,
+              teamId: fresh.id,
+              logger: ctx.logger,
+            })
+            void scan
+          }
           /**
            * ── ★★ 成员提交一次更新 ⇒ 顺手**读一遍它的会话日志**（这是第二个观察时刻）──
            *

@@ -24,13 +24,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { judgeWorktree, planReclaim, listWorktrees, recordReclaim, RECLAIM_OFF_ENV } from './worktree-reclaim.mjs'
+import {
+  judgeWorktree,
+  planReclaim,
+  listWorktrees,
+  recordReclaim,
+  removeWorktree,
+  scanTerminalWorktrees,
+  isTerminalTask,
+  RECLAIM_OFF_ENV,
+} from './worktree-reclaim.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -926,9 +935,146 @@ if (SHAPE === 'absorbed') {
   void 0
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * ★★★★★ 臂 C/D/E（defect 2）：**已经**终态的任务 —— 而它此后不会再被更新
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * ── 它防的是什么失效 ────────────────────────────────────────────────────────────
+ *
+ * 逐任务那条回收只在**终态转换那一刻**判一次，而它答 keep 时自己写着
+ * "将在下一次终态转换时重判" —— ★ 而对一条**已经**终态、此后不再更新的任务，
+ * 那个"下一次"**永远不会来** ⇒ 产物早已被合流的树**永久**留在盘上。
+ *
+ * ── ★★ 这个形状在生产上**真的会发生**（不是夹具编出来的）───────────────────────
+ *   一条 completed 的任务不会再被 update_task 碰；而它的产物被 integrator
+ *   合进 'main' 发生在**那之后**。⇒ 那一刻起，那棵树满足"可回收"的所有条件，
+ *   而**没有任何事件**会去问判据。
+ *
+ * ── ★★★ 造法：先把任务**直接写成终态**（绕过工具），再制造"吸收与否"的差别 ────────
+ *
+ *   · 'terminal-absorbed'  —— 树的 HEAD **就是** 'main' 的 HEAD（产物已并入）
+ *                              ⇒ 新扫描器必须**真的删掉它**，且 git 台账要干净。
+ *   · 'terminal-unabsorbed'—— 树里有一个 'main' 没有的 commit（产物**未**并入）
+ *                              ⇒ 扫描器必须把它算进 'kept'，而树**必须还在**。
+ *
+ * ★ 两者是**同一套输入、只有吸收与否不同** —— 否则"删了"与"这条输入本来就不可清"
+ *   同形，那条安全臂会**恒绿**而毫无分辨力。
+ *
+ * ── ★ 为什么走**生产入口**而不是直接调模块函数 ──────────────────────────────────
+ *   'scripts/worktree-reclaim.mjs' 的 'scanTerminalWorktrees' 是**纯规划器**（它不删）。
+ *   ★ 而"判定得对"与"接线接上了"是两件事 —— 后者才是缺陷 2 的所在。
+ *   ⇒ 所以这里调的是**落终态那一次** 'agent_teams_update_task'，让**产品自己**
+ *     把扫描跑起来（子进程里那一格见下）。
+ */
+if (SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed') {
+  /** ★ 先给树一点产物，再决定它并入没并入。 */
+  mkdirSync(join(worktree, 'src'), { recursive: true })
+  writeFileSync(join(worktree, 'src', 'delivered.ts'), 'export const delivered = 1\n')
+  /**
+   * ★ 提交必须**在树里、用真的 git**（与 'commitWorktree' 同构）。
+   *   本夹具不用 'commitWorktree'：那个函数只在**落终态那一步**才被调，
+   *   而这一格的整个意义是"产物早就在、任务早就是终态了"。
+   */
+  git(worktree, ['config', 'user.email', 't@t'])
+  git(worktree, ['config', 'user.name', 't'])
+  git(worktree, ['add', '-A'])
+  git(worktree, ['commit', '-qm', 'deliverable'])
+  if (SHAPE === 'terminal-absorbed') {
+    /**
+     * ── ★★★ 扮演 integrator 的**那一步**：把产物合进 main（快进）──────────────────
+     *
+     * ★★ MEASURED（本臂第一版在这里红过，而那个红**骗人**）：
+     *   git(WORKSPACE, ['merge', '-q', '--ff-only', 'HEAD']) —— 看起来对，
+     *   而 'HEAD' 是**在 WORKSPACE 里**解析的 ⇒ 它是 **main 自己** ⇒
+     *   那句是 'main' 合并 'main'，**一个空操作**（exit 0，什么都没发生）。
+     *
+     *   ⇒ 后果：树的 HEAD 仍然不是 main 的祖先 ⇒ 判据照旧答 'keep / not-absorbed'
+     *     ⇒ 臂 C 红，而**实现是对的** —— 那个红在指控一件没发生的事。
+     *   ★ 形态：一个"看起来在做合流、其实什么都没做"的命令，
+     *     与"合流了"在读数上**同形**（都是 exit 0）。
+     *
+     * ⇒ 所以必须用**树的那个 commit** 点名，而不是 'HEAD'。
+     */
+    const treeHead = git(worktree, ['rev-parse', 'HEAD'])
+    git(WORKSPACE, ['merge', '-q', '--ff-only', treeHead])
+  }
+  /**
+   * ★★ 再把任务**直接写成终态** —— 这一步就是"它已经终态、此后谁也不会再更新它"
+   *   的可执行形式（本缺陷的触发条件）。
+   */
+  /**
+   * ── ★★★★★ 关键是这一条：【另一条】早已终态、此后**谁也不会再碰**的任务 ──────────
+   *
+   * ★★ 这才是缺陷 2 的**真实形状**。MEASURED（本臂第一版在这里红过，而那个红教会了
+   *   我一件事）：如果只放一条已终态的任务 't1'，那么落终态那一步会先走
+   *   **逐任务那条回收**（'reclaimWorktreeAfterDelivery'）—— 它判的**正是**
+   *   't1' 这棵树、而此刻它已经被吸收了 ⇒ **它当场就把树删了**。
+   *   ⇒ 于是扫描器跑起来时树已经不在，扫描器"没删任何东西"，
+   *     而那条断言就变成了在指控一件**已经由另一条路做完**的事。
+   *
+   *   ★ 这不是缺陷 —— 它说明**两条机制各自覆盖不同的形状**：
+   *     · 逐任务那条：**这一条**任务落终态时，它的树恰好已经可清；
+   *     · 扫描器：**别的**任务（早已终态、不会再被更新）留下的树。
+   *
+   *   ⇒ 所以本臂必须放**两条**终态任务：
+   *     · 't1'  —— 本臂要落终态的那条（走逐任务那条路）；
+   *     · 't-done' —— ★ **早已终态、本臂全程不碰它** 的那条
+   *                  ⇒ 它的树只有扫描器能收（这正是缺陷 2）。
+   *   ★ 而"全程不碰它"是可断言的：子进程从头到尾只 'update_task' 了 't1'。
+   */
+  await withTeamLock('arm-terminal:' + stateAbs + ':' + teamId, async () => {
+    const team = await readTeam(stateAbs, teamId)
+    const now = Date.now()
+    team.tasks = [
+      { id: TASK, subject: 'terminal arm task', status: 'completed', dependencies: [], createdAt: now, updatedAt: now },
+      { id: 't-done', subject: 'long-terminal arm task', status: 'completed', dependencies: [], createdAt: now, updatedAt: now },
+      /**
+       * ★★ 安全臂的另一半：一条**非终态**的任务，它的树**绝不许被碰**。
+       *   ★ 它的树也造出来（否则"没碰"与"没有这棵树"同形）。
+       */
+      { id: 't-open', subject: 'open arm task', status: 'in_progress', dependencies: [], createdAt: now, updatedAt: now },
+    ]
+    team.taskSeq = 3
+    await writeTeam(stateAbs, team)
+  })
+  const openTree = join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-open'))
+  const openProvisioned = createTaskWorktree({ repo: WORKSPACE, taskId: 't-open', teamId })
+  if (openProvisioned.ok !== true) { out({ fatal: 'open-provision-failed', openProvisioned }); process.exit(0) }
+  /**
+   * ★★ 't-done'：早已终态、此后**不再被更新**的那条 —— 缺陷 2 的靶子。
+   *   它的树里也提交一份产物；而"吸收与否"与 't1' 那一格**同步**
+   *   （同一套输入、只有那个变量不同 ⇒ 两个读数可比）。
+   */
+  const doneTree = join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-done'))
+  const doneProvisioned = createTaskWorktree({ repo: WORKSPACE, taskId: 't-done', teamId })
+  if (doneProvisioned.ok !== true) { out({ fatal: 'done-provision-failed', doneProvisioned }); process.exit(0) }
+  mkdirSync(join(doneTree, 'src'), { recursive: true })
+  writeFileSync(join(doneTree, 'src', 'long-delivered.ts'), 'export const longDelivered = 1\n')
+  git(doneTree, ['config', 'user.email', 't@t'])
+  git(doneTree, ['config', 'user.name', 't'])
+  git(doneTree, ['add', '-A'])
+  git(doneTree, ['commit', '-qm', 'long-since-delivered'])
+  if (SHAPE === 'terminal-absorbed') {
+    git(WORKSPACE, ['merge', '-q', '--ff-only', git(doneTree, ['rev-parse', 'HEAD'])])
+  }
+  out({
+    step: 'terminal-setup',
+    shape: SHAPE,
+    worktree,
+    openTree,
+    doneTree,
+    absorbed: SHAPE === 'terminal-absorbed',
+    treeHead: git(worktree, ['rev-parse', '--short', 'HEAD']),
+    mainHead: git(WORKSPACE, ['rev-parse', '--short', 'HEAD']),
+  })
+}
+
 /** ★ 任务的记录必须是**完整形状**（"readTeam" 的强校验要 createdAt/updatedAt）。 */
 await withTeamLock('arm:' + stateAbs + ':' + teamId, async () => {
   const team = await readTeam(stateAbs, teamId)
+  /** ★ 上面 'terminal-*' 那两格已经把任务布置好了（而且是**终态**）—— 不许覆盖它。 */
+  if (team.tasks.length > 0) return
   const now = Date.now()
   team.tasks = [{ id: TASK, subject: 'arm task', status: 'in_progress', dependencies: [], createdAt: now, updatedAt: now }]
   team.taskSeq = 1
@@ -940,12 +1086,42 @@ const before = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
 logs.length = 0
 let threw
 try {
+  /**
+   * ── ★★★ 'terminal-*' 那两格：终态结果**不可变**，所以不能再落一次终态 ────────────
+   *
+   * ★ 走**真实可达**的那条路：先 'in_progress'（重开），再落 'completed'。
+   *   ⇒ 这一次转换就是**必然发生的那个时刻**，而扫描器挂在它后面。
+   *   ★ 而"任务早就是终态"这件事由**产物早已并入**那一格来代表：
+   *     重开这一次**没有任何新改动**（'commitWorktree' 报 nothing-to-commit），
+   *     产物在**上一次**终态时就交付完了 —— 正是缺陷 2 的场景。
+   */
+  if (SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed') {
+    await withTeamLock('arm-reopen:' + stateAbs + ':' + teamId, async () => {
+      const team = await readTeam(stateAbs, teamId)
+      const t = team.tasks.find((x) => x.id === TASK)
+      t.status = 'in_progress'
+      t.updatedAt = Date.now()
+      await writeTeam(stateAbs, team)
+    })
+  }
   await call('agent_teams_update_task', { task_id: TASK, status: 'completed', output: 'arm done' })
 } catch (error) {
   threw = String(error?.message ?? error).slice(0, 1200)
 }
 const afterMtime = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
 const task = (await readTeam(stateAbs, teamId)).tasks.find((t) => t.id === TASK)
+/** ★ 安全臂的那一半：那条非终态的任务，它的树**必须一个字节都没被动过**。 */
+const openTreeExists = SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed'
+  ? existsSync(join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-open')))
+  : null
+/**
+ * ★★ 台账读数：'git worktree list --porcelain' 里**还有没有**那棵树的记录（含 prunable）。
+ *   ★ 这一格是 defect 1 的判据，而它必须取自**子进程**（父进程看到的仓库已被清理）。
+ */
+const ledger = (() => {
+  try { return git(WORKSPACE, ['worktree', 'list', '--porcelain']) } catch { return '' }
+})()
+const ledgerHasWorktree = (path) => ledger.includes(path)
 
 /**
  * ── ★★ 可选：**再落一次终态**（round-2 的"重发"义务）─────────────────────────────
@@ -996,6 +1172,25 @@ out({
   logs,
   second,
   envOff: process.env.AGENT_TEAMS_NO_RECLAIM ?? null,
+  /** ★★ defect 1/2 的读数：git 的**台账**里还有没有那棵树（'prunable' 也算"有"）。 */
+  ledgerHasWorktree: ledgerHasWorktree(worktree),
+  ledgerHasPrunable: /prunable/.test(ledger),
+  ledger,
+  /** ★ 安全臂的另一半：那条**非终态**任务的树动没动。 */
+  openTreeExists,
+  /**
+   * ★★★★★ 缺陷 2 的靶子：那条**早已终态、全程没人碰**的任务，它的树还在不在。
+   *   ★ 它必须由**扫描器**收掉（逐任务那条回收判的是 t1，从不会看它）。
+   */
+  doneTreeExists: (SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed')
+    ? existsSync(join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-done')))
+    : null,
+  doneTree: (SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed')
+    ? join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-done'))
+    : null,
+  doneTreeInLedger: (SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed')
+    ? ledgerHasWorktree(join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-done')))
+    : null,
 })
 process.exit(0)
 `
@@ -1506,4 +1701,592 @@ test('★★★ 臂 16（判不了臂 · 生产路径）：主干引用解析不
   assert.doesNotMatch(line, /deleted /, `★ 判不了时不许出现"删了"。实测：${line}`)
   /** ★ 而它同样没有改判。 */
   assert.equal(payload.deliveryFailure, null, '★ 判不了不许写 deliveryFailure')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★★★ defect 1：删除必须**连 git 的台账一起清**（否则每次回收都留一个幽灵）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一节防的是什么失效（MEASURED）────────────────────────────────────────────
+ *
+ * 两处删除点此前都是裸的 `rmSync(path, { recursive: true, force: true })`：
+ *
+ *     scripts/worktree-reclaim.mjs  → planReclaim() 的 wouldApply 循环
+ *     src/tools/update-task.ts      → reclaimWorktreeAfterDelivery 的默认 remove
+ *
+ * ★ 那一句**只删目录**，而 git 的 worktree 台账里那条记录**还在**。
+ *   ⇒ 此后 `git worktree list` 里那条路径仍然出现，只是被标成：
+ *
+ *       worktree /…/.agent-teams/worktrees/task-x
+ *       prunable gitdir file points to non-existent location
+ *
+ * ── ★★ 而且它**不会自己消失** ──────────────────────────────────────────────────
+ *   裸 `git worktree prune` 的默认过期期是 **24 小时**（与 `gc.worktreePruneExpire`
+ *   同源），它依据那条记录的 mtime —— 而一个**刚刚**被 `rmSync` 弄成幽灵的条目，
+ *   mtime 就是"刚才" ⇒ 裸 prune **会放过它**。
+ *   ⇒ 所以修法里写的是 `git worktree prune --expire=now`。
+ *
+ * ── ★ 为什么它是**真缺陷**而不是洁癖 ────────────────────────────────────────────
+ *   此后每一次 `git worktree list` / `git worktree add` 都要绕开一个
+ *   **已经不存在**的路径；而最坏的地方是它与"我删干净了"**同形**：
+ *   目录不在了，台账却说这里有一棵树。
+ *
+ * ── ★★ 下面的读数一律解析 `git worktree list --porcelain` ────────────────────────
+ *   ★ 不解析人读的那一版：`--porcelain` 是 git 承诺**稳定**的机器接口，
+ *     而人读版会随 git 版本改措辞 —— 一个随 git 版本变红的夹具是**假红**。
+ */
+
+/** ★ 台账里那条路径还在不在（`prunable` 也算"在"—— 那正是本缺陷）。 */
+function ledgerEntryFor(repo, path) {
+  const out = git(repo, ['worktree', 'list', '--porcelain'])
+  /**
+   * ★ 按**块**解析：每块以 `worktree <path>` 开头，之后是该块的其余行。
+   *   ★ 而路径比较用 `realpath` —— macOS 的 `/tmp` 是指向 `/private/tmp` 的软链，
+   *     git 报出来的是**解析后**的那个（MEASURED：不做这一步会得到假红）。
+   */
+  const blocks = out.split('\n\n').map((block) => block.trim()).filter((block) => block !== '')
+  /**
+   * ── ★★★ 路径比较是**这一格最容易假红的地方**（MEASURED，本臂红过两次）──────────
+   *
+   * ① `realpathSync` 对**已经不存在的**路径会抛 `ENOENT` —— 而"幽灵"那一格
+   *    **正是**这种情况（目录没了）。第一版直接调它 ⇒ 整条臂炸在解析器里，
+   *    而那个红**看起来像**"台账里没有它"（其实是解析器自己炸了）。
+   *
+   * ② ★★ 更要命的是：即使兜底成原样比较，两侧仍然不等 ——
+   *    macOS 的 `/tmp` 是指向 `/private/tmp` 的软链，而 git 记的是**解析后**的那个：
+   *
+   *      我们给的路径： /tmp/xxx/.agent-teams/worktrees/task-x        （解析不了，退回原样）
+   *      git 记的路径：/private/tmp/xxx/.agent-teams/worktrees/task-x （解析得了）
+   *
+   *    ⇒ 两个都"对"，却 `===` 不成立 ⇒ 又一次假红。
+   *
+   * ── ★ 修法：**解析父目录**（它一定存在），再把基名拼回去 ────────────────────────
+   *   父目录解析得了 ⇒ `/tmp/xxx/.agent-teams/worktrees` → `/private/tmp/xxx/...`；
+   *   而基名（`task-x`）是两侧都一样的那个字符串。
+   *   ⇒ 这样"目录已经在不在"就不再影响路径的**身份**。
+   */
+  const resolve = (value) => {
+    const parent = dirname(value)
+    const name = basename(value)
+    try { return join(realpathSync(parent), name) } catch { return value }
+  }
+  const wanted = resolve(path)
+  for (const block of blocks) {
+    const lines = block.split('\n')
+    const head = lines[0] ?? ''
+    if (!head.startsWith('worktree ')) continue
+    const listed = head.slice('worktree '.length).trim()
+    if (resolve(listed) === wanted || listed === path) {
+      return { listed, lines, prunable: lines.some((l) => l.startsWith('prunable')) }
+    }
+  }
+  return undefined
+}
+
+test('★★★★★ 臂 A（defect 1 · 活的树）：planReclaim({apply:true}) 之后那棵树【不许】留在 git 的台账里', async () => {
+  /**
+   * ── 本臂问的是"删干净了没有"，而不是"目录在不在"─────────────────────────────────
+   *
+   * ★★ `existsSync(path) === false` 这一条**不足以**证明删干净了：
+   *   MEASURED（修法前）—— 裸 `rmSync` 之后目录确实不在，而
+   *   `git worktree list --porcelain` 里那条记录**仍在**，且带：
+   *
+   *       prunable gitdir file points to non-existent location
+   *
+   *   ⇒ 所以本臂的判据是**台账**，不是目录。
+   *
+   * ── ★★★ 定向突变（这条臂靠什么变红）────────────────────────────────────────────
+   *   把 `planReclaim` 里那句 `removeWorktree({ repo, worktree: entry.worktree })`
+   *   改回 `rmSync(entry.worktree, { recursive: true, force: true })`
+   *   ⇒ 目录没了、台账还在 ⇒ **本臂红**（`ledgerEntryFor` 返回一个带 prunable 的块）。
+   *   ★ 而它**不会**因为"目录还在"而红 —— 目录两种情况都在不了，
+   *     这正是"只看 existsSync"那种夹具会漏掉它的原因。
+   */
+  const f = fixture()
+  try {
+    const wt = f.worktreeAt(f.head(), 'task-ledger-live')
+    /** ★ 前置：git 的台账里**确实**有它（否则"清掉了"与"从来没登记过"同形）。 */
+    const before = ledgerEntryFor(f.repo, wt)
+    assert.notEqual(
+      before, undefined,
+      '★★ 前置：`git worktree add` 之后台账里必须有这条记录（否则本臂测的是"根本没有"）',
+    )
+    /** ★ 让判据说可清：产物已吸收（树 HEAD 是 main 的祖先）+ 没有脏源码。 */
+    f.commit('two')
+
+    const result = planReclaim({ repo: f.repo, apply: true })
+    assert.equal(result.applied, true, JSON.stringify(result))
+    assert.equal(result.removed.length, 1, `★ 前置：真的删了一个。实测：${JSON.stringify(result.removed)}`)
+
+    /** ★ 目录没了（这是旧夹具唯一会断言的那一格）。 */
+    assert.equal(existsSync(wt), false, '★ 目录必须没了')
+
+    /**
+     * ★★ 核心断言：**台账里也不许再有它**（★ `prunable` 算"有"）。
+     */
+    const after = ledgerEntryFor(f.repo, wt)
+    assert.equal(
+      after, undefined,
+      '★★★★★ 回收之后那棵树不许留在 git 的 worktree 台账里 —— '
+      + '裸 rmSync 会留下一条 `prunable` 幽灵（目录没了、台账还在，而它不会自己消失）'
+      + `\n  实测台账块：${JSON.stringify(after)}`
+      + `\n  完整 list：\n${git(f.repo, ['worktree', 'list', '--porcelain'])}`,
+    )
+    /**
+     * ★ 而**主检出自己**的记录必须还在 —— 回收只该动它被点名的那一条路径，
+     *   不许把主仓库也从台账里抹掉（那是 `prune` 用错范围的形状）。
+     */
+    assert.notEqual(
+      ledgerEntryFor(f.repo, f.repo), undefined,
+      '★ 主检出自己的台账记录必须还在（回收不许把主仓库也从台账里抹掉）',
+    )
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★★★ 臂 B（defect 1 · 已经是幽灵）：目录早没了、台账还在 ⇒ 删除路径必须把它清掉', async () => {
+  /**
+   * ── 这一格是"已经坏了的那一半" ──────────────────────────────────────────────────
+   *
+   * 臂 A 测的是"活树走下去不会留下幽灵"。而盘上**已经**有幽灵 ——
+   * 它们正是**上一版用裸 `rmSync` 删过的**那些残留。
+   * ★ 一个只处理"活树"的修法会把这些**永久**留着（它们不会再被删第二次：
+   *   目录本来就不在，扫描器看不到它们）⇒ 所以这一半必须单独钉住。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `removeWorktree` 的快慢两条路都写成裸 `rmSync`（不跑 `prune --expire=now`）
+   *      ⇒ 幽灵条目留着 ⇒ **本臂红**。
+   *   ② ★ 把 `--expire=now` 写成**裸 `prune`** ⇒ **本臂也红** ——
+   *      因为裸 prune 的 24 小时过期期会放过这条**刚刚**变成幽灵的记录。
+   *      这正是"为什么必须是 --expire=now"那条注释的**可执行形式**。
+   *
+   * ── ★ 造法：`git worktree add` 之后**手工** `rmSync` 它的目录 ─────────────────────
+   *   ⇒ 目录不在、台账在、被标成 `prunable`（与真实缺陷留下的形状逐字一致）。
+   */
+  const f = fixture()
+  try {
+    const wt = f.worktreeAt(f.head(), 'task-ledger-ghost')
+    const before = ledgerEntryFor(f.repo, wt)
+    assert.notEqual(before, undefined, '★ 前置：台账里先有这条记录')
+
+    /**
+     * ★★ 手工制造幽灵 —— 正是修法前 `planReclaim` / 默认 `remove` 干的那件事。
+     *   ★ 用 `rmSync` 而不是 `git worktree remove`：后者会把台账一起清掉，
+     *     那样本臂就**造不出**它要测的那个形状（会变成一条恒绿的臂）。
+     */
+    rmSync(wt, { recursive: true, force: true })
+    const ghost = ledgerEntryFor(f.repo, wt)
+    assert.notEqual(ghost, undefined, '★ 前置：目录删掉之后，台账里那条**还在**（幽灵造出来了）')
+    assert.equal(ghost.prunable, true, `★★ 前置：它必须被标成 prunable。实测：${JSON.stringify(ghost.lines)}`)
+
+    /** ★ 走修法后的删除路径（生产那一个函数）—— 它必须**连幽灵一起**清掉。 */
+    removeWorktree({ repo: f.repo, worktree: wt })
+
+    const after = ledgerEntryFor(f.repo, wt)
+    assert.equal(
+      after, undefined,
+      '★★★★★ 已经是幽灵的条目也必须被清掉 —— 否则上一版遗留的 `prunable` 会永远留着'
+      + `（而裸 \`git worktree prune\` 的 24 小时过期期会放过它）`
+      + `\n  实测台账块：${JSON.stringify(after)}`
+      + `\n  完整 list：\n${git(f.repo, ['worktree', 'list', '--porcelain'])}`,
+    )
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ 臂 B2（defect 1 · 对照臂 · 机制实测）：裸 prune vs --expire=now 在"刚变成幽灵"那一格上到底谁行', async () => {
+  /**
+   * ── 这一条是**对照臂**：它把"为什么写 --expire=now"从一句注释变成一次实测 ────────
+   *
+   * ── ★★★ 它防的是一种**很贵**的形态：注释里的机制是假的 ────────────────────────
+   *
+   * 本任务书里写着：「裸 `prune` 的默认过期期是 24 小时，它会**放过**刚刚被
+   * `rmSync` 弄成幽灵的那条 ⇒ 所以必须是 `--expire=now`」。
+   *
+   * ★★ MEASURED（2026-10-10，本机 git 2.50.1 Apple Git-155）：**那句话不成立**。
+   *   实测（本臂下面就是它的可执行形式）：
+   *
+   *     $ rm -rf .agent-teams/worktrees/task-x        # 目录没了、台账还在
+   *     $ git worktree prune -v
+   *     Removing worktrees/task-x: gitdir file points to non-existent location
+   *
+   *   ⇒ 裸 prune **当场就清掉了它** —— 因为这条记录属于
+   *     "gitdir file points to non-existent location" 那一类，git 对它**直接判死**，
+   *     **不看年龄**。（24 小时那一档管的是**另一类**：工作树目录还在、
+   *     只是被判为 unused。）
+   *
+   * ── ★★★ 所以本臂**不断言某一个特定结局**，它断言的是"两个 flag 的关系" ───────────
+   *
+   *   ① 先测**裸 prune** 对这一格的真实行为；
+   *   ② 再测 `--expire=now` 的行为；
+   *   ③ 断言：**至少有一个**能清掉它（即"修法有效"这件事不依赖我对 git 的猜测），
+   *      且 `--expire=now` **必须**在其中（它是修法实际写的那一个）。
+   *
+   * ★ 为什么不写死"裸 prune 清不掉"：那会让本臂在**任何**一个把这条记录
+   *   按年龄处理的 git 版本上**假红**；而假红会让人去改一个**本来是对的**实现。
+   *   ⇒ 反过来，一个**诚实的对照臂**在任何版本上都只因为"事实变了"而红。
+   *
+   * ── ★★ 它同时钉住"修法写的那一个 flag 真的管用" ────────────────────────────────
+   *   把 `removeWorktree` 兜底那一句的 `--expire=now` 换成裸 prune：
+   *   在本机这个 git 上**臂 B 仍然会绿**（见上面实测）。
+   *   ⇒ ★ 那正是"把语义写进参数"而不是"靠某个版本的默认值"的理由 ——
+   *     而本臂把这件事**说清楚**，免得下一个人以为 `--expire=now` 是可有可无的。
+   */
+  const f = fixture()
+  try {
+    /** ★ 两个独立的幽灵，形状**逐字相同** —— 否则两个读数不可比。 */
+    const wtBare = f.worktreeAt(f.head(), 'task-ledger-bare-prune')
+    const wtNow = f.worktreeAt(f.head(), 'task-ledger-expire-now')
+    assert.notEqual(ledgerEntryFor(f.repo, wtBare), undefined, '★ 前置：裸 prune 那一侧先有台账记录')
+    assert.notEqual(ledgerEntryFor(f.repo, wtNow), undefined, '★ 前置：--expire=now 那一侧先有台账记录')
+
+    /** ★★ 两边都用**同一个**造幽灵的动作（裸 `rmSync` —— 正是 defect 1 的成因）。 */
+    rmSync(wtBare, { recursive: true, force: true })
+    rmSync(wtNow, { recursive: true, force: true })
+    for (const [label, wt] of [['bare', wtBare], ['expire-now', wtNow]]) {
+      const ghost = ledgerEntryFor(f.repo, wt)
+      assert.notEqual(ghost, undefined, `★ 前置（${label}）：目录删掉之后台账里那条**还在**`)
+      assert.equal(ghost.prunable, true, `★★ 前置（${label}）：它必须被标成 prunable。实测：${JSON.stringify(ghost.lines)}`)
+    }
+
+    /**
+     * ★★ 实测一：裸 `prune`（不带 `--expire`）—— **不预先假设结局**。
+     *   ★ 在本机 git 2.50.1 上它清得掉；而在把这类记录按年龄处理的版本上它清不掉。
+     *     两者都被接受，因为本臂问的不是"裸 prune 行不行"，
+     *     而是"修法写的那一个必须行"。
+     */
+    git(f.repo, ['worktree', 'prune'])
+    const bareCleared = ledgerEntryFor(f.repo, wtBare) === undefined
+
+    /** ★★ 实测二：`--expire=now` —— 修法实际写的那一个。 */
+    git(f.repo, ['worktree', 'prune', '--expire=now'])
+    const nowCleared = ledgerEntryFor(f.repo, wtNow) === undefined
+
+    /** ★★★ 核心断言：`--expire=now` **必须**清掉它（这是修法依赖的那一格）。 */
+    assert.equal(
+      nowCleared, true,
+      '★★★★★ `prune --expire=now` 必须当场清掉刚变成幽灵的那条 —— '
+      + '它是 `removeWorktree` 兜底那一句实际写的 flag，'
+      + '所以"它到底行不行"不许是猜测'
+      + `\n  实测（bareCleared=${bareCleared}, nowCleared=${nowCleared}）`
+      + `\n  完整 list：\n${git(f.repo, ['worktree', 'list', '--porcelain'])}`,
+    )
+    /** ★ 而"至少有一个真的清掉了"—— 修法有效这件事不依赖我对 git 的猜测。 */
+    assert.equal(
+      bareCleared || nowCleared, true,
+      '★★★ 两个 flag 里必须至少有一个真的清掉了幽灵（否则修法本身不成立）',
+    )
+    /**
+     * ★★ 而**台账里不许再有任何 `.agent-teams/worktrees/` 下的残块** ——
+     *   这是"两边都清干净了"的合取读数（比分别看两个路径更强）。
+     */
+    const residue = git(f.repo, ['worktree', 'list', '--porcelain'])
+      .split('\n\n')
+      .filter((block) => block.includes('.agent-teams/worktrees/'))
+    assert.equal(
+      residue.length, 0,
+      `★★ 清完之后台账里不许再有任何 worktree 残块。实测残留：${JSON.stringify(residue)}`,
+    )
+    /**
+     * ★ 而**主检出自己**的记录必须还在 —— 上面那些 prune 不许把它也抹掉。
+     */
+    assert.notEqual(
+      ledgerEntryFor(f.repo, f.repo), undefined,
+      '★ 主检出的台账记录必须还在（prune 不许把主仓库也清掉）',
+    )
+  } finally {
+    f.done()
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★★★ defect 2：一条【已经终态、此后不再更新】的任务，它的树谁来收？
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一节防的是什么失效（MEASURED，本任务的由来）────────────────────────────────
+ *
+ * 逐任务那条回收只在**终态转换那一刻**判一次。而它答 `keep / not-absorbed` 时
+ * **自己写着**"将在下一次终态转换时重判"。
+ *
+ * ★★ 而对一条**已经**终态、此后不再被更新的任务，那个"下一次"**永远不会来**：
+ *
+ *     completed ⇒ 不会再被 `update_task` 碰 ⇒ 没有终态转换 ⇒ 没有重判时刻
+ *
+ *   ⇒ 一棵产物早已被 integrator 合进 `main` 的树，**永久**留在盘上。
+ *   ★ 而它在读数上与"这条任务还在跑"同形 —— 盘上有一棵树、没人知道它已经可以清了。
+ *
+ * ── ★★★ 修法：一个**扫描入口**，挂在必然发生的那一个时刻上 ───────────────────────
+ *
+ *   `scripts/worktree-reclaim.mjs` 的 `scanTerminalWorktrees`（**纯规划器**，不删）
+ *   + `src/tools/update-task.ts` 的 `reclaimTerminalWorktrees`（生产入口，删）
+ *   ⇒ 而它挂在那一次**终态转换**之后（`writeTeam` 落盘之后）。
+ *
+ * ── ★★ 两条臂的分工（★ 读之前先分清）────────────────────────────────────────────
+ *
+ *   臂 C：已终态 ∧ 产物**已吸收** ⇒ 扫描必须**真的删掉**它，且台账要干净。
+ *   臂 D：已终态 ∧ 产物**未**吸收 ⇒ 扫描必须把它算进 `kept`，而树**必须还在**；
+ *          ★ 外加"一条**非终态**任务的树一个字节都没被碰"。
+ *   臂 E：开关拨上 ⇒ 生产扫描器**什么都不删**，且把跳过**报出来**。
+ *
+ * ★ 三者都必须走**生产入口**（`lib/tools.js` 的 `registerAgentTeamsTools` →
+ *   真工具 `agent_teams_update_task`），而不是直接调那个纯函数 ——
+ *   "判定得对"与"接线接上了"是两件事，而后者才是缺陷 2 的所在。
+ */
+
+test('★★★★★ 臂 C（defect 2 · 收集）：已经终态的树产物已吸收 ⇒ 生产扫描【真的删掉】它，且台账干净', async () => {
+  /**
+   * ── 它测的是"一条不会再被更新的任务，它的树最终会被收掉"─────────────────────────
+   *
+   * ★★ 造法（见子进程里 `terminal-absorbed` 那一格）：产物**早就在树里提交过**、
+   *   而且**已经被合进 main**；任务**早就是终态**。此后唯一发生的事是
+   *   「重开一次、再落一次终态」—— 这就是**必然发生的时刻**。
+   *
+   * ── ★★★ 定向突变（这条臂靠什么变红）────────────────────────────────────────────
+   *   ① 把 `register()` 里那一句 `await reclaimTerminalWorktrees({...})` 删掉
+   *      ⇒ 扫描根本不跑 ⇒ 树留着 ⇒ **本臂红**。
+   *   ② 把它的入口条件从 `if (landedTerminal)` 改成"永远不跑"（例如 `if (false)`）
+   *      ⇒ 同上红。
+   *   ③ 把扫描器里的 `if (!isTerminalTask(task)) continue` 删掉
+   *      ⇒ 非终态那棵树也会被删 ⇒ **臂 D 红**（本臂反而照旧绿 ——
+   *        这正是"收集"与"安全"必须分成两条臂的理由）。
+   *   ④ 把 `scanTerminalWorktrees` 换成"扫全部任务"（不看状态）⇒ 臂 D 红。
+   *
+   * ── ★★ 台账那一格（与 defect 1 同一个判据）─────────────────────────────────────
+   *   删了之后 `git worktree list --porcelain` 里**不许**再有那棵树 ——
+   *   这一条把两个缺陷**接在一起**：扫描器删树走的是 `removeWorktree`，
+   *   所以它同样不许留下 `prunable` 幽灵。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'terminal-absorbed', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 落终态不许抛（扫描失败更不能改判）。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了（否则本臂测的是"没跑到"）')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务真的落了终态。实测：${payload.taskStatus}`)
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /**
+   * ── ★★★★★ 核心断言：那条**早已终态、全程没人碰**的树，必须被【扫描器】收掉 ──────
+   *
+   * ★★ 为什么靶子是 `t-done` 而不是 `t1`（本臂第一版在这里红过，而那个红教会了我
+   *   一件**真的事**）：落终态那一步会先走**逐任务那条回收**，而它判的**正是**
+   *   `t1` 那棵树 —— 若它此刻已经可清，**它当场就删了**。
+   *   ⇒ 于是扫描器跑起来时 `t1` 的树已经不在，"扫描器删的"这句话就无从测起
+   *     （那条断言会变成在指控一件**已经由另一条路做完**的事）。
+   *
+   * ★ `t-done` 才是缺陷 2 的形状：它**早已**终态、子进程**全程只 `update_task`
+   *   了 `t1`** ⇒ 没有任何终态转换会去判它 ⇒ 只有扫描器能收它。
+   *   MEASURED（修法前）：它的树**永远**留着 —— 而盘上的读数与"这条任务还在跑"同形。
+   */
+  const doneTree = payload.doneTree
+  assert.notEqual(doneTree, null, '★ 前置：子进程必须交出 `t-done` 那棵树的路径')
+  assertReclaimLandedUnderTemp(doneTree, workspace)
+
+  assert.equal(
+    payload.doneTreeExists, false,
+    '★★★★★ 一条**早已终态、此后没人再更新**的任务，它的树（产物已吸收）必须被扫描器收掉 —— '
+    + '这正是 defect 2：逐任务那条回收从不会看它，而它此后**没有任何**终态转换'
+    + `\n  实测 doneTreeExists=${String(payload.doneTreeExists)}`
+    + `\n  路径：${doneTree}\n  日志：${JSON.stringify(payload.logs, null, 1)}`,
+  )
+  /** ★★ 而 git 的台账里也不许再有它（否则留的是 `prunable` 幽灵 —— defect 1 接上 defect 2）。 */
+  assert.equal(
+    payload.doneTreeInLedger, false,
+    '★★★★★ 扫描器删完树之后，git 的 worktree 台账里不许再有那条路径 —— '
+    + `它必须走 removeWorktree（不是裸 rmSync）\n  实测台账：\n${payload.ledger}`,
+  )
+  assert.equal(
+    payload.ledgerHasPrunable, false,
+    `★★ 台账里不许出现任何 prunable 行（那正是 defect 1 留下的形状）\n  实测台账：\n${payload.ledger}`,
+  )
+
+  /** ★ 而"删了"必须有一条**指名这棵树**的读数（不许静默）。 */
+  const line = payload.logs.map(([, m]) => m).find((m) => m.includes(doneTree) && /reclaimed a terminal task/.test(m))
+  assert.notEqual(
+    line, undefined,
+    `★ 必须有"收了一条终态任务的树"这条读数，并指名那棵树。实测日志：${JSON.stringify(payload.logs)}`,
+  )
+  /** ★ 而它必须**复述判据自己的话**（不是本层另写的一句）。 */
+  assert.match(line, /safe to reclaim/, `★ 它必须复述判据自己的话。实测：${line}`)
+  /** ★ 而扫描的总读数必须报出"收了 1 棵"（否则"跑了没收到"与"收掉了"分不出）。 */
+  const scanLine = payload.logs.map(([, m]) => m).find((m) => /terminal worktree scan —/.test(m))
+  assert.notEqual(scanLine, undefined, `★ 必须有扫描的总读数。实测：${JSON.stringify(payload.logs)}`)
+  assert.match(scanLine, /reclaimed [1-9]/, `★★ 而它必须报出"收掉了 ≥1 棵"。实测：${scanLine}`)
+})
+
+test('★★★★★ 臂 D（defect 2 · 安全）：产物【未】吸收 ⇒ 必须进 kept 且树还在；非终态任务的树一个字节都不许动', async () => {
+  /**
+   * ── 这条臂防的是"扫描器"最贵的那种失效：**删掉唯一的那份产物** ──────────────────
+   *
+   * MEASURED（本仓 t89 普查）：只看 `--is-ancestor` 会在本仓删掉 **7 份唯一产物**。
+   * ★ 而扫描器比逐任务那条**更危险**：它一次判**很多棵**树 ——
+   *   一条判错的规则会一次性删掉一批，而不是一棵。
+   *
+   * ── ★★★ 造法：与臂 C **同一套输入**，只把"吸收与否"翻过来 ──────────────────────
+   *   树里有一个 `main` 没有的 commit ⇒ 判据必然答 `keep / not-absorbed`
+   *   ⇒ 扫描器必须把它算进 `kept`，而树**必须还在**。
+   *   ★ 两臂同形状是**关键**：否则"没删"与"这条输入本来就不可清"同形，
+   *     本臂会**恒绿**而毫无分辨力。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `scanTerminalWorktrees` 里的 `if (verdict.status === 'reclaimable')`
+   *      改成无条件收 ⇒ 本臂红（唯一产物被删）。
+   *   ② 把 `keep` / `undecidable` 并进 `reclaimable`（三态同形）⇒ 同上红。
+   *   ③ 把 `isTerminalTask` 那一句判断删掉 ⇒ 非终态那棵树被删 ⇒ **本臂红**
+   *      （而臂 C 照旧绿 —— 这正是本臂必须独立存在的理由）。
+   *
+   * ── ★★ 第二半：非终态的任务**一个字节都不许被碰** ──────────────────────────────
+   *   一条还在跑的任务，它的树**正在被写** ⇒ 判它没有意义、删它是灾难。
+   *   ★ 而那一半必须是**非空**的：所以子进程**真的**为它建了一棵树
+   *     （否则"没碰"与"压根没有这棵树"同形）。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'terminal-unabsorbed', hook: false })
+
+  assert.equal(payload.threw, undefined, `★ 落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
+  assert.equal(payload.taskStatus, 'completed', `★ 前置：任务照常落终态。实测：${payload.taskStatus}`)
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言一：产物未并入 ⇒ **树必须还在**（删掉就等于丢了那份工作）。 */
+  assertWorktreeState(payload, true, '★★★★★ 产物未并入 ⇒ 扫描器必须留住那棵树（删掉就丢了唯一产物）')
+  /** ★ 而"留着"必须给出判据自己的理由（在**台账**那一格：它没被删，所以还在名录里）。 */
+  assert.equal(
+    payload.ledgerHasWorktree, true,
+    '★ 未吸收的树必须仍然在 git 的台账里（它没被删，就还在名录上）',
+  )
+  /** ★ 而它**不许**被算成"收掉了"—— 日志里不许出现针对它的回收读数。 */
+  const reclaimedLine = payload.logs.map(([, m]) => m).find((m) => m.includes(worktree) && /reclaimed a terminal task/.test(m))
+  assert.equal(
+    reclaimedLine, undefined,
+    `★★ 未吸收的树绝不许出现"收掉了"的读数。实测：${reclaimedLine}`,
+  )
+
+  /**
+   * ── ★★★★★ 而缺陷 2 的那个靶子（`t-done`）在这里是**同形状的反面** ────────────────
+   *
+   * ★ 臂 C 与臂 D 用**同一套输入**、只有"吸收与否"不同 ⇒ 两个读数直接可比。
+   *   ⇒ 臂 C 说它被收了、臂 D 说它被留了 —— 而那条差别**只**来自产物并没并入主干。
+   *   ★ 少了这一格，"扫描器不删"在**未吸收**那一侧就没有对照，
+   *     而那会让臂 C 在"扫描器根本没接线"时**照旧绿**（本仓记账最多的那个形态）。
+   */
+  assert.notEqual(payload.doneTree, null, '★ 前置：子进程必须交出 t-done 那棵树的路径')
+  assertReclaimLandedUnderTemp(payload.doneTree, workspace)
+  assert.equal(
+    payload.doneTreeExists, true,
+    '★★★★★ 产物**未**并入 ⇒ 扫描器必须留住那棵树（哪怕它早已终态、此后没人再更新它）'
+    + `\n  实测 doneTreeExists=${String(payload.doneTreeExists)}\n  路径：${payload.doneTree}`,
+  )
+  assert.equal(
+    payload.doneTreeInLedger, true,
+    '★ 未吸收的树必须仍然在 git 的台账里（它没被删，就还在名录上）',
+  )
+  /** ★ 而它**不许**出现"收掉了"的读数（与上面同一条纪律，只是靶子换成 `t-done`）。 */
+  const doneReclaimed = payload.logs.map(([, m]) => m).find((m) => m.includes(payload.doneTree) && /reclaimed a terminal task/.test(m))
+  assert.equal(
+    doneReclaimed, undefined,
+    `★★ 未吸收的 t-done ⇒ 绝不许出现"收掉了"的读数。实测：${doneReclaimed}`,
+  )
+  /**
+   * ── ★★★★★ 第二半（**先断这一条**）：非终态的任务，它的树一个字节都没被碰 ──────
+   *
+   * ★★ 为什么它排在那条"总读数"前面（MEASURED，本臂调出来的顺序问题）：
+   *   在"扫描器不看状态"那个突变下，**两条**断言都会失败 —— 而报告只会打出**第一条**。
+   *   ⇒ 若总读数那条在前，读的人看到的是"日志里少了一行"，
+   *     而**真正发生的事**是"一条还在跑的任务的树被删了"。
+   *   ★ 那是本仓记账过的形态：**断言顺序会让最贵的那条失效藏在便宜的那条后面**。
+   *   ⇒ 所以安全那一条**必须第一个断言**。
+   *
+   * ★ 子进程为 `t-open`（`in_progress`）**真的**建了一棵树 ⇒ 这一格**非空**。
+   */
+  assert.equal(
+    payload.openTreeExists, true,
+    '★★★★★ 一条**非终态**任务的树绝不许被扫描器碰 —— '
+    + '"还在跑的任务，它的树正在被写"（`in_progress` 的任务不在扫描名单上）'
+    + '\n  ★ 定向突变：把 `scanTerminalWorktrees` 里的 `if (!isTerminalTask(task)) continue` '
+    + '删掉 ⇒ 这棵树会被判成可清（它 detached 在 main 上）⇒ 本臂红',
+  )
+
+  /**
+   * ★★ 而扫描**必须如实报出**它保住了多少 —— 否则"扫了但一棵都没收"与
+   *   "扫描根本没跑"同形（那正是本缺陷原来的样子）。
+   */
+  const scanLine = payload.logs.map(([, m]) => m).find((m) => /terminal worktree scan/.test(m))
+  assert.notEqual(
+    scanLine, undefined,
+    `★ 扫描必须留下一条可读的总读数（扫了几棵 / 收了几棵 / 留了几棵）。实测日志：${JSON.stringify(payload.logs)}`,
+  )
+  assert.match(scanLine, /kept [1-9]/, `★★ 而它必须报出"留住了 ≥1 棵"（本臂的形状）。实测：${scanLine}`)
+})
+
+test('★★★★ 臂 E（defect 2 · 开关）：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ 生产扫描器什么都不删，且把跳过【报出来】', async () => {
+  /**
+   * ── 一个自动删除的机制若不能停，在它误判时会造出**不可逆**的损失 ────────────────
+   *
+   * ★ 臂 13 测的是**逐任务那条**回收上的开关；本臂测的是**扫描器**上的同一个开关。
+   *   两件事必须分开测：一个只在逐任务那条生效的开关，在扫描器上等于没有开关 ——
+   *   而扫描器一次能删**一批**，所以它这条开关比那条更贵。
+   *
+   * ── ★★★ 定向突变 ─────────────────────────────────────────────────────────────
+   *   ① 把 `reclaimTerminalWorktrees` 里 `if (off) { … return }` 那一支删掉
+   *      ⇒ 树被删 ⇒ **本臂红**。
+   *   ② 把 `module.RECLAIM_OFF_ENV` 换成一个**重打的字面量**（而模块导出的是另一个
+   *      名字）⇒ 开关拨不动 ⇒ 同上红。
+   *      ★ 这正是"名字必须来自模块导出"那一格在**扫描器**上的可执行形式。
+   *
+   * ── ★★ 它必须与臂 C **用同一套输入** ────────────────────────────────────────────
+   *   否则"停了"与"这条输入本来就不可清"同形 ⇒ 本臂会**恒绿**而毫无分辨力。
+   *   ★ 所以形状、钩子、任务全都与臂 C 一样，**只有环境变量不同**。
+   */
+  const { payload, workspace } = runReclaimArm({ shape: 'terminal-absorbed', hook: false, env: { AGENT_TEAMS_NO_RECLAIM: '1' } })
+
+  assert.equal(payload.threw, undefined, `★ 开关打开时落终态不许抛。实测：${payload.threw}`)
+  assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
+  assert.equal(payload.taskStatus, 'completed', '★ 前置：任务照常落终态（开关只管回收，不管裁决）')
+
+  const worktree = payload.worktree
+  assertReclaimLandedUnderTemp(worktree, workspace)
+
+  /** ★★ 核心断言：开关拨上 ⇒ 树**仍在**（与臂 C 的同一套输入、相反的读数）。 */
+  assertWorktreeState(payload, true, '★★★★ 开关打开时那棵树【必须】还在（否则那个"可关闭"是假的）')
+  /** ★ 而台账里也还在（它没被删过）。 */
+  assert.equal(
+    payload.ledgerHasWorktree, true,
+    '★ 开关打开 ⇒ 台账里那条记录也必须原样留着（没删过就不该有任何变化）',
+  )
+  /**
+   * ★★ 而缺陷 2 的靶子（`t-done`）在这里也**必须还在** ——
+   *   开关拨上 ⇒ 连"那条早已终态的树会被收掉"这件事都不许发生。
+   *   ★ 少了这一格，本臂只证明"这条任务的树没被删"，而**没证明扫描器停了**。
+   */
+  assert.notEqual(payload.doneTree, null, '★ 前置：子进程必须交出 t-done 那棵树的路径')
+  assert.equal(
+    payload.doneTreeExists, true,
+    '★★★★ 开关打开 ⇒ 那条早已终态的树也必须原样留着（扫描器整个停手）'
+    + `\n  实测 doneTreeExists=${String(payload.doneTreeExists)}\n  路径：${payload.doneTree}`,
+  )
+  assert.equal(
+    payload.doneTreeInLedger, true,
+    '★ 开关打开 ⇒ 台账里那条记录也必须原样留着（没删过就不该有任何变化）',
+  )
+
+  /** ★ 而"跳过了"必须**可读** —— 否则它与"压根没接线"同形。 */
+  const line = payload.logs.map(([, m]) => m).find((m) => /terminal worktree scan skipped/.test(m))
+  assert.notEqual(
+    line, undefined,
+    `★ 开关生效时必须留下一条可读的话（说清"没有扫描、没有删"）。实测日志：${JSON.stringify(payload.logs)}`,
+  )
+  /** ★ 而它必须点名**哪个开关**拨到了什么值（名字来自模块导出）。 */
+  assert.match(line, /AGENT_TEAMS_NO_RECLAIM=1/, `★ 要点名开关与它的值。实测：${line}`)
+  assert.match(line, /nothing was deleted/, `★ 且要说清"什么都没删"。实测：${line}`)
+  /** ★ 而它绝不与"收掉了"同形（自相矛盾的两句会让读的人不知道信哪句）。 */
+  assert.doesNotMatch(line, /reclaimed a terminal task/, `★ 跳过的措辞不许与"收掉了"同形。实测：${line}`)
+  /** ★ 而它也**没有**留下"扫描跑了"的那条总读数（连扫都没扫）。 */
+  const scanLine = payload.logs.map(([, m]) => m).find((m) => /terminal worktree scan —/.test(m))
+  assert.equal(scanLine, undefined, `★ 开关拨上时不许出现"扫描跑了"的读数。实测：${scanLine}`)
 })

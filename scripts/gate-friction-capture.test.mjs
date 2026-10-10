@@ -26,30 +26,160 @@
  *   只不过这里是**写进同一个文件**。而台账是"记录"，被污染之后**不可重算**
  *   （README 第一条纪律：原始现象丢了就完了）。
  * ⇒ 所以本文件第一条臂就钉"写到哪儿"，而不是最后一条。
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ★★★ 2026-10-10 重做：卡点的【触发输入】是陈旧的那一半，被修掉的是它 ───────────────
+ *
+ * 本夹具此前用一个 `kind: 'repair'` + `verify: ['true']` + `inScope: ['a.ts']` 的任务
+ * 去 `update_task`，指望它被拒。**那条路现在根本不会被拒** ⇒ 四条臂一起红，
+ * 而红的成因不是"台账坏了"，是"这一轮压根没有卡点发生"（`frictions/` 从未创建）。
+ *
+ * MEASURED（本轮逐条复现，命令见下），旧的触发输入失效的确切原因是两条**并列**的：
+ *
+ *   ① `update_task` 的完成位在 `src/tools/update-task.ts:1123` 这样判"没检查"：
+ *
+ *          const completionNotChecked = completionGates.ok === false
+ *            && (completionGates.skippedAll !== undefined || completionGates.unmeasured !== undefined)
+ *
+ *      ★ 它**一眼都不看 `blockers`**：只要**任何一条**判据报了 `unmeasured`，
+ *        哪怕同时有一条判据真的 `blocked`，整段也被读成"没检查" ⇒ 警告 + 放行。
+ *      （`frictions/` 只在那段**真的拒绝**的分支里落盘，所以一条都不落。）
+ *
+ *   ② 而夹具原本的构造里，`completion.mutation` **必然** `unmeasured`：
+ *      它的杀手套件执行器把 `node --test <suite>` 交给 `/bin/sh`，而在
+ *      `node --test` 里再跑 `node --test` 会被 Node **静默跳过**：
+ *
+ *          Warning: node:test run() is being called recursively within a test file.
+ *                   skipping running files.
+ *          stdout = ""            （没有汇总行）
+ *          exit code = 0
+ *
+ *      ⇒ `parseTestSummary("")` = `{ total: null }`（本文件下面有一条断言把这一步
+ *        单独钉住）⇒ 判据落 `unmeasured("the killer suite did not report a readable
+ *        summary …")` ⇒ 回到 ①，整段被放行。
+ *
+ * ★★ 于是修法有两个层次，**缺一不可**，而它们修的是不同的一半：
+ *
+ *   · 触发输入那一半（**本文件的职责**）：让卡点**真的发生** —— 一个真正 `blocked`
+ *     的完成裁决（臂 1/2/4）与一个真正 `blocked` 的契约裁决（臂 3）。
+ *   · 环境那一半（本文件同样必须做）：把**继承来的 `NODE_TEST_CONTEXT`** 清掉。
+ *     ★ 这是上面 ② 的成因：那个变量是 `node --test` 给**子进程**打的标记，
+ *       子进程一看见它就判"这是递归"并跳过。`runVerifyCommand` 用
+ *       `env: process.env` 起 shell（`src/tools/shared/entities.ts:285`）⇒
+ *       标记**原样继承**给杀手套件。
+ *     ★ 清掉之后，套件**真的跑**，判据拿到真汇总，`mutation` 就**真的**能
+ *       `blocked`。MEASURED（下一条注释里逐字给出读数）。
+ *
+ * ★ 而"清掉环境变量让判据能测"**不是**把判据改松：判据一个字没动，改的是
+ *   **给它的探针能不能跑起来**。判据仍然自己决定杀没杀掉。
+ *
+ * ★ 本文件【不碰 `src/`，也不碰 `lib/`】(任务书硬约束)。下面 ①② 是**读数**，
+ *   不是待修的缺陷；它们该被报告，不该被这里改掉。
+ *
+ * ── 两条臂各自的触发为什么是**真的拒绝**（而不是"看起来像拒绝"）──────────────
+ *
+ *   臂 1/2/4 —— `completion.mutation` 的 `blocked(...)`：
+ *     出处在 `src/gates/completion/mutation.ts:506-516`：
+ *         if (report.mutationScore !== null && report.mutationScore < threshold) {
+ *           return blocked([ 'the delivered tests are decorative …', …survivors, scope ])
+ *         }
+ *     它要求 `report.disposition === 'measured'` —— 而这就意味着**基线绿、变异体
+ *     真的跑过、分数算得出来**。要让变异体存活而基线仍绿，那份杀手套件必须是
+ *     **绿但装饰性**的：它在改动行上不断言任何东西 ⇒ 变异体全活着 ⇒ 分数 0 < 0.6。
+ *
+ *   臂 3 —— `contract.verify-command` 的 `blocked(...)`：
+ *     出处在 `src/gates/contract/verify-command.ts:646-647`：
+ *         return blocked(problems.map((p) => `[${p.kind}] ${p.message}`))
+ *     它要求 `verifyCommandProblems(...)` 非空。这里用的是**整行匹配去比一条命令
+ *     的输出**那条规则（`processSubstitutionProblem`，:504 的 `kind: 'non-judgeable'`）。
+ *     ★ 这一条在 `create_task` 上落盘（`rejectOnContractGates` 里 `recordFriction`
+ *       + `throwWithSurface`），所以臂 3 的台账由**契约位**产生。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { createTeamDir } from '../lib/state.js'
 
 /**
- * 一个可用的夹具：临时工作区 + 真实 git 仓库 + 一个团队 + 一个成员。
+ * ★★★ 让杀手套件**真的能跑起来**（见文件头 ②）──────────────────────────────────
  *
- * ★ 全程**不碰主树**：`stateDir` 走临时目录 ⇒ 台账落在它自己那里。
+ * `node --test` 给子进程打 `NODE_TEST_CONTEXT`；子进程一看见它就跳过整个文件。
+ * `runVerifyCommand` 继承 `process.env` ⇒ 不清掉的话，判据拿到的永远是
+ * "空输出 + exit 0"，于是它**必然** `unmeasured`，本文件四条臂就永远没有卡点。
+ *
+ * ★ 只清这一个变量、且只在这个夹具里清：它是**探针的启动条件**，不是判据的输入。
+ *   返回一个还原函数，由调用方在 `finally` 里放回去 —— 一个夹具不该把
+ *   "让子进程跳过测试"这个副作用**泄漏给同一进程里的其它夹具**。
+ */
+function withoutRecursionSkip() {
+  const saved = process.env.NODE_TEST_CONTEXT
+  delete process.env.NODE_TEST_CONTEXT
+  return () => {
+    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT
+    else process.env.NODE_TEST_CONTEXT = saved
+  }
+}
+
+/** 一次 git 调用的统一包装（夹具的临时工作区）。 */
+function gitIn(workspace) {
+  return (args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
+/**
+ * ── 夹具工作区（臂 1/2/4 用）：一个**真的能测变异**的仓库 ─────────────────────────
+ *
+ * 要让 `completion.mutation` 走到 `blocked`，三样缺一不可，而它们各自有出处：
+ *
+ *   ① **改动行范围**：`mutation.gate()` 拿不到 `changedLines` 就直接 `unmeasured`
+ *      （`mutation.ts:276`）。它由调用方从 `changedLineNumbers(workspace, baseRevision)`
+ *      算出来 ⇒ 工作区必须**真的脏**，且任务记录必须带 `baseRevision`。
+ *   ② **杀手套件**：`killerSuites` 空 ⇒ `unmeasured`（`mutation.ts:288`）。
+ *      夹具里它由 `repairCompletionVerdict → repairEvidenceFiles` 从**任务契约**
+ *      （`inScope` + `changedPaths` 里那些**测试夹具**路径）推出来 ——
+ *      这条链**不依赖会话事件**，所以它在 `withSession` 两值下都成立。
+ *      ★ 这也是为什么测试夹具必须放在一个**带目录**的路径上（`scripts/…`）：
+ *        `deriveScanDirs` 对没有 `/` 的路径返回 `undefined`，而 r5 会因此报
+ *        `unmeasured`（"no scan directories were declared"）⇒ 又回到 ① 的放行。
+ *   ③ **基线绿**：套件在改动前就是红的 ⇒ 判据报 `unmeasured`
+ *      （"the killer suite is not green before mutation"，`mutation.ts:337`）。
+ *
+ * ★ 而套件必须是**装饰性**的：它绿，但在被变异的那些行上不断言任何东西
+ *   ⇒ 变异体一条都杀不掉 ⇒ 分数 0 < 0.6 ⇒ `blocked`。
  */
 function fixture({ withSession = true } = {}) {
   const workspace = mkdtempSync(join(tmpdir(), 'friction-'))
-  const git = (args) => execFileSync('git', args, { cwd: workspace, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const git = gitIn(workspace)
   git(['init', '-q', '.'])
-  writeFileSync(join(workspace, 'a.ts'), 'a\n')
+  mkdirSync(join(workspace, 'scripts'), { recursive: true })
+
+  /**
+   * 初始提交：`a.ts` 与那份**装饰性**套件。
+   * ★ 套件 `import` 了 `a.ts` —— 这满足判据的"探针够得到被变异文件"要求
+   *   （`probeReach` 读套件正文找被变异文件的 basename）。够不到 ⇒ `unmeasured`，
+   *   而不是"全存活"（`mutation.ts` 文件头那条硬规则）。
+   */
+  writeFileSync(join(workspace, 'a.ts'), 'export function f(x) {\n  if (x > 0) return 1\n  return 0\n}\n')
+  writeFileSync(
+    join(workspace, 'scripts', 'suite.test.mjs'),
+    "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\nimport { f } from '../a.ts'\ntest('t', () => { assert.equal(1, 1) })\n",
+  )
   git(['add', '-A'])
   git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
+  /** ★ `baseRevision` 必须是**真的 git 对象名** —— 读出来，不臆造。 */
+  const baseRevision = git(['rev-parse', 'HEAD']).trim()
+
+  /**
+   * ★ 而那一次"真的改动了"必须发生（不然 `changedLines` 为空 ⇒ ① 的 unmeasured）：
+   *   `if (x > 0)` ⇒ `if (x >= 0)`。于是 git 给出改动行，且**范围里真的有一个变异体**
+   *   （`ge-to-gt@L2`）。
+   */
+  writeFileSync(join(workspace, 'a.ts'), 'export function f(x) {\n  if (x >= 0) return 1\n  return 0\n}\n')
 
   const stateRoot = join(workspace, '.agent-teams')
   const tools = new Map()
@@ -62,16 +192,32 @@ function fixture({ withSession = true } = {}) {
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
     agents: { get() { return undefined } },
+    /**
+     * ★ 臂 3 要在**契约位**上触发拒绝，而那条路走 `create_task` ⇒ 它需要一个
+     *   可用的 `llm`（队长会话的模型路由）。缺它时 `create_task` 在到达判据之前
+     *   就抛了，于是"被拒"的原因会变成别的东西。给一个最小可用的实现。
+     */
+    llm: { async resolveCallConfig(config) { return config }, async listModels() { return [] } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, {
     stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined,
   })
-  return { workspace, stateRoot, tools, warnings, member: (id) => memberAgent(id, workspace, withSession) }
+  return { workspace, stateRoot, tools, warnings, baseRevision, ctx, member: (id) => memberAgent(id, workspace, withSession) }
 }
 
+/**
+ * 成员会话。
+ *
+ * ★ `meta.diffs` 必须列出**真的被改动过**的那些路径：`dispatch.changed-paths`
+ *   会拿"自报改动"与"会话观察"对账，而对不上的那一份会**先**拒绝 ——
+ *   那样本文件测的就变成那条判据，而不是完工/契约位。
+ */
 function memberAgent(id, workspace, withSession) {
-  const diffs = [{ path: 'a.ts', oldText: 'a', newText: 'b' }]
+  const diffs = [
+    { path: 'a.ts', oldText: 'if (x > 0) return 1', newText: 'if (x >= 0) return 1' },
+    { path: 'scripts/suite.test.mjs', oldText: 'x', newText: 'y' },
+  ]
   const events = withSession ? [{ type: 'tool/result', meta: { diffs } }] : []
   return {
     id, status: 'working', steer() {},
@@ -86,8 +232,17 @@ async function seedTeam(stateRoot, taskId, overrides = {}) {
     members: [{ id: 'm1', name: 'worker', status: 'working', joinedAt: 1 }],
     tasks: [{
       id: taskId, subject: 'x', status: 'in_progress', assignee: 'worker', dependencies: [],
-      attempt: 1, attemptId: 'a1', kind: 'repair', objective: 'o', inScope: ['a.ts'],
-      acceptance: ['x'], verify: ['true'], changedPaths: ['a.ts'], createdAt: 1, updatedAt: 1,
+      attempt: 1, attemptId: 'a1', kind: 'repair', objective: 'o',
+      acceptance: ['x'], createdAt: 1, updatedAt: 1,
+      /**
+       * ★ 契约要**同时**声明两个文件，理由见夹具头 ②：
+       *   · `a.ts` 是被变异的那一个（改动行范围落在它身上）；
+       *   · `scripts/suite.test.mjs` 是**杀手套件**，且必须落在 `inScope` 里
+       *     ——`repairEvidenceFiles` 会把"不在写域里的夹具"筛掉。
+       */
+      inScope: ['a.ts', 'scripts/suite.test.mjs'],
+      changedPaths: ['a.ts', 'scripts/suite.test.mjs'],
+      verify: ['node --test scripts/suite.test.mjs'],
       ...overrides,
     }],
   })
@@ -103,16 +258,91 @@ function frictionRecords(stateRoot) {
     .map((name) => JSON.parse(readFileSync(join(dir, name), 'utf8')))
 }
 
-/** 触发一次判据拒绝：走真实工具入口。 */
-async function rejectOnce(f, taskId = 't1') {
-  return f.tools.get('agent_teams_update_task').execute(
-    {
-      task_id: taskId, attempt_id: 'a1', status: 'completed', changedPaths: ['a.ts'],
-      acceptanceResults: [{ criterion: 'c', status: 'passed' }],
-      commandsRun: [{ command: 'true', status: 'passed', exitCode: 0 }],
+/**
+ * ── 触发一次**真的**拒绝：走真实工具入口，断言它抛的是一条真拒绝 ────────────────────
+ *
+ * ★ 本文件原先叫 `rejectOnce`，而那个名字把两件事混成了一件：它**假设**调用
+ *   会被拒，却从不检查。于是当判据不再拒绝时，四条臂一起红在"台账里没有记录"上
+ *   —— 一个**误导的**读数（看起来像台账坏了，其实是没卡点）。
+ *
+ * ⇒ 现在拆成两个**说清自己触发的是哪一条**的入口，且两个都**当场核对**返回值
+ *   确实是一条拒绝。名字、注释、断言三者说的是同一件事。
+ */
+async function rejectViaCompletionBlock(f, taskId = 't1') {
+  /**
+   * 臂 1/2/4 走这一条：`completion.mutation` 真的 `blocked`
+   * （`src/gates/completion/mutation.ts:506`）。
+   *
+   * ★ 它需要 ① `NODE_TEST_CONTEXT` 被清掉（否则套件被跳 ⇒ `unmeasured`），
+   *   ② 契约同时声明被变异文件与那份装饰性杀手套件（否则 `unmeasured`）。
+   *   两条都是**输入面**的事，判据一字未动。
+   */
+  const restoreEnv = withoutRecursionSkip()
+  try {
+    return await f.tools.get('agent_teams_update_task').execute(
+      {
+        task_id: taskId, attempt_id: 'a1', status: 'completed',
+        changedPaths: ['a.ts', 'scripts/suite.test.mjs'],
+        acceptanceResults: [{ criterion: 'c', status: 'passed' }],
+        commandsRun: [{ command: 'node --test scripts/suite.test.mjs', status: 'passed', exitCode: 0 }],
+      },
+      { agent: f.member('m1'), signal: new AbortController().signal },
+    ).then(
+      () => undefined,
+      (error) => String(error.message),
+    )
+  } finally {
+    restoreEnv()
+  }
+}
+
+/**
+ * 臂 3 走这一条：`contract.verify-command` 真的 `blocked`
+ * （`src/gates/contract/verify-command.ts:646`）—— 而它发生在 **`create_task`** 上。
+ *
+ * ★ 为什么臂 3 不用完工位：它刻意**没有会话事件**（它测的就是"事件读不到时会怎样"）。
+ *   没有会话事件 ⇒ `observedChangedPaths` 为 `undefined` ⇒ 回测的覆盖证据拿不到
+ *   ⇒ `completion.mutation` 与 `completion.backtest` 都会 `unmeasured` ⇒
+ *   回到 `completionNotChecked` 的放行 ⇒ 完工位**在这条臂里不可能真的拒绝**。
+ *   ★ 所以臂 3 的台账由**契约位**产生：那条路不读会话，且真的 `throwWithSurface`。
+ *
+ * `verify` 用的是 `grep -qx 7 <(wc -l < a.ts)`：整行匹配去比一条命令的**输出**，
+ * 而那条输出的空白由生产者在运行时决定、在契约里看不见 ⇒ 静态不可判
+ * （`processSubstitutionProblem`，`kind: 'non-judgeable'`）⇒ 真 `blocked`。
+ * ★ 不要用 `verify: ['true']`：那条现在是 `[always-green]`，也会拒绝，
+ *   但它拒绝的理由是关于"这条命令恒绿"，与本臂要测的东西无关（且它掩盖了
+ *   本臂真正想钉的那条规则）。
+ */
+async function rejectViaContractBlock(f) {
+  const captain = {
+    id: 'cap', status: 'working', steer() {},
+    session: {
+      header: { cwd: f.workspace, id: 'sess-cap' },
+      events: [],
+      ownEvents() { return [] },
+      requestHeader() { return { config: { provider: 'p', model: 'm' } } },
     },
-    { agent: f.member('m1'), signal: new AbortController().signal },
-  ).then(() => undefined).catch((error) => String(error.message))
+  }
+  const call = (name, args) => f.tools.get(name).execute(args, { agent: captain, signal: new AbortController().signal })
+  await call('agent_teams_create', {
+    name: 'team', description: 'friction fixture', approval: 'automatic',
+  })
+  await call('agent_teams_add_member', { name: 'worker', role: 'engineer' })
+  return call('agent_teams_create_task', {
+    subject: 'x',
+    description: 'a task whose verify command cannot judge the work',
+    kind: 'work',
+    assignee: 'worker',
+    objective: 'o',
+    acceptance: ['x'],
+    /**
+     * ★ 不可判的那条命令 —— 见上面的长注释。
+     */
+    verify: ['grep -qx 7 <(wc -l < a.ts)'],
+  }).then(
+    () => undefined,
+    (error) => String(error.message),
+  )
 }
 
 /** 落盘是异步的（拒绝路径不许等它）—— 等一小会儿再读。 */
@@ -134,8 +364,24 @@ test('臂 1 ★ 隔离臂：卡点记进本团队自己的 stateRoot —— 不�
    *   —— 本臂同时断言**那个**目录没有因这次调用而改变。
    */
   const f = fixture()
-  await seedTeam(f.stateRoot, 't1')
-  await rejectOnce(f)
+  await seedTeam(f.stateRoot, 't1', { baseRevision: f.baseRevision })
+  const message = await rejectViaCompletionBlock(f)
+
+  /**
+   * ★ 前置：这一次调用**真的被拒**了 —— 否则下面测的是"一次成功调用有没有写台账"
+   *   （它当然不写），而那个读数会被误读成台账坏了。见文件头 ①。
+   *   ★ 而"被拒"必须由**措辞**来证明，不能只证明"有 message"：
+   *     放行那一条有它自己的、完全不同的话（"NOT checked … allowing it through"）。
+   */
+  assert.ok(message !== undefined, '★ 前置：这条调用必须真的抛出来（而不是被放行）')
+  assert.match(
+    message, /^update_task rejected: /,
+    `★ 前置：它必须是一条**真拒绝**。实测抛出来的：${String(message).slice(0, 200)}`,
+  )
+  assert.match(
+    message, /\[completion\.mutation\]/,
+    `★ 而拒绝它的必须是完工位那条变异判据（本臂的触发就是它）。实测：${String(message).slice(0, 200)}`,
+  )
   await settle()
 
   const mine = frictionRecords(f.stateRoot)
@@ -152,7 +398,11 @@ test('臂 1 ★ 隔离臂：卡点记进本团队自己的 stateRoot —— 不�
   const mainCountBefore = existsSync(mainLedger)
     ? readdirSync(mainLedger).filter((name) => /^f-\d+\.json$/.test(name)).length
     : 0
-  await rejectOnce(f, 't1')
+  const secondMessage = await rejectViaCompletionBlock(f, 't1')
+  assert.match(
+    String(secondMessage), /^update_task rejected: /,
+    '★ 反向半边的两次调用也必须是**真拒绝**（否则它测的是一次成功调用的副作用）',
+  )
   await settle()
   const mainCountAfter = existsSync(mainLedger)
     ? readdirSync(mainLedger).filter((name) => /^f-\d+\.json$/.test(name)).length
@@ -174,8 +424,12 @@ test('臂 2 ★ 记录臂：ctx 快照 / 事件定位 / 机制状态 —— 三�
    *   缺任何一样，那条记录就 `replayable:false`（第一轮 12/12 都是这样）。
    */
   const f = fixture()
-  await seedTeam(f.stateRoot, 't1')
-  await rejectOnce(f)
+  await seedTeam(f.stateRoot, 't1', { baseRevision: f.baseRevision })
+  const message = await rejectViaCompletionBlock(f)
+  assert.match(
+    String(message), /^update_task rejected: /,
+    `★ 前置：本臂的记录来自一条**真拒绝**。实测：${String(message).slice(0, 200)}`,
+  )
   await settle()
 
   const [record] = frictionRecords(f.stateRoot)
@@ -231,15 +485,37 @@ test('臂 3 ★ 反向臂：事件读不到 ⇒ replayable:false 且写进 unkno
    *
    * ⇒ 所以：拿不到事件定位时，记录必须**如实标 false**，并把"没拿到什么"
    *   写进 `unknown`。留空会被读取端读成"当时没有"，而那与"我没记到"是两件事。
+   *
+   * ── ★ 本臂的触发为什么在**契约位**（而不是像臂 1/2/4 那样在完工位）──────────────
+   *
+   * 本臂刻意**没有会话事件**。而没有会话事件 ⇒ 回测的覆盖证据链拿不到
+   * ⇒ 完工位上的那两条判据都会 `unmeasured` ⇒ 触发文件头 ① 的"没检查就放行"
+   * ⇒ **完工位在这条臂里根本不可能真的拒绝**。
+   *
+   * ★ 所以触发换到契约位：`create_task` 的 `contract.verify-command` 真的
+   *   `blocked`（见 `rejectViaContractBlock` 的注释）—— 它不读会话，且真的抛。
+   *   ★ 而"事件读不到 ⇒ replayable:false"这条性质**一位没变**：契约位的调用点
+   *     本来就不带会话（所以 `eventRefs` 必然读不到），本臂要钉的正是它如实说出来。
    */
   const f = fixture({ withSession: false })
-  await seedTeam(f.stateRoot, 't1')
-  await rejectOnce(f)
+  const message = await rejectViaContractBlock(f)
+  assert.match(
+    String(message), /^create_task rejected: /,
+    `★ 前置：本臂的记录来自一条**真拒绝**。实测：${String(message).slice(0, 200)}`,
+  )
+  assert.match(
+    String(message), /\[contract\.verify-command\]/,
+    `★ 而拒绝它的必须是契约位那条判据。实测：${String(message).slice(0, 200)}`,
+  )
   await settle()
 
   const [record] = frictionRecords(f.stateRoot)
   assert.ok(record !== undefined, '★ 即使拿不到事件，卡点本身仍然要记下来（记不下与没卡点是两件事）')
 
+  assert.equal(
+    record.index.component, 'contract',
+    '★ 前置：这条记录确实来自**契约位**（本臂的触发方式）',
+  )
   assert.equal(
     record.index.replayable, false,
     '★ 拿不到事件定位 ⇒ 必须如实标 `replayable: false`；标 true 就是把「读得懂」当成「能重放」',
@@ -270,8 +546,12 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
    *   `gate()`，断言它**仍然拒绝**。这就是"卡点能再发生一次"的可执行形式。
    */
   const f = fixture()
-  await seedTeam(f.stateRoot, 't1')
-  await rejectOnce(f)
+  await seedTeam(f.stateRoot, 't1', { baseRevision: f.baseRevision })
+  const message = await rejectViaCompletionBlock(f)
+  assert.match(
+    String(message), /^update_task rejected: /,
+    `★ 前置：本臂重放的是从一条**真拒绝**里落下的记录。实测：${String(message).slice(0, 200)}`,
+  )
   await settle()
 
   const [record] = frictionRecords(f.stateRoot)
@@ -352,7 +632,24 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
     '★ 注入不了的那几格必须被列出来（它们是"重放做不到"的如实读数）',
   )
 
-  const replay = await registry.evaluate(point, replayedCtx)
+  /**
+   * ★★★ 重放**必须**在"探针跑得起来"的条件下进行 ────────────────────────────────
+   *
+   * MEASURED（本任务复现）：`completion.mutation` 在重放时会**再跑一次**杀手套件
+   * （它注入的那一格就是 `runTest`）。而在 `node --test` 里，继承来的
+   * `NODE_TEST_CONTEXT` 会让子进程那次 `node --test` 被跳过 ⇒ 套件报不出汇总
+   * ⇒ 重放得到的是 `unmeasured("the killer suite did not report a readable summary")`
+   *   ⇒ **重放与记录分叉**，而那个分叉是**环境的**、不是记录的。
+   *
+   * ⇒ 与触发侧同一条纪律：清掉那个变量，让探针真的跑。判据仍然自己判。
+   */
+  const restoreEnv = withoutRecursionSkip()
+  let replay
+  try {
+    replay = await registry.evaluate(point, replayedCtx)
+  } finally {
+    restoreEnv()
+  }
   assert.equal(
     replay.ok, false,
     `★ 用（重新注入后的）记录 ctx 重跑 "${point}" 必须以**拒绝**结束（卡点再现）—— `
@@ -375,6 +672,10 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
   const recordedGate = /\[([\w.-]+)\]/.exec(recorded)?.[1]
   const replayedGate = /\[([\w.-]+)\]/.exec(replayed)?.[1]
   assert.notEqual(recordedGate, undefined, `★ 记录里必须带有判据 id（否则无从比对）：${recorded.slice(0, 120)}`)
+  assert.equal(
+    recordedGate, 'completion.mutation',
+    `★ 前置：本臂记录的判据 id 必须是完工位那条变异判据（触发就是它）。实测：${recordedGate}`,
+  )
 
   assert.equal(
     replayedGate, recordedGate,
@@ -391,21 +692,44 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
    *
    *   本臂必须**仍能**在真分叉上变红 —— 否则它只是"我把它改成绿了"。
    *   ⇒ 构造一个**故意缺注入**的重放：不给 `loadKindRequirements`
-   *     ⇒ 分叉必须**再次出现**（落到 verify-rerun 而不是 mutation）。
+   *     ⇒ 分叉必须**再次出现**（落到 `verify-rerun` 而不是 `mutation`）。
    *
    * ★ 缺了这一半，一个"无论输入如何都返回同一个 id"的实现会让本臂恒真。
+   *
+   * MEASURED（本轮复核，读数逐字给出）：不给那张表 ⇒ `loadKindRequirementsOfHost`
+   *   读不到 ⇒ `mutation.appliesTo` 为 **false**（门**不说话**）⇒ 那一轮里
+   *   `completion.mutation` 的裁决是 **`skipped`**，于是**没有任何一条判据点名
+   *   `[completion.mutation]`** ⇒ 重放文本里根本抓不到判据 id。
+   *
+   *       recordedGate = "completion.mutation"
+   *       replayedGate = "completion.mutation"   ← 注入齐全时，同一格
+   *       brokenGate   = undefined               ← 拿掉那一格后，id 消失了
+   *
+   *   ★ 所以本臂的"分叉"在这里的真身是：**记录点名的那条判据在重放里沉默了**。
+   *     它仍然是一次**真分叉**（`undefined ≠ 'completion.mutation'`），而且这正是
+   *     要抓住的形态 —— 「重放里那条判据不见了」与「它又拒了一次」在只看 `ok`
+   *     时同形（两者都可能 `ok:false`），只有比对**判据 id** 才分得开。
+   *   ★ 这里断言的是"**分叉**"（id 不同），不是"分到哪条" —— 把"分到 verify-rerun"
+   *     写死会让本臂在下一次接线变动上误红（本轮实测它就**不是** verify-rerun）。
    */
   const broken = rehydrateReplayCtx(record.scene.ctx, { ...injections, loadKindRequirements: undefined })
   assert.ok(
     broken.unreplayable.includes('loadKindRequirements'),
     '★ 不给那一格 ⇒ 它必须出现在 `unreplayable` 里（而不是被静默忽略）',
   )
-  const brokenReplay = await registry.evaluate(point, broken.ctx)
+  const restoreEnv2 = withoutRecursionSkip()
+  let brokenReplay
+  try {
+    brokenReplay = await registry.evaluate(point, broken.ctx)
+  } finally {
+    restoreEnv2()
+  }
   const brokenReplayed = String(brokenReplay.unmeasured ?? brokenReplay.blockers?.join('; ') ?? '')
   const brokenGate = /\[([\w.-]+)\]/.exec(brokenReplayed)?.[1]
   assert.notEqual(
     brokenGate, recordedGate,
     `★ ★ 反向半边：把关键那一格**拿掉**之后，重放必须**再次分叉**（否则本臂对"真分叉"没有分辨力）。`
-    + ` 记录里是「[${recordedGate}]」，缺注入时得到「[${brokenGate}]」`,
+    + ` 记录里是「[${recordedGate}]」，缺注入时得到「[${brokenGate}]」`
+    + ` 完整读数：${JSON.stringify(brokenReplay).slice(0, 300)}`,
   )
 })

@@ -576,6 +576,52 @@
           "description": "Required non-empty reason when resume=true.",
           "type": "string"
         },
+        "reviewed": {
+          "additionalProperties": false,
+          "description": "A review stamp: {at, by, checks[]}. Optional — its absence means \"not reviewed yet\", which is a normal state (a task the user ruled on did not go through auto-generation).",
+          "properties": {
+            "at": {
+              "description": "Epoch ms when the review was stamped.",
+              "type": "number"
+            },
+            "by": {
+              "description": "Identity that performed the review (adversarial, captain, …).",
+              "type": "string"
+            },
+            "checks": {
+              "description": "Per-question verdicts (pass / fail / unmeasured). A bare boolean would be indistinguishable from one here.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "description": "Question id (scope, prerequisite, move, acceptance, boundary, …).",
+                    "type": "string"
+                  },
+                  "verdict": {
+                    "description": "pass / fail / unmeasured. unmeasured must NOT be folded into pass.",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Why this verdict — the reading that produced it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "verdict"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "at",
+            "by",
+            "checks"
+          ],
+          "type": "object"
+        },
         "reviewedTaskId": {
           "description": "Existing AgentTeams implementation/repair task id. Required for kind=review; an external repository audit is kind=work.",
           "type": "string"
@@ -619,6 +665,27 @@
         "properties": {
           "assignee": {
             "type": "string"
+          },
+          "dispatch_input_surface": {
+            "additionalProperties": false,
+            "properties": {
+              "checked": {
+                "type": "number"
+              },
+              "incomplete": {
+                "type": "number"
+              },
+              "missing": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "skipped": {
+                "type": "number"
+              }
+            },
+            "type": "object"
           },
           "input_surface": {
             "additionalProperties": false,
@@ -1458,6 +1525,12 @@
               "exitCode": {
                 "type": "number"
               },
+              "failures": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "status": {
                 "enum": [
                   "passed",
@@ -1566,27 +1639,6 @@
             "type": "string"
           },
           "completion_input_surface": {
-            "additionalProperties": false,
-            "properties": {
-              "checked": {
-                "type": "number"
-              },
-              "incomplete": {
-                "type": "number"
-              },
-              "missing": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "skipped": {
-                "type": "number"
-              }
-            },
-            "type": "object"
-          },
-          "dispatch_input_surface": {
             "additionalProperties": false,
             "properties": {
               "checked": {

@@ -450,10 +450,80 @@ test('臂 4 ★★ 全仓读数（如实报出）：合格多少、不合格多�
      *   与把一个缺陷合法化，在 diff 里长得完全一样。
      *   判据：那条产出【该不该】有生产消费者。不该 ⇒ 记账；该 ⇒ 去接线。
      *   ★ 而 `parseKnownBaselineFailures` 就属于后者（t76 报过，已接线）。
+     *
+     * ── ★★ 记账值 17 → 20（2026-10-08，t6，附理由·逐条）────────────────────────
+     *
+     * 这一轮涨到 21，多出 4 条。**逐条走它自己的判据**（该不该有生产消费者），
+     * 而不是一刀切上调上限 —— 下面是三条被记进账的，以及**一条被拒绝记账的**。
+     *
+     * ① `judgeWorktreeReclaimable`（`src/worktree.ts:709`）—— **不该记"没接线"**，
+     *    因为它【已经接上了】：消费它的是一条**生产 CLI**，只是它物理位置在
+     *    `scripts/` 下 —— 本装置按【路径】分桶，于是这条生产消费被数进了夹具桶。
+     *    MEASURED：`scripts/worktree-reclaim.mjs` 有 `#!/usr/bin/env node` 与真的
+     *    `main()`，`package.json:112-113` 把它挂成生产命令
+     *    （`reclaim:worktrees` / `reclaim:worktrees:apply`），它在 `:103` 真的
+     *    `import { judgeWorktreeReclaimable, describeReclaimability } from '../lib/worktree.js'`，
+     *    并在 `:182` 真的调用；它的头注释还写明"本文件里**不留**那份实现的副本"。
+     *    ⇒ ★ 这是本装置**按设计就有的盲区**（`scripts/**` 一律算夹具），不是 t41。
+     *      ★★ 而它**不是**本装置该去修的 bug：**不许**为此放宽
+     *        「`src/` = 生产、`scripts/` = 夹具」那条**路径**规则 —— 它正是本判据
+     *        能抓到 t41 的机制（见文件顶 `stripComments` 旁那段）。
+     *        正确的做法是**记账并写明**：消费它的是 `scripts/` 下的生产 CLI。
+     *      ★ 补充（t6 审核轮实测）：该 CLI 还经**运行期动态 import** 被生产调用 ——
+     *        `src/tools/update-task.ts` 的交付后回收路径按 `pluginRoot()` 动态加载
+     *        `scripts/worktree-reclaim.mjs`。⇒ 这是扫描期看不见的消费点的
+     *        **第二重成因**：本装置按路径静态分桶，两重都数不到。
+     *
+     * ② `describeReclaimability`（`src/worktree.ts:789`）—— 与 ① 同一条路径上的
+     *    另一条：它是那条裁决的**人读描述**，由同一个生产 CLI 在 `:189` / `:201` /
+     *    `:229` 调用（`human:` 那一格）。⇒ 同上，记账，不是 t41。
+     *
+     * ③ `verdictState`（`src/gates/admission/checkpoint.ts:645`）—— **不该有生产消费者**，
+     *    它的用途就是给夹具看的：定义处自己的文档注释逐字写着
+     *    「★ 一条只在夹具里用得到的出口（导出是为了让三态**结构上**可分辨）」
+     *    —— 导出是为了让夹具直接断言"返回对象上有没有那个字段"，
+     *    而不是去匹配告警里的一段自然语言（后者会因为改一个标点而静默失效）。
+     *    `src/` 里唯一提到它的地方是 `convene.ts:304` 的**注释**，明说**故意不 import**
+     *    （契约 §2：判据之间不互相调用），而两处读数的漂移由
+     *    `gate-admission-convene.test.mjs` 的一致性臂兜住。
+     *    ⇒ 与 `rehydrateReplayCtx` 同类：合法的纯夹具出口。
+     *
+     * ④ ★★ **被拒绝记账的那一条：`readContractGateVerdict`（`src/quality-gates.ts:1301`）。**
+     *    它**没有**被记进这个数 —— 因为它的形状恰恰是 t41：
+     *    `src/` 全仓对它**零引用**（连它自己的 `ContractGateReading` 类型也只出现在
+     *    定义处），而它返回的 `{disposition, rejects, leavesTrace, reason}` 里，
+     *    `rejects` 是"要不要**拒绝**这次调用"的**控制位**、`leavesTrace` 是
+     *    "要不要**留痕**" —— 那是给调用方的**处置指令**，不是一份给人看的读数。
+     *    ⇒ 它**该有**生产消费者 ⇒ 正解是**去接线**，不是记账。
+     *    ★ 而接线点**待定**：`evaluateQualityCompletion` 不消费契约裁决（它的 `ok`
+     *      是任务完成度的另一种形状）；`canDeclareDelivery` 返回 `{ok, blockers}`
+     *      而**没有** `unmeasured`，接上去是语义错配。
+     *    ★★ 而接线点**已实测定位**（t6 审核轮）：真正的调用方是
+     *      `src/tools/shared/entities.ts:2350` 的 `rejectOnContractGates` ——
+     *      它在 `gates.ok === false` 时**一律拒绝**（`:2389` `throwWithSurface`），
+     *      而 `unmeasured` 也落在这一支里。
+     *      ⇒ ★★ 这与本读数自己的口径**正好相反**：本读数说 `unmeasured` ⇒
+     *        `rejects: false, leavesTrace: true`（放行、但别静默），而生产在
+     *        `unmeasured` 上是**拒绝**。那正是 t38 声称修掉的那个缺陷
+     *        （把测不了读成不行）**仍在生产路径上活着** —— 一条写好、测过、
+     *        而从未被调用的读数，与它不存在，在上生产这件事上没有区别。
+     *    ⇒ 而 `src/tools/shared/entities.ts` 在本任务 in-scope **之外**。
+     *    ★★ 上限的取值 = 17（原记账）+ 3（本轮记账的 ①②③）= **20**。
+     *       ★ 这个式子**不是**"取实测值"：实测 `fixtureOnly` 是 **21**，而 ④ 按上面的
+     *         判据**不许入账** ⇒ 上限**故意停在 20、比实测少 1**。
+     *       ⇒ 本臂**保持红**（21 > 20），而那**是设计的结果、不是漏改**：
+     *         它红着正说明"有一条疑似 t41 尚未处置"，从而**不许**本批把它悄悄记掉。
+     *       ★ 反之，把 ④ 也记进账里（上限改成 21）能让它立刻变绿 ——
+     *         而那正是这条夹具存在的理由所要阻止的事。
+     *       ★★ 因此 t6 的交付状态就是"**红着**"：④ 需要一条**独立的后续任务**
+     *         （把 `rejectOnContractGates` 接到 `readContractGateVerdict`，
+     *         该文件在 t6 in-scope 之外），而不是由本批记账消化。
      */
-    fixtureOnly.length <= 17,
-    `★ "只有夹具消费"的产出涨到了 ${fixtureOnly.length}（记账值 17：16 + rehydrateReplayCtx）—— `
-    + '新增的那些正是 t41 的形状：在夹具里看起来被使用，在生产里从未被调用',
+    fixtureOnly.length <= 20,
+    `★ "只有夹具消费"的产出涨到了 ${fixtureOnly.length}（记账值 20：17 + worktree-reclaim 的两条 + verdictState）—— `
+    + '★ 而若多出的那一条是 readContractGateVerdict（src/quality-gates.ts:1301），它【不许】被记账：'
+    + '它带着 rejects / leavesTrace 两个控制位，是给调用方的处置指令，形状正是 t41 —— '
+    + '该做的是【去接线】，而不是把这条上限再往上调',
   )
   assert.ok(
     unconsumed.length <= 12,

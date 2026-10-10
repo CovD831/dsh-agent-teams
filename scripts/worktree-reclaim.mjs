@@ -101,6 +101,15 @@ import { fileURLToPath } from 'node:url'
  *     那只是把重复换个位置，而"谁是真值"仍然只有一份）。
  */
 import { judgeWorktreeReclaimable, describeReclaimability } from '../lib/worktree.js'
+/**
+ * ★★ 路径名也取**同一份真值**（建树 / 找树 / 这里扫描都用它）。
+ *   `worktreeDirName(teamId, taskId)` 是 `src/worktree.ts` 导出的确定性命名；
+ *   ★ 这里**绝不**自己拼 `task-<id>` —— 两处各拼一遍会在团队前缀那一位上分叉，
+ *     而分叉的表现是"扫不到树"，与"确实没有可清的"同形（本仓记账过的那条）。
+ *     ★ 而 `scripts/worktree-commit.test.mjs` 的臂 12 直接断言
+ *       `src/tools/update-task.ts` 里**不出现**那个字符串字面量。
+ */
+import { worktreeDirName } from '../lib/worktree.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -256,6 +265,114 @@ export function listWorktrees(repo) {
 }
 
 /**
+ * ── ★★★★★ 删一棵 worktree —— 而它必须**连 git 的台账一起清掉** ────────────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED）─────────────────────────────────────────────────
+ *
+ * 此前两处删除点（`planReclaim` 的 `wouldApply` 循环、`reclaimWorktreeAfterDelivery`
+ * 的默认 `remove`）都是裸的：
+ *
+ *     rmSync(path, { recursive: true, force: true })
+ *
+ * ★ 那一句**只删了目录**，而 git 的 worktree 台账里那条记录**还在**。
+ *   ⇒ 之后 `git worktree list` 里那条路径仍然出现，只是被标成 `prunable`。
+ *   ⇒ 后果不是"多余一行"：此后每一次 `git worktree list` / `git worktree add`
+ *     都要绕开一个**已经不存在**的路径，而 `prunable` 这个标记**不会自己消失**
+ *     （裸 `git worktree prune` 只清"最后活动在 24 小时以前"的那些 —— 见下）。
+ *   ⇒ 而它的最坏形态是**与"我删干净了"同形**：目录不在了，读数却说是"有棵树"。
+ *
+ * ── ★★★ 快路径：`git worktree remove --force` —— 一条命令做完两件事 ───────────────
+ *
+ * 它**既删目录、又清台账**（这两件事在 git 内部本来就是一次操作的两半）。
+ * ⇒ 目录还在时一律走它，而不是"先 rmSync 再 prune"：
+ *   后者把一个原子的动作拆成两步，中间那一瞬就正是"目录没了、台账还在"的形状。
+ *
+ * ── ★★★ 兜底：目录已经不在（或上面那条失败）⇒ `rmSync` + `prune --expire=now` ──────
+ *
+ * ★ 写 `--expire=now` 而**不是**裸 `prune`：本函数的语义是「我刚删的那条路径，
+ *   它的台账立即无效」。
+ *   `git worktree prune` 的默认过期期是 **24 小时**（`gc.worktreePruneExpire`），
+ *   而"24 小时"这条语义**与本次删除无关** —— 所以显式把窗口压到 0，
+ *   让"我删的这条立刻无效"成为**由参数保证**的事，而不是**依赖某个版本的默认值**。
+ *
+ * ── ★★ MEASURED（2026-10-10，本机 git 2.50.1 Apple Git-155）：在本机，
+ *    裸 `prune` **确实**会清掉一条**刚**变成幽灵的条目 ─────────────────────────────
+ *
+ *   实测（本目录下的一个临时仓库，用一个 < 1 秒年龄的幽灵）：
+ *
+ *     $ git worktree add --detach .agent-teams/worktrees/task-r2 main
+ *     $ rm -rf .agent-teams/worktrees/task-r2      # 目录没了、台账还在
+ *     $ git worktree prune -v
+ *     Removing worktrees/task-r2: gitdir file points to non-existent location
+ *
+ *   ⇒ ★★ 本任务书里那条"裸 prune 的 24 小时过期期会放过它"的说法，
+ *     **在本机这个 git 上不成立** —— 因为那条记录属于"gitdir file points to
+ *     non-existent location"这一类，git 对它**直接判死**，不看年龄。
+ *     （24 小时那一档管的是**另一类**：工作树目录还在、只是被判为 unused。）
+ *   ⇒ 所以这里**不能**写"裸 prune 会放过它"来为 `--expire=now` 辩护 ——
+ *     那是一句**与本机实测相反**的话，而它会让下一个人去信一条假机制。
+ *
+ * ★★ 那为什么**仍然**写 `--expire=now`？两条**真的**成立的理由：
+ *   ① 它把"立即失效"这件事变成**显式的**：本函数不依赖 git 的默认值、也不依赖
+ *      那条记录恰好被判进"直接判死"那一类 —— 换一个 git 版本、换一种幽灵形态
+ *      （例如目录还在、只是 gitdir 文件丢了），`--expire=now` 照样对；
+ *      而裸 `prune` 在那几种形态下的行为**要先测过才知道**。
+ *   ② 它把**窗口**表达出来：本函数刚删的那条路径，不许有任何"再看 24 小时"的余地。
+ *   ★ 也就是说：`--expire=now` 在这里是**把语义写进参数**，
+ *     而不是"因为裸 prune 会失败"—— 后者是假的。
+ *
+ * ── ★★★ 夹具（臂 B2）钉的是**这一格事实**，不是那句假话 ────────────────────────
+ *   臂 B 证明"幽灵被清掉了"；而臂 B2 把上面这段实测**写成可执行的**：
+ *   它当场比较裸 prune 与 `--expire=now` 的行为，而不是断言某一个特定结局 ——
+ *   ★ 这样它在任何 git 版本上都**只会因为事实变了而红**，不会因为措辞变了而假绿。
+ *
+ * ★★ 两个半边**都要**成立（本函数的契约）：
+ *   (a) 活的树  ⇒ 走快路径，目录与台账一起没；
+ *   (b) 已经是幽灵 ⇒ 目录早没了、台账还在 ⇒ 兜底那句 `prune --expire=now` 清掉它。
+ *   两者都会真的发生：(b) 正是"上一个版本用裸 `rmSync` 删过"的那些残留 ——
+ *   也就是说，这个函数要能清掉**它自己前身留下的**幽灵。
+ *
+ * ── ★ 失败必须【抛】 ────────────────────────────────────────────────────────────
+ *   绝不静默吞掉：调用方要靠这个异常留一条可读的痕迹
+ *   （见 `planReclaim` 里那一支把它记成 `undecidable` + `why`）。
+ *   ★ 一个静默失败的删除与"没删"同形，而盘上留下的那棵树没人会知道。
+ *
+ * ★ 为什么它导出：删除必须**只有一个出处**（`src/tools/update-task.ts` 通过动态
+ *   import 复用同一个函数）。两份实现分叉时，其中一份会把幽灵留下而没人发现。
+ */
+export function removeWorktree({ repo, worktree }) {
+  /**
+   * ★ 判"目录还在不在"用 `existsSync`：目录不在时 `git worktree remove` 会**失败**
+   *   （它要删的那个 checkout 不在盘上），而失败之后走兜底 ⇒ 结果一样。
+   *   显式先判一次只是让快慢两条路的**选择**可读，而不是靠异常兜圈子。
+   */
+  if (existsSync(worktree)) {
+    execFileSync('git', ['worktree', 'remove', '--force', worktree], {
+      cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    /**
+     * ★ 快路径**成功**也要再清一次台账吗？—— 不要，而且不许。
+     *   `git worktree remove` 成功就意味着那条台账已经没了；再 prune 一次是
+     *   一个**没有读数的多余动作**（它若恰好清掉了*别的*过期条目，
+     *   那件事会被记在本函数的账上 —— 一个函数只该动它被点名的那条路径）。
+     */
+    return
+  }
+  removeWorktreeFallback({ repo, worktree })
+}
+
+/**
+ * 兜底那一半（目录已经不在 / 快路径失败）：先删目录，再**立即**清台账。
+ * ★ 单独抽出来是为了让上面那个函数读起来就是"两条路"，而不是一堆嵌套 try。
+ */
+function removeWorktreeFallback({ repo, worktree }) {
+  rmSync(worktree, { recursive: true, force: true })
+  execFileSync('git', ['worktree', 'prune', '--expire=now'], {
+    cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+/**
  * ── 干跑 / 执行 ─────────────────────────────────────────────────────────────────
  *
  * ★ `apply: false`（默认）⇒ **绝不删除任何东西**，只报清单与预计回收。
@@ -288,7 +405,15 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
   if (wouldApply) {
     for (const entry of reclaimable) {
       try {
-        rmSync(entry.worktree, { recursive: true, force: true })
+        /**
+         * ★★★ 删除**只走 `removeWorktree`**（不是裸 `rmSync`）───────────────────────
+         *
+         * 定向突变：把这一句改回 `rmSync(entry.worktree, { recursive: true, force: true })`
+         *   ⇒ 目录没了、而 `git worktree list` 里那条路径仍在（标成 `prunable`）
+         *   ⇒ 夹具的臂 A 变红。★ 那个红**不是**洁癖：`prunable` 条目会让此后
+         *   每一次 `git worktree list` 都在报告一棵不存在的树。
+         */
+        removeWorktree({ repo, worktree: entry.worktree })
         removed.push(entry.worktree)
       } catch (error) {
         entry.status = 'undecidable'
@@ -307,6 +432,90 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
     applied: wouldApply,
     withinBudget,
   }
+}
+
+/**
+ * ── ★★★ 「终态」的定义**只有一份真值**：`src/types.ts` 的 `TERMINAL_TASK_STATUSES` ──
+ *
+ *     export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] =
+ *       ['completed', 'failed', 'cancelled']
+ *
+ * ★ 为什么这里**镜像**而不是 import：`src/types.ts` 是 TypeScript，
+ *   而本文件是脚本层（`.mjs`，被 `scripts/*.test.mjs` 与本 CLI 直接跑）——
+ *   它没有编译步骤可依赖。⇒ 所以镜像，并把**来源与取值逐字写在这里**：
+ *     哪天那个数组改了，这里有一行可 diff 的对照，而不是一个漂移的猜测。
+ *   ★（生产那半边走的是**真正的 import** —— 见 `src/tools/update-task.ts`：
+ *     它 import 的就是 `../types.ts`。本镜像只服务于脚本层。）
+ *
+ * ── ★★ 不知道的状态 ⇒ 【拒答】，而不是猜 ────────────────────────────────────────
+ *   本函数返回的是 `boolean`，而它门住的是**删除**。
+ *   ⇒ 一个没见过的状态（拼错的、将来新增的）必须落到 `false`：
+ *     "我不认识它"绝不能被读成"它是终态、可以删"。
+ *     ★ 三态在这里被压成两态是**故意的**：`scanTerminalWorktrees` 的问法是
+ *       "这条任务还会不会再被更新"，而"不知道"对那个问题的安全答案是"会"。
+ */
+export function isTerminalTask(task) {
+  const status = task?.status
+  if (typeof status !== 'string') return false
+  /** ★ 镜像自 `src/types.ts` 的 `TERMINAL_TASK_STATUSES`（见上）。 */
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * ── ★★★★★ 终态扫描：一个**已经**终态的任务，此后不会再被更新 ────────────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED，本任务的由来）───────────────────────────────────
+ *
+ * 生产接线（`reclaimWorktreeAfterDelivery`）只在**终态转换那一刻**判一次。
+ * ⇒ 而"产物交付时还没被合流"是**常态**（`commitWorktree` 从不合进 `main`）——
+ *   那一刻的判据必然答 `keep / not-absorbed`，而它明写着"将在**下一次**终态转换时重判"。
+ * ★★ 而**下一次**对一条已经终态、此后不再变化的运行来说**永远不会来**：
+ *   一条 `completed` 的任务不会再被更新 ⇒ **没有任何时刻**会重判它
+ *   ⇒ 一棵产物早已被合流进主干的树，**永久**留在盘上。
+ *   这与"任务已终态"是两件事 —— 判据仍然是「产物已被吸收」，
+ *   变的只是"**谁**在什么时刻去问它"。
+ *
+ * ── ★★★ 三态仍然**只有一份真值** ──────────────────────────────────────────────
+ *   本函数一行"吸收与否"的推理都没有：它把每一棵树交给 `judgeWorktree`
+ *   （进而 `judgeWorktreeReclaimable`）⇒ 与 CLI、与生产接线**同一个**答案。
+ *
+ * ── ★★★ 它是**纯规划器**：它【不】删任何东西 ────────────────────────────────────
+ *   删除是**调用方**的下一步，而且**只在一个地方**做（`removeWorktree`）。
+ *   ★ 为什么这样分：判定正确与删除正确是两件事，而"顺手删了"会让
+ *     「这条臂测的是判定」与「这条臂测的是删除」同形 —— 出红时读不出是哪一半坏了。
+ *   ⇒ 所以：`scanTerminalWorktrees` 答"哪些可清"，调用方拿这个清单去删。
+ *
+ * ── ★★ 安全那一半：[非终态] 的任务【不判、不删】────────────────────────────────
+ *   一条还没结束的任务，它的树**正在被写** ⇒ 判定它没有意义（而删它是灾难）。
+ *   ⇒ 本函数在**判定之前**就把非终态剔掉（不是判完了再忽略结果）——
+ *     两者的区别在于"有没有去碰那棵树"。
+ */
+export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef = 'main' }) {
+  const root = join(repo, '.agent-teams', 'worktrees')
+  const scanned = []
+  const reclaimable = []
+  const kept = []
+  const undecidable = []
+  for (const task of tasks ?? []) {
+    /**
+     * ★ 非终态 ⇒ **连判都不判**（见上面那一节）。未知状态同样落在这里 ——
+     *   `isTerminalTask` 对不知道的状态答 `false`，而不是猜。
+     */
+    if (!isTerminalTask(task)) continue
+    if (typeof task?.id !== 'string' || task.id === '') continue
+    const worktree = join(root, worktreeDirName(task.teamId, task.id))
+    /**
+     * ★ 目录不存在 ⇒ **这条任务压根不在这张名单上**（而不是"判了个 absent"）。
+     *   它与"树在而判据说保留"是两件事，读的人要能分开。
+     */
+    if (!existsSync(worktree)) continue
+    const verdict = judgeWorktree({ repo, worktree, mainRef })
+    scanned.push(verdict)
+    if (verdict.status === 'reclaimable') reclaimable.push(verdict)
+    else if (verdict.status === 'keep') kept.push(verdict)
+    else undecidable.push(verdict)
+  }
+  return { scanned, reclaimable, kept, undecidable }
 }
 
 /** 一行痕迹。★ 没有它，「清理过」与「没清理」在观测上同形。 */
