@@ -690,9 +690,85 @@ export function describeWorktree(result: WorktreeResult): string {
  *       ★ 只算源码（`src/` `scripts/` `docs/`）—— `lib/` 是构建产物，每次 build
  *         重生成，它脏不构成"唯一产物"。这个区分是实测逼出来的：
  *         不做它，`task-t16` 会因为一个 stamp 文件被误判成"有唯一产物"。
+ *
+ * ── ★★★ 而 `--is-ancestor` 【一条也不够】—— 反方向的那一半（t9）──────────────────
+ *
+ * MEASURED（2026-10-10，captain 在真实使用中量到）：
+ *
+ *   真实的合流流程**不是 merge，是按文件落盘**：
+ *
+ *     成员在自己的 worktree 里提交          ⇒ commit A
+ *     captain **按文件**把它落进 main      ⇒ commit B（内容相同、**对象不同**）
+ *     ⇒ A **永远不是** B 的祖先
+ *     ⇒ 判据**永远**答 keep ⇒ 那棵 worktree 永远不会被回收
+ *
+ *   当天量到：4 棵**产物早已落在 main 上**的 worktree，全部答 `keep`，占 3.5G。
+ *
+ * ⇒ ★ 所以 (a) 必须被**放宽**成「已提交的部分被吸收了」的**两种形态**：
+ *
+ *     形态 Ⅰ（原来的那一条）：A 是 `main` 的祖先 —— 即真的并进去了。
+ *     形态 Ⅱ（本次新增）：A 的**内容**已经在 `main` 里，即使 A 这个对象
+ *        从来不是它的祖先 —— 即"按文件落盘"那种合流。
+ *
+ * ── ★★ 形态 Ⅱ 用的是什么 git 原语，以及它**不**覆盖什么 ──────────────────────────
+ *
+ *   用的是 `git patch-id --stable`：把一次提交的 `git show` 输出**规范化**成
+ *   一个与父提交无关的 id（它把 hunk 的行号/偏移那类上下文抹掉，只留
+ *   "改了什么内容"）。
+ *
+ *     `git show <A> | git patch-id --stable`   →  id_A
+ *     `git show <main> | git patch-id --stable` →  id_main
+ *
+ *   而 `id_A === id_main` ⇒ **A 这次提交的改动，与主干顶端那次提交的改动
+ *   逐内容等价**（即使两条提交的对象、父提交、时间戳都不同）。
+ *   ⇒ 而"按文件落盘"产生的 B 正是这个形状：同样的内容、不同的对象。
+ *
+ * ★ 为什么**不**用 per-file 的树比较（`git diff --quiet <tree> main`）——
+ *   它看着更简单，但**在本仓会恒不成立**。MEASURED（2026-10-10，本仓：
+ *   `main` 里 3 个未跟踪的工作文件，`.agent-teams/` 未被 gitignore）：
+ *
+ *     树比较是**全树相等**，而它与"按文件落盘"的合流**不是同一个东西**：
+ *     captain 落盘只落**产物那几个文件**，主干上**同时还有**别的工作
+ *     ⇒ 两棵树从那一刻起就不可能相等 ⇒ 判据退化成**恒不删**。
+ *   ⇒ 而 patch-id 比较的是**这一次提交的改动**，不是两棵树的快照
+ *     ⇒ 它正是"按文件落盘"的那个形状。
+ *
+ * ── ★★★ 部分落盘 ⇒ **保留**（本模块明确裁定的边界）──────────────────────────────
+ *
+ *   判据问的是「**这棵树的这次提交**被吸收了吗」，而它只有两种答案：
+ *   `id_A` 命中主干上**某一条**提交 ⇒ 吸收；一条都不命中 ⇒ 未吸收。
+ *   ⇒ 「一半落盘、一半没落」在这个判据下**不**是一格单独的读数 ——
+ *     它落到"未吸收"那一格（那条被落盘的提交**不是** A 的 patch-id）。
+ *
+ *   ★ 而即使将来有人把它写成"逐文件部分命中"，答案也**必须**是 keep：
+ *     `absorbed` 是**删除的准入**，而"删掉它"会连带扔掉**没落盘的那一半**。
+ *     判据宁可少删（保留一棵多余的树，成本是磁盘），也不能多删
+ *     （扔掉一份只存在于那里的工作，成本是那份工作**本身**）。
+ *   ★ 而"部分落盘"真的会发生：captain 落盘时**挑文件**是常态，
+ *     所以这条边界不是假想的。
+ *
+ * ── ★★ 新增的这半边**没有**放松安全那一半 ──────────────────────────────────────
+ *
+ *   (b) 一个字没动，而且它仍然是**合取**里的一员 ——
+ *   即使 (a) 两种形态**都**命中（真的并进去了、或内容已落盘），
+ *   `unique-work` 照样能把一棵树**按住**（臂 3 与臂 T25-2 钉的就是这一格）。
+ *   ⇒ 形态 Ⅱ 只是把 (a) 的**准入面**放宽了一格，**没有**动"什么算唯一产物"。
  */
 export type WorktreeReclaimability =
-  | { status: 'reclaimable'; reason: 'absorbed'; behind: number | undefined }
+  | {
+      status: 'reclaimable'
+      reason: 'absorbed'
+      /**
+       * ★ 是**哪一种**吸收（两种形态**不是**同一件事，读的人要能分开）：
+       *   `'ancestor'` —— 提交对象真的并进了主干（形态 Ⅰ）；
+       *   `'content'`  —— 提交对象不是祖先，而**内容**已在主干上（形态 Ⅱ，按文件落盘）。
+       * ★ 两态共用 `status: 'reclaimable'` **是故意的**：裁决只有"能清/不能清"两种，
+       *   "它是怎么被吸收的"是**依据**，不是第三种裁决 —— 把它做成第三种 status
+       *   会让下游每一处读 status 的代码都要多认识一格，而多认识的那一格没有行为差别。
+       */
+      how: 'ancestor' | 'content'
+      behind: number | undefined
+    }
   | { status: 'keep'; reason: 'not-absorbed' | 'unique-work'; behind: number | undefined; detail: string; orphaned?: string[] }
   | { status: 'undecidable'; why: string }
 
@@ -702,9 +778,23 @@ export type WorktreeReclaimability =
  * @param repo - 主仓库根。
  * @param worktree - 那个检出目录。
  * @param mainRef - 主干引用（默认 `main`）。
- * @returns 三态。★ 三者**不同形**：可清的带 `reason: 'absorbed'`；
+ * @returns 三态。★ 三者**不同形**：可清的带 `reason: 'absorbed'` 与 `how`
+ *   （`'ancestor'`｜`'content'`，见 `WorktreeReclaimability`）；
  *   不可清的带 `reason` 与 `detail`（以及可能的 `orphaned`）；
  *   判不了的带 `why`。没有任何两个共用同一组字段。
+ *
+ * ── ★★★ 顺序（这是本判据可辩论的那一半）─────────────────────────────────────────
+ *
+ *   ① `undecidable`（读不到 HEAD / 读不到主干引用）—— **在一切之前**返回。
+ *      判不了 ≠ 可以清，所以它**绝不**往下走到任何"吸收"的判断。
+ *   ② 已提交的部分**是否被吸收** —— `--is-ancestor` 与"内容落盘"是**或**：
+ *      形态 Ⅰ 命中就**短路**（不去跑 patch-id，省一次 `git show`）；
+ *      形态 Ⅰ 不命中才跑形态 Ⅱ。★ 而两者**都不是旁路** ——
+ *      它们只决定 `absorbed` 这个布尔值，之后的检查**照跑**。
+ *   ③ ★ `unique-work` —— **吸收之后、reclaimable 之前**。
+ *      它是把树按住的最后一道，且**对两种吸收形态一视同仁**：
+ *      "内容已落盘"**不能**绕过它（臂 3 / 臂 T25-2 / 定向突变臂钉的就是这一格）。
+ *   ④ `reclaimable`。
  */
 export function judgeWorktreeReclaimable(options: {
   repo: string
@@ -724,14 +814,14 @@ export function judgeWorktreeReclaimable(options: {
   const mainHead = mainResult.value.trim()
 
   /**
-   * ★ (a) 已提交的部分是否被吸收。
+   * ★ (a-Ⅰ) 已提交的部分**真的**被吸收了。
    *   ★ 用退出码判，**不用输出** —— `--is-ancestor` 成功时**没有输出**
    *     （空串），而 `tryGit` 对"退出 0、无输出"与"退出非 0"的区分
    *     只能靠抛不抛错 ⇒ 所以要 `try/catch` 而不是比字符串。
    *     ★ 若按输出判，`absorbed` 会恒为 **false** ⇒ 判据退化成**恒不删**
    *       （而那正是反向半边禁止的）。
    */
-  const absorbed = (() => {
+  const isAncestor = (() => {
     try {
       execFileSync('git', ['merge-base', '--is-ancestor', head, mainHead], {
         cwd: repo, stdio: ['ignore', 'pipe', 'pipe'],
@@ -741,6 +831,58 @@ export function judgeWorktreeReclaimable(options: {
       return false
     }
   })()
+
+  /**
+   * ★★★ (a-Ⅱ) 已提交的部分**按内容**被吸收了（t9 新增的那一半）。
+   *
+   *   MEASURED 的缺陷：真实合流是**按文件落盘**（`cp` + 在主干上提交），
+   *   而它产生的是**另一个对象** ⇒ `--is-ancestor` 永远答 false
+   *   ⇒ 4 棵产物早已落盘的树全部被判 keep，占 3.5G。
+   *
+   * ── 这个原语比较的到底是什么 ──────────────────────────────────────────────────
+   *
+   *   `git patch-id --stable` 把一次提交的 `git show` 规范化成一个
+   *   **与父提交无关**的 id：同样的内容改动 ⇒ 同样的 id。
+   *
+   *     git show <head> | git patch-id --stable   ⇒  同样的 (id, <head>)
+   *     git show <main> | git patch-id --stable   ⇒  同样的 (id, <main>)
+   *
+   *   ⇒ `id` 相等就是"这次提交的改动与主干顶端那次提交逐内容等价"。
+   *
+   * ★ 为什么只比**主干顶端**（`mainHead`）而不是遍历整条主干历史：
+   *   ① 本能力是**回收**，不是考古。真实的按文件落盘发生在**刚刚**，
+   *      那条落盘提交就在 `main` 的顶端（captain 落完就完了）。
+   *   ② 遍历会引入"两条不同的提交恰好 patch-id 相同"的老历史误命中，
+   *      而漏判的代价只是**多留一棵树**（可再跑一次），误判的代价是**扔东西**。
+   *   ③ ★ 它的**已知边界**（不藏着）：`main` 顶端此后又前进过 ⇒ 这一格答 false
+   *      ⇒ 退回 keep。这是**保守**的错法，方向是对的。
+   *
+   * ★★ 而为什么必须【两边都真的读到了 id】才算命中：
+   *   任一格读不到（空串、命令失败）⇒ **不算命中** ⇒ 退回 keep。
+   *   把"没读到"当成"相等"会让判据**恒真**，而那正是本任务禁止的方向。
+   */
+  const contentAbsorbed = (() => {
+    const patchId = (ref: string): string | undefined => {
+      try {
+        const shown = execFileSync('git', ['show', ref], {
+          cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
+        })
+        const id = execFileSync('git', ['patch-id', '--stable'], {
+          cwd: repo, encoding: 'utf8', input: shown, stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim().split(/\s+/)[0]
+        return id === undefined || id === '' ? undefined : id
+      } catch {
+        return undefined
+      }
+    }
+    const headId = patchId(head)
+    if (headId === undefined) return false
+    const mainId = patchId(mainHead)
+    return mainId !== undefined && mainId === headId
+  })()
+
+  /** ★ 两种形态的**合取**：任一命中即"已提交的部分被吸收了"。 */
+  const absorbed = isAncestor || contentAbsorbed
 
   const behindResult = tryGit(repo, ['rev-list', '--count', `${head}..${mainHead}`])
   const behind = behindResult.ok === false ? undefined : Number.parseInt(behindResult.value.trim(), 10)
@@ -768,10 +910,23 @@ export function judgeWorktreeReclaimable(options: {
       status: 'keep',
       reason: 'not-absorbed',
       behind,
-      detail: `its HEAD (${head.slice(0, 12)}…) is not an ancestor of ${mainRef} `
-        + `(${mainHead.slice(0, 12)}…) — its committed work is not in the trunk yet`,
+      /**
+       * ★ 这段措辞要能解释**两种**没被吸收的形状（否则读的人会以为"只有 merge 才算"）：
+       *   既不是主干的祖先，其内容也不等价于主干顶端的任何一次提交。
+       */
+      detail: `its HEAD (${head.slice(0, 12)}…) is neither an ancestor of ${mainRef} `
+        + `(${mainHead.slice(0, 12)}…) nor content-equivalent to the tip commit there — `
+        + `its committed work is not in the trunk yet`,
     }
   }
+  /**
+   * ★★★ 安全那一半**在这里、且只在内容** ────────────────────────────────────────
+   *
+   *   `unique-work` 必须在**两种吸收形态之后**都仍然能把树按住：
+   *   无论是"真的并进去了"还是"内容已按文件落盘"，只要有源码文件的内容
+   *   **在整条历史里都不存在**，删掉它就会扔掉那份唯一的工作。
+   *   ⇒ 它是**合取**里的一员，不是一个可以被 `contentAbsorbed` 绕过的旁路。
+   */
   if (orphaned.length > 0) {
     return {
       status: 'keep',
@@ -782,13 +937,24 @@ export function judgeWorktreeReclaimable(options: {
         + ` (${orphaned.slice(0, 3).join(', ')}${orphaned.length > 3 ? ', …' : ''}); deleting this worktree would lose them`,
     }
   }
-  return { status: 'reclaimable', reason: 'absorbed', behind }
+  /**
+   * ★ 两种形态**不是**同一件事，所以把"是哪一种"如实带出去 ——
+   *   读的人要能分辨"它真的并进去了"与"它的内容被按文件落盘了"。
+   */
+  return { status: 'reclaimable', reason: 'absorbed', how: isAncestor ? 'ancestor' : 'content', behind }
 }
 
 /** 把那个判定说成一句人话。★ 三态各有各的措辞（不许同形）。 */
 export function describeReclaimability(verdict: WorktreeReclaimability): string {
   if (verdict.status === 'reclaimable') {
-    return `absorbed into the trunk${verdict.behind === undefined ? '' : ` (${verdict.behind} commit(s) behind)`} — safe to reclaim`
+    /**
+     * ★ 两种吸收形态说成**两句不同的话**：它们的**依据**不同，
+     *   而"依据"正是读的人要拿去复核的东西。
+     */
+    const how = verdict.how === 'ancestor'
+      ? 'absorbed into the trunk'
+      : 'its commit is not an ancestor of the trunk, but its content already landed there (absorbed by file)'
+    return `${how}${verdict.behind === undefined ? '' : ` (${verdict.behind} commit(s) behind)`} — safe to reclaim`
   }
   if (verdict.status === 'keep') {
     return `${verdict.reason === 'unique-work' ? 'HELD: unique work' : 'HELD: not absorbed'} — ${verdict.detail}`

@@ -31,6 +31,7 @@
  *   ⇒ ★★ 所以判据是**两个条件的合取**：
  *
  *         (a) 已提交的部分被吸收了：`--is-ancestor <wt HEAD> main`
+ *             　**或者**它的**内容**已经在主干上（按文件落盘 —— 见下）
  *         (b) 未提交的部分没有唯一的产物：**每一个脏的源码文件的内容，
  *             都能在历史里找到**（`git log --all --find-object=<blob>`）
  *
@@ -38,6 +39,28 @@
  *        `lib/` 是构建产物，每次 `pnpm build` 重生成，它脏不构成"唯一产物"。
  *        ★ 这个区分是实测逼出来的：不做它，`task-t16` 会因为
  *          `lib/git-artifact-stamp.json` 一个构建产物而被误判成"有唯一产物"。
+ *
+ * ── ★★★ 而 (a) 还有【另外半边】：`--is-ancestor` 也太【强】了（t9）──────────────
+ *
+ * MEASURED（2026-10-10，captain 在真实使用中量到）：
+ *
+ *   真实合流**不是 merge，是按文件落盘**：
+ *
+ *     成员在 worktree 里提交        ⇒ commit A
+ *     captain **按文件**落进 main  ⇒ commit B（内容相同、**对象不同**）
+ *     ⇒ A **永远不是** B 的祖先 ⇒ 判据**永远**答 keep
+ *
+ *   当天量到：4 棵产物**早已落在 main 上**的 worktree 全部答 keep，占 3.5G。
+ *
+ * ⇒ ★ 所以 (a) 被放宽成**两种形态**（`absorbed` 的 `how` 字段如实带出是哪一种）：
+ *
+ *     `'ancestor'` —— A 是 main 的祖先（真的并进去了）；
+ *     `'content'`  —— A 不是祖先，而它的**内容**已在主干上（按文件落盘）。
+ *     原语：`git patch-id --stable`（与父提交无关的内容规范化 id）。
+ *
+ * ★★ 而**安全那一半一个字没动**：`unique-work` 仍然在**两种形态之后**把树按住
+ *   （见 `src/worktree.ts` 里那个判定与夹具的臂 3）。
+ *   ★ 判据的实现**不在本文件里** —— 本文件只调用它（见下面那一节）。
  *
  * ── ★★ 两层 ────────────────────────────────────────────────────────────────────
  *
@@ -72,7 +95,7 @@
  *
  * ── ★ 三态不同形 ───────────────────────────────────────────────────────────────
  *
- *   `reclaimable` —— 已吸收（列出层与依据）
+ *   `reclaimable` —— 已吸收（列出层与依据；`how` 说清是**哪一种**吸收）
  *   `keep`        —— **不可清**，且说清是哪一种：产物未吸收（附差多少提交）/ 有唯一产物（附文件名）
  *   `undecidable` —— 判不了（不是 git 仓库 / 读不到 HEAD / 没在 worktrees 目录下）
  */
@@ -226,7 +249,20 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
   }
   layers.push({
     layer: 'worktree',
-    why: `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
+    /**
+     * ★★★ 这一句是**措辞**，不是判断 —— 判断在权威实现里（见上面那一节）─────────────
+     *
+     * ★ 它此前逐字写死成 "HEAD is an ancestor of main"，而那在 t9 之后**会变成假话**：
+     *   按文件落盘的那一类树，其 HEAD **不是**主干的祖先（那正是原来的缺陷）。
+     *   ⇒ 于是那一行日志会对一棵"内容已落盘"的树宣称它"是祖先" ——
+     *     而读日志的人据此去 `git merge-base` 复核会得到相反的答案。
+     * ⇒ 所以它按权威给出的 `how` 分两句说（`'ancestor'` / `'content'`）。
+     *   ★ 这两句**没有**做任何判断：`how` 是权威传下来的字段，
+     *     本脚本只决定"怎么把它说成人话"。
+     */
+    why: verdict.how === 'content'
+      ? `the commit's content is already on ${mainRef} (landed by file), and no uncommitted source file is unique to it`
+      : `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
   })
   return {
     status: 'reclaimable',
@@ -235,6 +271,8 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
     behind,
     hasDeps,
     reason: verdict.reason,
+    /** ★ 权威给的那一格（`'ancestor'`｜`'content'`）—— 原样透传，读的人据此复核。 */
+    how: verdict.how,
     human: describeReclaimability(verdict),
   }
 }

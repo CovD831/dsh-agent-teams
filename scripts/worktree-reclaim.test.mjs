@@ -12,9 +12,25 @@
  *
  *   ⇒ ★ 只看它就会删掉**唯一的那份产物**，而那正是本任务承诺不会发生的事。
  *
- * ── ★ 所以判据是两个条件的合取 ─────────────────────────────────────────────────
+ * ── ★★★ 而 `--is-ancestor` 【一条也不够】—— 反方向的那一半（t9）──────────────────
  *
- *   (a) 已提交的：`--is-ancestor <wt HEAD> main`
+ * MEASURED（2026-10-10，captain 在真实使用中量到）：
+ *
+ *   真实合流**不是 merge，是按文件落盘**：
+ *
+ *     成员在 worktree 里提交        ⇒ commit A
+ *     captain **按文件**落进 main  ⇒ commit B（内容相同、**对象不同**）
+ *     ⇒ A **永远不是** B 的祖先 ⇒ 判据**永远**答 keep
+ *
+ *   当天量到：4 棵产物**早已落在 main 上**的 worktree 全部答 keep，占 3.5G。
+ *
+ * ⇒ ★ 所以 (a) 被放宽成**两种形态**（见臂 10b 那一节）：
+ *     `'ancestor'`（形态 Ⅰ，真的并进去了）/ `'content'`（形态 Ⅱ，按文件落盘）。
+ * ★★ 而 (b) 那个安全条件**一个字没动** —— 形态 Ⅱ 不许绕过它（臂 10e 钉这一格）。
+ *
+ * ── ★ 所以判据是**两个条件的合取** ─────────────────────────────────────────────────
+ *
+ *   (a) 已提交的：`--is-ancestor <wt HEAD> main`，**或**其内容已落盘（patch-id）
  *   (b) 未提交的：**每一个脏的源码文件的内容，都能在历史里找到**
  *       ★ 且 (b) 只算源码（`src/` `scripts/` `docs/`）—— `lib/` 是构建产物，
  *         每次 build 重生成，它脏不构成"唯一产物"（那一条也是实测逼出来的）。
@@ -343,8 +359,305 @@ test('★★★ 臂 10（定向突变臂 · 唯一产物那一半）：去掉 (b
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★★ 「自动」的第三件事：必须可关闭
+// ★★★ t9：吸收的【第二种形态】—— 按文件落盘（不是 merge）
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一节防的是什么失效（MEASURED，2026-10-10，captain 在真实使用中量到）────────
+ *
+ * 上面每一臂用的都是"**并进去**"那种合流（`--is-ancestor`）。而真实的合流是
+ * **按文件落盘**：
+ *
+ *     成员在 worktree 里提交        ⇒ commit A
+ *     captain **按文件**落进 main  ⇒ commit B（内容相同、**对象不同**）
+ *     ⇒ A **永远不是** B 的祖先
+ *     ⇒ 判据**永远**答 keep ⇒ 那棵树永远不会被回收
+ *
+ *   当天量到：4 棵产物**早已落在 main 上**的 worktree 全部答 keep，占 3.5G。
+ *
+ * ⇒ 所以下面两臂是**方向相反**的一对：
+ *     · 臂 10b（前向）：按文件落盘 ⇒ **必须**判可清（否则本缺陷没修）；
+ *     · 臂 10c（反向）：内容**没有**落盘 ⇒ **必须**判 keep（否则会误删）。
+ *   ★ 反向那一臂**必须自己真建一棵树**（不是断言一句描述）——
+ *     否则它对"把判据改成恒真"这件事毫无分辨力。
+ *
+ * ★★ 臂 10d 是**边界**（部分落盘），臂 10e 是**安全那一半在形态 Ⅱ 下仍然有效**。
+ */
+
+/**
+ * ★ 把一棵 worktree 的产物**按文件**落进主干 —— 这正是 captain 的真实动作。
+ *
+ * 它**不是** `git merge`、也**不是** `git cherry-pick`：那两者都会产生
+ * "A 是 B 的祖先"或"内容等价"的**另一种**关系。这里刻意走**最笨的那条路**：
+ * 读文件、写文件、在主干上提交 —— 于是 A 与 B 是**两个不同的对象**。
+ *
+ * @returns 主干上那条落盘提交的 SHA（B）。
+ */
+function landByFile(f, wt, paths, message = 'land by file') {
+  for (const relative of paths) {
+    const source = join(wt, relative)
+    const target = join(f.repo, relative)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, readFileSync(source))
+  }
+  /**
+   * ── ★★★ 必须**逐个点名**、绝不 `git add -A`（MEASURED 的坑）──────────────────
+   *
+   * MEASURED（本夹具第一版就是这么错的）：`git add -A` 会把
+   * `<repo>/.agent-teams/worktrees/<name>` 这个**嵌进主干的 git 检出**
+   * 当成一个 gitlink（mode 160000 的子模块条目）扫进去 ——
+   * 于是落盘那条提交 **B 多了一个 diff 段**，patch-id 与 A **对不上**
+   * ⇒ 前向臂红，而那个红是**夹具造的**，不是判据的。
+   *
+   * （真仓库里 `.agent-teams/` 有 `.gitignore`；本夹具的临时仓库没有，
+   *   所以这个坑只在这里显形。★ 而它值得原样记下来：它是"夹具比被测物
+   *   更早出错"的形态 —— 红的是臂，坏的却是臂的构造。）
+   *
+   * ⇒ 所以这里**只 add 落盘的那几个路径**，让 B 的 diff **恰好**是 A 的 diff。
+   *   这也更接近 captain 的真实动作（他落的是**点名的那几个产物文件**）。
+   */
+  git(f.repo, ['add', '--', ...paths])
+  git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', message])
+  return f.head()
+}
+
+test('★★★ 臂 10b（t9 前向臂 · 按文件落盘）:内容已落盘、对象不是祖先 ⇒ 必须判【可清】', async () => {
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-landed-by-file')
+
+    /** ① 成员在自己的检出里提交 —— 这一条**不在**主干上。 */
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'feature.ts'), 'export const feature = 42\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t9): worktree deliverable'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+
+    /** ② captain **按文件**落进主干 ⇒ B（内容相同、对象不同）。 */
+    const b = landByFile(f, wt, ['src/feature.ts'])
+
+    /** ★★ 前置：这两条提交的对象关系**必须**是"不是祖先"（否则本臂测的是别的东西）。 */
+    let isAncestor = true
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: f.repo, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      isAncestor = false
+    }
+    assert.equal(
+      isAncestor, false,
+      '★★ 前置：按文件落盘产生的 B **不该**让 A 成为它的祖先 —— 否则这一臂没有复现那个缺陷',
+    )
+    /** ★ 而两个对象确实不同（同内容不同对象，这正是缺陷的成因）。 */
+    assert.notEqual(a, b, '★ 前置：A 与 B 必须是两个对象')
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'reclaimable',
+      `★★★ 内容已按文件落进主干 ⇒ 必须判可清（否则那棵树永远不会被回收）。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.reason, 'absorbed', JSON.stringify(verdict))
+    /** ★ 而它必须说清是**哪一种**吸收 —— "按文件"与"真的并进去"不是同一件事。 */
+    assert.equal(
+      verdict.how, 'content',
+      `★ 必须报出这是形态 Ⅱ（内容落盘），而不是形态 Ⅰ（祖先）。实测：${JSON.stringify(verdict.how)}`,
+    )
+    /** ★ 而人话也要说清依据（读的人要能拿去复核）。 */
+    assert.match(verdict.human, /content already landed|absorbed by file/i, `★ 人话必须说清依据。实测：${verdict.human}`)
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ 臂 10c（t9 反向安全臂 · 独立构造）：内容**没有**落盘 ⇒ 必须判【保留】', async () => {
+  /**
+   * ── ★★★ 为什么这一臂必须**自己真建一棵树**（而不是断言一句描述）───────────────
+   *
+   * 一个"恒真"的新判据（例如把 patch-id 比较写成 `return true`）会让**前向臂**
+   * 照样绿 —— 前向臂只证明"该清的清了"，对"不该清的也清了"毫无分辨力。
+   * ⇒ 所以这一臂的分辨力**全部**来自那个**独立构造的、未被吸收的输入**：
+   *   同样形状的一棵树（在检出里提交、主干也前进），**唯一**的区别是
+   *   **产物没有被落进主干** ⇒ 读数必须翻转成 keep。
+   *
+   * ★ 而它不是前向臂的"取反"：它**另建一棵树**、在**另一个路径**上提交
+   *   **另一份内容**，而且主干那一侧的落盘动作**没有发生**。
+   *   两臂只有"落不落盘"这一个变量不同 —— 这才是可比的对照。
+   */
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-not-landed')
+
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    /** ★ 独立的内容（与前向臂那份不同）—— 免得两臂共用同一份 patch-id。 */
+    writeFileSync(join(wt, 'src', 'never-landed.ts'), 'export const neverLanded = "this content is on no trunk"\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t9): worktree deliverable that was never landed'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+
+    /** ★ 主干**前进**，但走的是**无关**的一次提交（不是落盘那份产物）。 */
+    writeFileSync(join(f.repo, 'src', 'unrelated.ts'), 'export const unrelated = true\n')
+    git(f.repo, ['add', '-A'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'unrelated trunk work'])
+    const b = f.head()
+
+    /** ★ 前置：确实没有落盘 —— 产物那个文件在主干上**不存在**。 */
+    assert.equal(
+      existsSync(join(f.repo, 'src', 'never-landed.ts')), false,
+      '★ 前置：这一臂的产物**必须**真的没落进主干（否则它测的是前向那一格）',
+    )
+    let isAncestor = true
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: f.repo, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      isAncestor = false
+    }
+    assert.equal(isAncestor, false, '★ 前置：A 不是主干顶端的祖先')
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'keep',
+      `★★★ 内容**没有**落盘 ⇒ 必须保留（新判据绝不能在这一格上说"可清"）。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.reason, 'not-absorbed', JSON.stringify(verdict))
+    /** ★ 而"没吸收"与"可清"的字段**不同形** —— 下游读 status 的代码不该被这一格骗到。 */
+    assert.equal(verdict.how, undefined, '★ keep 不许带 how（那是"可清"的字段）')
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ 臂 10d（t9 边界臂 · 部分落盘）:**一半**落盘 ⇒ 明确裁定为【保留】', async () => {
+  /**
+   * ── 这条边界是被**明确裁定**的（不是"没测到"）───────────────────────────────────
+   *
+   * 判据问的是「**这棵树的这次提交**被吸收了吗」，而它有且只有两种答案：
+   * 主干顶端那条提交的 patch-id 命中 A 的 patch-id ⇒ 吸收；否则 ⇒ 未吸收。
+   *
+   * ⇒ ★ 「一半落盘」在这个判据下**不**是一格单独的读数 —— 它落到"未吸收"。
+   *   而这是**对的**，理由不是"恰好如此"，是**代价不对称**：
+   *
+   *     · 多留一棵树  ⇒ 成本 = 磁盘（可再跑一次，可逆）
+   *     · 删掉它      ⇒ 成本 = **没落盘的那一半工作本身**（不可逆）
+   *
+   * ★ 而"部分落盘"真的会发生：captain 落盘时**挑文件**是常态
+   *   （例如 3 个产物文件里只落 2 个）。所以这条边界不是假想的。
+   */
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-partial')
+
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'landed-half.ts'), 'export const landedHalf = 1\n')
+    writeFileSync(join(wt, 'src', 'unlanded-half.ts'), 'export const unlandedHalf = "only here"\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t9): two files, only one will land'])
+
+    /** ★ 只落**一半** —— 另一个文件留在检出里，主干上没有它。 */
+    landByFile(f, wt, ['src/landed-half.ts'], 'land half of the worktree product')
+
+    assert.equal(existsSync(join(f.repo, 'src', 'landed-half.ts')), true, '★ 前置：这一半**确实**落盘了')
+    assert.equal(existsSync(join(f.repo, 'src', 'unlanded-half.ts')), false, '★ 前置：另一半**确实**没落盘')
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'keep',
+      `★★★ 部分落盘 ⇒ 明确裁定为**保留**（宁可多留一棵树，也不扔掉没落盘的那一半）。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.reason, 'not-absorbed', JSON.stringify(verdict))
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ 臂 10e（t9 安全臂 · 形态 Ⅱ 不许绕过 unique-work）:内容已落盘【但】有唯一产物 ⇒ 仍须保留', async () => {
+  /**
+   * ── 这一臂是**新增的那半边**与**原有的安全半边**的合取点 ─────────────────────────
+   *
+   * 新增的形态 Ⅱ（内容落盘）**只能**放宽"已提交的部分算不算被吸收"这一格。
+   * ⇒ 而它**绝不能**变成一条绕过 `unique-work` 的旁路：
+   *   一棵树可以**同时**是"内容已落盘"和"还攥着一份历史里不存在的工作"，
+   *   那时正确的答案是 **keep**（臂 3 在形态 Ⅰ 下钉的是同一件事）。
+   *
+   * ★ 定向突变：把 `contentAbsorbed` 写成 `return true`（或把 `orphaned` 检查
+   *   挪到 `absorbed` 判断**之前**并在内容命中时跳过它）⇒ 本臂变红。
+   */
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-content-plus-unique')
+
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'absorbed.ts'), 'export const absorbed = 1\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t9): this part will land'])
+    /** ★ 按文件落盘 ⇒ 形态 Ⅱ 命中。 */
+    landByFile(f, wt, ['src/absorbed.ts'], 'land it by file')
+
+    /** ★★ 而它**还**有一份未提交、内容在整条历史里都不存在的源码。 */
+    writeFileSync(join(wt, 'src', 'only-here.ts'), 'export const onlyHere = "appears in no commit anywhere"\n')
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'keep',
+      `★★★ 内容已落盘**不能**绕过唯一产物那一道。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.reason, 'unique-work', JSON.stringify(verdict))
+    assert.deepEqual(verdict.orphaned, ['src/only-here.ts'], JSON.stringify(verdict.orphaned))
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ 臂 10f（t9 定向突变臂 · 真跑）:关掉新判据 ⇒ 臂 10b 当场变红；开着 ⇒ 绿', async () => {
+  /**
+   * ── 为什么这条臂不是"再断言一遍 10b"─────────────────────────────────────────────
+   *
+   * 它要在**同一个真实输入**上给出**两个不同的读数**，而那正是"新判据有分辨力"
+   * 的可执行形式：把形态 Ⅱ 关掉（= 修法前的读法：只看 `--is-ancestor`）⇒ 那棵树
+   * 答 keep；开着 ⇒ 答 reclaimable。**同一个输入，读数必须翻转。**
+   *
+   * ★ 它比"读源码看着像"强：一个恒真的判据在这条臂上仍然会红，
+   *   因为"修法前"那个读数是由**真正的旧原语**（`--is-ancestor`）当场算出来的，
+   *   不是断言出来的。
+   */
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-mutation-t9')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'feature.ts'), 'export const feature = 42\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t9): worktree deliverable'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+    landByFile(f, wt, ['src/feature.ts'])
+    const mainHead = f.head()
+
+    /** ★ 修法前的读法：**只看** `--is-ancestor`（这就是"关掉新判据"）。 */
+    const legacy = (() => {
+      try {
+        execFileSync('git', ['merge-base', '--is-ancestor', a, mainHead], { cwd: f.repo, stdio: ['ignore', 'pipe', 'pipe'] })
+        return 'reclaimable'
+      } catch {
+        return 'keep'
+      }
+    })()
+    assert.equal(legacy, 'keep', '★ 修法前：按文件落盘的那种树被误判成"不可清"（这就是本任务的缺陷）')
+
+    /** ★ 修法后：同一棵树必须翻成 reclaimable。 */
+    const fixed = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(fixed.status, 'reclaimable', `★★ 修法必须改变这个答案。实测：${JSON.stringify(fixed)}`)
+    assert.notEqual(fixed.status, legacy, '★★ 同一份输入，修法前后的读数必须不同（否则新判据没有分辨力）')
+  } finally {
+    f.done()
+  }
+})
 
 test('★★ 臂 11（可关闭臂）：`AGENT_TEAMS_NO_RECLAIM` 必须真的停手，且它是一条可读的事实', async () => {
   /**
@@ -543,6 +856,17 @@ test('★★ 臂 T25-2（★对照臂）：两份判断在【同一个真实树�
     const unique = f.worktreeAt(base, 'task-unique')
     writeFileSync(join(unique, 'src', 'only-here.ts'), `export const only = '${Math.random()}'\n`)
 
+    /**
+     * ⑤ ★ reclaimable / how='content'（t9）：产物**按文件落盘**、对象不是祖先。
+     *   ★ 它必须进这份样本 —— 否则"两份一致"会在**新那一格**上完全没有分辨力：
+     *     一个只在形态 Ⅱ 上分叉的脚本副本会在这批样本上蒙混过去。
+     */
+    const byFile = f.worktreeAt(base, 'task-by-file')
+    writeFileSync(join(byFile, 'src', 'by-file.ts'), `export const byFile = '${Math.random()}'\n`)
+    git(byFile, ['add', '-A'])
+    git(byFile, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'land by file sample'])
+    landByFile(f, byFile, ['src/by-file.ts'], 'land the t25-2 sample by file')
+
     /** ④ undecidable：一个不是 git 检出的目录。 */
     const notGit = mkdtempSync(join(tmpdir(), 't25-notgit-'))
 
@@ -550,6 +874,7 @@ test('★★ 臂 T25-2（★对照臂）：两份判断在【同一个真实树�
       { label: 'absorbed', worktree: absorbed, expect: 'reclaimable' },
       { label: 'ahead', worktree: ahead, expect: 'keep' },
       { label: 'unique', worktree: unique, expect: 'keep' },
+      { label: 'by-file', worktree: byFile, expect: 'reclaimable' },
       { label: 'not-a-checkout', worktree: notGit, expect: 'undecidable' },
     ]
 
@@ -566,14 +891,28 @@ test('★★ 臂 T25-2（★对照臂）：两份判断在【同一个真实树�
       assert.equal(a.status, item.expect, `★ [${item.label}] 前置：这一格本该是 ${item.expect}，实测 ${a.status}`)
       if (b.status === 'keep') assert.equal(a.reason, b.reason, `★ [${item.label}] keep 的 reason 必须相同`)
       if (b.status !== 'undecidable') assert.equal(a.behind, b.behind, `★ [${item.label}] behind 必须相同`)
-      compared.push(`${item.label}=${a.status}`)
+      /**
+       * ★★ 新那一格也要比：一个在形态 Ⅱ 上分叉的副本必须在这里当场红。
+       *   `how` 决定读的人去哪里复核（"是祖先" vs "内容落盘"）⇒ 它同源是**功能性**的。
+       */
+      if (b.status === 'reclaimable') assert.equal(a.how, b.how, `★ [${item.label}] 吸收的形态必须同源`)
+      compared.push(`${item.label}=${a.status}${b.status === 'reclaimable' ? `:${a.how}` : ''}`)
     }
 
     /** ★ 三态**都被覆盖到**（否则这条对照臂在"只有一态"的样本上恒真）。 */
-    const seen = new Set(compared.map((entry) => entry.split('=')[1]))
+    const seen = new Set(compared.map((entry) => entry.split('=')[1].split(':')[0]))
     assert.deepEqual(
       [...seen].sort(), ['keep', 'reclaimable', 'undecidable'],
       `★ 样本必须覆盖三态（否则"一致"没有分辨力）。实测：${compared.join(' · ')}`,
+    )
+    /**
+     * ★★ t9：两态**各自的形态**也必须都被覆盖到 ——
+     *   否则"两份一致"在形态 Ⅱ 上仍然没有分辨力。
+     */
+    const hows = new Set(compared.filter((entry) => entry.includes(':')).map((entry) => entry.split(':')[1]))
+    assert.deepEqual(
+      [...hows].sort(), ['ancestor', 'content'],
+      `★ 样本必须覆盖**两种吸收形态**（祖先 / 内容落盘）。实测：${compared.join(' · ')}`,
     )
     rmSync(notGit, { recursive: true, force: true })
   } finally {
