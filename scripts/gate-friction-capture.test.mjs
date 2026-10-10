@@ -62,7 +62,8 @@
  *
  *   · 触发输入那一半（**本文件的职责**）：让卡点**真的发生** —— 一个真正 `blocked`
  *     的完成裁决（臂 1/2/4）与一个真正 `blocked` 的契约裁决（臂 3）。
- *   · 环境那一半（本文件同样必须做）：把**继承来的 `NODE_TEST_CONTEXT`** 清掉。
+ *   · 环境那一半（本文件同样必须做）：把**继承来的递归标记**清掉
+ *     （`NODE_TEST_CONTEXT` 及其同族）—— 唯一出处见 `scripts/fixtures/nested-test-env.mjs`。
  *     ★ 这是上面 ② 的成因：那个变量是 `node --test` 给**子进程**打的标记，
  *       子进程一看见它就判"这是递归"并跳过。`runVerifyCommand` 用
  *       `env: process.env` 起 shell（`src/tools/shared/entities.ts:285`）⇒
@@ -99,13 +100,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { createTeamDir } from '../lib/state.js'
-
 /**
  * ★★★ 让杀手套件**真的能跑起来**（见文件头 ②）──────────────────────────────────
  *
@@ -113,18 +113,16 @@ import { createTeamDir } from '../lib/state.js'
  * `runVerifyCommand` 继承 `process.env` ⇒ 不清掉的话，判据拿到的永远是
  * "空输出 + exit 0"，于是它**必然** `unmeasured`，本文件四条臂就永远没有卡点。
  *
- * ★ 只清这一个变量、且只在这个夹具里清：它是**探针的启动条件**，不是判据的输入。
- *   返回一个还原函数，由调用方在 `finally` 里放回去 —— 一个夹具不该把
- *   "让子进程跳过测试"这个副作用**泄漏给同一进程里的其它夹具**。
+ * ★ 这里**不再**自己清那一格 —— 那是 `scripts/fixtures/nested-test-env.mjs` 的职责，
+ *   本文件此前那份 `withoutRecursionSkip()` 是它的 7 份重复实现之一。
+ *   ★ 共享件仍然是**探针的启动条件**、不是判据的输入；它返回配对的还原函数，
+ *     本文件每处都放在 `finally` 里 —— 一个夹具不该把"让子进程跳过测试"这个
+ *     副作用**泄漏给同一进程里的其它夹具**（那条纪律原样保留，只是实现搬了家）。
+ *
+ * ★ 迁移前本文件只删 `NODE_TEST_CONTEXT` 一个键；共享件按同族处理（含 `NODE_OPTIONS`），
+ *   与迁移前 `gate-mutation` / `gate-t1` / `worktree-reclaim` 已经在删的集合一致。
  */
-function withoutRecursionSkip() {
-  const saved = process.env.NODE_TEST_CONTEXT
-  delete process.env.NODE_TEST_CONTEXT
-  return () => {
-    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT
-    else process.env.NODE_TEST_CONTEXT = saved
-  }
-}
+import { nestedTestEnv, recursionFreeEnv } from './fixtures/nested-test-env.mjs'
 
 /** 一次 git 调用的统一包装（夹具的临时工作区）。 */
 function gitIn(workspace) {
@@ -273,11 +271,12 @@ async function rejectViaCompletionBlock(f, taskId = 't1') {
    * 臂 1/2/4 走这一条：`completion.mutation` 真的 `blocked`
    * （`src/gates/completion/mutation.ts:506`）。
    *
-   * ★ 它需要 ① `NODE_TEST_CONTEXT` 被清掉（否则套件被跳 ⇒ `unmeasured`），
+   * ★ 它需要 ① 递归标记被清掉（否则套件被跳 ⇒ `unmeasured`；清理由
+   *   `scripts/fixtures/nested-test-env.mjs` 负责），
    *   ② 契约同时声明被变异文件与那份装饰性杀手套件（否则 `unmeasured`）。
    *   两条都是**输入面**的事，判据一字未动。
    */
-  const restoreEnv = withoutRecursionSkip()
+  const { restore: restoreEnv } = nestedTestEnv()
   try {
     return await f.tools.get('agent_teams_update_task').execute(
       {
@@ -636,14 +635,14 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
    * ★★★ 重放**必须**在"探针跑得起来"的条件下进行 ────────────────────────────────
    *
    * MEASURED（本任务复现）：`completion.mutation` 在重放时会**再跑一次**杀手套件
-   * （它注入的那一格就是 `runTest`）。而在 `node --test` 里，继承来的
-   * `NODE_TEST_CONTEXT` 会让子进程那次 `node --test` 被跳过 ⇒ 套件报不出汇总
+   * （它注入的那一格就是 `runTest`）。而在 `node --test` 里，继承来的递归标记
+   * （`NODE_TEST_CONTEXT`）会让子进程那次 `node --test` 被跳过 ⇒ 套件报不出汇总
    * ⇒ 重放得到的是 `unmeasured("the killer suite did not report a readable summary")`
    *   ⇒ **重放与记录分叉**，而那个分叉是**环境的**、不是记录的。
    *
-   * ⇒ 与触发侧同一条纪律：清掉那个变量，让探针真的跑。判据仍然自己判。
+   * ⇒ 与触发侧同一条纪律：用共享件清掉那些标记，让探针真的跑。判据仍然自己判。
    */
-  const restoreEnv = withoutRecursionSkip()
+  const { restore: restoreEnv } = nestedTestEnv()
   let replay
   try {
     replay = await registry.evaluate(point, replayedCtx)
@@ -717,7 +716,7 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
     broken.unreplayable.includes('loadKindRequirements'),
     '★ 不给那一格 ⇒ 它必须出现在 `unreplayable` 里（而不是被静默忽略）',
   )
-  const restoreEnv2 = withoutRecursionSkip()
+  const { restore: restoreEnv2 } = nestedTestEnv()
   let brokenReplay
   try {
     brokenReplay = await registry.evaluate(point, broken.ctx)
@@ -732,4 +731,151 @@ test('★ 臂 4（★ 本条是"记录 vs 日志"的分水岭）：用记录重�
     + ` 记录里是「[${recordedGate}]」，缺注入时得到「[${brokenGate}]」`
     + ` 完整读数：${JSON.stringify(brokenReplay).slice(0, 300)}`,
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 5（★★★ 判别臂）："清掉递归标记"这件事**本身**是不是在起作用 —— 读真子进程
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 5（判别臂 · 对照对）：不清递归标记 ⇒ 内层套件被静默跳过（exit 0 而**没有**汇总）；清了 ⇒ 它真的跑并打印汇总', () => {
+  /**
+   * ── ★ 为什么这一臂必须存在，且必须落在**本文件**里 ──────────────────────────────
+   *
+   * 本文件上面四条臂全都**依赖**"递归标记被清掉"这个前置条件：
+   * 它是让 `completion.mutation` 从 `unmeasured` 变成真 `blocked` 的那一格。
+   * ★ 而那个前置条件在此之前**没有任何一条断言直接读它** —— 它藏在调用序列的
+   *   环境里，跟着 `nestedTestEnv()` 一起被引用。⇒ 谁把那一行删掉，
+   *   上面四条臂会**一起变红**，但红出来的措辞是关于 mutation 的，
+   *   读的人要从"判据说读不到汇总"倒推回"原来是环境没清"。
+   *
+   * ⇒ 本臂把那个前置条件**单独拎出来做成读数**：直接读**真子进程**的
+   *   exitCode / stdout / stderr，证明"清"与"不清"这两种环境下，
+   *   同一个内层套件的读数**不同形**，而不是靠中间那些判据的解释。
+   *
+   * ── ★★ 它是一个【对照对】，两个半边缺一即恒真 ─────────────────────────────────
+   *
+   *   · **nested 半边**：显式把 `NODE_TEST_CONTEXT` 放回子环境 ⇒ 必须观测到
+   *     ① exitCode **仍是 0**（与"通过"在退出码上同形 —— 这就是 f-0028 的要害）
+   *     ② stdout **没有** `ℹ pass` / `ℹ tests` 汇总行（判据读汇总的那条路断掉）
+   *     ③ stderr **有** "skipping running files" 那句 warning（它其实说了话）
+   *   · **clean 半边**：用共享件 `recursionFreeEnv()` 剥掉标记 ⇒ 必须观测到
+   *     ① exitCode 0 ② stdout **有**可读汇总行 ③ 套件自己打印的哨兵串在场
+   *
+   * ★ 没有 nested 半边 ⇒ "clean 有汇总"可能只是因为**这个套件本来就会打印**，
+   *   与剥不剥标记无关；没有 clean 半边 ⇒ "nested 没汇总"可能只是套件坏了。
+   *
+   * ── ★★★ 方向性（directional）：删掉清洗 ⇒ 本臂**必须**变红 ──────────────────────
+   *
+   * 本臂的 clean 半边**不**自己手写 `delete env.NODE_TEST_CONTEXT`，而是调用
+   * `recursionFreeEnv(process.env)` —— 也就是**真的走共享件**。
+   * ⇒ 任何让共享件失效的改动（把 `isRecursionMarkerKey` 改成恒 false、
+   *   把前缀表清空、把 `nestedTestEnv` 改成不删键）都会让 clean 半边
+   *   退化成 nested 半边，于是"clean 有汇总 / clean 有哨兵串"当场红。
+   * ★ 这一点已用**定向突变实验**实测过（本任务报告里逐字给出：
+   *   临时把 `isRecursionMarkerKey` 改成 `return false` ⇒ 本臂红，
+   *   红的正是 clean 那两条断言），而不是推断的。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'friction-arm5-'))
+  try {
+    const inner = join(dir, 'inner.test.mjs')
+    /**
+     * 内层套件：既**打印哨兵串**（证明它真的跑了），又让 `node --test`
+     * 能打出 `ℹ pass N` 汇总（那是判据 `parseTestSummary` 读的那一行）。
+     */
+    writeFileSync(inner, [
+      "import { test } from 'node:test'",
+      "import assert from 'node:assert/strict'",
+      "test('inner arm 5 that must print', () => { console.log('INNER RAN'); assert.equal(1, 1) })",
+      '',
+    ].join('\n'), 'utf8')
+
+    /**
+     * 子进程**在 `dir` 里**跑（`inner.test.mjs` 是相对路径），且**不抛** —— 失败形态也要读。
+     *
+     * ★★ 这里**不能**用 `execFileSync(..., { encoding: 'utf8' })` 的返回值当 stdout/stderr：
+     *   那条路径成功时**只交回 stdout**，而本臂要读的那句 "skipping running files"
+     *   恰好在 **stderr** 上、且那次运行的退出码是 0（成功）⇒ 直接读返回值
+     *   会得到 `stderr: ""`，于是"它没说那句话"与"我没读那个流"同形。
+     *   MEASURED（本臂第一版就撞了）：断言红在 `实测 stderr=""` 上，
+     *   而子进程其实**说了**那句话 —— 是我的读法丢了它。
+     * ⇒ 用 `spawnSync` 把两个流**分开**收回来。
+     */
+    const runInner = (env) => {
+      const r = spawnSync('node', ['--test', 'inner.test.mjs'], { cwd: dir, encoding: 'utf8', env })
+      return {
+        code: typeof r.status === 'number' ? r.status : -1,
+        stdout: String(r.stdout ?? ''),
+        stderr: String(r.stderr ?? ''),
+      }
+    }
+
+    /**
+     * ── ★ nested 半边：**显式**把标记放回去（而不是靠继承）────────────────────────
+     *
+     * ★ 靠继承会让**本夹具自己**也被算作被嵌套的那一层（本仓
+     *   `gate-nested-test-probe` scaffold 里那段注释记过这个坑）⇒ 读到的
+     *   就不是"内层被跳过"，而是"我自己被跳过"。所以这里显式构造。
+     */
+    const nestedEnv = { ...process.env, NODE_TEST_CONTEXT: 'child-v8' }
+    const nested = runInner(nestedEnv)
+    console.log(`  [臂 5] nested 半边：exit=${nested.code} · stdout 汇总=${/ℹ\s+(pass|tests)\s+\d+/.test(nested.stdout)} · stderr=${JSON.stringify(nested.stderr.trim().slice(0, 120))}`)
+
+    /**
+     * ── ★ clean 半边：**走共享件**剥标记（这一句就是被突变瞄准的那一句）──────────
+     *
+     * ★ 用 `recursionFreeEnv(process.env)` 而不是就地 `delete`：本臂要证明的正是
+     *   **共享件在起作用**，所以它必须是共享件的调用方，不能自己另起一份实现 ——
+     *   否则删掉共享件的清洗，本臂照样绿，那条"方向性"就是假的。
+     */
+    const cleanEnv = recursionFreeEnv(process.env)
+    const clean = runInner(cleanEnv)
+    console.log(`  [臂 5] clean  半边：exit=${clean.code} · stdout 汇总=${/ℹ\s+(pass|tests)\s+\d+/.test(clean.stdout)} · stdout 哨兵=${clean.stdout.includes('INNER RAN')}`)
+
+    /** ── ① clean 半边：套件**真的跑**，且打印出可读汇总 ───────────────────────── */
+    assert.equal(clean.code, 0, `★ clean 半边：剥掉标记后必须成功退出。实测 stdout=${clean.stdout.slice(0, 300)}`)
+    assert.match(
+      clean.stdout, /INNER RAN/,
+      '★ clean 半边：剥掉递归标记后，内层那条测试**必须真的跑**（哨兵串在场）——否则下面 nested 半边的"被跳过"没有参照物',
+    )
+    assert.match(
+      clean.stdout, /ℹ\s+(pass|tests)\s+\d+/,
+      '★★ clean 半边：必须打出 `ℹ pass N` / `ℹ tests N` 那类**可读汇总** —— 判据 parseTestSummary 读的就是这一行。'
+      + ` 若它不在，说明共享件没有真的剥掉标记。实测 stdout=${JSON.stringify(clean.stdout.slice(-400))}`,
+    )
+
+    /** ── ② nested 半边：**静默跳过**，而退出码仍是 0（同形，f-0028 的要害）─────── */
+    assert.doesNotMatch(
+      nested.stdout, /INNER RAN/,
+      '★ nested 半边：递归标记在场时，内层那条测试**一条都没跑**',
+    )
+    assert.doesNotMatch(
+      nested.stdout, /ℹ\s+(pass|tests)\s+\d+/,
+      '★★ nested 半边：**汇总行必须缺席** —— 判据读不到汇总，就会把这次运行记成 unmeasured，'
+      + ` 而在退出码上它与"通过"同形。实测 stdout=${JSON.stringify(nested.stdout.slice(0, 300))}`,
+    )
+    assert.equal(
+      nested.code, 0,
+      '★★ nested 半边：被静默跳过的那次运行**退出码仍然是 0** —— 这就是"把没测到并进通过"在子进程边界上的现身',
+    )
+    assert.match(
+      nested.stderr, /skipping running files/i,
+      '★ nested 半边：stderr 上**必须**有那句 "skipping running files" —— 它是这个失效唯一说出口的话。'
+      + ` 实测 stderr=${JSON.stringify(nested.stderr)}`,
+    )
+
+    /** ── ③ 对照对的**方向**：两半的读数必须不同形（否则本臂是恒真的）────────────── */
+    const summaryOf = (r) => /ℹ\s+(pass|tests)\s+\d+/.test(r.stdout)
+    assert.notEqual(
+      summaryOf(clean), summaryOf(nested),
+      '★★★ 对照对：同一个套件在两种环境下"有没有可读汇总"必须**不同形**。'
+      + ` 实测 clean=${summaryOf(clean)} · nested=${summaryOf(nested)} —— 若两者相同，本臂证明不了"是标记造成的"`,
+    )
+    assert.equal(
+      clean.code, nested.code,
+      '★★★ 而**退出码这一格两者相同**（都是 0）—— 这正是本臂存在的理由：'
+      + '只看退出码时，那个被跳过的运行与真正通过的那一次**完全分不开**。',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

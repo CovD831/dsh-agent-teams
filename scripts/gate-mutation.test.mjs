@@ -50,6 +50,13 @@ import { parseTestSummary } from '../lib/mutation.js'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
+/**
+ * ★ 递归标记的唯一出处：清洗规则搬去 `scripts/fixtures/nested-test-env.mjs`。
+ *   ★ 迁移前本文件的 `childEnv()` 删的是 `NODE_TEST*` + `NODE_OPTIONS`（见下），
+ *     转移后**集合一字未变** —— 共享件用的正是同一套判据（那一份集合是它收拢的
+ *     三个夹具里最宽的一个），所以这里的行为是等价的，不是放宽。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
 const run = promisify(execFile)
 
 /**
@@ -323,13 +330,14 @@ function expectOk(verdict) {
  *
  * ⇒ 这条同时说明为什么"未测量"必须能与真实结论分开：夹具环境造成的假 unmeasured
  *   与"套件真的够不到"在旧形态下会长得一模一样。
+ *
+ * ★ 现在这份清洗**只有一处实现**（`scripts/fixtures/nested-test-env.mjs` 的
+ *   `recursionFreeEnv`）—— 本文件此前那份就地循环是它的 7 份重复实现之一。
+ *   这里保留 `childEnv()` 这个名字，是因为它在下面被调用三处、且名字本身
+ *   说的是"给子进程的那份 env"，语义没变；变的是它不再自己定义"什么算标记"。
  */
 function childEnv() {
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete env[key]
-  }
-  return env
+  return recursionFreeEnv(process.env)
 }
 
 /**
@@ -368,7 +376,8 @@ function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...
          *     形态（`runVerifyCommand` 也是 shell），夹具必须一致，否则测的是一套
          *     不存在的接口。
          *
-         *   · `env` 里清掉 `NODE_TEST*` / `NODE_OPTIONS` —— MEASURED：夹具自己跑在
+         *   · `env` 里清掉递归标记（`NODE_TEST*` / `NODE_OPTIONS`，
+         *     唯一出处 `scripts/fixtures/nested-test-env.mjs`）—— MEASURED：夹具自己跑在
          *     `node --test` 里，那会通过环境把子进程变成【子报告器】，于是子进程
          *     不再打印汇总行 ⇒ 判据读不到 `pass/fail` ⇒ 一次本该测到的东西被读成
          *     "没能测量"。也就是说，夹具的环境会让被测判据产生假 unmeasured，

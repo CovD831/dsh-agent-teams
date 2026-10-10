@@ -39,6 +39,21 @@ import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+/**
+ * ★★ 递归标记的唯一出处（见 `scripts/fixtures/nested-test-env.mjs`）。
+ *
+ * ★ 本文件此前**一处都不清** —— 它是 7 个夹具里唯一没有处理这一格的，
+ *   而它起的是 `pnpm test:gates`（那是一条**完整的 `node --test`**）。
+ *   后果见下面那条臂里记的读数：子报告器不打印汇总 ⇒ `counts.tests` 是 `null`。
+ *
+ * ★ 本次迁移**不改变**那条臂的结论：它断言的是**退出码**，而"读不到汇总"
+ *   被如实写成 `null`（不是 0）。★ 我**没有**把那次运行改成"清干净再看汇总"——
+ *   那会把这本审查从"在真实上下文里读数"改成"在一个我摆好的上下文里读数"，
+ *   而后者会掩盖本文件要报的那件事（本审查所在的上下文**就是**嵌套的）。
+ *   ⇒ 这里引入共享件只是为了：**下一次**谁要在本文件里起子进程时，
+ *     有唯一一处可引用、且不必再抄一份（此前是"想清也找不到出处"）。
+ */
+import { recursionFreeEnv, NESTED_TEST_RECURSION_KEYS } from './fixtures/nested-test-env.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const LIB = join(ROOT, 'lib')
@@ -657,9 +672,20 @@ test('★ 存量红与本次审查的关系（如实报，不并进"通过"）',
    *   ① 如实报"我在这个上下文里读不到它"（而不是把 `null` 读成 0）
    *   ② 把**它为什么读不到**写下来
    * ⇒ ★ 而那正是本队那条纪律：**没能测量与测得了零必须不同形。**
+   *
+   * ★★ 而"要清掉哪个键才能让它读得到"这件事，现在是
+   *   `scripts/fixtures/nested-test-env.mjs` 的 `NESTED_TEST_RECURSION_KEYS`
+   *   —— 本臂把它**打印出来**（读数，不是断言）：读日志的人当场看得到
+   *   "这个上下文里到底是哪几个键让汇总消失的"，而不必去翻七个夹具。
+   *   ★ 刻意**不**用它去构造下一次运行：见文件头那段（那会掩盖本臂要报的事）。
    */
   let exitCode = 0
   let raw = ''
+  console.log(`  [t6] 本上下文里被当作递归标记的键（共享件声明）：${JSON.stringify(NESTED_TEST_RECURSION_KEYS)}`)
+  console.log(`  [t6] 而本进程此刻的实际取值：NODE_TEST_CONTEXT=${JSON.stringify(process.env.NODE_TEST_CONTEXT ?? null)}`)
+  /** ★ 只做**纯**读取，证明共享件在本上下文里可用；它不碰 `process.env`，不欠还原。 */
+  const wouldBeClean = recursionFreeEnv(process.env)
+  console.log(`  [t6] ★ 若剥掉它们，这一格里就只剩 ${Object.keys(wouldBeClean).length} 个键（现 ${Object.keys(process.env).length} 个）—— 本臂没有那样做，理由见上`)
   try {
     raw = execFileSync('pnpm', ['test:gates'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 })
   } catch (error) {

@@ -54,6 +54,18 @@
  */
 
 import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
+/**
+ * ★ 递归标记的唯一出处（见 `scripts/fixtures/nested-test-env.mjs`）。
+ *
+ * 本文件迁移前有**两处**各写一遍的就地循环（`for (const key of ...) if
+ * (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete env[key]`），
+ * 两处都是同一个意图：让**孙进程**（判据起的那个 `node --test <suite>`）
+ * 不会因为继承递归标记而变成"子报告器"、从而报不出 `ℹ pass N` 汇总。
+ * ★ 那个意图一字未改，只是不再有第二份、第三份实现。
+ * ★ 注意这里是**构建一份子进程 env**（不是改本进程 `process.env`）⇒ 用**纯**的
+ *   `recursionFreeEnv()`：它没有副作用，也就不欠任何一次还原。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, execFile } from 'node:child_process'
@@ -523,7 +535,7 @@ async function readCompletionVerdict() {
     const { stdout } = await run(process.execPath, [script], {
       cwd: T1_WORKTREE,
       /**
-       * ── ★★ 必须清掉 `NODE_TEST_CONTEXT` / `NODE_OPTIONS` ────────────────────────
+       * ── ★★ 必须清掉递归标记（`NODE_TEST_CONTEXT` / `NODE_OPTIONS`）─────────────
        *
        * MEASURED（本夹具实测，且本仓的 `scripts/gate-mutation.test.mjs` 记过同一条）：
        * 本夹具自己跑在 `node --test` 里，而 `NODE_TEST_CONTEXT` 会让**孙进程**
@@ -534,14 +546,15 @@ async function readCompletionVerdict() {
        * ★ 而那正是本任务记账的形态：**夹具的环境**让被测判据产生**假 unmeasured**，
        *   而它与"套件真的够不到"在读数上完全同形。
        * ⇒ 清掉它，让判据拿到它与生产上会拿到的那一份一样的输出。
+       * ★ 清洗规则搬到了 `scripts/fixtures/nested-test-env.mjs`（唯一出处）；
+       *   这里换掉的是**它从哪一份环境起**，`T13_*` 那几格注入一字未动。
        */
-      env: (() => {
-        const env = { ...process.env, T13_ROOT: ROOT, T13_WORKSPACE: T1_WORKTREE, T13_BASE: git(['rev-parse', 'HEAD'], T1_WORKTREE) }
-        for (const key of Object.keys(env)) {
-          if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete env[key]
-        }
-        return env
-      })(),
+      env: recursionFreeEnv({
+        ...process.env,
+        T13_ROOT: ROOT,
+        T13_WORKSPACE: T1_WORKTREE,
+        T13_BASE: git(['rev-parse', 'HEAD'], T1_WORKTREE),
+      }),
       maxBuffer: 32 * 1024 * 1024,
     })
     if (process.env.T13_DEBUG === '1') console.log('  [child stdout]\n' + stdout.split('\n').filter(l => l.startsWith('__T13DBG__')).join('\n'))
@@ -681,11 +694,12 @@ process.stdout.write('__T13C__' + JSON.stringify({ changedLineTotal: lines.lengt
   try {
     counted = JSON.parse(execFileSync(process.execPath, [probeScript], {
       cwd: T1_WORKTREE,
-      env: (() => {
-        const env = { ...process.env, T13_ROOT: ROOT, T13_WORKSPACE: T1_WORKTREE, T13_BASE: base }
-        for (const key of Object.keys(env)) if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete env[key]
-        return env
-      })(),
+      /**
+       * ★ 与上一处同一条理由、同一个出处：这一路不跑 `node --test`，
+       *   但共享件的**射程**就是"这一族标记不许透给后代"，所以一并走它 ——
+       *   ★ 关键是别再出现第三份 "什么算标记" 的说法。
+       */
+      env: recursionFreeEnv({ ...process.env, T13_ROOT: ROOT, T13_WORKSPACE: T1_WORKTREE, T13_BASE: base }),
       encoding: 'utf8',
     }).split('\n').find(l => l.startsWith('__T13C__')).slice('__T13C__'.length))
   } finally {

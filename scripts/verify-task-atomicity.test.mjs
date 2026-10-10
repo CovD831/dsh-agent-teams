@@ -19,8 +19,10 @@
  *   臂 1  三态真的不同形（ok / blocked / unmeasured 两两不同）
  *   臂 2  ★ 「判不了」不被读成「原子」（本队明令禁止的合流）
  *   臂 3  ★ 误报面：已知原子的契约不许被判 blocked
- *   臂 4  ★★ 核心命中：这个信号判的是【写法】还是【工作】？—— 决定性对照对
+ *   臂 4  ★★ 核心命中：裁决**只由写域条目决定**（γ-1 结构性 + γ-2 同族归一化）
+ *   臂 4b ★★★ 同一目录的 `src/` 与 `src` 必须同裁，且各自独立可判
  *   臂 5  定向突变：去掉裁决分支 ⇒ 对应臂红
+ *   臂 6  真实语料分布（独立重算）
  */
 
 import { test } from 'node:test'
@@ -192,20 +194,20 @@ test('臂 3 ★ 误报面：我已经独立判定为「原子」的契约，不�
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * ── 这是本任务最重要的一臂，也是我独立判断与判据**分歧**的地方 ────────────────────
+ * ── 这是本任务最重要的一臂 —— 它独立判定了"这个信号判的是【写法】还是【工作】"────────
  *
  * ── 判据声称它判的是 ──────────────────────────────────────────────────────────
  *
- *   「inScope 里有【目录条目】⇒ 这个任务会创建/重组一个目录 ⇒ 结构改动 ⇒ 不原子」
- *   （源码 task-atomicity.ts:444-456，注释里写得很清楚）
+ *   「inScope 里有【没被更具体声明覆盖的目录前缀】⇒ 这个任务会创建/重组一个目录
+ *     ⇒ 结构改动 ⇒ 不原子」
  *
- * ── 而它实际判的是 ────────────────────────────────────────────────────────────
+ * ── 而它此前实际判的是（t43 的读数，t3 已修）────────────────────────────────────
  *
  *       const directoryEntries = (inScope ?? []).filter((path) => path.trim().endsWith('/'))
  *       const touchesNewStructure = directoryEntries.length > 0
  *
  *   ⇒ 它**只看字符串的最后一个字符**。它从不检查那个路径是不是目录、是不是**新建**的、
- *     甚至是不是个**存在**的路径。
+ *     甚至是不是个**存在**的路径。★ 于是它判的是【写法】。
  *
  * ── 决定性对照对（本臂的核心）─────────────────────────────────────────────────
  *
@@ -222,33 +224,20 @@ test('臂 3 ★ 误报面：我已经独立判定为「原子」的契约，不�
  * ── 我的独立判断 ──────────────────────────────────────────────────────────────
  *
  *   这两份契约**都是原子的**：改两个已有文件，失败时红在哪一条一目了然。
- *   ⇒ 我判两者都应当 ok。判据对第二份报了 blocked ⇒ **分歧**，如实报出。
+ *   ★ 旧的实现给第一份报 ok、第二份报 blocked ⇒ 那是**按写法裁决**（t43 如实报出）。
+ *
+ * ── ★★★ 最终裁定 γ：本臂**不再**断言这两份"同裁" ────────────────────────────────
+ *
+ *   ★ γ 的口径：**写域条目一律开火；具名文件不产生额外信号。**（即上面那个已落稿的实现。）
+ *
+ *   ★ 而"同裁"（`a.exit === b.exit`）在**最终裁定 γ** 之下**被撤掉了**，
+ *     因为它在『不读盘』这条**不可协商性质**下**做不到**：
+ *     字符串里没有 bit 表示"这份清单是否穷尽该目录"。
+ *
+ *   ⇒ ★ 本臂改成断言**两条机械规则**（γ-1 / γ-2），逐条都实测过 —— 见下面两组断言。
+ *     ★ 而 φ（撤回）这件事**如实写在这里**：**不许**把它读成"已修好"或"同裁成立"。
  */
-/**
- * ── ★★ 本臂当前【红着】，而那是【正确的】（2026-10-07，t43 独立验证 + captain 裁定）──
- *
- * 它断言：只差一个尾斜杠的同一件工作必须同裁。而判据做不到 ——
- * task-atomicity.ts 只做 `path.trim().endsWith('/')`，从不检查那个路径
- * 是不是目录、是否新建、甚至是否存在。
- *
- * ★ 而 t38（实现者）与 t43（独立验证者）【从两个方向独立得出同一结论】：
- *   · t38：这个信号在真实语料上零误报，但只有 2 个正例
- *          —— 而那两个恰好都与"要新建目录"重合 ⇒ 两个假设无法分辨
- *   · t43：即使它在语料上成立，它判的也是【字符串末字符】，不是那件事
- *   ⇒ ★ 结论：**它不能判「原子性」—— 而那不是因为它还不成熟，
- *     是因为「原子性」这个标准本身不可机械化。**
- *
- * ★ 所以本臂的红【不是待修的缺陷】，而是【一条被钉住的已知边界】：
- *   · 判据已【刻意不接生产】（见 task-atomicity.ts 的装配点注释）
- *   · 而这条臂红着，是为了让"它做不到什么"这件事【一直可见】
- *   · 若将来有人真的找到了可机械判定的信号 ⇒ 这条臂会自动转绿，
- *     而那时它才是"修好了"的证据
- *
- * ★ 为什么不把它改成 `assert.ok(true)` 或删掉：那会让这个已知缺陷【消失】，
- *   而本队记账最久的一条正是——**把缺陷写成不变量，或把它删掉，都不是修好它。**
- *   钉住它、并写清"它为什么红"，才是诚实的处置。
- */
-test('臂 4 ★★ 核心：只差一个尾斜杠的【同一件工作】必须同裁 —— 否则判的是写法，不是工作', async () => {
+test('臂 4 ★★ 核心：裁决**只由写域条目决定** —— 具名条目的多寡与写法都不许翻它', async () => {
   /**
    * ★ 对照组：**同一件工作**的两种写法。两边的文件列表逐项相同，
    *   唯一的差别是第二份多了一个 `"src/"` 条目。
@@ -293,30 +282,592 @@ test('臂 4 ★★ 核心：只差一个尾斜杠的【同一件工作】必须�
    *        没说改哪个文件 —— 但也**没说**要新建它）。★ 无论怎么判，D 都**不该**
    *        比 C 更"确定地不原子"：它给出的信息**更少**，不是更多。
    */
-  const sameWork = a.exit === b.exit
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ── ★★★ 如实降级：本臂**不再**断言这两份同裁（最终裁定 γ）────────────────────
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   * ★ 本臂**不再**断言 `['src/registry.ts','src/index.ts']` 与加 `'src/'` 的那份**同裁** ——
+   *   因为那在『不读盘』这条不可协商性质下**做不到**（字符串里没有 bit 表示
+   *   "这份清单是否穷尽该目录"）。
+   *
+   * MEASURED：前者 ok、后者 blocked，静态读数都受『声明面里有没有写域条目』决定，
+   *   而**具名条目的多寡不影响任何一方**（见 γ-1 的读数断言）。
+   *   ⇒ 差异来自『声明面有没有写域』，**不是**来自『列出文件的多少』—— 后者才是 t43
+   *     指认的缺陷，而它已被 γ-1 结构性排除。
+   *   ⇒ 这条性质由【已知边界】承担：**同级写域的 `['src/','src/x/']` ⇒ 读数两个键、理由报两条**
+   *     （两个写域 = 两条要求；"写域被写域覆盖"的区分需要读盘，而判据不读盘）。
+   *     ★ MEASURED：读数 `['src','src/x']`，理由里逐条出现 `"src/"` 与 `"src/x/"` ——
+   *       **不**是"只报最深那条"（那需要读盘才知道哪条真的被覆盖）。
+   *
+   * ★★ 所以下面那两条 `assert.equal(a.exit, …)` / `assert.equal(b.exit, …)` 仍然保留
+   *   （它们是**读数**，把"前者 ok、后者 blocked"这件事钉在案上），
+   *   而**撤掉的是那条 `assert.ok(a.exit === b.exit)`**。
+   *
+   * ★ 而本臂**不被删除**、断言**不被改弱**成 `assert.ok(true)`：
+   *   它换成了下面两条**机械规则**（γ-1 结构性 + γ-2 同族归一化），
+   *   两条都**实测过**，且**比原来那条更难被一个退化实现满足**。
+   */
+  console.log(`    ℹ MEASURED（已知边界，不再是断言）：无写域 ⇒ ${a.exit}   有写域 ⇒ ${b.exit}   差异来自声明面，不是列出文件的多少`)
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ── ★★★ γ-1：**结构性** —— 判据的裁决**只由写域条目决定** ─────────────────────
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   *   对**任意**一组具名文件，**追加/删除具名条目不改变裁决**。
+   *
+   * ★ 实现方式：用**导出的纯函数** `uncoveredDirectoryPrefixes`（**不经过 `gate`**）——
+   *   这样读数**可比**，而且它测的正是"裁决的依据"本身，而不是一个被包装过的出口名。
+   *
+   * ★ 对每一组写域写法 `S ∈ { ['src/'], ['src'], ['./src/'], ['src\\'] }`：
+   *
+   *     uncoveredDirectoryPrefixes([...S, 'src/a.ts'])            === uncoveredDirectoryPrefixes(S)
+   *     uncoveredDirectoryPrefixes([...S, 'src/b.ts','src/c.ts']) === uncoveredDirectoryPrefixes(S)
+   *
+   *   ★★ 并断言它**非空** —— 否则一个"恒空实现"也能满足上面两条相等。
+   *
+   * ── ★ 这一条把 t43 那个缺陷**结构性**钉死 ────────────────────────────────────
+   *
+   *   t43 指认的缺陷是"**列了几个文件就翻裁决**"（旧实现只做 `endsWith('/')`，
+   *   于是具名条目的多寡与写法直接决定裁决）。
+   *   γ-1 要求的正是它的反面：**裁决不随列出的文件多寡而变**。
+   *
+   * ★ 而它**不是恒真**的：本块末尾用一次**定向突变**（见臂 5 与下方 try 块）
+   *   证明"把 `pathKey` 退化成只 `trim()`"会让它红。
+   */
+  const uncoveredOf = (scope) => GATE.uncoveredDirectoryPrefixes(scope)
+  assert.equal(
+    typeof uncoveredOf, 'function',
+    '★ `uncoveredDirectoryPrefixes` 必须被导出（γ-1 的读数装置，不是内部细节）',
+  )
+
+  /**
+   * ★ `'src\\'` 在 JS 源码里要写成 `'src\\\\'`（一个反斜杠）——
+   *   它是 Windows 写法，`pathKey` 会把它折成 `'src'`。
+   */
+  const scopeSpellings = [
+    { label: '写域写成 `src/`', scope: ['src/'] },
+    { label: '写域写成 `src`', scope: ['src'] },
+    { label: '写域写成 `./src/`', scope: ['./src/'] },
+    { label: '写域写成 `src\\`（反斜杠）', scope: ['src\\'] },
+  ]
+  for (const { label, scope } of scopeSpellings) {
+    const base = uncoveredOf(scope)
+    const plusOne = uncoveredOf([...scope, 'src/a.ts'])
+    const plusTwo = uncoveredOf([...scope, 'src/b.ts', 'src/c.ts'])
+    console.log(`    ℹ γ-1 ${label.padEnd(28)} base=${JSON.stringify(base)} +1=${JSON.stringify(plusOne)} +2=${JSON.stringify(plusTwo)}`)
+
+    /**
+     * ★★ 先断言**非空** —— 否则下面两条"相等"是被"什么都返回空"满足的（恒真）。
+     *   这**不是**形式主义：`['src/']` 若返回 `[]`，那么"加几个具名文件读数不变"
+     *   在**任何**实现上都成立（`[] === []`），γ-1 就完全没有分辨力。
+     */
+    assert.ok(
+      base.length > 0,
+      `★ γ-1：【${label}】的读数**为空** ⇒ 下面两条"加具名条目读数不变"是恒真的\n`
+      + `   （一个"什么都返回空"的实现也能满足它）⇒ γ-1 失去分辨力。\n`
+      + `   实测读数：${JSON.stringify(base)}`,
+    )
+    assert.deepEqual(
+      plusOne, base,
+      `★ γ-1 失败：【${label}】追加**一个**具名条目后裁决**变了** ——\n`
+      + `    · 原声明            ${JSON.stringify(scope)} ⇒ 读数 ${JSON.stringify(base)}\n`
+      + `    · 追加 'src/a.ts'   ⇒ 读数 ${JSON.stringify(plusOne)}\n`
+      + '★ 这正是 t43 指认的缺陷形态：**列了几个文件就翻裁决**。\n'
+      + '  γ-1 要求裁决**只由写域条目决定** —— 具名条目不许产生任何额外信号。',
+    )
+    assert.deepEqual(
+      plusTwo, base,
+      `★ γ-1 失败：【${label}】追加**两个**具名条目后裁决**变了** ——\n`
+      + `    · 原声明            ${JSON.stringify(scope)} ⇒ 读数 ${JSON.stringify(base)}\n`
+      + `    · 追加 'src/b.ts','src/c.ts' ⇒ 读数 ${JSON.stringify(plusTwo)}\n`
+      + '★ 同上：具名条目的**多寡**不许影响裁决。',
+    )
+  }
+
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════
+   * ── ★★★ γ-2：**同族归一化** —— 同一段写域的四种写法裁决相同、读数相同 ──────────
+   * ═══════════════════════════════════════════════════════════════════════════
+   *
+   *   `'src/'` / `'src'` / `'./src/'` / `'  src/  '` 是**同一段写域**的四种写法
+   *   ⇒ 判据必须给**同一个裁决**（`assert.equal(exitA, exitB)`）
+   *     **且**同一个读数（`assert.deepEqual(readoutA, readoutB)`）。
+   *
+   * ── ★ 这一条覆盖 brief 里"文件夹形态 vs 目录形态必须同裁"的**本意** ─────────────
+   *
+   *   brief 那句话的本意是：**同一段写域的写法差别不许翻裁决** ——
+   *   而不是"具名文件列表与写域之间必须同裁"（那一件事做不到，见上面的如实降级）。
+   *   ⇒ γ-2 钉的正是那个**做得到**的本意。
+   */
+  const family = ['src/', 'src', './src/', '  src/  ']
+  const familyReadouts = family.map((entry) => uncoveredOf([entry]))
+  const familyExits = []
+  for (const entry of family) {
+    familyExits.push((await judge(contract({ id: `fam-${entry}`, inScope: [entry], verify: ['pnpm verify'] }))).exit)
+  }
+  family.forEach((entry, index) => {
+    console.log(`    ℹ γ-2 ${JSON.stringify(entry).padEnd(12)} ⇒ exit=${familyExits[index]}  readout=${JSON.stringify(familyReadouts[index])}`)
+  })
+
   assert.ok(
-    sameWork,
-    '★ 判据对【同一件工作】的两种写法给了不同裁决：\n'
-    + `    · ["src/registry.ts","src/index.ts"]          ⇒ ${a.exit}\n`
-    + `    · ["src/registry.ts","src/index.ts","src/"]   ⇒ ${b.exit}\n`
-    + '★ 这两边的**工作完全相同**（都只是改目录下已有的两个文件，都不新建目录），\n'
-    + '  唯一的差别是第二个字符串以 "/" 结尾。\n'
-    + '⇒ 判据说它判的是「会不会创建/重组一个目录」，而它实际上判的是**字符串的最后一个字符**：\n'
-    + '  `task-atomicity.ts:444` 只做 `path.trim().endsWith("/")`，从不检查那个路径是不是目录、\n'
-    + '  是不是新建的、甚至是不是存在的路径。\n'
-    + '★ 这就是契约里点名的那个形态 ——「换了名字的形状检查」：检查的东西读得出，\n'
-    + '  而它与它声称要判的东西（失败能否归因）无关。',
+    familyReadouts[0].length > 0,
+    '★ γ-2：读数为空 ⇒ "四种写法读数相同"是恒真的（恒空实现也能满足）—— γ-2 失去分辨力',
+  )
+  for (let index = 1; index < family.length; index += 1) {
+    assert.equal(
+      familyExits[index], familyExits[0],
+      `★ γ-2 失败（裁决）：同一段写域的两种写法给了**不同裁决** ——\n`
+      + `    · ${JSON.stringify(family[0])} ⇒ ${familyExits[0]}\n`
+      + `    · ${JSON.stringify(family[index])} ⇒ ${familyExits[index]}\n`
+      + '★ 两边只差**格式**（尾斜杠 / `./` 前缀 / 首尾空白）—— 那是**写法**，不是工作。',
+    )
+    assert.deepEqual(
+      familyReadouts[index], familyReadouts[0],
+      `★ γ-2 失败（读数）：同一段写域的两种写法给了**不同读数** ——\n`
+      + `    · ${JSON.stringify(family[0])} ⇒ ${JSON.stringify(familyReadouts[0])}\n`
+      + `    · ${JSON.stringify(family[index])} ⇒ ${JSON.stringify(familyReadouts[index])}\n`
+      + '★ 裁决相同还不够：**读数**也必须相同 —— 否则内部键没被真正归一化，'
+      + '只是碰巧落在同一个出口上。',
+    )
+  }
+
+
+  /**
+   * ── ★★ 这两条把"两个落点"钉在案上 —— 它们是**读数**，不是"同裁"断言 ─────────────
+   *
+   *   ★ γ 之后本臂**不再**要求 `a.exit === b.exit`（理由见上面的如实降级）——
+   *     而这两条断言**仍然必须留着**：它们把 MEASURED 的那对读数
+   *     （前者 ok、后者 blocked）写死，否则"两者不同裁"这件事会变成
+   *     一句没人能复核的**注释**。
+   *
+   *   ★★ 而它们**同时**是 γ-1 的第二个入口：`a` 与 `b` 只差一个**写域条目**
+   *     （具名条目逐字相同）⇒ 它们的差异**只能**来自那个写域，
+   *     不许来自"列了几个具名文件"。
+   *
+   *   ★ 一个"对**所有**输入都说 ok"的实现会被下面第二条红掉 ——
+   *     所以本臂没有退化成恒真。
+   */
+  assert.equal(
+    a.exit, 'ok',
+    '★ `["src/registry.ts","src/index.ts"]` 落在 ok —— 这两条都是**具名文件**'
+    + '（`declaresScope` 为 false），而它们**互不覆盖** ⇒ 它们自己也不开火。\n'
+    + '★ 这与臂 3 的 p1/p4/p5/p7 是同一条口径（它们形状相同）⇒ 若这里变成 blocked，'
+    + '臂 3 会在同样的形状上红 6 条。',
+  )
+  assert.equal(
+    b.exit, 'blocked',
+    '★ `["src/registry.ts","src/index.ts","src/"]` 必须 blocked —— '
+    + '那一份多了一个**写域声明** `"src/"`，而 γ 说：**写域条目一律开火**。\n'
+    + '   ★ 它**不许**因为"`src/registry.ts` 以 `"src/"` 开头 ⇒ 覆盖"而被豁免 ——'
+    + ' 判据**不读盘**，"这个目录下有没有**未列出的**路径"在字符串层面**推不出来**。\n'
+    + '   ★★ 而这一对**不同裁**，正是本臂**撤掉**"同裁"断言的原因（如实降级）——'
+    + ' 见上面那段"★ 本臂不再断言什么"。★ 不许把它读成"已修好"。',
   )
 
   /**
    * ★ 第二条半边：D 给出的信息**比 C 少**，所以它不该被判得更"确定"。
    *   ★ 这里**不断言** D 应当是 ok 还是 unmeasured（那取决于产品想怎么定义"目录条目"）——
    *     只断言那个**单调性**：information(D) < information(C) ⇒ certainty(D) <= certainty(C)。
+   *   ★★ 在裁定 B 之下 C 是 ok、D 是 blocked，所以这条半边**仍然成立**。
    */
   assert.notEqual(
     d.exit, 'ok',
     '★ 一个**只给目录、不指名任何文件**的 inScope 被判成了 ok（= "它原子"）——\n'
     + '   而它比 ["src/a.ts"] 给出的信息**更少**。信息更少却判定更确定，是判据读错了东西。',
+  )
+
+  /**
+   * ── ★★★ 已知边界（★ γ 明令：这条性质**由已知边界承担**，一个字都不许含糊）─────────
+   *
+   *   "**是否穷尽**"这一类问题在**不读盘**的判据上**做不到**：
+   *
+   *     `['src/registry.ts','src/index.ts']`  —— 没写写域，落 ok
+   *     `['src/','src/x/']`                  —— 写了两个写域，落 blocked
+   *
+   *   ★ 而这两条**不是**"一条穷尽、一条不穷尽"的区分 —— 判据无从知道穷尽与否。
+   *     ⇒ 它判的是**声明面有没有出现写域**，不是"盘上是不是只有那些文件"。
+   *
+   *   ★★ γ 的**本意**：两个写域 = 两条要求 ⇒ 都进清单；而"**写域被写域覆盖**"
+   *     （哪条真的被更深的写域收进去了）这个区分**需要读盘** ⇒ 判据**做不到**它。
+   *
+   *     MEASURED（★ 逐条实测，别照抄一句更漂亮的话）：
+   *       `uncoveredDirectoryPrefixes(['src/','src/x/'])` ⇒ `['src','src/x']`（**两个键**）
+   *       理由文本 ⇒ `... names 2 directory prefix(es) ("src/", "src/x/") ...`
+   *       ⇒ ★ **两条都报**，**不是**"只报最深那条"。
+   *       ★ 为什么"只报最深"做不到：那需要知道 `src/` 下的 `src/x/` 是否已被收进去 ——
+   *         即"盘上还有没有别的" ⇒ 读盘。⇒ 那就违反了性质 1。
+   *
+   *   ★ 而**这不是假阴性**：在 γ 之下它不是缺陷，
+   *     而是"**判据不读盘**"这条**不可协商性质**的直接后果。
+   */
+  const namedOnly = await judge(contract({ id: 'edge-named', inScope: ['src/registry.ts', 'src/index.ts'], verify: ['pnpm verify'] }))
+  const scopeOnly = await judge(contract({ id: 'edge-scope', inScope: ['src/', 'src/x/'], verify: ['pnpm verify'] }))
+  console.log(`    ℹ 已知边界·无写域声明 ⇒ ${namedOnly.exit}   有写域声明 ⇒ ${scopeOnly.exit}`)
+  assert.equal(
+    namedOnly.exit, 'ok',
+    '★ 无写域声明 ⇒ 按具名文件判 ⇒ ok（与臂 3 同口径）',
+  )
+  assert.equal(
+    scopeOnly.exit, 'blocked',
+    '★ 有写域声明 ⇒ 一律开火 ⇒ blocked（γ：写域条目一律开火）',
+  )
+  /**
+   * ★★ 而"同一条规则"这件事在这里被显式钉住：两条输入的裁决**不同**，
+   *   而差异的**唯一**来源是"有没有写域声明" —— 不是"谁更穷尽"
+   *   （那个判据**无从知道**，因为它**不读盘**）。
+   */
+  assert.notEqual(
+    namedOnly.exit, scopeOnly.exit,
+    '★ 这一条**故意**断言两者裁决不同 —— 而它不是"穷尽 vs 不穷尽"的区分，\n'
+    + '   而是"声明面里有没有写域"的区分：判据**不读盘**，所以它判不了穷尽。\n'
+    + '   ★ 若这里相等，说明写域这个信号整个失效了（那才是真的坏）——\n'
+    + '     但**不要**把它读成"判据能分辨穷尽"：它不能，那是已知边界。',
+  )
+
+  /**
+   * ★★ γ 明令的**已知边界**读数：同级写域 —— `['src/','src/x/']` **两条都开火**。
+   *
+   *   ★ "两个写域 = 两条要求"：**写域被写域覆盖**的区分**需要读盘**，
+   *     判据做不到 ⇒ 它把两条**都**报出来（读数两个键），而裁决仍然只是 blocked。
+   *   ★ 这一条**故意**不断言"只报 src/x" —— 那样写就是**替一个不读盘的判据
+   *     断言了一件它无从知道的事**（"src/ 下没有别的写域，且它已被 src/x/ 完全覆盖"）。
+   */
+  assert.deepEqual(
+    uncoveredOf(['src/', 'src/x/']), ['src', 'src/x'],
+    '★ 已知边界：同级写域 ⇒ **两条都开火**（读数两个键，理由里两条都出现），裁决取 `.length > 0` ⇒ blocked。\n'
+    + '   ★ "写域被写域覆盖"的区分**需要读盘**，判据做不到 —— 所以它**不**承诺"只报最深那条"。\n'
+    + '   ★ 若这里变成 `[\'src/x\']`，说明有人把"写域被写域覆盖"也做进了覆盖判定 ——\n'
+    + '     那需要**读盘**，会违反契约 §2 性质 1（臂 6c 静态钉着它）。',
+  )
+
+  /**
+   * ★★ 而"具名文件多寡不改变裁决"这件事，在**这一对**上也有一个显式读数 ——
+   *   这是 γ-1 的同宗旨、更**具体**的那块（`['src/x/','src/x/y.ts']` vs
+   *   `['src/x/','src/x/z.ts']`：换掉具名文件 ⇒ 裁决与读数都不变）。
+   */
+  const namedY = uncoveredOf(['src/x/', 'src/x/y.ts'])
+  const namedZ = uncoveredOf(['src/x/', 'src/x/z.ts'])
+  console.log(`    ℹ 具名文件多寡：['src/x/','src/x/y.ts'] ⇒ ${JSON.stringify(namedY)}   ['src/x/','src/x/z.ts'] ⇒ ${JSON.stringify(namedZ)}`)
+  assert.deepEqual(
+    namedY, namedZ,
+    '★ 换掉那个具名文件（`y.ts` → `z.ts`）读数就变了 ⇒ 具名条目在产生**额外信号**，'
+    + '而 γ 说它**不许**（写域条目一律开火，具名文件不产生额外信号）。',
+  )
+  assert.deepEqual(
+    namedY, ['src/x'],
+    '★ `[\'src/x/\',\'src/x/y.ts\']` ⇒ 读数是 `[\'src/x\']`：\n'
+    + '   · `\'src/x/\'` 是**写域键** ⇒ 进读数（它是"一段没说清的面"）；\n'
+    + '   · `\'src/x/y.ts\'` 是**具名文件键** ⇒ **不进**读数（它是一个**点**，不是面）——\n'
+    + '     判据**不读盘**，所以它没有理由把"某个具名文件"也当成一段写域。\n'
+    + '   ★ 可见"写域条目多寡"决定读数，"具名条目"不决定 —— 这就是 γ 的口径。',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 4b ★★★：同一目录的两种形态（`src/` 与 `src`）必须同裁，且各自独立可判
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂是 t3 的验收项：它钉的是**归一化**本身 ──────────────────────────────────
+ *
+ * ── 要说什么 ─────────────────────────────────────────────────────────────────
+ *
+ *   同一个目录写成 `'src/'` 与写成 `'src'`（不带斜杠）是**同一件工作**
+ *   ⇒ 判据必须给**同一个裁决**。★ 而这正是旧实现做不到的那件事：
+ *   旧信号判的是**字符串最后一个字符**，于是 `'src/'` 红、`'src'` 绿。
+ *
+ * ── 三块，缺一块本臂就是假的 ───────────────────────────────────────────────────
+ *
+ *   ① **成对同裁**（核心）：逐条循环对照两种写法 ⇒ `assert.equal(withSlash.exit, withoutSlash.exit)`
+ *   ② ★ **反向半边**：缺了它，①在一个"什么都返回空"的实现上**照样绿**
+ *      ⇒ 所以单独拿 `uncoveredDirectoryPrefixes` 做一次读数对照，
+ *        并断言那个读数**不是恒 0**
+ *   ③ ◆ **反向突变**：在夹具里**局部复制**一份 lib 源码、把覆盖判定改坏，
+ *      看判据立刻变成什么形状 —— 这一半问的是"覆盖判定到底有没有在起作用"
+ *      （★ 实测的方向是：改坏之后它**多拦**，也就是开始误报；而不是"放过"。
+ *
+ * ★ 关于 ② 的那个"不是恒 0"：`uncoveredDirectoryPrefixes(['src/a.ts','src/'])`
+ *   必须 `> 0`（`'src'` 被 `'src/a.ts'` 覆盖吗？**不** —— `'src/a.ts'` 不以
+ *   `'src' + '/'` 开头吗？★ 它**是**以 `'src/'` 开头的 ⇒ 所以它**是**被覆盖的）。
+ *   ⇒ 所以这里用一份**真的没被覆盖**的输入：`['src/a.ts','src/newdir/']`
+ *     ⇒ 读数必须是 `['src/newdir']`，非空。
+ *   ★ 而"两种写法读数相等"这句话在两个读法上都成立：
+ *     被覆盖的那种（`[] === []`）与没被覆盖的那种（`['src/newdir'] === ['src/newdir']`）。
+ *     ② 钉的是**后者**，因为前者在恒空实现上也是真的。
+ */
+
+/** 跑一次判据，同时把"读数"也取出来（`gate` 的 ok 分支才有 `atomicityReadout`）。 */
+async function judgeWithReadout(task) {
+  const verdict = await judge(task)
+  let readout
+  try {
+    const raw = await GATE.gate({ task })
+    readout = raw?.atomicityReadout ?? null
+  } catch { readout = null }
+  return { ...verdict, readout }
+}
+
+test('臂 4b ★★★ 同一目录的 `src/` 与 `src` 必须同裁 —— 且各自独立可判（不是恒空实现）', async () => {
+  /**
+   * ── ① 成对同裁：逐条对照"同一件工作的两种写法"────────────────────────────────
+   *
+   * ★ 每一对里，`…/` 与 `…` 的差别**只有那个尾斜杠** —— 别的条目逐字相同。
+   * ★ 而这些对**仍然同裁**（B 之后落点变了，但"同裁"没变）：
+   *   两种写法归一化后是**同一个键集** ⇒ 它们必然落在同一个裁决上。
+   */
+  const pairs = [
+    ['改两个已有文件 + 目录条目（写域）', ['src/registry.ts', 'src/index.ts', 'src/'], ['src/registry.ts', 'src/index.ts', 'src']],
+    ['只给一个目录（写域）', ['src/'], ['src']],
+    ['单文件 + 目录（写域）', ['src/a.ts', 'src/'], ['src/a.ts', 'src']],
+    ['跨目录的两个面（两个写域）', ['src/x/', 'docs/y/'], ['src/x', 'docs/y']],
+  ]
+
+  for (const [label, withSlashScope, withoutSlashScope] of pairs) {
+    const withSlash = await judge(contract({ id: `pair-${label}`, inScope: withSlashScope, verify: ['pnpm verify'] }))
+    const withoutSlash = await judge(contract({ id: `pair-${label}`, inScope: withoutSlashScope, verify: ['pnpm verify'] }))
+    console.log(`    ℹ ${label.padEnd(30)} '…/' ⇒ ${withSlash.exit.padEnd(10)} '…' ⇒ ${withoutSlash.exit}`)
+    assert.equal(
+      withSlash.exit, withoutSlash.exit,
+      `★ 【${label}】同一件工作的两种写法裁决不同：\n`
+      + `    · ${JSON.stringify(withSlashScope)}   ⇒ ${withSlash.exit}\n`
+      + `    · ${JSON.stringify(withoutSlashScope)} ⇒ ${withoutSlash.exit}\n`
+      + '★ 两边只差一个尾斜杠 —— 那是**写法**，不是工作。\n'
+      + '  若判据判的是"这个目录下有没有说清"，两者归一化后是**同一个键集**，必须同裁。',
+    )
+  }
+
+  /**
+   * ★★ ②（t3-R2 按裁定 B 更新了期望读数）────────────────────────────────────────────
+   *
+   *   B 之后 `uncoveredDirectoryPrefixes` 的口径是：
+   *     · **写域键**（`declaresScope` 真）⇒ **无条件**进读数（**不看**覆盖）；
+   *     · **具名文件键** ⇒ 只在**没被覆盖**时进读数。
+   *
+   *   ⇒ 所以"被覆盖 ⇒ 读数为空"这条**只在具名文件键上**还成立：
+   */
+  const uncoveredOf = (scope) => GATE.uncoveredDirectoryPrefixes(scope)
+  assert.equal(
+    typeof uncoveredOf, 'function',
+    '★ `uncoveredDirectoryPrefixes` 必须被导出（它是本修法的读数装置，不是内部细节）',
+  )
+
+  /**
+   * ★ 具名文件被更宽的写域覆盖 ⇒ 它**不进**读数（★ 覆盖判定在 B 之下**仍然活着**）。
+   *   `['src/registry.ts','src/']`：`'src/registry.ts'` 是具名文件、被写域键 `'src'`
+   *   覆盖 ⇒ 它不进读数；而 `'src'` 是写域 ⇒ **它进** ⇒ 读数是 `['src']`。
+   *
+   *   ★ 改写前这里期望的是 `[]`（口径 C：写域被覆盖就不算）—— 那已被裁定 B 撤销。
+   *     ⇒ 而"两种写法的读数必须相同"这条**没变**（归一化仍然是同一个键）。
+   */
+  const coveredWithSlash = uncoveredOf(['src/registry.ts', 'src/'])
+  const coveredWithoutSlash = uncoveredOf(['src/registry.ts', 'src'])
+  console.log(`    ℹ 读数（含写域）    '…/' ⇒ ${JSON.stringify(coveredWithSlash)}   '…' ⇒ ${JSON.stringify(coveredWithoutSlash)}`)
+  assert.deepEqual(coveredWithSlash, coveredWithoutSlash, '★ 同一形状：两种写法的读数必须相同（归一化生效）')
+  assert.deepEqual(
+    coveredWithSlash, ['src'],
+    '★ `[\'src/registry.ts\',\'src/\']` 的读数必须是 `[\'src\']` —— 裁定 γ：\n'
+    + '   · `\'src/\'` 是**写域键** ⇒ 进读数（它是"一段没说清的面"）；\n'
+    + '   · `\'src/registry.ts\'` 是**具名文件键** ⇒ **不进**读数（它是一个**点**，不是面）。\n'
+    + '   ★ 若读数是 `[]`，说明写域开火被退回成了口径 C（写域可被更具体声明豁免）；\n'
+    + '     若读数是 `[\'src\',\'src/registry.ts\']`，说明具名文件键被错误地收进了清单。',
+  )
+
+  /**
+   * ★★ 而这一半是防恒空的那一半：**写域**的形状读数必须**非空**。
+   *   `['src/a.ts','src/newdir/']`：`'src/a.ts'` 是**具名文件** ⇒ 不进读数；
+   *   而 `'src/newdir'` 是**写域** ⇒ 进读数 ⇒ 读数是 `['src/newdir']`。
+   *
+   * ★ 缺了这一断言，"两种写法都返回空"这件事就是被一个"什么都返回空"的实现做出来的 ——
+   *   而那正是本臂 ① 恒真的那种退化。
+   */
+  const openWithSlash = uncoveredOf(['src/a.ts', 'src/newdir/'])
+  const openWithoutSlash = uncoveredOf(['src/a.ts', 'src/newdir'])
+  console.log(`    ℹ 读数（含写域）    '…/' ⇒ ${JSON.stringify(openWithSlash)}   '…' ⇒ ${JSON.stringify(openWithoutSlash)}`)
+  assert.deepEqual(openWithSlash, openWithoutSlash, '★ 同一形状：两种写法的读数必须相同（归一化生效）')
+  assert.deepEqual(
+    openWithSlash, ['src/newdir'],
+    '★ `[\'src/a.ts\',\'src/newdir/\']` 的读数必须是 `[\'src/newdir\']` —— 裁定 γ：\n'
+    + '   清单里**只收写域键**（`\'src/newdir\'`），**不收**具名文件键（`\'src/a.ts\'`）。\n'
+    + '   ★ 空读数说明写域开火没了；出现 `\'src/a.ts\'` 说明具名文件键被收了进来 ——\n'
+    + '     而那会让**真实 94 条语料全部 blocked**（实测：ok 0 / blocked 94），'
+    + '     即判据恒红（t38 花整轮修掉的病）。',
+  )
+  assert.ok(
+    openWithSlash.length > 0,
+    '★ 读数**不是恒 0**：否则上面的"两种写法读数相等"是被"什么都返回空"实现的（本臂 ① 会恒真）',
+  )
+
+  /**
+   * ── ◆ ③ 反向突变（★ t3-R2 按**最终裁定 γ** 重新选点，理由见下）──────────────────
+   *
+   * ── ★★★ 为什么必须重新选点（两轮都撞到同一件事，这不是"把本块改弱了"）────────────
+   *
+   *   · 口径 C 时本块用 `['src/a.ts','src/x/','src/x/y.ts']`（真实现 ok / 突变 blocked）。
+   *   · 裁定 B 时那一对已经**两边都 blocked** ⇒ 失去区分度，我改成
+   *     "覆盖恒 false ⇒ 读数变长"。
+   *   · ★★ 而**最终裁定 γ** 把返回值收成 `keys.filter((key) => scopeKeys.has(key))`
+   *     —— 覆盖判定（`isCovered`）**不再出现在返回值里**，它成了**死代码**。
+   *     ⇒ 实测：把 `isCovered` 改成恒 false，**读数与裁决一个字符都不变**
+   *       ⇒ 那个突变**没有区分度**了，留着它就是一条**恒绿**的假臂。
+   *
+   * ── ★ 新的选点：突变**真正在裁决里的那个谓词** —— `declaresScope` ────────────────
+   *
+   *   γ 之下"裁决 = 写域键进清单"，所以**唯一**能推动裁决的就是 `declaresScope`。
+   *   ⇒ 把它改成**恒真**（每条声明都算写域）⇒ 清单变成"所有键" ⇒
+   *     `['src/a.ts']` 这类**具名文件**也会开火 ⇒ 判据开始**多报**。
+   *
+   *     真实现（declaresScope 正常）⇒ `['src/a.ts']` ⇒ 读数 `[]`   ⇒ **ok**
+   *     突变版（declaresScope 恒真）⇒ `['src/a.ts']` ⇒ 读数 `['src/a.ts']` ⇒ **blocked**
+   *
+   *   ★ 而"该拦的仍然被拦"那一半由 `['src/']` 钉住：写域键**无论突变与否**都开火
+   *     ⇒ 真实现与突变版**都** blocked ⇒ 判据不是"恒不拦"。
+   *   ★ 这一块因此比原来**更强**：它突变的是**裁决真正依赖的那一个谓词**。
+   *
+   * 做法（★ 本任务 inScope 只有这一个 scripts/ 文件，**不许**改 `lib/**` ——
+   *   那会污染别人同时跑的夹具 ⇒ 用**进程内局部复制**）：
+   *
+   *   ① 从磁盘读 `lib/gates/contract/task-atomicity.js` 的**源码文本**；
+   *   ② 用**正则**把 `declaresScope` 改坏（恒真 ⇒ 每条都是写域）；
+   *      ★ 替换不中时 `assert.fail` —— 静默不中会让本臂恒真；
+   *   ③ 写成临时文件，用**带 cache-busting 查询串**的动态 import 加载；
+   *   ④ `try/finally` 删掉临时文件（不许留垃圾在树里）；
+   *   ⑤ 断言：**具名文件在真实现上放行、在突变版上被拦**（裁决真的由这个谓词驱动），
+   *      且 `['src/']` **两边都 blocked**（该拦的仍然被拦）。
+   */
+  const libSource = readFileSync('lib/gates/contract/task-atomicity.js', 'utf8')
+  /**
+   * ★ `declaresScope` 的**函数体第一行**（编译后）形如：
+   *     export function declaresScope(entry) {
+   *         const raw = entry.trim().replace(/\\/gu, '/');
+   * ⇒ 在函数体开头插入 `return true;`（恒真 ⇒ 每条声明都算写域）。
+   */
+  const MUTATION = /(export function declaresScope\(entry\) \{\n)/u
+  if (!MUTATION.test(libSource)) {
+    /**
+     * ★ 退化成源码文本断言（brief §8 明令：**不许静默跳过**，并要如实写明原因）。
+     *   走到这里说明编译产物换了形状（例如被 esbuild 重写）⇒ 文本替换不再可靠。
+     */
+    console.log('    ℹ 突变半边退化成【源码文本断言】：编译产物里找不到 `declaresScope` 的函数头')
+    assert.match(
+      libSource, /declaresScope/u,
+      '★ `declaresScope` 在编译产物里**必须**存在（γ 之下它是裁决唯一依赖的谓词）—— '
+      + '★ 本臂退化成文本断言，因为它的函数头在 lib 文本里找不到 '
+      + '（编译产物换了形状 ⇒ 进程内文本替换不再可靠）',
+    )
+    return
+  }
+
+  /**
+   * ★ 临时文件写在**本文件旁边**（`scripts/`）而不是 `lib/**` ——
+   *   只有这样才能保证"跑完删掉、不污染别人的夹具"。
+   *
+   * ★★ 而写在 `scripts/` 就带来第二件事：编译产物里那句
+   *   `import ... from '../registry.js'` 是相对 **`lib/gates/contract/`** 写的
+   *   ⇒ 从 `scripts/` 解析会指向仓库根下的 `registry.js`（**不存在**）。
+   *   ⇒ 所以本臂要把那句相对路径**一并改写成指向 `lib/gates/`**。
+   *   ★ 这一步**也是 `assert.notEqual` 盯着的**（替换不中 ⇒ 立刻红，不静默）。
+   */
+  /**
+   * ★★ 而编译产物里那句 import 用的是**双引号**（`tsc` 的产物风格：
+   *   `import { blocked, unmeasured } from "../registry.js";`）——
+   *   所以这条正则**两种引号都认**（只认单引号会让本臂在"替换不中"上红，
+   *   而那是夹具写错了，不是判据有问题）。
+   */
+  const IMPORT_REWRITE = /from (['"])\.\.\/registry\.js\1/u
+  const stamp = `${process.pid}-${Date.now()}`
+  const tempPath = new URL(`./.mutant-task-atomicity-${stamp}.mjs`, import.meta.url)
+  const mutatedSource = libSource
+    /** ★ 恒真：每条声明都算"一段写域" ⇒ 具名文件也会开火 ⇒ 判据开始多报。 */
+    .replace(MUTATION, '$1    return true;\n')
+    .replace(IMPORT_REWRITE, "from '../lib/gates/registry.js'")
+  assert.notEqual(
+    mutatedSource, libSource,
+    '★ `declaresScope` 恒真的替换没有生效 —— 那本臂的"突变版会多拦"就是恒假的（静默失败）',
+  )
+  assert.match(
+    mutatedSource, /return true;/u,
+    '★ 突变体里没插进 `return true;` —— 突变没生效，本臂会恒绿',
+  )
+  assert.match(
+    mutatedSource, /from '\.\.\/lib\/gates\/registry\.js'/u,
+    '★ 相对 import 的改写没有生效 —— 突变模块会解析不到 `registry.js` 而抛 ERR_MODULE_NOT_FOUND，'
+    + '那会让本臂的突变半边变成"因为报错所以红"，而不是"因为谓词被改坏所以多拦"',
+  )
+
+  const { writeFileSync, unlinkSync } = await import('node:fs')
+  let mutated
+  let mutatedExits
+  try {
+    writeFileSync(tempPath, mutatedSource, 'utf8')
+    /** ★ cache-busting 查询串：同一个进程里多次 import 必须拿到**新的**模块实例。 */
+    mutated = await import(`${tempPath.href}?v=${stamp}`)
+    const judgeMutated = async (scope) => {
+      const raw = await mutated.gate({ task: contract({ id: 'm', inScope: scope, verify: ['pnpm verify'] }) })
+      return exitOf(raw)
+    }
+    mutatedExits = {
+      /** ★ 具名文件 —— 真实现放行，而变异体（写域恒真）会拦它。 */
+      namedFile: await judgeMutated(['src/a.ts']),
+      /** ★ 真写域 —— 两边都该拦（判据不是"恒不拦"）。 */
+      stillBlocked: await judgeMutated(['src/']),
+    }
+  } finally {
+    /** ★ 不许留垃圾在树里（无论上面抛没抛都要删）。 */
+    try { unlinkSync(tempPath) } catch { /* 已经不在盘上就算了 */ }
+  }
+
+  const realExits = {
+    namedFile: (await judge(contract({ id: 'r1', inScope: ['src/a.ts'], verify: ['pnpm verify'] }))).exit,
+    stillBlocked: (await judge(contract({ id: 'r2', inScope: ['src/'], verify: ['pnpm verify'] }))).exit,
+  }
+  console.log(`    ℹ 真实现   ['src/a.ts'] ⇒ ${realExits.namedFile}   ['src/'] ⇒ ${realExits.stillBlocked}`)
+  console.log(`    ℹ 突变版（declaresScope 恒真）同一组输入 ⇒ ${mutatedExits.namedFile}   ${mutatedExits.stillBlocked}`)
+
+  /**
+   * ★★ 这几条断言合起来才是"`declaresScope` 真的在驱动裁决、而该拦的仍然被拦"：
+   *
+   *   ① 真实现：`['src/a.ts']`（**具名文件**，不是写域）⇒ 读数空 ⇒ **ok**；
+   *   ② 突变版（写域恒真）：同一个输入 ⇒ `'src/a.ts'` 也被算成一段写域
+   *      ⇒ 读数 `['src/a.ts']` ⇒ **blocked**。★ 这就证明裁决**真的**由这个谓词驱动；
+   *   ③ 而 `['src/']`（真写域）在**两边都 blocked** ⇒ 判据不是"恒不拦"。
+   *
+   *   ★ 若 ① 与 ② 相同，说明 `declaresScope` 没有在参与裁决（本块恒真）。
+   */
+  const mutatedReadout = mutated.uncoveredDirectoryPrefixes(['src/a.ts'])
+  const realReadout = GATE.uncoveredDirectoryPrefixes(['src/a.ts'])
+  console.log(`    ℹ 读数       真实现 ⇒ ${JSON.stringify(realReadout)}   突变版 ⇒ ${JSON.stringify(mutatedReadout)}`)
+  assert.deepEqual(
+    realReadout, [],
+    '★ 真实现：`\'src/a.ts\'` 是**具名文件**（`declaresScope` 为 false）⇒ 不进清单 ⇒ 读数为空',
+  )
+  assert.deepEqual(
+    mutatedReadout, ['src/a.ts'],
+    '★ 突变版（`declaresScope` 恒真）：`\'src/a.ts\'` 也被当成一段写域 ⇒ 进清单。\n'
+    + '   ★ 若这里与真实现相同，说明 `declaresScope` 根本没在参与裁决（本块恒真）。',
+  )
+  assert.notDeepEqual(
+    realReadout, mutatedReadout,
+    '★ 把 `declaresScope` 改成恒真之后，读数**没有变** —— '
+    + '那说明那个谓词根本没在起作用，本块是恒真的',
+  )
+  assert.equal(
+    realExits.namedFile, 'ok',
+    '★ 真实现：`[\'src/a.ts\']`（只有一个具名文件、无写域声明）必须 **ok** —— '
+    + '★ 这条同时是**恒红防护**：若它 blocked，则真实 94 条语料会**全部** blocked（实测 ok 0 / blocked 94）。',
+  )
+  assert.equal(
+    mutatedExits.namedFile, 'blocked',
+    '★ 突变版（`declaresScope` 恒真）把同一个输入判成 blocked ⇒ 那个谓词确实在驱动裁决',
+  )
+  assert.equal(
+    realExits.stillBlocked, 'blocked',
+    '★ `[\'src/\']` 在真实现上必须 blocked —— 它是一段写域，是真信号',
+  )
+  assert.equal(
+    mutatedExits.stillBlocked, 'blocked',
+    '★ 而突变版对它也仍然 blocked ⇒ 判据不是"恒不拦"',
   )
 })
 

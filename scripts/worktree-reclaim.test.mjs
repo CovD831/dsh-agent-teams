@@ -30,6 +30,16 @@ import { join } from 'node:path'
 import { basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ★ 递归标记的唯一出处（见 `scripts/fixtures/nested-test-env.mjs`）。
+ *
+ * 本文件迁移前在 `runReclaimArm` 里有一份就地循环，删 `NODE_TEST*` +
+ * `NODE_OPTIONS`；意图原样保留，只是不再有第二份实现。
+ * ★ 这里同样是**构建一份子进程 env**（不改本进程 `process.env`）⇒ 用纯的
+ *   `recursionFreeEnv()`，无副作用、不欠还原。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
+
 import {
   judgeWorktree,
   planReclaim,
@@ -1216,17 +1226,24 @@ function runReclaimArm({ shape, env = {}, hook = false, secondTransition = false
   writeFileSync(guide, RECLAIM_ARM_CHILD)
   try {
     /**
-     * ── ★★ 必须清掉 `NODE_TEST*` / `NODE_OPTIONS` ─────────────────────────────
+     * ── ★★ 必须清掉递归标记（`NODE_TEST*` / `NODE_OPTIONS`）───────────────────
      *
      * MEASURED（本仓多个夹具记过同一条）：`node --test` 会给子进程种下
      * `NODE_TEST_CONTEXT`，那会让**孙**进程变成"子报告器"而不再打印汇总。
      * 本臂的子进程不是测试套件，但它同样会继承一堆与本次测量无关的环境 ——
      * 清掉它们，让子进程拿到与生产一致的那一份。
+     * ★ 清洗规则搬到了 `scripts/fixtures/nested-test-env.mjs`（唯一出处）；
+     *   `ARM_*` 那几格注入一字未动，换的只是它从哪一份环境起。
      */
-    const childEnv = { ...process.env, ARM_ROOT: RECLAIM_TEST_ROOT, ARM_WORKSPACE: workspace, ARM_SHAPE: shape, ARM_INTEGRATOR_HOOK: hook ? '1' : '0', ARM_SECOND_TRANSITION: secondTransition ? '1' : '0', ...env }
-    for (const key of Object.keys(childEnv)) {
-      if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete childEnv[key]
-    }
+    const childEnv = recursionFreeEnv({
+      ...process.env,
+      ARM_ROOT: RECLAIM_TEST_ROOT,
+      ARM_WORKSPACE: workspace,
+      ARM_SHAPE: shape,
+      ARM_INTEGRATOR_HOOK: hook ? '1' : '0',
+      ARM_SECOND_TRANSITION: secondTransition ? '1' : '0',
+      ...env,
+    })
     /**
      * ★ 关掉重定向：`execFileSync` 的 `stdio: 'pipe'` 会在**子进程被信号杀掉**时
      *   丢掉全部输出 ⇒ 而"没有输出"与"子进程没跑"同形。这里**捕获**它，
