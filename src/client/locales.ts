@@ -53,6 +53,8 @@ export const zh = {
   'task.status.failed': '失败',
   'task.status.cancelled': '已取消',
   'task.status.notRun': '未执行',
+  /* t16: why an already-spawned member's model cannot be changed. */
+  'member.model.sealedReason': '该成员已启动，模型已冻结进它的会话描述符；现在改只会被记录而不会生效 —— 请新建一个替代成员',
   'member.state.working': '工作中',
   'member.state.failed': '有失败',
   'member.state.waiting': '等待',
@@ -271,6 +273,7 @@ export const en = {
   'task.status.failed': 'Failed',
   'task.status.cancelled': 'Cancelled',
   'task.status.notRun': 'Not run',
+  'member.model.sealedReason': 'Already spawned: this model is frozen into its session descriptor, so changing it now would be recorded without being applied - spawn a replacement member instead',
   'member.state.working': 'Working',
   'member.state.failed': 'Has failures',
   'member.state.waiting': 'Waiting',

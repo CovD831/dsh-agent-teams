@@ -50,6 +50,7 @@ export declare const zh: {
     'task.status.failed': string;
     'task.status.cancelled': string;
     'task.status.notRun': string;
+    'member.model.sealedReason': string;
     'member.state.working': string;
     'member.state.failed': string;
     'member.state.waiting': string;
@@ -265,6 +266,7 @@ export declare const en: {
     'task.status.failed': string;
     'task.status.cancelled': string;
     'task.status.notRun': string;
+    'member.model.sealedReason': string;
     'member.state.working': string;
     'member.state.failed': string;
     'member.state.waiting': string;

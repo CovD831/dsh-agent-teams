@@ -121,7 +121,7 @@ export function WorkspaceActivity({ sessionId, useTabInfo, t, state, modelDirect
           <button onClick={backToChat}>{t('workspace.back')}</button>
         </section> : <>
           <TeamSection key={`${sessionId}:${selected.teamId}`} team={selected} workspace historic={history}
-            modelDirectory={selected.phase === 'staged' ? modelDirectories.directoryFor(sessionId) : undefined}
+            modelDirectory={history ? undefined : modelDirectories.directoryFor(sessionId)}
             onContinuePlanning={backToChat} onDiscarded={backToChat} onNavigate={openMember} t={t} />
         </>}
       </div>

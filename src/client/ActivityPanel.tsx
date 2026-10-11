@@ -70,7 +70,7 @@ import {
 } from './activity-monitor.ts'
 import { ACTION_ART, LEAD_ART, memberArtUrl } from './artwork.ts'
 import { OPEN_PANEL_EVENT } from './AgentTeamsCard.tsx'
-import { StagingPlanEditor } from './StagingPlanEditor.tsx'
+import { memberModelEditability, MemberModelField, StagingPlanEditor } from './StagingPlanEditor.tsx'
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts'
 import type { AgentTeamsLocaleKey, AgentTeamsTranslate } from './locales.ts'
 import {
@@ -108,6 +108,15 @@ const PANEL_SHIFT_PROPERTY = '--agent-teams-panel-shift'
 const PANEL_CONVERSATION_GAP = 14
 const MOVE_THRESHOLD = 4
 const CAPTAIN_ASSIGNEE = 'captain'
+
+/**
+ * t16: styles for the member model control. ★ Inline rather than a CSS module
+ *   because no stylesheet is inside this task's scope; the values still come
+ *   only from host --dsw-alias-* tokens, so the host theme keeps applying.
+ */
+const MEMBER_MODEL_LINE_STYLE: CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, padding: '2px 6px 0 60px',
+}
 
 type PanelGesture = {
   readonly kind: 'move' | 'resize'
@@ -838,6 +847,8 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                   const memberModel = memberRouteLabel(member)
                   /** Time on the current task: read from durable stamps, never invented. */
                   const clock = memberClock(member, team.tasks, elapsedNow)
+                  /** ★ t16: three-state, read from the snapshot; never guessed. */
+                  const memberModelEditable = memberModelEditability(member)
                   return (
               <div key={member.id || member.name} className={css.memberBlock} data-activity={member.activity} data-selected-member={workspace && selectedAssignee === member.name || undefined}>
                 <span className={css.memberBranch} aria-hidden><span /></span>
@@ -878,11 +889,14 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                     <span className={css.memberLine}>
                       <span className={css.memberName}>{member.name}</span>
                       {member.role !== '' && <span className={css.memberRole}>{member.role}</span>}
-                      {/* Inline member model badge: compact visible label, full route in
-                          title/aria-label (accessible tooltip) and the data-member-model
-                          DOM probe; noninteractive span, no tab stop. */}
+                      {/* ★ t16: the member's model badge stays a read-only probe here.
+                          The EDITABLE control lives below the row (see the member-model
+                          line) because a control cannot nest inside this row button. */}
                       {memberModel !== '' && (
-                        <span className={css.memberModel} role="img" data-member-model={memberModel} title={memberModel} aria-label={memberModel}>
+                        <span className={css.memberModel} role="img" data-member-model={memberModel}
+                          data-member-model-state={memberModelEditable}
+                          title={memberModelEditable === 'sealed' ? t('member.model.sealedReason') : memberModel}
+                          aria-label={memberModel}>
                           {compactModelLabel(memberModel)}
                         </span>
                       )}
@@ -923,6 +937,22 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                     <span className={css.memberCount}>{member.done}/{member.total}</span>
                   </span>
                 </button>
+                {/* ★ t16: the editable model control, OUTSIDE the row button — a button
+                    cannot nest inside a button (browsers silently rewrite that DOM).
+                    Offered only when the member has not been spawned; otherwise a
+                    disabled control carrying the reason, and when the fact is unknown,
+                    nothing at all rather than a control we cannot promise works. */}
+                {memberModelEditable === 'editable' && modelDirectory !== undefined && !discarded && !stopped && (
+                  <div style={MEMBER_MODEL_LINE_STYLE} data-member-model-editable>
+                    <MemberModelField
+                      team={team}
+                      member={member}
+                      modelDirectory={modelDirectory}
+                      disabledReason={undefined}
+                      t={t}
+                    />
+                  </div>
+                )}
                 <div className={css.assignmentLine}>
                   <span className={css.assignmentLabel}>{t(discarded
                     ? 'assignment.discarded'
@@ -1492,9 +1522,9 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
                     <TeamSection
                       key={team.teamId}
                       team={team}
-                      modelDirectory={team.phase === 'staged'
-                        ? modelDirectories.directoryFor(team.captainSessionId as SessionId)
-                        : undefined}
+                      modelDirectory={historic
+                        ? undefined
+                        : modelDirectories.directoryFor(team.captainSessionId as SessionId)}
                       onContinuePlanning={returnToComposer}
                       onDiscarded={returnToComposer}
                       onNavigate={navigateToSession}
