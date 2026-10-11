@@ -140,7 +140,12 @@ export declare function settleActivityMonitorTargets(keys: ReadonlySet<string>):
 export declare function subscribeActivitySnapshots(listener: () => void): () => void;
 /** Read the stable shared live/archive snapshot. */
 export declare function getActivitySnapshotsSnapshot(): ActivitySnapshots;
-/** Publish one or both successful state-route responses. */
+/**
+ * Publish one or both successful state-route responses.
+ *
+ * ★★★ 通知的条件是【**内容**变了】，不是【对象换了】（t31）。
+ *   判据见 {@link contentEquals}；"为什么引用比较在这里恒不成立"也写在那一格。
+ */
 export declare function updateActivitySnapshots(update: Partial<ActivitySnapshots>): void;
 /** Poll cadence for the live host snapshot route. */
 export declare const ACTIVITY_POLL_MS = 1000;
