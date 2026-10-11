@@ -13,7 +13,8 @@ import { type RulesLoad } from '../../gates/contract/verify-command.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
-import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '../../types.ts';
+import type { CommandResult, TeamMember, TeamState, TeamTask } from '../../types.ts';
+import type { StallObservation } from '../../types.ts';
 import { CAPTAIN_KEY } from '../../state.ts';
 export declare function withInputSurfaceOnError<T extends {
     execute: (...args: never[]) => unknown;
@@ -692,31 +693,6 @@ export interface FrictionCapture {
     stall?: StallObservation;
 }
 /**
- * ── ★★ C1 的判据结论（三态里的两态 + 缺席）─────────────────────────────────────
- *
- * 由调用方的 {@link observeStall} 算出来，交给 {@link recordFriction} 决定
- * 落【哪一类记录】。
- */
-export interface StallObservation {
-    /** ★ 这是不是"任务已经停住"（= 同一 `(task, gate)` 被拒 ≥2 次）。 */
-    stalled: boolean;
-    /** 这个 `(task, gate)` 被拒的次数（含这一次）。 */
-    count: number;
-    /**
-     * ★ 这个数字代表什么 —— **不许省略**。
-     *
-     *   `repeated`  —— 同一个判据重复拒绝（**这就是判据本身**）
-     *   `first`     —— 第一次被拒（⇒ 还自己解得了）
-     *   `unknown`   —— 判据 id 读不出来 ⇒ **判不了**
-     *
-     * ★ 第三态不许并进前两者：把 `unknown` 读成 `first` 会让"读不到 id"
-     *   变成"它没停"（错的）；读成 `repeated` 会让每一条读不出 id 的拒绝
-     *   都变成卡点（把 207 条又请回来）。
-     *   ⇒ 落 `first`（保守：不惊动人）**并在记录里说清为什么判不了**。
-     */
-    basis: 'first' | 'repeated' | 'unknown';
-}
-/**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
  * 而读台账的人接下来要问的是「**是哪条判据**把它拒了」。
  */
@@ -813,7 +789,38 @@ export declare function sessionEventRefs(session: unknown): {
  *   缺省 2（用户已确认）。★ 读不出数就**回落缺省**，而不是当成 0：
  *   一个坏值会让每一片拒绝都变成卡点（或一条都不变）。
  */
-export declare const STALL_REPEAT_THRESHOLD = 2;
+/**
+ * ── ★★★ C1 的判据【搬了家】（t24）—— 而这里**只转交**，不留第二份实现 ────────────
+ *
+ * 本文件此前**自己实现**了 `observeStall` / `stallRepeatThreshold` /
+ * `STALL_REPEAT_THRESHOLD` / `StallObservation`。它们搬去了 `src/types.ts` ——
+ * 理由在那份长注释里（**判据层要用它，而本文件 import 了 `gates/index.ts`**，
+ * ⇒ 判据要用它就只能复制或成环，两条都不可接受）。
+ *
+ * ── ★★ 为什么这里是 `export … from` 而不是 `import` + `export` ────────────────
+ *
+ * 两者在本文件里**读起来几乎一样**，而它们不是一回事：
+ *   · `export { x } from './y'`  —— **纯转交**，本模块作用域里**没有** `x` 的绑定；
+ *   · `import { x } …; export { x }` —— 多了一个**本地绑定**。
+ *
+ * ★ 而第一条路径还有一个更要紧的性质：它是**重导出**，读的人一眼看得出
+ *   "这东西的真身在别处"。第二条长得像"它住在这里、只是从别处拿的"。
+ *   ⇒ 本队反复记账的那条（**"声明的家"与"真身"必须同形**）在这里的落点是：
+ *     谁将来在本文件里加第二个 `observeStall`，`export … from` 这种写法会当场
+ *     报重复导出，而 `import` + `export` 不会那么明显地挡住他。
+ *
+ * ★★★ 而"**不许有第二份实现**"是一条**可断言**的性质，不是一句忠告：
+ *   `scripts/gate-stall-leaf-home.test.mjs` 臂 3 扫全仓，断言
+ *   "计数判据"这个词只在 `src/types.ts` 里被**实现**过一次。
+ *
+ * ── ★ 而 C1 的调用点**一个字都不用改** ─────────────────────────────────────────
+ *
+ * `src/tools/update-task.ts` import 的是 `'./shared/entities.ts'` 的那几个名字。
+ * 重导出之后它们仍然从这里拿得到，且**类型与运行期绑定都不变**。
+ * ⇒ 见 `scripts/gate-stall-leaf-home.test.mjs` 臂 1（搬家前后逐字同判）。
+ */
+export { STALL_REPEAT_THRESHOLD, stallRepeatThreshold, observeStall, } from '../../types.ts';
+export type { StallObservation } from '../../types.ts';
 /**
  * ── ★★★ C1：两类记录的判别面 ───────────────────────────────────────────────────
  *
@@ -822,6 +829,11 @@ export declare const STALL_REPEAT_THRESHOLD = 2;
  *
  * ★ 两者合流正是本轮要修的缺陷（实测 253 条里 207 条是判据拒绝日志，
  *   而真正让任务停下来的只有 21 条 —— 82% 不是卡点）。
+ *
+ * ★ 它**没有**跟着判据一起搬走：它描述的是**记录的分类**（`recordFriction` 的产物），
+ *   而判据描述的是**任务停没停**。两件事不同轴 —— 判据层不需要知道记录分几类。
+ *   ⇒ 搬到 types.ts 会让判据层多背一个与它无关的概念（而"多背一个"正是
+ *     那条叶子性质最容易被弄脏的方式）。
  */
 export type FrictionRecordClass = 'rejection' | 'blocker';
 /**
@@ -831,26 +843,6 @@ export type FrictionRecordClass = 'rejection' | 'blocker';
  *   而机读那一份用 `class` 字段，不靠这个前缀（代理读数会随措辞漂）。
  */
 export declare const REJECTION_TITLE_PREFIX = "[rejection \u2014 not a blocker] ";
-export declare function stallRepeatThreshold(env?: Record<string, string | undefined>): number;
-/**
- * ── ★★★ 算出这一次拒绝之后任务停没停（C1 的判据本体）────────────────────────────
- *
- * 输入：这个任务**上一次**的 `stall` 读数（`task.stall`，可能缺席）+ 这一次的判据 id。
- * 输出：三态观察（`first` / `repeated` / `unknown`）。
- *
- * ── ★ 为什么密钥是 `(gate, point)` 而不只是 `gate` ──────────────────────────────
- *
- * 判据 id 在注册表里**唯一**（`completion.mutation` 只有一个位置），所以
- * 只按 gate 判就已经够了。★ 而 `point` **也**要一起比，是因为判据 id 读不出来时
- * （`unknown` 那一态）`gate` 是 `undefined`：那时若只比 `undefined === undefined`，
- * **两条毫不相干的、都读不出 id 的拒绝**会被算成"同一个判据拒了两次"。
- * ⇒ 加上 `point`，两处都读不出来时也要求位置相同。
- *   ★ 而它仍然可能把同一个位置上的两条**不同**判据算成一条 —— 所以那条路上
- *     我们落的是 `unknown`（保守：不惊动人），而不是 `repeated`。
- */
-export declare function observeStall(previous: TaskStall | undefined, gate: string | undefined, point: string, 
-/** ★ 这一次之前这个 `(task, gate)` 已经被拒了几次（由任务级读出，可注入）。 */
-priorCount?: number, threshold?: number): StallObservation;
 /**
  * ── ★★★ C1：把这一次拒绝的读数【落进任务】，好让下一次拒绝能跟它比 ────────────────
  *
@@ -1064,4 +1056,3 @@ export declare function restartQueueFrom(tasks: ReadonlyArray<{
 }>): RestartQueueState;
 /** 一句人话（供工具结果与 status 读）。★ 三态措辞必须互不同形。 */
 export declare function restartQueueMessage(state: RestartQueueState): string;
-export {};

@@ -439,6 +439,102 @@ export interface TaskStall {
  *   （"从未被拒"），而"缺席"与"记着一个值"必须不同形（本仓反复记账的那条）。
  */
 export type StallState = 'trying' | 'stalled';
+/**
+ * ── ★★★ C1 的判据本体：这一次拒绝之后，任务**有没有继续往下走** ──────────────────
+ *
+ * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+ *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+ * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被拒 ≥2 次 = 停住了**。
+ *
+ * ── ★★★ 为什么它住在这里（一个 **零 import 的叶子模块**），而不是住在 tools/ ────
+ *
+ * MEASURED（t24，由 t6 的持有者先撞上并逐条复现）：
+ * 本函数原先住在 `src/tools/shared/entities.ts`，于是**判据层没法用它** ——
+ *
+ *     runtime/stall.ts -> tools/shared/entities.ts -> gates/index.ts -> runtime/stall.ts
+ *                                                       ↑ 成环
+ *
+ * 因为 `entities.ts:27` import 了 `gates/index.ts`，而 `gates/index.ts` import 每一条判据。
+ * ⇒ 判据层若要用它，只有两条路：**复制一份**（第二个真相，本仓反复记账的形态）
+ *   或**成环**。两条都不可接受。
+ *
+ * ★ 而本仓有一条**实测出来的不变量**：`grep -rn "from '../../tools" src/gates/` 是空的 ——
+ *   **判据层是一个不 import tools/ 任何东西的纯模块**。这条不变量是承重的（它让判据
+ *   可以在没有 tools 层的情况下单测、且不会与状态层互相锁死）。
+ * ⇒ 所以正确的修法是**把判据搬到双方都能 import 的叶子上**，而不是让判据层破例。
+ *
+ * ★★ 为什么这个叶子是 `types.ts`：它**一个 import 都没有**（本文件是纯类型声明），
+ *   因此谁 import 它都不会成环。而 `TaskStall` / `StallState` **本来就住在这里**
+ *   ⇒ 搬家之后，**类型与它的观察者同处一室**，比原来（类型在 types.ts、判据在
+ *   entities.ts）**更内聚**，而不是更散。
+ *
+ * ★★★ 而这条性质**必须被机械守住**：`types.ts` 之所以是叶子，**只因为**它没有任何
+ *   import。一行 import 就会把它变成图上的一个节点，于是这个环会在**下一层**重新长出来
+ *   （而且长得更隐蔽：报错会指向别的文件）。⇒ 夹具里有一条臂断言本文件**零 import**。
+ *   见 `scripts/gate-stall-leaf-home.test.mjs` 臂 4。
+ *
+ * ── ★★ 为什么"同一个判据"必须是键的一部分 ────────────────────────────────────
+ *
+ * 五个**不同**的判据各拒一次是**五件不同的事**（成员每次都在改，只是每次
+ * 撞上另一条门）。把它们数成一个数字会让"每次都被不同的门拦"读成"卡在同一处"
+ * —— 而那正好是本任务要消灭的那个合流（换成计数版本）。
+ *
+ * ── ★★ 为什么 N 是【可注入】的（本仓教训，逐字）───────────────────────────────
+ *
+ * `docs/PENDING-FRICTION-REFORM.md` §2：「`with-timeout` 那族缺陷连躲三次，
+ * 根因都是『上限是硬编码常量，短测试复现不了』」⇒ N 必须能注入。
+ * ★ 而注入的是**上限**，不是判据本身 —— 判据仍然只有一处实现。
+ * ★ 注入口是环境变量（与 `restartEscapeHatchFromEnv` 同一形态：**明写的、可核的**），
+ *   缺省 2（用户已确认）。★ 读不出数就**回落缺省**，而不是当成 0：
+ *   一个坏值会让每一片拒绝都变成卡点（或一条都不变）。
+ */
+export declare const STALL_REPEAT_THRESHOLD = 2;
+/** ★ `observeStall` 的三态结论（见那里的长注释）。 */
+export interface StallObservation {
+    /** ★ 这是不是"任务已经停住"（= 同一 `(task, gate)` 被拒 ≥N 次）。 */
+    stalled: boolean;
+    /** 这个 `(task, gate)` 被拒的次数（含这一次）。 */
+    count: number;
+    /**
+     * ★ 这个数字代表什么 —— **不许省略**。
+     *
+     *   `repeated`  —— 同一个判据重复拒绝（**这就是判据本身**）
+     *   `first`     —— 第一次被拒（⇒ 还自己解得了）
+     *   `unknown`   —— 判据 id 读不出来 ⇒ **判不了**
+     *
+     * ★ 第三态不许并进前两者：把 `unknown` 读成 `first` 会让"读不到 id"
+     *   变成"它没停"（错的）；读成 `repeated` 会让每一条读不出 id 的拒绝
+     *   都变成卡点（把 207 条又请回来）。
+     *   ⇒ 落 `first`（保守：不惊动人）**并在记录里说清为什么判不了**。
+     */
+    basis: 'first' | 'repeated' | 'unknown';
+}
+/**
+ * 读 N（`AGENT_TEAMS_STALL_REPEAT_THRESHOLD`）。
+ *
+ * ★ 坏值 / 空白 ⇒ **回落缺省**，而不是当成 0（那会让每一片拒绝都变成卡点）
+ *   也不是抛错（一个因为参数没写对就炸的守卫会被关掉）。
+ */
+export declare function stallRepeatThreshold(env?: Record<string, string | undefined>): number;
+/**
+ * ── ★★★ 算出这一次拒绝之后任务停没停（C1 的判据本体）────────────────────────────
+ *
+ * 输入：这个任务**上一次**的 `stall` 读数（`task.stall`，可能缺席）+ 这一次的判据 id。
+ * 输出：三态观察（`first` / `repeated` / `unknown`）。
+ *
+ * ── ★ 为什么密钥是 `(gate, point)` 而不只是 `gate` ──────────────────────────────
+ *
+ * 判据 id 在注册表里**唯一**（`completion.mutation` 只有一个位置），所以
+ * 只按 gate 判就已经够了。★ 而 `point` **也**要一起比，是因为判据 id 读不出来时
+ * （`unknown` 那一态）`gate` 是 `undefined`：那时若只比 `undefined === undefined`，
+ * **两条毫不相干的、都读不出 id 的拒绝**会被算成"同一个判据拒了两次"。
+ * ⇒ 加上 `point`，两处都读不出来时也要求位置相同。
+ *   ★ 而它仍然可能把同一个位置上的两条**不同**判据算成一条 —— 所以那条路上
+ *     我们落的是 `unknown`（保守：不惊动人），而不是 `repeated`。
+ */
+export declare function observeStall(previous: TaskStall | undefined, gate: string | undefined, point: string, 
+/** ★ 这一次之前这个 `(task, gate)` 已经被拒了几次（由任务级读出，可注入）。 */
+priorCount?: number, threshold?: number): StallObservation;
 /** 成员生命周期状态。 */
 export type MemberStatus = 'idle' | 'working' | 'removed';
 /** One team member: a continuable subagent plus its team-side record. */
