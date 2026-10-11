@@ -1423,17 +1423,36 @@ test('★ 臂 27（R3 集合比对臂）：搬动之后**没有**任何渲染事
    *   · 有意去掉的 → 在这里可核（而它的替代也写在下面）；
    *   · 没登记的差异 → 仍然是红的（所以"悄悄删掉一件事实"跑不掉）。
    */
-  const INTENTIONAL_REMOVALS = new Map([
-    // R3：收敛循环那一块整块删掉 —— 而它的轮次读数在 R2 里已经搬到成员行上。
-    ['data-review-loop', '轮次信息由 MemberRow 的 data-member-round 承载（R2）'],
-    ['data-loop-toggle', '展开/收起由成员行自己的 toggle 承载（R2）'],
-    ['data-tracked', '轮次计数由每行的 data-member-round 与轮次行本身承载（R2）'],
-    // R3：进度色块条与图例是同一批数字的第二、三次表述，留一句人话的总结。
-    ['progress.title', 'taskSummary 的那句人话总结仍在（progress.aria / data-progress-summary）'],
-    ['progress.running', 'taskSummary 的 task.summary.running/blockedAndRunning 仍报同一批数字'],
-    ['progress.blocked', 'taskSummary 的 task.summary.blocked 仍报同一批数字'],
-    ['progress.delivered', '团队头的 team.stats.completed（completed/total）报同一个数'],
-  ])
+  /**
+   * ── ★★★ 登记表是**空的**，而这不是退让，是实测的结论 ────────────────────────
+   *
+   * MEASURED（本臂第一次上线时恒红，实测 7 条全被 `neverLost` 挑出）：
+   *
+   * 反向半边判的是"登记了却没丢"，而它的参照集**只从组件面取**
+   * （`headComponents` 明确排除 `locales.ts`）。于是：
+   *
+   *   · 3 条 `data-*`（`data-review-loop` / `data-loop-toggle` / `data-tracked`）
+   *     在 HEAD 里**根本不存在** —— `git grep -c … HEAD -- src/client/` 实测 0 次。
+   *   · 4 条 `progress.*` 各自在 HEAD 的**词典**里出现 2 次，而**现在仍然是 2 次**
+   *     ⇒ 它们**从未被删除**。登记它们等于说"我删了"，而实际什么都没删。
+   *
+   * ⇒ 7 条**全部**是凭空登记：记录了一次从未发生的删除。
+   *
+   * ★ 而它们掩盖的事实是更重要的一条：**R3 是纯搬运，一件事实都没丢。**
+   *   本臂上面那段（`lost` 与 `unexplained`）实测报出的未登记丢失是**空的**，
+   *   而文件级比对也确认 `src/client/` 没有任何文件消失
+   *   （`comm -23 <HEAD 文件列表> <现行文件列表>` 为空；R3 新增的是
+   *   `DependencyGraph.tsx`，代码是**移过去**而不是删掉）。
+   *
+   * ★★ 所以正确的登记表就是空表 —— 而**反向半边必须允许它为空**，
+   *    否则这条臂会强迫作者编造条目来喂饱它。这正是它第一次上线时发生的事：
+   *    一条"白名单不许为空"的断言，配上一条"每条都必须真的丢过"的断言，
+   *    在一个**什么都没删**的搬运任务上，唯一能同时满足两者的做法就是**编造**。
+   *
+   * ⇒ 于是本条臂的判据改成：登记表**可以**为空；而**只要非空**，
+   *   每一条都必须在自己那张面上真的丢过（下面的 `neverLost`）。
+   */
+  const INTENTIONAL_REMOVALS = new Map()
 
   /** ★ 组件面：**排除词典文件本身**，否则"词条还在"会被读成"读数还在"。 */
   const componentFiles = (names) => names.filter((name) => name !== 'locales.ts')
@@ -1459,25 +1478,55 @@ test('★ 臂 27（R3 集合比对臂）：搬动之后**没有**任何渲染事
 
   /**
    * ★★ 而登记本身也要有反向半边，否则它可以被当成一个"什么都能放行"的白名单：
-   *   · 登记表不许是空的（空表 = 这条臂退化成"任何差异都红"）；
-   *   · 而**每一条登记都必须真的发生过** —— 一条"登记了但根本没丢"的条目
-   *     说明这份登记在替未来的某次删除打掩护。
+   *   · **每一条登记都必须真的发生过** —— 一条"登记了但根本没丢"的条目
+   *     说明这份登记在替未来的某次删除打掩护（下面 `neverLost`）。
+   *
+   * ★★★ 而"登记表不许为空"那一条**已被删除**，理由是实测出来的：
+   *   它要求表非空，而 `neverLost` 要求每条都真的丢过。在一个**什么都没删**
+   *   的搬运任务上（R3 就是：`lost` 实测为空，文件级比对也一个文件没少），
+   *   能同时满足这两条的唯一做法是**编造条目** —— 而本臂第一版正是这么做的：
+   *   7 条登记，3 条在 HEAD 里从未存在，4 条从未被删除。
+   *
+   * ⇒ 一条会**逼作者撒谎**的断言，比没有这条断言更坏：它生产的不是保证，
+   *   而是一份看起来有保证的假账。空表是诚实的答案，就必须允许它为空。
    */
-  assert.ok(INTENTIONAL_REMOVALS.size > 0, '★ 登记表不许为空（空了这条臂就只是"任何差异都红"）')
-  const beforeAll = new Set([
+  assert.ok(Array.isArray([...INTENTIONAL_REMOVALS.keys()]), '★ 登记表必须可枚举（空表是合法状态）')
+  /**
+   * ★★ 参照集**按面各取一份** —— 这是修掉恒红的那一处。
+   *   词典面的登记必须拿词典面的参照去判；混用会让"它在另一张面上"被读成
+   *   "它从未存在"，而那正是本臂第一次上线时 7 条全红的原因。
+   */
+  const beforeComponents = new Set([
     ...unionOver(headComponents, referencedLocaleKeys, readHeadFile),
     ...unionOver(headComponents, dataProbes, readHeadFile),
     ...unionOver(headComponents, exportedSymbols, readHeadFile),
   ])
-  const afterAll = new Set([
+  const afterComponents = new Set([
     ...await unionOverAsync(workComponents, referencedLocaleKeys, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
     ...await unionOverAsync(workComponents, dataProbes, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
     ...await unionOverAsync(workComponents, exportedSymbols, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
   ])
-  const neverLost = [...INTENTIONAL_REMOVALS.keys()].filter((item) => afterAll.has(item) || !beforeAll.has(item))
+  /** ★ 词典面：`headFiles` / `workFiles` **包含** `locales.ts`（与组件面刻意相反）。 */
+  const beforeDictionary = unionOver(headFiles, declaredLocaleKeys, readHeadFile)
+  const afterDictionary = await unionOverAsync(workFiles, declaredLocaleKeys, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8'))
+
+  const faceOf = (face) => (face === 'dictionary'
+    ? { before: beforeDictionary, after: afterDictionary }
+    : { before: beforeComponents, after: afterComponents })
+
+  const neverLost = [...INTENTIONAL_REMOVALS.entries()]
+    .filter(([item, spec]) => {
+      const { before, after } = faceOf(spec.face)
+      // 反向半边：登记为"已删除"的条目，必须 (a) 在参照里真的存在过，且 (b) 现在真的不在了。
+      return after.has(item) || !before.has(item)
+    })
+    .map(([item]) => item)
   assert.deepEqual(neverLost, [],
-    `★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**（或在参照里根本不存在）——`
+    `★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**（或在各自的面上根本不存在）——`
     + `一份会替未来删除打掩护的登记表比没有登记更坏。实测：${JSON.stringify(neverLost)}`)
+  /** ★ 而"各面都真的读到了东西"必须各自成立，否则上面那条会退化成恒真。 */
+  assert.ok(beforeDictionary.size > 0, '★ 反向半边：词典面的参照集合不能是空的')
+  assert.ok(afterDictionary.size > 0, '★ 反向半边：词典面的现行集合不能是空的')
 })
 
 test('★ 臂 27b（R3 反向半边）：把一条事实从集合里拿掉 ⇒ 上面那条必须变红', async () => {
