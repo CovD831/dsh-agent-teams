@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -202,4 +202,85 @@ test('★ t33 臂 6：缺 stamp / 缺产物 各自**自己的**裁决，不许�
   /** ★ 而两者都必须**抛**（它们是"真的对不上"，不是假红）。 */
   assert.throws(() => verifyGitArtifacts(missingStamp.root), /Missing Git artifact stamp/u)
   assert.throws(() => verifyGitArtifacts(missingArtifact.root), /Missing Git artifact/u)
+})
+
+/**
+ * ── ★★★ t33 臂 7：**只有这个检查自己变了** ⇒ 那是**它自己**的一态 ────────────────
+ *
+ * ── 它防的是什么（MEASURED，本任务在真 worktree 上撞到的）────────────────────────
+ *
+ * `scripts/git-artifacts.mjs` 列在**它自己的 `CONFIG` 摘要清单里** ⇒ 任何对它的编辑
+ * 都会改变它所核对的那个 source 摘要 ⇒ 检查当场变红。而那个红**既不是**
+ * "提交陈旧"、**也不是**"有人改坏了树" —— 它是第三种。
+ *
+ * ★★ 若不分出来，任何**修这个检查的人**都会看到一个指向 src/ 的红
+ *   （"the source digest differs (src/, config … changed)"），于是去查 src/，
+ *   而那是一个**假归因**。本臂钉的就是"它不再假归因"。
+ *
+ * ── ★ 怎么造这个形状 ────────────────────────────────────────────────────────────
+ *
+ *  ① 建一个 git 仓库，写 stamp，**提交**（于是 `HEAD:<self>` 拿得到那一份）；
+ *  ② 只改 `scripts/git-artifacts.mjs`（**不提交**）；
+ *  ③ 核对 ⇒ 必须是 `self-edit`，且理由里**指名**是这份文件造成的。
+ *
+ * ★ 而反向半边同样重要：**真的改了 src** 时必须是 `content-differs`，
+ *   不许也被认成 `self-edit`（那会把"改了没重建"洗成"没事，是你自己改的"）。
+ */
+test('★★★ t33 臂 7：只有检查自己变了 ⇒ `self-edit`（指名是它），而改 src 不会误报成它', t => {
+  const { root, put, git } = gitFixture(t)
+  /**
+   * ★★ 顺序是**承重**的：必须先提交**全部**输入，**最后**写 stamp。
+   *   MEASURED（本臂第一版）：先写 stamp 再 `git commit` ⇒ HEAD 又前进了一次
+   *   ⇒ 裁决落在 `stale-commit` 上，而本臂的**前置**当场红。
+   *   ★ 那不是本臂要测的东西（它测的是"只有检查自己变了"），
+   *     所以顺序必须让 stamp 与 HEAD **对齐**。
+   */
+  /**
+   * ★★ stamp 必须在**最后一次提交之后**写 —— 它记的是写的那一刻的 HEAD。
+   *   MEASURED（本臂前两版）：先写 stamp 再提交 ⇒ HEAD 又前进一格
+   *   ⇒ 裁决落在 `stale-commit`，而本臂的**前置**当场红（两次都栽在这里）。
+   *   ★ 所以顺序是：**提交一切 → 写 stamp → （不提交了）**。
+   *     而 stamp 未提交**不影响**本臂：它测的是"只有检查自己变了"，
+   *     而 `sourceDigestAtCommittedSelf` 取的是 `HEAD:<脚本>` —— 与 stamp 提交与否无关。
+   */
+  writeGitArtifactStamp(root)
+  /** ★ 前置：此刻应当是干净的（`current`）。 */
+  assert.equal(
+    inspectGitArtifacts(root).verdict, 'current',
+    '★ 前置：stamp 与 HEAD 对齐之后是 current',
+  )
+
+  /** ② 只改那个检查（不提交）。 */
+  put('scripts/git-artifacts.mjs', `${readFileSync(join(root, 'scripts/git-artifacts.mjs'), 'utf8')}\n// an edit to the check itself\n`)
+  const inspection = inspectGitArtifacts(root)
+  assert.equal(
+    inspection.verdict, 'self-edit',
+    '★★★ 只改检查自己 ⇒ `self-edit`。★ 若它报 `content-differs`，读的人会去查 src/ —— 而那是假归因',
+  )
+  assert.match(
+    inspection.why, /CAUSED BY EDITING THE CHECK/u,
+    '★★★ 那句话必须**指名**这个红是由编辑这个检查造成的',
+  )
+  assert.ok(
+    !/source digest differs \(src\//u.test(inspection.why),
+    '★★★ 而它**不许**沿用那句指向 src/ 的措辞 —— 两者不同形',
+  )
+  /** ★ 它仍然**抛**（退出码 1）：那棵树确实与 stamp 不一致，要刷新。 */
+  assert.throws(() => verifyGitArtifacts(root), /EDITING THE CHECK/u, '★★ self-edit 仍然是不通过（要刷新），不是"放行"')
+
+  /** ── ★★★ 反向半边：真的改了 src ⇒ 必须是 `content-differs`，不许洗成 self-edit ── */
+  const second = gitFixture(t)
+  writeGitArtifactStamp(second.root)
+  second.put('src/index.ts', 'a real source change')
+  const real = inspectGitArtifacts(second.root)
+  assert.equal(real.verdict, 'content-differs', '★★★ 真的改了 src ⇒ `content-differs`')
+  assert.notEqual(
+    real.verdict, 'self-edit',
+    '★★★ 不许把"改了 src 没重建"洗成 `self-edit` —— 那会让一次**真**不一致读成"没事"',
+  )
+  assert.match(real.why, /source digest differs/u, '★ 而它的措辞指向 src（那才是该去看的地方）')
+
+  /** ★ 而刷新之后，self-edit 那一棵树回到 `current`（acceptance 4）。 */
+  writeGitArtifactStamp(root)
+  assert.equal(inspectGitArtifacts(root).verdict, 'current', '★ 刷新之后 self-edit 那棵树必须回到 current')
 })

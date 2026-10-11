@@ -7,7 +7,70 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const STAMP = 'lib/git-artifact-stamp.json'
 const REQUIRED = ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts', 'lib/types/client/index.d.ts']
-const CONFIG = ['tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/clean-build.mjs', 'scripts/git-artifacts.mjs']
+/**
+ * ── ★★ `SELF` 被**单独提出来**，因为它是 t33 那一态的判据坐标 ──────────────────────
+ *
+ * ★ 它**仍然留在 `CONFIG` 里**（那是刻意的：改这个检查应当让 stamp 失效，
+ *   于是"stamp 是谁写的"这件事对它的**编辑**也是敏感的）——
+ *   见 `inspectGitArtifacts` 里 `self-edit` 那一态的长注释。
+ *   ⇒ 提出来只是让那一态能**指名**是哪一份文件，而不是把文件名字面量
+ *     抄第二遍（抄两遍就会在某次改名时分叉）。
+ */
+const SELF = 'scripts/git-artifacts.mjs'
+const CONFIG = ['tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/clean-build.mjs', SELF]
+/**
+ * 摘要输入（`source` 覆盖的那些），**附带**该配的 settings 字串。
+ *
+ * ★ 提成函数是因为 `self-edit` 那一态要拿**同一份构造**重算一次
+ *   （把 `SELF` 剔掉）—— 两处各拼一遍输入清单，正是本仓记账过的那种分叉。
+ */
+function sourceDigest(root, settings, omit = []) {
+  const inputs = [...files(root, 'src'), ...CONFIG.filter(path => !omit.includes(path))]
+  return digest(root, inputs, settings)
+}
+function settingsOf(root) {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+  return JSON.stringify({ name: pkg.name, version: pkg.version, type: pkg.type, exports: pkg.exports, devDependencies: pkg.devDependencies, dependencies: pkg.dependencies, build: pkg.scripts?.build })
+}
+/**
+ * ── ★★★ 用【已提交的那一份】字节算一次 source 摘要（`self-edit` 的第三条判据）───────
+ *
+ * ── 为什么不是"把自己剔掉"（MEASURED：本任务第一版就是这么写的，而它**恒不成立**）──
+ *
+ * 我第一版把 SELF 从输入清单里**剔掉**，再问"这样得到的摘要是不是等于 saved.source"。
+ * ★ 它**永远不会成立**：stamp 是在**带着那一份文件**的情况下算出来的
+ *   ⇒ 把输入**减一项**不可能复原一个**含那一项**的摘要。
+ *   MEASURED：那一版在受控仓库里恒落 `content-differs`（三条判据的第三条恒 false）。
+ *
+ * ★★ 正确的问法是：**把这一份换成"已提交的那一份"之后，摘要会不会对上？**
+ *   对上 ⇒ 差异**完全**由"我改了它"造成。
+ *   MEASURED（受控仓库，`git checkout` 回旧字节）：那条摘要**确实**等于 `saved.source`。
+ *
+ * ★ 读不到提交内容（不在 git 仓库里 / 没有提交 / 这份文件未被跟踪）⇒ `undefined`
+ *   —— 那会让第三条判据**不成立**，于是裁决保守地落在 `content-differs` 上，
+ *   而**不是**误报成"这个红是你自己改出来的"（假归因比没有归因坏）。
+ */
+function sourceDigestAtCommittedSelf(root) {
+  try {
+    const committed = execFileSync('git', ['show', `HEAD:${SELF}`], {
+      cwd: root, encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const settings = settingsOf(root)
+    const inputs = [...files(root, 'src'), ...CONFIG]
+    /**
+     * ★ 逐个输入喂进去，而 `SELF` 那一格**用已提交的字节** ——
+     *   其余每一格都用**盘上**的字节（它们没被换过）。
+     */
+    const hash = createHash('sha256').update(settings)
+    for (const path of [...inputs].sort()) {
+      const bytes = path === SELF ? committed : readFileSync(join(root, path))
+      hash.update(path).update('\0').update(bytes).update('\0')
+    }
+    return hash.digest('hex')
+  } catch {
+    return undefined
+  }
+}
 function files(root, directory) {
   return readdirSync(join(root, directory), { withFileTypes: true }).flatMap(entry => {
     const path = `${directory}/${entry.name}`
@@ -58,12 +121,17 @@ function gitCommit(root) {
 }
 function current(root) {
   for (const path of REQUIRED) if (!existsSync(join(root, path))) throw new Error(`Missing Git artifact: ${path}; run pnpm build`)
-  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  const settings = JSON.stringify({ name: pkg.name, version: pkg.version, type: pkg.type, exports: pkg.exports, devDependencies: pkg.devDependencies, dependencies: pkg.dependencies, build: pkg.scripts?.build })
+  /**
+   * ★ 摘要构造走**共享的那两个函数**（`settingsOf` / `sourceDigest`）——
+   *   与 `self-edit` 那一态的第三条判据**同一份实现**。
+   *   ★ MEASURED（本任务）：两处各拼一遍"摘要覆盖哪些文件"正是分叉的起点，
+   *     而分叉之后 `self-edit` 会**误判**（它拿一份与真身不同的清单去比）。
+   */
+  const settings = settingsOf(root)
   const commit = gitCommit(root)
   return {
     schema: 1,
-    source: digest(root, [...files(root, 'src'), ...CONFIG], settings),
+    source: sourceDigest(root, settings),
     output: digest(root, files(root, 'lib').filter(path => path !== STAMP)),
     ...commit === undefined ? {} : { commit },
   }
@@ -149,6 +217,45 @@ export function inspectGitArtifacts(root) {
    *   ⇒ 把它排在前面，读的人第一步就拿到**该做什么**。
    */
   if (saved.schema !== actual.schema || saved.source !== actual.source || saved.output !== actual.output) {
+    /**
+     * ── ★★★ t33：**只有这个检查自己变了** ⇒ 那是**它自己**的一态，不是"树坏了" ────────
+     *
+     * MEASURED（本任务，在本 worktree 上逐条复现）：`scripts/git-artifacts.mjs`
+     * **列在它自己的 `CONFIG` 摘要清单里**（第 10 行）⇒ 任何对它的编辑都会改变
+     * 它所核对的那个 source 摘要 ⇒ 检查当场变红。
+     *
+     *     同一棵树、同一份 stamp：**旧字节**跑 ⇒ exit 0；**新字节**跑 ⇒ exit 1。
+     *
+     * ★ 于是"我正在修这个检查"这件事，产生了一个**既不是**"提交陈旧"、
+     *   **也不是**"有人改坏了树"的红 —— 它是**第三种**：检查的自我引用。
+     *   ⇒ 补救动作也不同：把 stamp 刷新一次（`--write`），或者意识到
+     *     这个红**完全由你正在改的那个文件造成**。
+     *
+     * ── 怎么认出来（机械判据，不猜）────────────────────────────────────────────────
+     *
+     *   ① `saved.output === actual.output`（**产物没变** —— 排除"改了 src 没重建"）
+     *   ② `saved.source !== actual.source`（源摘要确实变了）
+     *   ③ 把 `scripts/git-artifacts.mjs` 从摘要输入里**剔掉**之后 source **就对上了**
+     * ⇒ **三条全中**才认定。任一不成立就不是自我引用（例如 src/ 也真的变了）。
+     *
+     * ★★ 它**仍然是一态不通过**（退出码不变）—— 因为那棵树**确实**与 stamp 不一致，
+     *   而"要不要我重建"的答案确实是"要"。变的是**读法**：一眼看出这个红是
+     *   **自己正在改的那份文件**造成的，而不必去查 src/。
+     *   ★ 把它的退出码改成 0 会**削弱**这条检查：那会让"真的改了 src 却没重建"
+     *     也蒙混过关（那正是本条要区分的另一件事）。
+     */
+    if (saved.output === actual.output && saved.source !== actual.source
+      && sourceDigestAtCommittedSelf(root) === saved.source) {
+      return {
+        verdict: 'self-edit',
+        why: 'Git artifacts are stale or modified: the ONLY input that differs is this check itself '
+          + `(${SELF} is listed in its own digest list, so editing it invalidates the stamp it verifies). `
+          + 'This red is CAUSED BY EDITING THE CHECK, not by a change to src/ or lib/ — '
+          + 'run `node scripts/git-artifacts.mjs --write` (or pnpm build) once the edit is final.',
+        savedCommit,
+        headCommit: head,
+      }
+    }
     const which = saved.source !== actual.source && saved.output !== actual.output
       ? 'both the source digest and the build output differ'
       : saved.source !== actual.source
@@ -248,6 +355,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       console.log(`  HEAD:         ${inspection.headCommit}`)
       console.log('  \u2192 this is PRE-EXISTING: it predates the current work and is not caused by it.')
       console.log('  \u2192 run `node scripts/git-artifacts.mjs --write` (or pnpm build) to refresh the stamp.')
+    } else if (inspection.verdict === 'self-edit') {
+      /**
+       * ★★★ 这一行**就是 t33 的交付物之一**：读的人一眼看出这个红是
+       *   **自己正在改的那份文件**造成的，而不是去查 src/。
+       * ★ 退出码**仍然是 1** —— 那棵树确实与 stamp 不一致（要刷新）。
+       *   变的是**读法**，不是裁决。
+       */
+      console.error(inspection.why)
+      process.exitCode = 1
     } else if (inspection.verdict === 'unknown-commit') {
       /** ★ 第四态：**说出来**，且不判失败（没有 git 的环境是正常的）。 */
       console.log('Git artifacts match source and build settings.')
