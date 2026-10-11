@@ -300,8 +300,10 @@ export type MemberClockKind =
 'running'
 /** Work is still open but nothing is driving it; the clock counts abandonment, not work. */
  | 'stale'
-/** Nothing open to time. */
- | 'none';
+/** Nothing open to time: the member is genuinely idle. A real readout, not a blank cell. */
+ | 'idle'
+/** Open work exists but its stamp is unreadable: could-not-measure, never rounded to idle. */
+ | 'unknown';
 /** Complete elapsed readout for one member row. */
 export interface MemberClock {
     readonly kind: MemberClockKind;

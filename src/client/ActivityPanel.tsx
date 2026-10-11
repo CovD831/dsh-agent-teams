@@ -927,13 +927,26 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                       count share one aligned column, so every member row's
                       status reads at the same horizontal position. */}
                   <span className={css.memberStatusTail}>
-                    {clock.kind !== 'none' && (
-                      <span className={css.memberClock} data-kind={clock.kind}>
-                        {clock.kind === 'stale'
-                        ? `${formatElapsed(clock.ms)} · ${t('member.state.waiting')}`
-                        : formatElapsed(clock.ms)}
-                      </span>
-                    )}
+                    {/**
+                      * ── ★★★ 四种读数，**没有一种是空白** ──────────────────────────
+                      *
+                      * MEASURED（用户 2026-10-11）：「Integrator 前面是一个空白的显示，
+                      *   这说明显示就不对」—— 而且它当时显示的是"12 小时 1 分钟"，
+                      *   那其实是**任务 11 小时没人动过**，被渲染成了"等待"。
+                      *
+                      * ★ 口径（用户原话）：「要么显示已工作多长时间，要么显示已等待多长时间」：
+                      *   · running ⇒ **已工作** N（它确实在推进）
+                      *   · stale   ⇒ **已等待** N（没人推进它，这才是要看的数）
+                      *   · idle    ⇒ 空闲（明确的中性读数，不是空白）
+                      *   · unknown ⇒ 读不出时间（"没能测量"不许读成"它没事做"）
+                      */}
+                    <span className={css.memberClock} data-kind={clock.kind}>
+                      {clock.kind === 'idle' ? t('member.clock.idle')
+                        : clock.kind === 'unknown' ? t('member.clock.unknown')
+                          : clock.kind === 'stale'
+                            ? t('member.clock.waiting', { elapsed: formatElapsed(clock.ms) })
+                            : t('member.clock.working', { elapsed: formatElapsed(clock.ms) })}
+                    </span>
                     <span className={css.memberCount}>{member.done}/{member.total}</span>
                   </span>
                 </button>

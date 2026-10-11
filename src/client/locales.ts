@@ -56,6 +56,11 @@ export const zh = {
   /* t16: why an already-spawned member's model cannot be changed. */
   'member.model.sealedReason': '该成员已启动，模型已冻结进它的会话描述符；现在改只会被记录而不会生效 —— 请新建一个替代成员',
 
+  'member.clock.working': '已工作 {elapsed}',
+  'member.clock.waiting': '已等待 {elapsed}',
+  'member.clock.idle': '空闲',
+  'member.clock.unknown': '时间未知',
+
   'roster.title': '花名册与成员模型',
   'roster.readonly': '只读',
   'roster.empty': '当前还没有团队，因此暂时没有可显示的成员模型。',
@@ -279,6 +284,11 @@ export const en = {
   'task.status.cancelled': 'Cancelled',
   'task.status.notRun': 'Not run',
   'member.model.sealedReason': 'Already spawned: this model is frozen into its session descriptor, so changing it now would be recorded without being applied - spawn a replacement member instead',
+
+  'member.clock.working': '已工作 {elapsed}',
+  'member.clock.waiting': '已等待 {elapsed}',
+  'member.clock.idle': '空闲',
+  'member.clock.unknown': '时间未知',
 
   'roster.title': 'Roster and member models',
   'roster.readonly': 'Read-only',
