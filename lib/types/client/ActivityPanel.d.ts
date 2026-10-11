@@ -24,8 +24,6 @@ import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/c
 import { type ActivityTeam } from './activity-monitor.ts';
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts';
 import type { AgentTeamsTranslate } from './locales.ts';
-/** Presentation tone of one member's 16px status dot. */
-export type MemberDotTone = 'running' | 'stalled' | 'delivered' | 'idle' | 'dormant';
 export declare function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, onNavigate, t, historic, workspace }: {
     readonly team: ActivityTeam;
     readonly modelDirectory?: ModelDirectory;

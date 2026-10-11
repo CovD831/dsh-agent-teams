@@ -36,14 +36,14 @@ import {
   activityPanelExpandedForSession,
   activityPanelShouldAutoExpand,
   compactDagLayout,
-  compactModelLabel,
   COMPACT_DAG_NODE_HEIGHT,
   COMPACT_DAG_NODE_WIDTH,
   dependencyFocusTaskId,
-  formatElapsed,
-  memberClock,
   memberRouteLabel,
+  memberRowExpanded,
+  memberRowKey,
   orderDelegationMembers,
+  pruneMemberRows,
   relatedTaskIds,
   loopFacts,
   nextLoopDisclosure,
@@ -53,9 +53,11 @@ import {
   taskModelLabel,
   teamIsActive,
   toggleLoopDisclosure,
+  toggleMemberRow,
   usesParallelTaskGrid,
   type LoopDisclosure,
   type LoopTask,
+  type MemberExpansion,
 } from './activity-model.ts'
 import {
   ACTIVITY_HALT_URL,
@@ -68,9 +70,10 @@ import {
   type ActivityTask,
   type ActivityTeam,
 } from './activity-monitor.ts'
-import { ACTION_ART, LEAD_ART, memberArtUrl } from './artwork.ts'
+import { LEAD_ART } from './artwork.ts'
 import { OPEN_PANEL_EVENT } from './AgentTeamsCard.tsx'
-import { memberModelEditability, MemberModelField, StagingPlanEditor } from './StagingPlanEditor.tsx'
+import { memberModelEditability, StagingPlanEditor } from './StagingPlanEditor.tsx'
+import { MemberRow } from './MemberRow.tsx'
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts'
 import type { AgentTeamsLocaleKey, AgentTeamsTranslate } from './locales.ts'
 import {
@@ -93,8 +96,6 @@ import css from './ActivityPanel.module.css'
 
 /** Grace before the panel collapses once no team remains. */
 const AUTOCLOSE_GRACE_MS = 2000
-/** Elapsed readouts refresh once a second while a member is actually working. */
-const MEMBER_CLOCK_TICK_MS = 1000
 /**
  * Page-settle window after mount: activity restored on page load only shows
  * the collapsed badge, so the panel never yanks the conversation column
@@ -136,31 +137,6 @@ function initialPanelLayout(): PanelLayout {
 function initialPanelBounds(): PanelBounds {
   if (typeof window === 'undefined') return { width: 1440, height: 900, anchorRight: 1440 }
   return { width: window.innerWidth, height: window.innerHeight, anchorRight: window.innerWidth }
-}
-
-/** Initial-letter fallback for unmatched roles. */
-function memberInitial(name: string): string {
-  return name.trim().slice(0, 1).toUpperCase() || '?'
-}
-
-function stableHash(value: string): number {
-  let hash = 0
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0
-  }
-  return Math.abs(hash)
-}
-
-const ACCENTS = [
-  'var(--dsw-alias-state-business-primary)',
-  'var(--dsw-alias-state-success-primary)',
-  'var(--dsw-alias-state-error-primary)',
-  'var(--dsw-alias-state-warn-primary)',
-  'var(--dsw-alias-label-tertiary)',
-] as const
-
-function accentOf(id: string): string {
-  return ACCENTS[stableHash(id) % ACCENTS.length] ?? ACCENTS[0]
 }
 
 /** Badge text follows the raw task status (finer than the 4 visual states):
@@ -268,91 +244,16 @@ function CollapsedBadge({ count, busy, onClick, t }: {
   )
 }
 
-function memberStateLabel(
-  member: ActivityMember,
-  tasks: readonly ActivityTask[],
-  historic: boolean,
-  t: AgentTeamsTranslate,
-): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
-  if (member.activity === 'working') return t('member.state.working')
-  if (owned.some((task) => task.status === 'failed')) return t('member.state.failed')
-  if (owned.some((task) => task.state === 'blocked')) return t('member.state.waiting')
-  if (owned.length > 0 && owned.every((task) => task.status === 'completed')) return t('member.state.delivered')
-  if (member.status === 'removed') return t(historic ? 'member.state.left' : 'member.state.removed')
-  if (owned.length > 0) return t('member.state.pending')
-  return t('member.state.unassigned')
-}
-
-function memberStatusText(
-  member: ActivityMember,
-  tasks: readonly ActivityTask[],
-  t: AgentTeamsTranslate,
-): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
-  const current = owned.find((task) => task.id === member.currentTask)
-  const blocked = owned.find((task) => task.state === 'blocked')
-  if (member.activity === 'working' && current !== undefined) {
-    const model = taskModelLabel(current, [member])
-    return model === ''
-      ? t('member.status.executing', { taskId: current.id })
-      : t('member.status.executingModel', { taskId: current.id, model })
-  }
-  if (member.activity === 'working') return t('member.status.working')
-  if (blocked !== undefined) {
-    const dependency = tasks.find((task) => blocked.dependencies.includes(task.id) && task.state !== 'completed')
-    if (dependency !== undefined) {
-      return t('member.status.waitingOn', {
-        taskId: dependency.id,
-        assignee: dependency.assignee || t('task.assignee.unclaimed'),
-      })
-    }
-    return t('member.status.waitingPrerequisite')
-  }
-  if (member.total === 0) return t('member.status.waitingAssignment')
-  if (member.done === member.total) return t('member.status.delivered')
-  if (owned.some((task) => task.status === 'failed')) return t('task.detail.failed')
-  if (owned.length > 0 && owned.every((task) => task.status === 'completed' || task.status === 'cancelled')) return t('member.status.settled')
-  return t(member.activity === 'idle' ? 'member.status.idle' : 'member.status.unknown')
-}
-
-/** Presentation tone of one member's 16px status dot. */
-export type MemberDotTone = 'running' | 'stalled' | 'delivered' | 'idle' | 'dormant'
-
-/** Context flags that decide which member dot tone applies. */
-interface MemberDotContext {
-  readonly discarded?: boolean
-  readonly stopped?: boolean
-  readonly staged?: boolean
-  readonly historic?: boolean
-}
-
 /**
- * The tone of one member's status dot.
+ * ── ★★★ R2：这几段读数**搬进了 `MemberRow.tsx`** ────────────────────────────────
  *
- * ★ Liveness is read BEFORE `activity`, and the order is the whole point:
- *   `activity` is a durable field that keeps saying `working` after the member's
- *   session dies, so a dead member would keep a "running" dot forever — the
- *   residual reading task t4 exists to remove. A member whose session is gone
- *   while its work is still open therefore reads `stalled` (amber), not `running`.
+ * `memberStateLabel` / `memberStatusText` / `memberDotTone` 原来长在这里，
+ * 而它们全部是**关于一行成员**的读数。R2 把成员行变成一个真正的组件
+ * （`src/client/MemberRow.tsx`）之后，它们跟着那一行走 —— 留在面板里就成了
+ * 第二份实现，而本仓对"第二份实现"的判据是：它一定会漂移。
  *
- * ★ When the host publishes no liveness field, this falls back to `activity`
- *   exactly as before rather than inferring a state nobody measured.
+ * ★ 一行只应有一个"它在做什么"的口径，所以这里**不留**转发壳。
  */
-function memberDotTone(member: ActivityMember, context: MemberDotContext): MemberDotTone {
-  if (context.discarded === true || context.staged === true) return 'dormant'
-  if (context.stopped === true || context.historic === true) return 'idle'
-  const liveness = member.liveness
-  if (liveness !== undefined && liveness !== '') {
-    if (liveness === 'working') return 'running'
-    if (liveness === 'not-live') return 'stalled'
-    if (liveness === 'never-spawned') return 'dormant'
-    /** `idle` / `could-not-measure`: alive but not driving, or unmeasured. */
-    return 'idle'
-  }
-  if (member.activity === 'working') return 'running'
-  return member.activity === 'idle' ? 'idle' : 'dormant'
-}
 
 function compactTaskLabel(subject: string): string {
   const withoutVerb = subject.replace(/^开发\s*/u, '').replace(/^\d+[-_.、\s]*/u, '')
@@ -394,21 +295,17 @@ function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = fal
 }
 
 /**
- * Now-stamp for elapsed readouts.
+ * ── ★★★ R2：秒表**不再**长在这里 ──────────────────────────────────────────────
  *
- * ★ A member's elapsed time is read from the task's durable `updatedAt` against
- *   this stamp, never from a timer started in the browser — a browser timer would
- *   be an invented fact that resets on every reload.
+ * MEASURED：这里原来有一个 `useElapsedNow(active)` —— 它把 `now` 放进
+ * `TeamSection` 的 state，于是**每秒**整棵面板树重渲染（契约原句：
+ * "a tick must not re-render the 1586-line panel it sits inside"）。
+ *
+ * ★ 修法不是"少 tick 几次"，而是**搬家**：`now` 的 state 与 `setInterval`
+ *   都搬进 `MemberClock.tsx`（一个只印一行时长的小组件）。本组件**不持有** `now`，
+ *   所以它没有任何理由跟着 tick 重渲染。
+ * ★ 而"只有真的在跑的成员才起表"由 `memberClockTicks` 判定（见 activity-model）。
  */
-function useElapsedNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!active) return
-    const timer = setInterval(() => { setNow(Date.now()) }, MEMBER_CLOCK_TICK_MS)
-    return () => { clearInterval(timer) }
-  }, [active])
-  return now
-}
 
 /**
  * Review/repair rounds with the round markers that make convergence visible.
@@ -698,7 +595,39 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
   const [stopOpen, setStopOpen] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [stopError, setStopError] = useState('')
-  const elapsedNow = useElapsedNow(!historic && team.phase === 'running')
+  /**
+   * ── ★★★ R2：成员的**展开**状态 ────────────────────────────────────────────────
+   *
+   * ★ 默认**收起**：`memberRowExpanded` 对"没有条目"返回 `false`，所以初值是一个
+   *   **值**，不是一条缺席分支 —— 一次新渲染不可能顺手把每一行都打开。
+   *
+   * ★ 用户的选择活得过重渲染：它存在这里（不是每次渲染重算的派生态），
+   *   所以下一轮轮询回来读到的仍然是用户按下的那个。
+   *
+   * ★ 按**成员 id** 存（未启动的成员退化成名字）：轮询会重排名册，
+   *   而按位置存会把一个成员的展开状态**交给另一个成员**。
+   */
+  const [expansion, setExpansion] = useState<MemberExpansion>(() => new Map())
+  const toggleMember = useCallback((key: string): void => {
+    setExpansion((current) => toggleMemberRow(current, key))
+  }, [])
+  /**
+   * ★ 打开一个会话（成员本身，或它底下的一个子代理）。两个都走同一条路：
+   *   `navigateToSession` 会立刻收起浮动面板 —— 那是一次**明确的离开**。
+   */
+  const onNavigateMember = useCallback((childId: string): void => {
+    if (childId === '') return
+    onNavigate(team.captainSessionId as SessionId, childId as SessionId)
+  }, [onNavigate, team.captainSessionId])
+  /**
+   * ★ 剪掉不在册的展开条目。放在 effect 里而**不是**渲染期：渲染必须是纯的。
+   *   store 只在用户真的按过某一行时才有条目，所以这里剪的永远是"被重生成
+   *   替换掉的那一行"留下的残条。
+   */
+  const rosterKey = team.members.map((member) => memberRowKey(member)).join('\u0000')
+  useEffect(() => {
+    setExpansion((current) => pruneMemberRows(current, rosterKey === '' ? [] : rosterKey.split('\u0000')))
+  }, [rosterKey])
   const discarded = historic && team.phase === 'staged'
   const stopped = !historic && team.halted === true
   const busyCount = team.members.filter((member) => member.activity === 'working').length
@@ -817,10 +746,35 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
           </span>
         </div>
 
+        {/**
+          * ── ★★★ 终态口径（"放弃了/停止了"**不是**"待执行"）─────────────────────
+          *
+          * MEASURED：一个被放弃的计划**根本不会创建成员**，一个被停止的团队**不会再
+          * 往前走**。把它们读成"待执行"会让读者以为它们还在排队 —— 这是本仓反复
+          * 修的那一类"读数被读成了它不是的东西"。
+          *
+          * ★ 成员行自己也会印这两句（`MemberRow`）；这一行是**团队级**的那一份，
+          *   它先说话，于是下面每一行不必各自解释一次。
+          */}
+        {(discarded || stopped) && (
+          <p className={css.teamTerminalNote} data-team-terminal={discarded ? 'discarded' : 'stopped'}>
+            {discarded ? t('member.status.discarded') : t('member.status.stopped')}
+          </p>
+        )}
+
         <ProgressOverview team={team} t={t} discarded={discarded} />
 
         {(() => {
           const orderedMembers = orderDelegationMembers(team.members, team.tasks)
+          /**
+           * ★★★ R2：第一屏是**成员中心**的（用户原话：the first screen should show
+           *   durable roles, and clicking one expands to show the subagents working
+           *   underneath it, together with round information）。
+           *
+           * ★ 而"谁在动"这条折叠口径保留（issue #192）：收起时只列**还在动**的成员，
+           *   展开时把已结束的也列出来并按结束时间倒序。原因没变 —— 一个不动的成员
+           *   占着行会让"整队在不在动"这个第一问读不出来。
+           */
           const runningMembers = orderedMembers.filter((member) => (
             member.activity === 'working' || member.status === 'working'
             || team.tasks.some((task) => task.assignee === member.name
@@ -833,6 +787,12 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
             : hiddenFinishedCount > 0
               ? t('members.expandFinished', { count: hiddenFinishedCount })
               : t('members.expand')
+          /**
+           * ★ 展开存活的键 = 当前名册定义的那些键。不在册的条目会被**剪掉** ——
+           *   否则这个 store 会随面板（一个跨会话存活的 shell-overlay 单例）
+           *   一直长下去，而没有任何一行再引用那些键。
+           */
+          const rosterKeys = orderedMembers.map((member) => memberRowKey(member))
           return (
             <>
               <button type="button" className={css.membersToggle} onClick={() => { setMembersOpen((current) => !current) }} aria-expanded={membersOpen} data-members-toggle>
@@ -840,161 +800,87 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                 <span>{expandLabel}</span>
               </button>
 
-              {(membersOpen || visibleMembers.length > 0) && <div className={css.delegationTree}>
+              {(membersOpen || visibleMembers.length > 0) && <div className={css.delegationTree} data-member-rows={visibleMembers.length}>
                 {team.members.length === 0 && <span className={css.emptyHint}>{t('members.empty')}</span>}
                 {visibleMembers.map((member) => {
-                  const owned = team.tasks.filter((task) => task.assignee === member.name)
-                  const memberModel = memberRouteLabel(member)
-                  /** Time on the current task: read from durable stamps, never invented. */
-                  const clock = memberClock(member, team.tasks, elapsedNow)
-                  /** ★ t16: three-state, read from the snapshot; never guessed. */
-                  const memberModelEditable = memberModelEditability(member)
-                  return (
-              <div key={member.id || member.name} className={css.memberBlock} data-activity={member.activity} data-selected-member={workspace && selectedAssignee === member.name || undefined}>
-                <span className={css.memberBranch} aria-hidden><span /></span>
-                <button
-                  type="button"
-                  className={css.memberRow}
-                  data-activity={member.activity}
-                  onClick={() => {
-                    if (member.id !== '') {
-                      onNavigate(team.captainSessionId as SessionId, member.id as SessionId)
-                    }
-                  }}
-                >
-                  <span className={css.memberAvatar} data-unread={member.unread > 0}>
-                    {memberArtUrl(member.name, member.role) !== null ? (
-                      <img className={css.memberArt} src={memberArtUrl(member.name, member.role) ?? ''} alt="" aria-hidden />
-                    ) : (
-                      <span className={css.memberInitial} style={{ background: accentOf(member.id) }}>{memberInitial(member.name)}</span>
-                    )}
-                    <img className={css.stateArt} data-activity={member.activity} src={ACTION_ART[member.activity]} alt="" aria-hidden />
-                  </span>
-                  {/**
-                   * ★ First-party 16px member status dot.
+                  const key = memberRowKey(member)
+                  /**
+                   * ── ★★ 面板在这一行上**探出**两件事，而不是"把它们交给子组件就算完"──
                    *
-                   * It reads liveness BEFORE `activity`: `activity` is a durable
-                   * field that keeps saying `working` after the session dies, so a
-                   * dead member would otherwise keep a "running" dot — the exact
-                   * reading task t4 exists to remove. Without a liveness field we
-                   * fall back to `activity`, which is today's behaviour, not a guess.
-                   */}
-                  <span
-                    className={css.memberDot}
-                    data-tone={memberDotTone(member, { discarded, stopped, staged: team.phase === 'staged', historic })}
-                    role="img"
-                    aria-label={memberStateLabel(member, team.tasks, historic, t)}
-                  />
-                  <span className={css.memberInfo}>
-                    <span className={css.memberLine}>
-                      <span className={css.memberName}>{member.name}</span>
-                      {member.role !== '' && <span className={css.memberRole}>{member.role}</span>}
-                      {/* ★ t16: the member's model badge stays a read-only probe here.
-                          The EDITABLE control lives below the row (see the member-model
-                          line) because a control cannot nest inside this row button. */}
-                      {memberModel !== '' && (
-                        <span className={css.memberModel} role="img" data-member-model={memberModel}
-                          data-member-model-state={memberModelEditable}
-                          title={memberModelEditable === 'sealed' ? t('member.model.sealedReason') : memberModel}
-                          aria-label={memberModel}>
-                          {compactModelLabel(memberModel)}
-                        </span>
-                      )}
-                      <span className={css.memberState} data-activity={member.activity}>
-                        <WorkGlyph active={member.activity === 'working'} />
-                        {discarded
-                          ? t('member.state.notCreated')
-                          : stopped
-                            ? t('member.state.stopped')
-                            : team.phase === 'staged'
-                              ? t('member.state.staged')
-                              : memberStateLabel(member, team.tasks, historic, t)}
-                      </span>
-                    </span>
-                    <span className={css.memberStatusLine}>{discarded
-                      ? t('member.status.discarded')
-                      : stopped
-                        ? t('member.status.stopped')
-                        : team.phase === 'staged'
-                          ? t('member.status.staged')
-                      : historic && owned.length > 0 && owned.every((task) => (
-                        task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
-                      ))
-                        ? t('member.status.settled')
-                      : memberStatusText(member, team.tasks, t)}</span>
-                  </span>
-                  {/* ★ Fixed-width status tail: elapsed time and the done/total
-                      count share one aligned column, so every member row's
-                      status reads at the same horizontal position. */}
-                  <span className={css.memberStatusTail}>
-                    {/**
-                      * ── ★★★ 四种读数，**没有一种是空白** ──────────────────────────
-                      *
-                      * MEASURED（用户 2026-10-11）：「Integrator 前面是一个空白的显示，
-                      *   这说明显示就不对」—— 而且它当时显示的是"12 小时 1 分钟"，
-                      *   那其实是**任务 11 小时没人动过**，被渲染成了"等待"。
-                      *
-                      * ★ 口径（用户原话）：「要么显示已工作多长时间，要么显示已等待多长时间」：
-                      *   · running ⇒ **已工作** N（它确实在推进）
-                      *   · stale   ⇒ **已等待** N（没人推进它，这才是要看的数）
-                      *   · idle    ⇒ 空闲（明确的中性读数，不是空白）
-                      *   · unknown ⇒ 读不出时间（"没能测量"不许读成"它没事做"）
-                      */}
-                    <span className={css.memberClock} data-kind={clock.kind}>
-                      {clock.kind === 'idle' ? t('member.clock.idle')
-                        : clock.kind === 'unknown' ? t('member.clock.unknown')
-                          : clock.kind === 'stale'
-                            ? t('member.clock.waiting', { elapsed: formatElapsed(clock.ms) })
-                            : t('member.clock.working', { elapsed: formatElapsed(clock.ms) })}
-                    </span>
-                    <span className={css.memberCount}>{member.done}/{member.total}</span>
-                  </span>
-                </button>
-                {/* ★ t16: the editable model control, OUTSIDE the row button — a button
-                    cannot nest inside a button (browsers silently rewrite that DOM).
-                    Offered only when the member has not been spawned; otherwise a
-                    disabled control carrying the reason, and when the fact is unknown,
-                    nothing at all rather than a control we cannot promise works. */}
-                {memberModelEditable === 'editable' && modelDirectory !== undefined && !discarded && !stopped && (
-                  <div style={MEMBER_MODEL_LINE_STYLE} data-member-model-editable>
-                    <MemberModelField
-                      team={team}
-                      member={member}
-                      modelDirectory={modelDirectory}
-                      disabledReason={undefined}
-                      t={t}
-                    />
-                  </div>
-                )}
-                <div className={css.assignmentLine}>
-                  <span className={css.assignmentLabel}>{t(discarded
-                    ? 'assignment.discarded'
-                    : team.phase === 'staged'
-                      ? 'assignment.staged'
-                      : 'assignment.label')}</span>
-                  <span className={css.assignmentTasks}>
-                    {owned.length === 0
-                      ? <span className={css.taskEmpty}>{t('assignment.empty')}</span>
-                      : owned.map((task) => {
-                          const model = taskModelLabel(task, team.members)
-                          const shortModel = compactModelLabel(model)
-                          return (
-                            <span
-                              key={task.id}
-                              className={css.assignmentChip}
-                              data-state={discarded ? 'cancelled' : taskTerminalTone(task)}
-                              data-task-model={model || undefined}
-                              title={taskTitle(task, model)}
-                            >
-                              {task.state === 'running' && shortModel !== '' ? `${task.id} · ${shortModel}` : task.id}
-                            </span>
-                          )
-                        })}
-                  </span>
-                </div>
-                  </div>
-                )
-              })}
+                   * ① `activity`：收起的成员列表要一眼看出"这一行在不在动"，
+                   *    而 `data-activity` 是宿主语义色（business color）挂上去的那个钩子。
+                   * ② `memberModel`：这个成员跑在哪个路由上 —— 用户要的第一屏是
+                   *    "谁在做什么"，而"用哪个模型做"是这件事的一部分。
+                   *
+                   * ★ 两格都是**读**，不是第二份真相：`MemberRow` 用的是同一个
+                   *   `memberRouteLabel` / `member.activity`，判定口径只有一个。
+                   */
+                  const memberModel = memberRouteLabel(member)
+                  /**
+                   * ★ "这个成员正在做什么"，到**任务 + 模型**这一层。
+                   *   用户要的第一屏是 "who is doing what"，而"用哪个模型在做"
+                   *   是同一件事的一半 —— 所以它是同一行字，不是另一个标签。
+                   *   读不出当前任务时不编一个（`member.status.working` 兜底）。
+                   */
+                  const currentTask = team.tasks.find((task) => task.id === member.currentTask
+                    && task.assignee === member.name)
+                  const doingModel = currentTask === undefined ? '' : taskModelLabel(currentTask, [member])
+                  const doingText = currentTask === undefined
+                    ? t('member.status.working')
+                    : doingModel === ''
+                      ? t('member.status.executing', { taskId: currentTask.id })
+                      : t('member.status.executingModel', { taskId: currentTask.id, model: doingModel })
+                  return (
+                    /**
+                     * ★★ 面板在这一格上**读**两件事（它们是宿主的语义色与模型探针）：
+                     *   · `data-activity` —— 行在不在动（CSS 用宿主的 business color）
+                     *   · 模型路由 —— 那一格的**读数**由 `MemberRow` 交出（见下）。
+                     * ★ 判定口径只有一份：`memberRouteLabel` 与 `member.activity`。
+                     */
+                    <div
+                      key={key}
+                      /**
+                       * ★ 槽的类名跟着**有没有模型**走：`.memberModel` 是那一格的
+                       *   排版契约（就地省略号、不撑破面板），而"这一行有没有模型"
+                       *   是面板这一层知道的事。行本身不认识这个类。
+                       */
+                      /**
+                       * ★ 槽的**布局类**由面板给：这一行有没有模型，面板知道；
+                       *   而 `.memberModel` 是"就地省略号、不撑破面板"的排版口径。
+                       *   行负责**画**那一格，面板负责**给它留位置**。
+                       */
+                      className={memberModel === '' ? css.memberSlot : `${css.memberSlot} ${css.memberModel}`}
+                      data-activity={member.activity}
+                      data-member-doing={doingText}
+                      /**
+                       * ★ 模型那一格的**读数**只由 `MemberRow` 交出（`role="img"` 那一个）。
+                       *   这里**不再**挂第二份探针 —— 同一个事实的两次读数一定会漂移，
+                       *   而"归属错了"与"归属对了"在界面上同形。
+                       */
+                    >
+                      <MemberRow
+                        team={team}
+                        member={member}
+                        tasks={team.tasks}
+                        /**
+                         * ★ 面板算一次，行里只负责画：模型路由与"能不能改"，
+                         *   各只有一条判据（`memberRouteLabel` / `memberModelEditability`）。
+                         */
+                        memberModel={memberModel}
+                        memberModelEditable={memberModelEditability(member)}
+                        expanded={memberRowExpanded(expansion, key)}
+                        onToggle={toggleMember}
+                        onOpenSubagent={onNavigateMember}
+                        onSelectTask={setSelectedTaskId}
+                        modelDirectory={modelDirectory}
+                        t={t}
+                        historic={historic}
+                        discarded={discarded}
+                        stopped={stopped}
+                      />
+                    </div>
+                  )
+                })}
                 </div>}
             </>
           )

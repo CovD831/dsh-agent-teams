@@ -269,6 +269,23 @@ export declare function hasReviewLoop<T extends LoopTask>(tasks: readonly T[]): 
  * @returns rounds ascending by index; the ascending order IS the loop.
  */
 export declare function reviewLoop<T extends LoopTask>(tasks: readonly T[]): ReviewLoop<T>;
+/**
+ * ── ★★★ R2：把轮次搬到成员行上（用户原话：round data moves UP into screen one）──
+ *
+ * MEASURED（用户 2026-10-11）：轮次/收敛原本单占一块（`ReviewLoopSection`），
+ * 而成员行上**一个字都没有**。于是"这个成员在第几轮、那一轮什么结果"要看第二处
+ * 才知道 —— 而用户要的第一屏口径是"整队在不在动、谁在做什么"。
+ *
+ * ★ 口径是**成员自己的**轮次，不是全队的：一个成员名下带 `round` 的任务里最大的
+ *   那一轮。缺席 ⇒ `undefined`（"没有轮次概念"），**不是** `0`（"第 0 轮"）——
+ *   两者必须不同形（与 `TeamActivityMember.round` 同一条判据，且不在这里重算规则）。
+ *
+ * ★ 反向半边：同一批任务，只看**这个成员的**任务 —— 一个把全队最大轮次印到每个人
+ *   身上的实现，会让没参与那一轮的成员也印着"第 N 轮"。
+ * @param tasks - the member's OWN tasks.
+ * @returns the member's highest round, or undefined when none carries one.
+ */
+export declare function memberRound(tasks: readonly LoopTask[]): LoopRound<LoopTask> | undefined;
 /** One status tail value: which durable task states map to which tail text. */
 export type RoundTailCountKey = 'converging' | 'failed' | 'unmeasured' | 'running' | 'completed';
 /** Locale key of one round-tail count. */
@@ -294,6 +311,130 @@ export declare function roundTailCounts<T extends LoopTask>(tasks: readonly T[],
  * words, and the two sets would drift the moment one of them is edited.
  */
 export declare const ROUND_TAIL_LABEL: Readonly<Record<RoundTailCountKey, string>>;
+/**
+ * ── ★★★ R2：**谁该拥有秒表** ──────────────────────────────────────────────────
+ *
+ * MEASURED（R2 开工时）：秒表原本挂在 1599 行的 `TeamSection` 上 ——
+ * `useElapsedNow` 一 tick，**整棵面板树重渲染**。而它每秒都在跑，
+ * 哪怕队里只有一个人在动。
+ *
+ * ★ 判据（契约原句）："Only members that actually have a running clock
+ *   subscribe to ticks; an idle or waiting member does not keep a timer alive."
+ *
+ * ★ 为什么只有 `running` 一格为真，另三格各自说清：
+ *   · `running` ⇒ 时长**每秒都在变**（`now − updatedAt`）⇒ 必须有人 tick，否则读数不动。
+ *   · `stale`   ⇒ 时长同样在变，但它数的是"没人推进它"——★ 而它是**告警**，
+ *                 不是进度；让它每秒重排一次会把一个静态的坏消息画成"还在动"。
+ *                 ⇒ 它读一次就够了（值本身就是"最后一次改动以来"）。
+ *   · `idle`    ⇒ **不带时长**（`ms` 恒为 0）⇒ tick 只会重渲染一个不动的字符串。
+ *   · `unknown` ⇒ 读不出戳 ⇒ 同样没有可更新的数字。
+ *
+ * ★ 反向半边（缺了它，一个"恒返回 true"的实现会让面板每秒重渲染每一行，
+ *   而每一条断言照样绿）：本函数对四种读数**必须**给出**不同**的答案。
+ * @param kind - the member's elapsed readout.
+ * @returns whether a live per-second ticker is required for that readout.
+ */
+export declare function memberClockTicks(kind: MemberClockKind): boolean;
+/**
+ * One live subagent as the panel reads it off /state.
+ *
+ * ★ Declared structurally rather than imported from the host half: the payload
+ *   crosses the wire as JSON, and a client that typed it from `src/members.ts`
+ *   would make a server-side refactor a browser-only breakage.
+ */
+export interface MemberSubagent {
+    readonly id: string;
+    readonly label: string;
+    readonly mode?: 'one-shot' | 'continuable';
+    readonly status: string;
+    readonly parentSession?: string;
+}
+/** What a member's subagent layer can say: measured, or not measured. */
+export type MemberSubagentState = 'observed' | 'could-not-measure';
+/** The per-member subagent readout as it reaches the panel. */
+export interface MemberSubagentReadout {
+    readonly state: MemberSubagentState;
+    readonly subagents: readonly MemberSubagent[];
+    readonly reason?: string;
+}
+/**
+ * Read one member's subagent layer off the `/state` payload.
+ *
+ * ★★★ 三态不许塌：`observed` + 空数组是"**读了**，真的没有"；
+ *   `could-not-measure` 是"**没读成**"。把后者圆成前者会让面板永远印着
+ *   "没有子代理" —— 而那与"确实没有"在读者眼里**同形**（本仓三态纪律，
+ *   也是 t27 立这一格的唯一理由）。
+ *
+ * ★ 缺省（老宿主根本没有这一格）同样归入 `could-not-measure`，而不是
+ *   "这个成员没有子代理"：老宿主不是"测到了没有"，是"没这块数据"。
+ * @param member - one member row from the snapshot (read structurally).
+ * @returns the tri-state readout, with the host's own reason when it gave one.
+ */
+export declare function memberSubagentReadout(member: {
+    readonly subagents?: string;
+    readonly liveSubagents?: readonly MemberSubagent[];
+    readonly subagentsReason?: string;
+}): MemberSubagentReadout;
+/**
+ * Presentation tone of one subagent's own status.
+ *
+ * ★ `unknown` is a real third answer, not a default to be styled away: the host
+ *   hands the raw session status through (`running` / `idle` / anything), and a
+ *   value we do not recognise must not be rounded to "working".
+ */
+export type SubagentTone = 'working' | 'idle' | 'unknown';
+/**
+ * Classify one live subagent's status for rendering.
+ * @param status - the raw session status as the host reported it.
+ * @returns `working`, `idle`, or `unknown` for anything unrecognised.
+ */
+export declare function subagentTone(status: string): SubagentTone;
+/**
+ * One member row's disclosure state.
+ *
+ * ★ The map is keyed by member id (falling back to name for pre-spawn rows) so a
+ *   poll that reorders the roster cannot hand one member's expansion to another.
+ */
+export type MemberExpansion = ReadonlyMap<string, boolean>;
+/** Stable key for one member row's expansion slot. */
+export declare function memberRowKey(member: {
+    readonly id?: string;
+    readonly name: string;
+}): string;
+/**
+ * Whether one member row is expanded.
+ *
+ * ★ Collapsed by default is a *value*, not an absent branch: an unmapped row
+ *   reads `false`, so a fresh render can never accidentally open every row.
+ * @param expansion - the panel's expansion store.
+ * @param key - the row's stable key (see {@link memberRowKey}).
+ */
+export declare function memberRowExpanded(expansion: MemberExpansion, key: string): boolean;
+/**
+ * Apply one explicit user toggle to the expansion store.
+ *
+ * ★ The result is a user choice from then on: it is stored, so the next poll's
+ *   re-render reads it back rather than re-deriving a default. That is the whole
+ *   of "a user's choice is not reset".
+ * ★ Returns the SAME map when nothing changed, so a redundant toggle cannot
+ *   invalidate every row on the next render.
+ * @param expansion - the current store.
+ * @param key - the row's stable key.
+ * @returns the next store.
+ */
+export declare function toggleMemberRow(expansion: MemberExpansion, key: string): MemberExpansion;
+/**
+ * Drop expansion entries for members that are no longer on the team.
+ *
+ * ★ Without this, a store keyed by member id grows for the life of the panel —
+ *   the panel is a shell-overlay singleton and outlives every conversation
+ *   route change. Rows the user never touched are never added in the first
+ *   place, so the pruning is only ever removing what a re-spawn replaced.
+ * ★ Returns the same map when nothing was pruned.
+ * @param expansion - the current store.
+ * @param keys - every key the current roster defines.
+ */
+export declare function pruneMemberRows(expansion: MemberExpansion, keys: readonly string[]): MemberExpansion;
 /** What one member's elapsed readout means. */
 export type MemberClockKind = 
 /** The member's own session is live and working; the clock counts real progress. */
@@ -308,6 +449,12 @@ export type MemberClockKind =
 export interface MemberClock {
     readonly kind: MemberClockKind;
     readonly ms: number;
+    /**
+     * The durable stamp `ms` was measured from.
+     * ★ Present only for `running` / `stale` — the two readings whose duration
+     *   actually advances. The ticking component re-derives `ms` from it.
+     */
+    readonly stamp?: number;
 }
 /** Minimal member shape the clock needs (matches one snapshot member row). */
 export interface ClockMember {
@@ -341,6 +488,17 @@ export interface ClockTask {
  * @param now - observation instant, injected so this stays pure.
  */
 export declare function memberClock(member: ClockMember, tasks: readonly ClockTask[], now: number): MemberClock;
+/**
+ * The durable stamp a member's clock is currently measured from.
+ *
+ * ★ Same picks as {@link memberClock}, returned as the raw stamp instead of a
+ *   duration: the ticking component re-derives the duration each second from
+ *   this stamp, so the panel never has to re-render to move the number.
+ * @param member - the member row.
+ * @param tasks - the team's tasks.
+ * @returns the durable `updatedAt` being counted from, or undefined.
+ */
+export declare function memberClockStamp(member: ClockMember, tasks: readonly ClockTask[]): number | undefined;
 /** Compact elapsed copy for one row: `4s`, `12m`, `1h 5m`. */
 export declare function formatElapsed(ms: number): string;
 /** Group tasks by their precomputed dependency depth. */

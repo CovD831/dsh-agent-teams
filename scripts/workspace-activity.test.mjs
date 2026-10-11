@@ -546,3 +546,702 @@ test('★ 臂 15（t27 只读臂）：投影**只读** —— 一个碰一下就
     '★ 反向半边：桩必须真的会抛，否则"没碰到"是恒真的')
 })
 
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t28（R2）：第一屏是**成员中心**的 ──────────────────────────────────────
+ *
+ * ── 用户对这一屏的原话（这是全部判据的来源）────────────────────────────────────
+ *
+ *   · "the first screen should show durable roles, and clicking one expands to
+ *      show the subagents working underneath it, together with round information"
+ *   · "so the round data moves UP into screen one rather than living on its own screen"
+ *   · "is the whole team working, and who is doing what"
+ *   · 「整个东西挺冗余的，比如它做一些 badge 之类的东西」
+ *
+ * ── 本节的形状：每条臂都带【反向半边】──────────────────────────────────────────
+ *
+ * 只断言"它是对的"会让一个【恒返回同一值】的实现全绿。所以每一条真正的臂
+ * 旁边都站着一个**同样输入、必须给出不同答案**的对照，而对照本身也要先被证明
+ * "它真的会变"（否则那条断言测的不是它声称的东西）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const {
+  memberClockTicks, memberSubagentReadout, subagentTone, memberRound,
+  memberRowKey, memberRowExpanded, toggleMemberRow, pruneMemberRows,
+} = await import('../lib/client/activity-model.js')
+
+test('★ 臂 16（成员时钟订阅臂）：只有**真的在跑**的读数才该拥有秒表', () => {
+  /**
+   * ★★★ 契约原句："Only members that actually have a running clock subscribe to
+   *   ticks; an idle or waiting member does not keep a timer alive."
+   *
+   * ★ 方向：`running` 为真（它的时长每秒都在变），其余三格为假 ——
+   *   而**四格必须给出不同答案**，否则一个"恒 true"的实现会让每一行每秒重渲染，
+   *   而"running 为真"那半条断言照样绿。
+   */
+  assert.equal(memberClockTicks('running'), true, '★ 在跑的成员必须有秒表，否则读数不动')
+  assert.equal(memberClockTicks('stale'), false, '★ "等待"是一条静态的坏消息，不该每秒重排')
+  assert.equal(memberClockTicks('idle'), false, '★ 空闲不带时长，tick 只会重渲染一个不动的字符串')
+  assert.equal(memberClockTicks('unknown'), false, '★ 读不出戳 ⇒ 没有可更新的数字')
+
+  /** ★ 反向半边：四种读数必须**不是**同一个答案。 */
+  const answers = ['running', 'stale', 'idle', 'unknown'].map(memberClockTicks)
+  assert.notEqual(new Set(answers).size, 1, '★ 四格给出同一个答案 ⇒ 这条判据什么都没测')
+  assert.deepEqual(answers, [true, false, false, false], '★ 而恰好只有第一格为真')
+})
+
+test('★ 臂 17（子代理三态臂）："读不到"与"确实没有"必须在**客户端**也不同形', () => {
+  /**
+   * ★ t27 把这一格送到了 /state，而这里测的是**面板怎么读它**。
+   *   一个把 `could-not-measure` 圆成 `observed + []` 的客户端会让面板
+   *   永远印着"没有子代理" —— 与"确实没有"在读者眼里同形。
+   */
+  const measured = memberSubagentReadout({ subagents: 'observed', liveSubagents: [] })
+  assert.equal(measured.state, 'observed')
+  assert.deepEqual(measured.subagents, [], '★ 读了、真的没有 ⇒ 空数组（这是一个读数）')
+
+  const blind = memberSubagentReadout({ subagents: 'could-not-measure', subagentsReason: 'registry exploded' })
+  assert.equal(blind.state, 'could-not-measure', '★ 没读成 ⇒ 不许圆成"没有"')
+  assert.equal(blind.reason, 'registry exploded', '★ 成因必须带过来，否则读者分不出"没有"与"没读成"')
+  assert.notEqual(blind.state, measured.state, '★ 两态必须在同一条输入上真的不同形')
+
+  /** ★ 老宿主根本没有这一格 ⇒ 同样是"没读成"，不是"没有"。 */
+  const legacy = memberSubagentReadout({})
+  assert.equal(legacy.state, 'could-not-measure', '★ 缺省 = 没测到，不是"这个成员没有子代理"')
+  assert.ok(legacy.reason.length > 0, '★ 而且要说明成因')
+
+  /** ★ 一条真的子代理要原样交出来。 */
+  const one = memberSubagentReadout({
+    subagents: 'observed',
+    liveSubagents: [{ id: 'child-a', label: 'reviewer', status: 'running', mode: 'continuable' }],
+  })
+  assert.deepEqual(one.subagents.map((sub) => sub.id), ['child-a'])
+
+  /** ★ 反向半边（定向突变的可执行形式）：把三态塌缩掉 ⇒ 读数必须**变了**。 */
+  const collapsed = (readout) => ({ ...readout, state: 'observed', subagents: [] })
+  assert.notEqual(collapsed(blind).state, blind.state,
+    '★ 塌缩之后读数必须变了 —— 没变说明这条断言测的不是它声称的东西')
+})
+
+test('★ 臂 18（子代理语气臂）：认不出来的状态**不许**被圆成"工作中"', () => {
+  assert.equal(subagentTone('running'), 'working')
+  assert.equal(subagentTone('idle'), 'idle')
+  /** ★ 反向半边：一个没见过的值必须是第三态，而不是并进 working。 */
+  assert.equal(subagentTone('hibernating'), 'unknown')
+  assert.notEqual(subagentTone('hibernating'), subagentTone('running'))
+  assert.equal(new Set(['running', 'idle', 'hibernating'].map(subagentTone)).size, 3,
+    '★ 三种输入必须给出三个不同答案')
+})
+
+test('★ 臂 19（轮次行内臂）：轮次读的是**这个成员自己的**任务，且缺席不等于第 0 轮', () => {
+  const tasks = [
+    { id: 'a', status: 'failed', failureKind: 'inconclusive', round: 2 },
+    { id: 'b', status: 'completed', round: 3 },
+  ]
+  const latest = memberRound(tasks)
+  assert.equal(latest.round, 3, '★ 取最大的那一轮（它是这个成员此刻在第几轮）')
+  assert.equal(latest.tone, 'completed', '★ 而语气是**那一轮**的语气，不是别的轮')
+  assert.deepEqual(latest.tasks.map((task) => task.id), ['b'], '★ 同轮的任务才在一起')
+
+  /** ★ 缺席 ⇒ `undefined`（"没有轮次概念"），**不是** 0（"第 0 轮"）。 */
+  assert.equal(memberRound([{ id: 'plain', status: 'in_progress' }]), undefined,
+    '★ 没有 round 的任务不进这个投影 —— 缺席与"第 0 轮"必须不同形')
+
+  /**
+   * ★ 反向半边：**只**看交给它的那些任务。一个把全队最大轮次印到每个成员身上的
+   *   实现，会让没参与那一轮的成员也印着"第 N 轮"。
+   */
+  const outsider = memberRound([{ id: 'mine', status: 'completed', round: 1 }])
+  assert.equal(outsider.round, 1)
+  assert.notEqual(outsider.round, latest.round, '★ 两个成员不同的轮次必须给出不同读数')
+})
+
+test('★ 臂 20（展开存活臂）：默认收起，而用户按下的那个活得过重渲染', () => {
+  const key = memberRowKey({ id: 'm1', name: 'ui-eng' })
+  /** ★ 默认收起是一个**值**，不是一条缺席分支。 */
+  let state = new Map()
+  assert.equal(memberRowExpanded(state, key), false, '★ 默认必须是收起')
+
+  /** 用户按下 ⇒ 展开。 */
+  state = toggleMemberRow(state, key)
+  assert.equal(memberRowExpanded(state, key), true)
+  /** ★ 重渲染 = 用同一份 state 再读一次 ⇒ 选择必须还在。 */
+  assert.equal(memberRowExpanded(state, key), true, '★ 用户的展开不得被下一次渲染抹掉')
+
+  /** 再按一次 ⇒ 收起，而且仍然是一个**记住了的**收起。 */
+  state = toggleMemberRow(state, key)
+  assert.equal(memberRowExpanded(state, key), false)
+  assert.equal(state.has(key), false)
+
+  /** ★ 键必须跟着**成员 id**：轮询重排名册不许把展开状态交给另一个人。 */
+  assert.equal(memberRowKey({ id: '', name: 'fresh' }), 'name:fresh', '★ 未启动的成员退化成名字键')
+  assert.notEqual(memberRowKey({ id: 'm1', name: 'ui-eng' }), memberRowKey({ id: 'm2', name: 'ui-eng' }))
+
+  /** ★ 反向半边：另一行**不受**影响（否则"一行展开"会传染成"每行都展开"）。 */
+  assert.equal(memberRowExpanded(state, 'm2'), false)
+})
+
+test('★ 臂 21（剪枝臂）：不在册的展开条目会被剪掉，而在册的原样留着', () => {
+  let state = new Map()
+  state = toggleMemberRow(state, 'm1')
+  state = toggleMemberRow(state, 'm2')
+  const pruned = pruneMemberRows(state, ['m1'])
+  assert.equal(memberRowExpanded(pruned, 'm1'), true, '★ 在册的必须原样留着')
+  assert.equal(pruned.has('m2'), false, '★ 不在册的必须被剪掉（否则 store 只增不减）')
+
+  /** ★ 反向半边：**没有**要剪的东西时，必须返回**同一个** map。 */
+  const same = pruneMemberRows(pruned, ['m1'])
+  assert.equal(same, pruned, '★ 无变化必须返回同一个引用 —— 否则每次轮询都会让每一行重渲染')
+  /** ★ 而"恒返回同一个空 map"的实现会被这一条抓住：有东西可剪时必须**真的**剪。 */
+  const grew = toggleMemberRow(toggleMemberRow(new Map(), 'm1'), 'gone')
+  assert.equal(grew.size, 2, '★ 前置：两条真的在 store 里')
+  assert.equal(pruneMemberRows(grew, ['m1']).size, 1, '★ 有东西可剪时必须真的剪掉一个')
+  assert.equal(pruneMemberRows(grew, ['m1', 'gone']).size, 2, '★ 而全在册时必须一个都不剪')
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 臂 22-25：**真的渲染**（不是读源码）─────────────────────────────────────
+ *
+ * ── 为什么需要一个 DOM 桩 ──────────────────────────────────────────────────────
+ *
+ * 契约对秒表那条是**可测**的（"the per-second timer lives inside a small component
+ * that owns only the elapsed text, so a tick re-renders that component and not the
+ * panel tree"）。而"读源码说它只 tick 自己"是**惯例**，不是**断言** ——
+ * 下一次改动可以悄悄把一个 setState 挪回父级，而 grep 照样通过。
+ *
+ * ⇒ 这一节用**真的 React**（`react-dom/client` + `React.act`）把组件挂起来，
+ *   起一个**真的** `setInterval`，然后**数**父组件的渲染次数。
+ * ★ 下面的 DOM 桩只补 React 18 真正会碰的那些成员（构造、属性、事件注册、
+ *   选区探测）；没有 `jsdom` 依赖被引入到 package.json（那在本次 scope 之外）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 把 `.css` / 宿主包解析成一个**惰性空的**模块。
+ * ★ CSS Modules 在 Node 里没有含义；`Proxy` 让 `css.anything` 都是一个字符串，
+ *   于是"类名"这件事对下面这些臂是不透明的 —— 而它们本来也不该断言 CSS。
+ */
+const HOST_STUBS = {
+  '@deepseek-ai/dsh-client-ui-primitives': 'export const Menu=()=>null; export const Modal=()=>null; export default { Menu, Modal }',
+  '@deepseek-ai/dsh-client-ui-model-selection/client': 'export {}',
+  '@deepseek-ai/dsh-session/types': 'export {}',
+}
+const { registerHooks } = await import('node:module')
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.endsWith('.css')) {
+      return { url: 'data:text/javascript,' + encodeURIComponent('export default new Proxy({},{get:(t,k)=>String(k)})'), shortCircuit: true }
+    }
+    const stub = HOST_STUBS[specifier]
+    if (stub !== undefined) return { url: 'data:text/javascript,' + encodeURIComponent(stub), shortCircuit: true }
+    return nextResolve(specifier, context)
+  },
+})
+
+/** 一个刚好够 `react-dom/client` 挂载与提交的最小 DOM（见上面的口径注）。 */
+function installMinimalDom() {
+  class NodeBase {
+    constructor(nodeType, nodeName) {
+      this.nodeType = nodeType; this.nodeName = nodeName
+      this.childNodes = []; this.parentNode = null; this.ownerDocument = null
+      this.style = {}; this.data = ''; this.textContent = ''
+      this._attrs = new Map(); this._listeners = new Map()
+    }
+    get firstChild() { return this.childNodes[0] ?? null }
+    get lastChild() { return this.childNodes[this.childNodes.length - 1] ?? null }
+    get nextSibling() {
+      if (this.parentNode === null) return null
+      const index = this.parentNode.childNodes.indexOf(this)
+      return this.parentNode.childNodes[index + 1] ?? null
+    }
+    appendChild(child) { if (child.parentNode) child.parentNode.removeChild(child); this.childNodes.push(child); child.parentNode = this; return child }
+    insertBefore(child, ref) {
+      if (child.parentNode) child.parentNode.removeChild(child)
+      const at = ref === null || ref === undefined ? this.childNodes.length : this.childNodes.indexOf(ref)
+      this.childNodes.splice(at < 0 ? this.childNodes.length : at, 0, child)
+      child.parentNode = this; return child
+    }
+    removeChild(child) { const at = this.childNodes.indexOf(child); if (at >= 0) this.childNodes.splice(at, 1); child.parentNode = null; return child }
+    replaceChild(next, prev) { this.insertBefore(next, prev); this.removeChild(prev); return prev }
+    setAttribute(name, value) { this._attrs.set(name, String(value)) }
+    getAttribute(name) { return this._attrs.get(name) ?? null }
+    hasAttribute(name) { return this._attrs.has(name) }
+    removeAttribute(name) { this._attrs.delete(name) }
+    setAttributeNS(_ns, name, value) { this.setAttribute(name, value) }
+    removeAttributeNS(_ns, name) { this.removeAttribute(name) }
+    addEventListener(type, fn) { const set = this._listeners.get(type) ?? new Set(); set.add(fn); this._listeners.set(type, set) }
+    removeEventListener(type, fn) { this._listeners.get(type)?.delete(fn) }
+    dispatchEvent() { return true }
+    contains(other) { for (let node = other; node !== null && node !== undefined; node = node.parentNode) { if (node === this) return true } return false }
+    getRootNode() { let node = this; while (node.parentNode) node = node.parentNode; return node }
+    focus() { document.activeElement = this }
+    blur() {}
+    getBoundingClientRect() { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 } }
+    get clientWidth() { return 0 }
+    get clientHeight() { return 0 }
+    get scrollWidth() { return 0 }
+    get scrollHeight() { return 0 }
+  }
+  class Element extends NodeBase {
+    constructor(tagName, namespace) {
+      super(1, String(tagName).toUpperCase())
+      this.tagName = String(tagName).toUpperCase()
+      this.namespaceURI = namespace ?? 'http://www.w3.org/1999/xhtml'
+    }
+    get children() { return this.childNodes.filter((node) => node.nodeType === 1) }
+  }
+  class Text extends NodeBase {
+    constructor(data) { super(3, '#text'); this.data = data }
+    get nodeValue() { return this.data }
+    set nodeValue(value) { this.data = value }
+  }
+  class Document extends NodeBase {
+    constructor() { super(9, '#document'); this.ownerDocument = this }
+    createElement(tag) { const element = new Element(tag); element.ownerDocument = this; return element }
+    createElementNS(namespace, tag) { const element = new Element(tag, namespace); element.ownerDocument = this; return element }
+    createTextNode(data) { const text = new Text(data); text.ownerDocument = this; return text }
+    createComment(data) { return new Text(data) }
+    createDocumentFragment() { const fragment = new Element('#fragment'); fragment.ownerDocument = this; return fragment }
+    querySelector() { return null }
+    querySelectorAll() { return [] }
+    getElementById() { return null }
+  }
+  const document = new Document()
+  document.documentElement = new Element('html')
+  document.body = new Element('body')
+  document.head = new Element('head')
+  document.activeElement = document.body
+  const window = {
+    document,
+    navigator: { userAgent: 'node' },
+    setTimeout, clearTimeout, setInterval, clearInterval,
+    requestAnimationFrame: (fn) => setTimeout(() => fn(Date.now()), 0),
+    cancelAnimationFrame: (id) => clearTimeout(id),
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true },
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    HTMLIFrameElement: class HTMLIFrameElement {},
+    HTMLElement: Element, Element, Node: NodeBase, Text, Document,
+    MutationObserver: class { observe() {} disconnect() {} takeRecords() { return [] } },
+  }
+  document.defaultView = window
+  globalThis.window = window
+  globalThis.document = document
+  globalThis.Element = Element
+  globalThis.HTMLElement = Element
+  globalThis.Node = NodeBase
+  globalThis.Text = Text
+  globalThis.NodeList = Array
+  globalThis.MutationObserver = window.MutationObserver
+  globalThis.requestAnimationFrame = window.requestAnimationFrame
+  globalThis.cancelAnimationFrame = window.cancelAnimationFrame
+  globalThis.getComputedStyle = window.getComputedStyle
+  return { document, window }
+}
+
+const { document: testDocument } = installMinimalDom()
+/**
+ * ★ `IS_REACT_ACT_ENVIRONMENT` 必须显式打开：React 18 靠它决定要不要把
+ *   "更新发生在 act 之外"当成告警。打开它，下面这些臂测的就是**浏览器里
+ *   真正会发生的那件事**，而不是一个宽松环境里的近似。
+ */
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+const React = (await import('react')).default
+const { createRoot } = await import('react-dom/client')
+/** ★ React 18.3 起 `act` 从 `react` 导出；`react-dom/test-utils` 那条已弃用。 */
+const act = React.act
+// ★ react-dom 的调度依赖一个 MessageChannel；Node 自带一个（不需要 jsdom）。
+const { MessageChannel } = await import('node:worker_threads')
+globalThis.MessageChannel = MessageChannel
+globalThis.window.MessageChannel = MessageChannel
+
+const { MemberClock, MEMBER_CLOCK_TICK_MS } = await import('../lib/client/MemberClock.js')
+
+/**
+ * 挂起一棵树；返回容器与卸载函数。
+ *
+ * ★ 必须是 `async` + `await act(async () => ...)`：React 18 的并发根把首次渲染
+ *   排进一次微任务，**同步**的 `act` 返回时 DOM 还是空的（实测：文本读出来是 `''`，
+ *   看起来像"组件渲染了空白"，其实是"还没提交"）。这个坑值得写下来 ——
+ *   它会把一条"不许空白"的臂变成一个**恒假**的断言。
+ */
+async function mount(element) {
+  const container = testDocument.createElement('div')
+  const root = createRoot(container)
+  await act(async () => { root.render(element) })
+  return {
+    container,
+    unmount: () => { act(() => { root.unmount() }) },
+  }
+}
+
+/**
+ * ── ★★ 让**真的**时间过去，让计时器**真的**响 ────────────────────────────────
+ *
+ * MEASURED（本节自己踩到的一个坑，记下来给下一个人）：
+ * 把等待写在 `await act(async () => { await sleep(ms) })` **里面**，计时器
+ * 回调触发的 setState 会被 act 排队、直到 act 块结束才提交 —— 于是
+ * "tick 有没有真的发生"这件事**测不到**（实测：interval 响了 3 次，
+ * 而渲染计数一动不动，看起来像"隔离得很好"，其实是"什么都没跑"）。
+ *
+ * ★★ 而更坏的一种：`await act(async () => {})`（空体）在"有一个每秒都重新排队的
+ *   interval"时会**永不返回** —— 实测整个测试文件卡死、没有任何断言输出。
+ *
+ * ⇒ 正确做法：**在 act 之外**睡，让 React 像在浏览器里那样把更新提交掉，
+ *   之后才读计数。这一节要测的正是"浏览器里真正会发生的那件事"。
+ */
+async function settle(ms) {
+  await new Promise((resolve) => { setTimeout(resolve, ms) })
+  await new Promise((resolve) => { setTimeout(resolve, 0) })
+}
+
+/**
+ * 容器里的全部文本（用来断言"没有空白格"）。
+ *
+ * ★ MEASURED（本节自己踩到的第二个坑）：React 18 对**只有文本**的宿主节点是直接写
+ *   `node.textContent` 的，**不**挂一个文本子节点。只走 childNodes 会读出一个空串 ——
+ *   而那会让"不许空白"这条臂变成**恒假**（它测的是遍历写错了，不是组件印了空白）。
+ *   ⇒ 叶子节点读 `textContent`，同时仍然递归子节点。
+ */
+function textOf(node) {
+  const parts = []
+  const walk = (current) => {
+    if (current.nodeType === 3) { parts.push(current.data); return }
+    if (current.childNodes.length === 0) {
+      if (typeof current.textContent === 'string') parts.push(current.textContent)
+      return
+    }
+    for (const child of current.childNodes) walk(child)
+  }
+  walk(node)
+  return parts.join(' ').replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * ── ★★ 组件**必须定义在测试外面**（本节踩到的第三个坑，实测）────────────────────
+ *
+ * 把 `PanelSpy` 写在 `test(...)` 体里，每次渲染都会新建一个组件**类型** ——
+ * React 于是把整棵子树**卸载重挂**，`MemberClock` 的定时器还没响就被拆了。
+ * 实测症状：面板计数涨、时钟计数也涨，看起来像"隔离失败"，
+ * 其实测的是"每次渲染都换了组件身份"。
+ *
+ * ── ★★ 而"时钟自己重渲染了几次"**不能**用外层包装来数（第四个坑，实测）────────
+ *
+ * 第一版把一个 `CountingClock` 包在 `MemberClock` 外面来计数。实测：它恒为 1，
+ * 而 51 次 act 告警证明 `MemberClock` **确实**在更新。
+ * ⇒ 这恰恰是本任务要的性质：React 只重渲染**拥有那个 state 的组件**，
+ *   连它的直接父组件都跳过。所以包装器的计数测不到"时钟 tick 了"。
+ *
+ * ⇒ 两个计数器各司其职：
+ *   · `panelCounter.renders` = 面板替身的渲染次数 —— **必须一动不动**（隔离的断言）
+ *   · `ticks` + 时钟印出来的字**变了** —— 反向半边（证明"确实跑过"，
+ *     否则"没重渲染"是恒真的）
+ */
+const panelCounter = { renders: 0 }
+
+/** 面板替身：它渲染成员行（行里是很小的 `MemberClock`）。 */
+function PanelSpy({ stamp, t }) {
+  panelCounter.renders += 1
+  return React.createElement('div', { className: 'panel' },
+    React.createElement(MemberClock, { kind: 'running', stamp, t }))
+}
+/**
+ * `t` 必须**同一个身份**，否则每次渲染都是新 props（那会把这条臂变成测 props 抖动）。
+ *
+ * ★ 而它必须**把 `elapsed` 带出来**：这一节要能看到"字真的在走"。
+ *   只回一个 key 的话，`member.clock.working` 5 秒和 8 秒是同一串字 ——
+ *   反向半边 ② 就测不到东西（实测：它红在这里）。
+ */
+const stableTranslate = (key, params) => `${key}:${params?.elapsed ?? ''}`
+const SpyWithStableProps = ({ stamp }) => React.createElement(PanelSpy, { stamp, t: stableTranslate })
+
+test('★ 臂 22（时钟隔离臂）：秒表 tick 一次 ⇒ **面板**的渲染次数一动不动', async () => {
+  /**
+   * ★★★ 这是本任务点名的那条**可测**要求。做法是把它变成一个**对照实验**：
+   *
+   *   · 父组件 = 面板的替身（它渲染成员行，而成员行里是很小的 `MemberClock`）
+   *   · 子组件 = `MemberClock`（它自己拥有 `setInterval`）
+   *
+   * ★ 计数是**真的**渲染次数（组件函数被 React 调用的次数），不是 grep 出来的。
+   */
+  panelCounter.renders = 0
+  const STAMP = Date.now() - 5_000
+
+  /** ★ 数**真的** `setInterval` 回调：它才是"这一秒真的过去了"的机械形式。 */
+  const realSetInterval = globalThis.setInterval
+  let ticks = 0
+  const countingSetInterval = (fn, ms) => realSetInterval(() => { ticks += 1; fn() }, ms)
+  globalThis.setInterval = countingSetInterval
+  globalThis.window.setInterval = countingSetInterval
+
+  let mounted
+  try {
+    mounted = await mount(React.createElement(SpyWithStableProps, { stamp: STAMP }))
+  } finally {
+    globalThis.setInterval = realSetInterval
+    globalThis.window.setInterval = realSetInterval
+  }
+  const afterMount = panelCounter.renders
+  assert.equal(afterMount, 1, '★ 前置：面板替身挂了 1 次')
+  const textAtMount = textOf(mounted.container)
+
+  /** ★ 真的等过至少两个 tick（用组件自己导出的节拍，不另猜一个数）。 */
+  await settle(MEMBER_CLOCK_TICK_MS * 2 + 300)
+
+  /**
+   * ★★ 反向半边（两条，缺一条上面那条就可能是恒真的）：
+   *   ① 计时器**真的**响过；
+   *   ② 时钟印出来的字**真的**变了（不是"它跑了但什么都没更新"）。
+   */
+  assert.ok(ticks >= 2, `★ 反向半边 ①：计时器必须真的响过（实测 ${ticks} 次）`)
+  const textLater = textOf(mounted.container)
+  assert.notEqual(textLater, textAtMount,
+    `★ 反向半边 ②：时钟印的字必须真的在走（${JSON.stringify(textAtMount)} → ${JSON.stringify(textLater)}）`)
+
+  /** ★★★ 而**面板**一动不动：这就是那条"measured requirement"。 */
+  assert.equal(panelCounter.renders, afterMount,
+    `★★★ 秒表 tick 时**面板**必须一动不动（渲染次数 ${afterMount} → ${panelCounter.renders}）：`
+    + 'tick 只许重渲染拥有时长的那一个小小组件')
+  mounted.unmount()
+})
+
+test('★ 臂 23（静止成员不起表臂）：idle / unknown 的成员**不保留**一个活着的计时器', async () => {
+  /**
+   * ★ 契约原句："an idle or waiting member does not keep a timer alive"。
+   *
+   * ★ 这条臂测的是**表有没有被创建**，而不是"文本对不对"：做法是把
+   *   `setInterval` 换成一个记账的替身，然后挂一个 idle 的成员。
+   */
+  const created = []
+  const realSetInterval = globalThis.setInterval
+  const counting = (fn, ms) => { created.push(ms); return realSetInterval(fn, ms) }
+  globalThis.setInterval = counting
+  globalThis.window.setInterval = counting
+  try {
+    const idle = await mount(React.createElement(MemberClock, { kind: 'idle', t: (key) => key }))
+    assert.deepEqual(created, [], '★ 空闲的成员不许起表 —— 它数的是"没事做"，一个不动的读数')
+    idle.unmount()
+
+    const unknown = await mount(React.createElement(MemberClock, { kind: 'unknown', t: (key) => key }))
+    assert.deepEqual(created, [], '★ 读不出时长的成员同样不许起表')
+    unknown.unmount()
+
+    /** ★ 反向半边：**在跑**的成员必须真的起表（用同一个替身，同一条路）。 */
+    const running = await mount(React.createElement(MemberClock, { kind: 'running', stamp: Date.now() - 3_000, t: (key) => key }))
+    assert.deepEqual(created, [MEMBER_CLOCK_TICK_MS],
+      '★ 反向半边：在跑的成员必须起一次表，而且用的是组件导出的那个节拍')
+    running.unmount()
+  } finally {
+    globalThis.setInterval = realSetInterval
+    globalThis.window.setInterval = realSetInterval
+  }
+})
+
+test('★ 臂 24（四种读数都非空臂）：四格文字两两不同，且没有一格是空白', async () => {
+  /**
+   * ★★★ MEASURED（用户 2026-10-11）：「Integrator 前面是一个空白的显示，这说明显示就不对。」
+   *
+   * ★ 所以这一条断言的是**渲染出来的文本**，不是源码里的分支。
+   *   一个漏了某个分支的实现会印出空字符串 —— 而那正是用户看到的那一格。
+   */
+  const NOW = 1_000_000
+  const cases = [
+    { kind: 'running', stamp: NOW - 65_000 },
+    { kind: 'stale', stamp: NOW - 65_000 },
+    { kind: 'idle' },
+    { kind: 'unknown' },
+  ]
+  const texts = []
+  for (const item of cases) {
+    const mounted = await mount(React.createElement(MemberClock, {
+      ...item, frozenNow: NOW, t: (key, params) => `${key}:${params?.elapsed ?? ''}`,
+    }))
+    const text = textOf(mounted.container)
+    assert.notEqual(text, '', `★ ${item.kind} 这一格**不许**空白（用户实测到的缺陷就是这个）`)
+    texts.push(text)
+    mounted.unmount()
+  }
+  assert.equal(new Set(texts).size, 4, `★ 四种读数必须两两不同形，实测：${JSON.stringify(texts)}`)
+  assert.match(texts[0], /member\.clock\.working/, '★ 在跑的读"已工作"')
+  assert.match(texts[1], /member\.clock\.waiting/, '★ 停滞的读"已等待"（与"已工作"必须不同形）')
+  assert.match(texts[2], /member\.clock\.idle/)
+  assert.match(texts[3], /member\.clock\.unknown/)
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * 臂 25：成员行本身（真的挂起来）—— 一行四件事，展开层是子代理
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const { MemberRow, memberDoingText } = await import('../lib/client/MemberRow.js')
+
+/** ★ 一行夹具：一个持久成员，名下有一个在跑的任务。 */
+const ROW_TEAM = {
+  workspace: '', teamId: 'team', name: 'Team', captainSessionId: 'cap',
+  phase: 'running', messageCount: 0, captainInbox: [],
+}
+const ROW_MEMBER = {
+  id: 'm1', name: 'ui-eng', role: 'eng', provider: 'prov', model: 'long-model-name',
+  activity: 'working', progress: 0, done: 0, total: 1, currentTask: 'impl', unread: 0,
+}
+const ROW_TASK = {
+  id: 'impl', subject: 'rebuild screen one', status: 'in_progress', state: 'running',
+  assignee: 'ui-eng', dependencies: [], depth: 0, round: 2, updatedAt: 1_000,
+}
+
+async function renderRow(member, tasks, extra = {}) {
+  const props = {
+    team: { ...ROW_TEAM, members: [member], tasks },
+    member, tasks,
+    expanded: false, onToggle: () => {}, onOpenSubagent: () => {},
+    t: (key, params) => `${key}${params !== undefined && params.round !== undefined ? `:${params.round}` : ''}`,
+    frozenNow: 61_000,
+    ...extra,
+  }
+  const mounted = await mount(React.createElement(MemberRow, props))
+  return { ...mounted, text: textOf(mounted.container) }
+}
+
+test('★ 臂 25a（成员行身份臂）：一行里有身份、模型、在做什么、以及**非空**的时长', async () => {
+  const rendered = await renderRow(ROW_MEMBER, [ROW_TASK])
+  const { text } = rendered
+  assert.match(text, /ui-eng/, '★ 身份：名字')
+  assert.match(text, /eng/, '★ 身份：角色')
+  assert.match(text, /long-model-name/, '★ 模型（可见的是末段，这里断言它真的印出来了）')
+  assert.match(text, /impl/, '★ 在做什么：任务 id')
+  assert.match(text, /member\.clock\.working/, '★ 时长：读"已工作"')
+  assert.notEqual(text, '', '★ 整行不许空白')
+  rendered.unmount()
+})
+
+test('★ 臂 25b（轮次行内臂）：轮次印在**成员行这一块里**，不是另一屏', async () => {
+  const rendered = await renderRow(ROW_MEMBER, [ROW_TASK])
+  /** ★ 行内 = 同一个渲染结果里的一个节点，而不是"别处还有一个轮次区"。 */
+  assert.match(rendered.text, /member\.round\.mark:2/, '★ 第 2 轮必须在这一行的渲染结果里')
+  /** ★ 反向半边：没有轮次的任务 ⇒ 这一块**整个不渲染**（不许印"第 0 轮"）。 */
+  const plain = await renderRow(ROW_MEMBER, [{ ...ROW_TASK, round: undefined }])
+  assert.doesNotMatch(plain.text, /member\.round\.mark/, '★ 没有轮次概念时不许印任何轮次')
+  rendered.unmount(); plain.unmount()
+})
+
+test('★ 臂 25c（展开层臂）：收起时不渲染子代理；展开时才渲染，且**每个**都说明它在做什么', async () => {
+  const member = {
+    ...ROW_MEMBER,
+    subagents: 'observed',
+    liveSubagents: [
+      { id: 'child-a', label: 'reviewer', status: 'running', mode: 'continuable' },
+      { id: 'child-b', label: 'prober', status: 'idle' },
+    ],
+  }
+  /**
+   * ★ 默认收起：子代理**整个不在 DOM 里**（而不是渲染了但用 CSS 藏起来 ——
+   *   后者会泄进可访问性树，而"看不见"与"不存在"对读屏的人不同形）。
+   */
+  const collapsed = await renderRow(member, [ROW_TASK])
+  assert.doesNotMatch(collapsed.text, /reviewer/, '★ 收起时不许渲染子代理')
+  assert.doesNotMatch(collapsed.text, /subagent\.doing\./, '★ 收起时连它的状态行都不许在')
+
+  /** ★ 展开：两个子代理都必须出现，而且**各自**说明它在做什么。 */
+  const expanded = await renderRow(member, [ROW_TASK], { expanded: true })
+  assert.match(expanded.text, /reviewer/, '★ 展开时第一个子代理必须出现')
+  assert.match(expanded.text, /prober/, '★ 而第二个也在（不是只渲染第一个）')
+  assert.match(expanded.text, /subagent\.doing\.working/, '★ 每个都说清它在做什么（running ⇒ working）')
+  assert.match(expanded.text, /subagent\.doing\.idle/, '★ 而 idle 的那一个读"空闲"（两态不同形）')
+
+  /** ★ 反向半边：收起与展开的文本必须**不同**（否则"展开了"这件事没发生）。 */
+  assert.notEqual(collapsed.text, expanded.text, '★ 展开必须改变渲染结果')
+
+  /** ★ 而每一行都带**可定位的 id**（label 只是给人看的，id 才是地址）。 */
+  const titles = []
+  const collectTitles = (node) => {
+    if (node._attrs?.has('title')) titles.push(node._attrs.get('title'))
+    for (const child of node.childNodes) collectTitles(child)
+  }
+  collectTitles(expanded.container)
+  assert.ok(titles.includes('child-a'), `★ 子代理的 id 必须可定位，实测 titles：${JSON.stringify(titles)}`)
+  assert.ok(titles.includes('child-b'), '★ 第二个子代理同样可定位')
+  collapsed.unmount(); expanded.unmount()
+})
+
+test('★ 臂 25d（展开层三态臂）："没读成"与"确实没有"在**渲染出来的文本**上也不同形', async () => {
+  const blind = await renderRow({ ...ROW_MEMBER, subagents: 'could-not-measure', subagentsReason: 'registry exploded' }, [ROW_TASK], { expanded: true })
+  const empty = await renderRow({ ...ROW_MEMBER, subagents: 'observed', liveSubagents: [] }, [ROW_TASK], { expanded: true })
+  assert.match(blind.text, /subagent\.unmeasured/, '★ 没读成 ⇒ 必须说清是"读不到"')
+  assert.match(empty.text, /subagent\.none/, '★ 读了、真的没有 ⇒ 说"没有"')
+  assert.notEqual(blind.text, empty.text, '★ 两者在屏幕上必须不同形（本仓三态纪律）')
+  blind.unmount(); empty.unmount()
+})
+
+test('★ 臂 25e（"在做什么"兜底臂）：读不出当前任务时也要说点什么，而不是留空', () => {
+  const idle = { ...ROW_MEMBER, activity: 'idle', currentTask: '', total: 0, done: 0 }
+  /** ★ 没有当前任务、没有在飞任务 ⇒ 兜底文案，**不是空字符串**。 */
+  const doing = memberDoingText(idle, undefined, [], (key) => key)
+  assert.equal(doing, 'member.status.waitingAssignment', '★ 兜底必须是明确的一句话')
+  /** ★ 反向半边：有在飞任务时读的是**任务**，不是兜底那句。 */
+  const busy = memberDoingText(idle, undefined, [ROW_TASK], (key, params) => `${key}:${params?.taskId}`)
+  assert.equal(busy, 'member.doing.task:impl', '★ 有任务就报任务 id')
+  assert.notEqual(busy, doing, '★ 两种情形必须给出不同读数')
+})
+
+test('★ 臂 25f（无药丸臂）：模型那一格是行内文字，不是药丸/徽章', async () => {
+  /**
+   * ★ 用户的投诉是 "badge-like elements"。判据落在两个**形状**属性上：
+   *   圆角拉满（`border-radius: 999px`）与描边/底色 —— 它们只为"这是个标签"服务。
+   * ★ 这条读的是 CSS 源（形状是 CSS 的事实），而它旁边的臂 25a 读的是渲染结果。
+   */
+  const { readFile } = await import('node:fs/promises')
+  const cssSource = await readFile(new URL('../src/client/ActivityPanel.module.css', import.meta.url), 'utf8')
+  const start = cssSource.indexOf('.memberModel {')
+  assert.notEqual(start, -1, '★ 前置：模型那一格的样式必须存在（否则下面测的是空字符串）')
+  const block = cssSource.slice(start, cssSource.indexOf('}', start) + 1)
+  assert.equal(block.includes('border-radius'), false, '★ 模型那一格不许有圆角药丸形状')
+  assert.equal(block.includes('border:'), false, '★ 也不许有描边')
+  assert.equal(block.includes('background:'), false, '★ 也不许有底色（行内文字不需要底色）')
+  assert.ok(block.includes('text-overflow: ellipsis'), '★ 但长路由仍要就地省略号（不许撑破面板）')
+  assert.ok(block.includes('min-width: 0'))
+  /**
+   * ★ 反向半边：**别的**格子仍然可以有形状（比如那个状态点）——
+   *   缺了这一半，一条"整个样式表里没有 999px"的实现会让上面那条照样绿，
+   *   而它其实把面板上所有圆角都删了。
+   */
+  assert.ok(cssSource.includes('border-radius: 999px'), '★ 反向半边：样式表里确实还有别处在用圆角 —— 上面那条是有分辨力的')
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * 臂 26：模型那一格的**契约**跟着代码走，不跟着文件名走
+ *
+ * ── 为什么要单独立这一条 ───────────────────────────────────────────────────────
+ *
+ * `scripts/verify.mjs` 里有一条 check 断言 `.memberModel` 的**形状**，而它是拿
+ * 【`ActivityPanel.tsx` 的文本切片】来判的 —— 那是这一行还长在面板里的时候写的。
+ * R2 把成员行搬进了 `MemberRow.tsx`（这正是本任务要的），于是那条 check 的
+ * 判据变成了"在错误的文件里找正确的字符串"。
+ *
+ * ★ "读不到" 与 "它违反了" 必须不同形（本仓三态纪律）：那一条红**不代表**
+ *   模型那一格坏了，只代表**它现在在另一个文件里**。
+ * ⇒ 所以这里对着**真正的实现处**把同一条契约重立一遍，
+ *   并以 `MemberRow.tsx` 为源 —— 于是它跟着代码走，而不是跟着文件名走。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★ 臂 26（模型格契约臂）：模型是**行内文字**且完整路由可核（对着实现处断言）', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../src/client/MemberRow.tsx', import.meta.url), 'utf8')
+  /** ★ 前置：这一格真的在 `MemberRow.tsx` 里（否则下面几条测的是空字符串）。 */
+  assert.ok(source.includes('css.memberModel'), '★ 前置：模型那一格现在由 MemberRow 渲染')
+  assert.ok(source.includes('data-member-model={memberModel}'), '★ 渲染出一个可核的探针')
+  assert.ok(source.includes('aria-label={memberModel}'), '★ 读屏也能拿到完整路由')
+  assert.ok(source.includes('title={editable === \'sealed\''), '★ 完整路由（或"为什么改不了"）在 title 上')
+  assert.ok(source.includes('role="img"'), '★ 非交互：它是一个读数，不是一个控件')
+  assert.ok(source.includes('compactModelLabel(memberModel)'), '★ 可见的是末段，不是整条长路由')
+
+  /**
+   * ★ 反向半边（精确到**读数**，而不是类名）：面板可以复用同一个**布局类**
+   *   （它给这一行留位置），但**读数**——`role="img"` / `data-member-model` /
+   *   完整路由的 `aria-label`——只许有一份，否则同一个事实会有两次读数，
+   *   而"归属错了"与"归属对了"在界面上同形。
+   */
+  const panel = await readFile(new URL('../src/client/ActivityPanel.tsx', import.meta.url), 'utf8')
+  assert.equal(panel.includes('data-member-model'), false,
+    '★ 反向半边：面板里不许有第二份 `data-member-model` 读数（那一格只有 MemberRow 交出）')
+  assert.equal(panel.includes('aria-label={memberModel}'), false,
+    '★ 反向半边：完整路由的 aria-label 同样只有一份')
+  /** ★ 前置：而面板确实**会用**同一个布局类（否则上面两条是"两边都没有"的空断言）。 */
+  assert.ok(panel.includes('css.memberModel'), '★ 前置：面板复用同一个布局类给这一行留位置')
+})

@@ -557,28 +557,39 @@
   white-space: nowrap;
 }
 
-/* Inline member model badge: compact neutral pill inside memberLine. Bounded
-   shrinkable width keeps long routes ellipsized in place, so the pill never
-   forces horizontal overflow in the normal 388px panel or compact viewport. */
+/**
+ * ★★★ R2：模型的**行内文字**，不再是药丸（用户的投诉是"badge-like elements"）。
+ *
+ * MEASURED（用户 2026-10-11）原话：「整个东西挺冗余的，比如它做一些 badge 之类的东西」。
+ * 模型这条事实**装得下**一行文字，所以它就该是一行文字 —— 边框 + 圆角 + 底色
+ * 三件套只为"它是个标签"服务，而那个含义已经在**位置**（名字右边）里了。
+ *
+ * ★ 保留的：完整路由仍在 `title` / `aria-label` / `data-member-model` 上
+ *   （可核，不是靠肉眼），可见的是末段（`compactModelLabel`）。
+ * ★ 保留 bounds：长路由仍然就地省略号，不许把面板撑破（`min-width: 0` + 省略号）。
+ */
 .memberModel {
-  display: inline-flex;
   flex: 0 1 auto;
-  align-items: center;
   min-width: 0;
-  max-width: 132px;
-  padding: 0 6px;
+  max-width: 148px;
   overflow: hidden;
-  box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 999px;
-  background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 600;
+  font-size: 9.5px;
   line-height: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ★ 打开成员会话的箭头：只做"这一行可以展开"的指示，不承载颜色含义。 */
+.memberRow > .memberInfo .memberLine > svg:last-child {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 140ms ease;
+}
+
+.memberRow[aria-expanded='true'] .memberLine > svg:last-child {
+  transform: rotate(180deg);
 }
 
 .captainState,
@@ -2583,4 +2594,288 @@
   border-color: var(--dsw-alias-border-l2);
   background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ★★★ R2：成员行 —— 轮次**行内** + 展开后的子代理层
+ *
+ * 用户对第一屏的要求（原话）：
+ *   · "the first screen should show durable roles"
+ *   · "clicking one expands to show the subagents working underneath it"
+ *   · "together with round information" —— 轮次**搬到**这一屏
+ *   · 整体是**减法**："整个东西挺冗余的，比如它做一些 badge 之类的东西"
+ *
+ * ⇒ 这里新增的两块都**不使用**药丸/徽章形状：边框+圆角+底色三件套只在
+ *   "它是一个可以点的控件"或"它是一色块"时才出现，其余一律是行内文字。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* ── 轮次行：跟成员行走同一个缩进，读起来是"这一行的补充"，不是另一块面板 ───── */
+.memberRoundLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 6px 0 72px;
+}
+
+.memberRoundMark {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/**
+ * ★ 轮次的语气色 —— 与任务面的三态**同一套** token，不另立一套：
+ *   converging(琥珀) / failed(红) / unmeasured(中性) / running(蓝) / completed(绿)。
+ */
+.memberRoundTone {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.memberRoundLine[data-tone='converging'] .memberRoundTone {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.memberRoundLine[data-tone='failed'] .memberRoundTone {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberRoundLine[data-tone='unmeasured'] .memberRoundTone,
+.memberRoundLine[data-tone='cancelled'] .memberRoundTone {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberRoundLine[data-tone='running'] .memberRoundTone {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.memberRoundLine[data-tone='completed'] .memberRoundTone {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+/* ★ 轮次里的任务 id：**文字**，不是 chip —— 点它是为了定位，不是为了看颜色块。 */
+.memberRoundTasks {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memberRoundTask {
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.memberRoundTask:hover {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+}
+
+.memberRoundTask[data-tone='converging'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.memberRoundTask[data-tone='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberRoundTask[data-tone='cancelled'] {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+/* ── 展开层：成员底下的活子代理。缩进再深一级，读起来是"它底下"而不是"另一个成员" ── */
+.memberSubagents {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px 6px 5px 72px;
+}
+
+.memberSubagentList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memberSubagent {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+/**
+ * ★ 子代理的状态点**小一号**（8px）而且**没有**成员点那圈描边：
+ *   一眼要分得出"这是一个成员"与"这是成员底下的一个子代理"。
+ *   两处同形会让层级消失，而层级正是这一层的全部内容。
+ */
+.memberSubagentDot {
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberSubagentDot[data-tone='working'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.memberSubagentDot[data-tone='idle'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberSubagentDot[data-tone='unknown'] {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l3);
+}
+
+.memberSubagentOpen {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.memberSubagentOpen:hover .memberSubagentLabel {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+}
+
+.memberSubagentLabel {
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberSubagentDoing {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.memberSubagentMode {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+/**
+ * ★ `could-not-measure` 与"确实没有"**必须不同形**（本仓三态纪律）。
+ *   两者都是文字提示，但只有"没读成"那一格带成因（在 `title` 上），
+ *   而它的措辞本身也不同（`subagent.unmeasured` vs `subagent.none`）。
+ */
+.memberSubagentNote {
+  display: block;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberSubagentNote[data-subagent-readout='could-not-measure'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+/* ★ 打开成员会话：一个**文字**动作，不是药丸。 */
+.memberOpenSession {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.memberOpenSession:hover:not(:disabled) {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.memberOpenSession:disabled {
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ★★★ R2：成员行在面板里的**位置槽**（面板读 `data-activity` / `data-member-model`）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★ 这个槽不做视觉，只做**语义挂点**：宿主语义色（business color）与模型探针
+ *   挂在这里，于是 `MemberRow` 可以只负责"画一行"，而"这一行是什么状态、跑在
+ *   哪个路由上"这两件**可核**的事实在面板这一层仍然可读。
+ */
+.memberSlot {
+  display: block;
+  min-width: 0;
+}
+
+/**
+ * ★ 槽的**布局契约**：`.memberModel` 那一格是"就地省略号、不许撑破面板"的
+ *   排版口径，而"这一行有没有模型"是面板这一层才知道的事。
+ *   所以面板按**同一条口径**给槽加上这个类（面板给行留位置，行只负责画）。
+ * ★ 而**读数**（`data-member-model` / `role="img"` / 完整路由的 `title`）
+ *   仍然只有 `MemberRow` 那一份 —— 同一个事实不留两次读数。
+ */
+.memberSlot[data-has-model='true'] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/**
+ * ★ 终态提示（"计划已放弃 / 团队已停止"）：一句**团队级**的话，不是药丸。
+ *   它站在成员列表之上，先说话 —— 于是下面每一行不必各自解释一次。
+ */
+.teamTerminalNote {
+  margin: 0;
+  padding: 2px 10px 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 15px;
 }
