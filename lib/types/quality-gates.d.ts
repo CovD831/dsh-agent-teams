@@ -379,6 +379,95 @@ export type RepairCompletionResult = {
 };
 export declare function collectChangedPaths(gitStatusText: string): string[];
 export declare function inScopeOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): string[];
+/**
+ * ── ★★★ t23：契约的【文件级前提】在**建任务时**就核对，而不是让成员在派发中途发现 ──────
+ *
+ * ── 它修的是什么（MEASURED：同一个缺陷类吃过**五次**完整往返，四个成员独立撞到）──────
+ *
+ *   t1 契约**整份是空的**（objective / inScope / acceptance / verify 全缺席）
+ *      ⇒ 成员分不出"这个任务不需要契约"与"契约在途中丢了"。
+ *   t3 契约点名 `lib/types.d.ts` —— 而本仓的 build **永远产不出那个路径**
+ *      （`declarationDir` 是 `lib/types`）。
+ *   t6 的 objective 点名 `observeStall`，由它的依赖 t3 产出 —— 而 t3 的交付是
+ *      **worktree 局部的提交**，不是基线的祖先（本仓按【落文件】合流）
+ *      ⇒ 那个产物**在它跑的那棵树上根本不存在**。
+ *   t8 ★ **最强的一例**：它【被强制的 verify 命令】本身在基线上就编不出来 ——
+ *      `scripts/gate-friction-capture.test.mjs` 在那个修订上**一个 C1 臂都没有**
+ *      ⇒ 于是它的验收第 2 条**是空的**（那条要 gate 的 escalate 池在基线上不存在）。
+ *      照写一个臂**能变绿而什么都没证明** —— 而"读起来像被验证过"正是本队存在的理由。
+ *
+ * ── 为什么放在这里（验收第 2 条）────────────────────────────────────────────────
+ *
+ * `validateCreateTask` **已经**在校验 `inScope` / `verify` / `acceptance`
+ * （见下面那几个 `nonemptyStringList` 分支）⇒ 在这里加一道**存在性断言**，
+ * 成本是一次 `existsSync`，而不是一整次派发往返。
+ *
+ * ── 三条梯级（验收第 3 条），每条各自可读、各自指名（验收第 4 条）──────────────
+ *
+ *   (i)   objective 里**点名**的产物存在
+ *   (ii)  inScope 里**每一个**文件存在
+ *   (iii) 每一条 verify 命令的**目标文件存在**，且**含验收标准点名的臂**
+ *
+ * ── ★★ 而它**不许**用 git ancestry（验收第 5 条）────────────────────────────────
+ *
+ * 本仓**按落文件合流**：一个内容相同的落地提交**永远不是** worktree 提交的祖先
+ * ⇒ 祖先检查会在**正确落地的活**上误报，而那是最坏的一种误报
+ *   （它惩罚的正是这个仓库做对的那件事）。
+ * ⇒ 所以这里**一律按内容**判：文件在不在、里面有没有那句话。
+ */
+/** 一条被核对的前提；读得出来才算数 ⇒ 每条都带**它是哪一条**与**实测到的什么**。 */
+export interface PremiseFailure {
+    /** 梯级：(i) 目标产物 / (ii) inScope 文件 / (iii) verify 目标与臂。 */
+    readonly tier: 'i' | 'ii' | 'iii';
+    /** 人话，指名**哪一条前提**失败（验收第 4 条）。 */
+    readonly detail: string;
+}
+/**
+ * 从一段自由文本（objective / acceptance）里取出**看起来像仓库路径**的 token。
+ *
+ * ★ 口径刻意**保守**：只认反引号里的那一类（本仓的契约几乎总是这样写路径），
+ *   以及裸的 `dir/file.ext` 形态。
+ * ★★ 而"取不到"⇒ 返回空数组（**不猜**）：一个靠猜的检查会在别的措辞上误报，
+ *   而误报会教人忽略门禁 —— 与漏报同样有害。
+ */
+export declare function repoPathsNamedIn(text: string): string[];
+/** 一条 verify 命令里"被跑的那个文件"（`node --test <path>` / `node <path>`）。 */
+export declare function verifyTargetOf(command: string): string | undefined;
+/**
+ * 一条验收标准"点名的臂"—— 例如 `scripts/gate-friction-capture.test.mjs` 里的 `臂 4`。
+ *
+ * ★ 这是 (iii) 的**要害**：文件存在**不等于**它里面那条臂存在。
+ *   t8 那一例正是如此：文件在（51755 字节），而 **C1 的臂一个都没有**。
+ */
+export declare function armsNamedIn(text: string): string[];
+/**
+ * ── ★★★ t8 那一例的最强读数：**臂名存在，而它承载的东西不存在**────────────────────
+ *
+ * MEASURED（本任务实测，`git show ba5b23a:scripts/gate-friction-capture.test.mjs`）：
+ *
+ *     `臂 4` 在那个修订上**存在**（2 处）—— 而它是一个**与 C1 无关的**老臂：
+ *         「臂 4（★ 重放臂）：拿记录去重跑那条判据 —— 卡点必须**再发生一次**」
+ *     而 C1 的词汇（`observeStall` / `recordClass` / `FrictionRecordClass`）**零出现**。
+ *
+ * ⇒ ★★ 于是"验收说臂 4 证明 escalate 池"在那棵树上**是空的**：
+ *   臂名对得上，而**它证明的东西不存在**。
+ *   ⇒ 一个只比臂名的检查**会放它过去** —— 而那正是本任务要消灭的形态本身：
+ *     **一条读起来像被验证过的标准，其实没有主语。**
+ *
+ * ── 所以这一梯补的是**主语**：验收标准里点名的标识符，必须在那个文件里真的出现 ────────
+ *
+ * ★ 口径保守（与 `repoPathsNamedIn` 同一条纪律）：只认**反引号里**、
+ *   且形状像**代码标识符**（camelCase / snake_case / PascalCase，可带点）的那些。
+ *   ⇒ 取不到 ⇒ 不报（**不猜**）：一个靠猜的检查会在散文上误报，
+ *     而误报会教人忽略门禁 —— 与漏报同样有害。
+ */
+export declare function subjectTermsIn(text: string): string[];
+export declare function checkTaskPremises(input: {
+    objective?: string;
+    acceptance?: readonly string[];
+    inScope?: readonly string[];
+    verify?: readonly string[];
+}, root?: string): PremiseFailure[];
 export declare function validateCreateTask(team: TeamState, input: CreateTaskInput): ValidateCreateTaskResult;
 /**
  * ── ★ 这一条判据【已搬到注册表】────────────────────────────────────────────────
