@@ -253,6 +253,73 @@ export interface TaskEvidence {
 }
 
 /**
+ * ── ★★ 失败成因的取值 —— 而它**必须与 `state.ts` 的 `FAILURE_KINDS` 逐字相同** ──────
+ *
+ * ★ 为什么不 `import type { FailureKind } from './state.ts'`：
+ *   **本文件是一个零 import 的叶子**（t24 立的规矩，且有一条臂直接断言它）。
+ *   ⇒ 一旦这里 import 了 `state.ts`，叶子就变成图上的一个节点 ——
+ *     而 `state.ts` 反过来 import 本文件 ⇒ **成环**。
+ *
+ * ★★ 而"不 import"的代价是**这里多了一份字面量**。⇒ 它必须有一条**机械的**保障，
+ *   而不是靠"记得同步"（那是一条会腐烂的规则，本仓反复记账过）。
+ *   ⇒ `scripts/gate-execution-history.test.mjs` 里有一条臂**逐字比对**
+ *     这两处取值相等 —— 于是它们分叉的那一天，夹具当场红。
+ */
+export type FailureKindName = 'failed_delivery' | 'failed_context' | 'inconclusive'
+
+/** 上述取值的运行期清单（与 `state.ts` 的 `FAILURE_KINDS` 同源，由夹具逐字比对）。 */
+export const FAILURE_KIND_NAMES: readonly FailureKindName[] = ['failed_delivery', 'failed_context', 'inconclusive']
+
+/**
+ * ── ★★★ t19：一次执行的**历史元素**（`TaskExecution`）────────────────────────────
+ *
+ * 一条 = **一次尝试走到了终态**。`TeamTask.executions[]` 按发生顺序装它们。
+ *
+ * ── ★★ 为什么这些格各自都必须在这里（每一条都有出处）────────────────────────────
+ *
+ *   `at`         —— ★ 排序的依据。**没有它，"有序数组"这句话就没有证据**：
+ *                   一个只有内容的数组，读取端无法分辨"先失败后通过"与反过来。
+ *   `attempt`    —— 第几次（与 `TeamTask.attempt` 同一套编号），用来把历史元素
+ *                   与"当时那一代的 capability"对上。
+ *   `attemptId`  —— ★ 那一代的 capability。缺席 ⇒ 当时没有 attemptId
+ *                   （例如 captain 代落终态）。**不许编一个**。
+ *   `round`      —— 收敛循环的第几轮（review/repair 才有）。★ 而它是**当时**的读数，
+ *                   所以必须**抄进历史**：`TeamTask.round` 会被下一轮覆盖。
+ *   `status`     —— 那一次落到了什么终态（`completed`/`failed`/…）。
+ *   `verdict`    —— 审查类任务的裁决（`pass`/`needs_revision`/…）。
+ *                   ★★ 这一格**正是**"收敛"与"一串事故"的分水岭：
+ *                     `needs_revision` 落成 `status: 'failed'` 时会**看起来像一次失败**，
+ *                     而它其实是**那一步成功地产出了一个否定结论**（t12 的
+ *                     `failure_kind = inconclusive` 说的同一件事）。
+ *   `failureKind`—— 只是失败时才有；与 `state.ts` 的 `failureKindOf` 同一套取值。
+ *
+ * ── ★ 三态在这条元素里也必须分形 ──────────────────────────────────────────────
+ *
+ * `verdict` / `round` / `failureKind` 各自**缺席**都有意义，而不许与"有个空值"同形：
+ *   · `round` 缺席  —— 这不是收敛循环里的一轮（`work` 类没有轮次）
+ *   · `verdict` 缺席 —— 这一次没有裁决（不是"裁决为空"）
+ * ⇒ 所以它们是**可选**的，且**不填 `undefined`**（`exactOptionalPropertyTypes` 同源纪律）。
+ */
+export interface TaskExecution {
+  /** ★ 这一刻（墙钟）。**排序依据** —— 见上面的长注释。 */
+  at: number
+  /** 这是第几次尝试（与 `TeamTask.attempt` 同一套编号）。 */
+  attempt: number
+  /** 当时那一代的 capability；缺席 = 当时没有（**不编一个**）。 */
+  attemptId?: string
+  /** 当时落的终态。 */
+  status: TaskStatus
+  /** 收敛循环的第几轮（review/repair 才有；缺席 = 不是一轮）。 */
+  round?: number
+  /** 那一次的裁决（审查类才有；缺席 = 没有裁决，不是"裁决为空"）。 */
+  verdict?: ReviewVerdict
+  /** 失败时的成因分类；与 `failureKindOf` 同一套取值 —— 见 {@link FailureKindName}。 */
+  failureKind?: FailureKindName
+  /** 谁把它落到这个终态的（成员名 / `captain`）。 */
+  by?: string
+}
+
+/**
  * ── ★★★ 那份「已审查」的**逐条读数**（而不是一句"审过了"）────────────────────────
  *
  * 用户原话（本字段存在的理由）：
@@ -391,6 +458,41 @@ export interface TeamTask {
   commandsRun?: CommandResult[]
   /** Supplemental observations, attributed to their original execution generation. */
   supplementalEvidence?: TaskEvidence[]
+  /**
+   * ── ★★★ t19：这条任务**跑过的每一次**，按发生顺序（`executions[]`）────────────────
+   *
+   * 借自 `@linxin666/dsh-web-all` 的 task-board：那边渲染的是 `task.executions.length`
+   * 作为"跑了几次"，于是**一次运行是历史里的一个元素，而不是一次状态转换**。
+   *
+   * ── ★★ 它修的是什么（MEASURED，本轮真实发生的那件事）──────────────────────────
+   *
+   * 本插件此前把每一次尝试**塌缩成一个当前状态**：一次 `needs_revision` 的审查
+   * 落成 `status: 'failed'`，而"它是那个收敛循环里的第 2 轮"这件事**从记录里消失了**。
+   * ⇒ 一个收敛的循环（失败、失败、通过）在用户眼里**读成一串互不相干的红色失败**，
+   *   而不是"它在第二轮修好了"。
+   *
+   * ── ★ 为什么是**数组**而不是把 `round`/`verdict` 填得更满 ───────────────────────
+   *
+   * 那些是**单值**字段（`attempt?: number` / `round?: number` / `verdict?: ReviewVerdict`）
+   * —— 它们**天生只能表达"现在"**。而"它失败过两次然后通过了"问的是**过去**：
+   * 单值字段无论填得多满，都答不了它（第二次会覆盖第一次）。
+   * ⇒ 唯一能回答它的形状是**有序数组**。
+   *
+   * ── ★★ 三态（与全仓纪律同源）──────────────────────────────────────────────────
+   *
+   *   · 有元素 —— 跑过 N 次，按发生顺序排列
+   *   · **缺席** —— ★ **从未跑到终态**（还在第一次里）⇒ 与"跑过 0 次"不同形
+   *   · 空数组 —— ★ **不出现**：本字段只在**追加**时出现（见 `appendExecution`）
+   *
+   * ★ 为什么空数组不该出现：一个恒在场的空数组会让"还没跑过"与"跑过但记录丢了"
+   *   在读取端**同形** —— 而那正是本队一直在修的那条。
+   *
+   * ── ★ 它**只追加，不改写**（append-only）────────────────────────────────────────
+   *
+   * 一条历史元素记的是**当时发生了什么**。允许改写它等于允许"过去"被推翻 ——
+   * 而那样一来"它失败过两次"这句话就不可依赖了。⇒ 唯一被允许的写操作是 push。
+   */
+  executions?: TaskExecution[]
   reviewedTaskId?: string
   reviewedAttempt?: number
   /**
@@ -751,4 +853,97 @@ export interface TeamState {
   reviewPolicy?: ReviewPolicy
   /** Set when an automatic review/repair loop hits its configured ceiling. */
   escalated?: boolean
+}
+
+/**
+ * ── ★★★ t19：把"这一次执行"追加进历史（**唯一被允许的写操作**）──────────────────
+ *
+ * ★★ 它【只追加】，从不改写 —— 那不是一个风格选择，是这一格能不能被信任的前提：
+ *   一条历史元素记的是**当时发生了什么**。允许改它等于允许"过去"被推翻，
+ *   而那样一来"它失败过两次"这句话就不可依赖了（本仓那条：
+ *   **记录被改写之后不可重算**）。
+ *
+ * ★ 为什么它是**纯函数**（改传入的 task，返回它）：调用点在 `update-task.ts` 的
+ *   终态分支里 —— 那里已经持有 `fresh` 那一份权威状态（在锁里）。
+ *   ⇒ 让它在这里**再读一次盘**会读到另一个时刻的事实（与 C1 的 `observeStall`
+ *     同一条纪律：别让判据自己去找状态）。
+ *
+ * ── ★★ 三态：它**不制造空数组** ────────────────────────────────────────────────
+ *
+ * 第一次调用**建立**数组；在那之前 `executions` **缺席**。
+ * ⇒ "从未跑到终态"（缺席）与"跑到过终态但记录是空的"（空数组）不同形 ——
+ *   而后者**永远不会出现**，因为本函数只在追加时建立它。
+ */
+export function appendExecution(task: TeamTask, execution: TaskExecution): TaskExecution {
+  /**
+   * ★ 数组**原地** push：`task.executions` 是这条任务自己的历史，
+   *   而调用方持有的是同一份对象（在锁里）。
+   * ★ 缺席 ⇒ 先建空数组 ⇒ 于是"第一条"与"第 N 条"走**同一条**代码路径
+   *   （两处各写一遍会让它们在"第一条要不要建数组"上分叉）。
+   */
+  const history = task.executions ?? []
+  history.push(execution)
+  task.executions = history
+  return execution
+}
+
+/**
+ * ── ★★★ t19：把历史读成一句**人能读的**结论（"收敛了没有"）─────────────────────
+ *
+ * 用户的原话（本函数存在的理由）：
+ *   「一个收敛的循环，在用户眼里读成一串互不相干的红色失败」。
+ *
+ * ★★ 而"收敛"与"一串事故"的**机械区别**只有一条：
+ *   **最后一次是好的，而它前面有过不好的** —— 那就是收敛；
+ *   最后一次也是不好的 ⇒ 那是**还没解决**（不是"收敛"）。
+ *
+ * ── ★ 三态（不是二态）──────────────────────────────────────────────────────────
+ *
+ *     `converged`     —— 末次成功，且此前有过失败（★ 这就是"失败两次然后通过"）
+ *     `first-pass`    —— 一次就成（**没有**失败过）⇒ 与收敛**不同形**：
+ *                        收敛的补救动作是"这个循环有效"，而这个什么都不用做
+ *     `still-failing` —— 末次仍失败 ⇒ **还没收敛**（★ 不许并进 `converged`：
+ *                        那会把"还没修好"读成"修好了"，方向反了）
+ *
+ * ★ `executions` 缺席（从未跑到终态）⇒ `rounds: 0` 而 `outcome: undefined` ——
+ *   **不是** `first-pass`：一次都还没跑完，与"一次就成"不同形。
+ */
+export interface ExecutionHistorySummary {
+  /** 跑到过终态的次数（`executions.length`；缺席 ⇒ 0）。 */
+  rounds: number
+  /** 见过的最大轮次号（`round` 的最大值；一个都没有 ⇒ 缺席）。 */
+  maxRound?: number
+  /** 三态结论；`executions` 缺席 ⇒ 缺席（**不是** `first-pass`）。 */
+  outcome?: 'converged' | 'first-pass' | 'still-failing'
+  /** 失败过几次（`status === 'failed'`）。 */
+  failures: number
+}
+
+export function summariseExecutions(task: Pick<TeamTask, 'executions'>): ExecutionHistorySummary {
+  const history = task.executions
+  /** ★ 缺席 ⇒ 一次都还没跑到终态。**不许**读成 `first-pass`（那是"跑过一次且成了"）。 */
+  if (history === undefined || history.length === 0) {
+    return { rounds: 0, failures: 0 }
+  }
+  const rounds = history.length
+  const failures = history.filter((entry) => entry.status === 'failed').length
+  const maxRounds = history.map((entry) => entry.round).filter((round): round is number => typeof round === 'number')
+  const last = history[history.length - 1]
+  /**
+   * ★ 末次是不是"好的" —— 判据是 `status === 'completed'`。
+   *   ★ 而 `failed` 里面**混着两种东西**（`needs_revision` 的否定结论 vs 东西真的坏了，
+   *     见 t12 的 `failure_kind`）—— 但对**收敛**这个问句而言两者一样：
+   *     那一次没有走到 `completed` ⇒ 循环还要继续。
+   *   ⇒ 所以这里**只用 status**，不替读取端解释 verdict（那件事归 t12/t13）。
+   */
+  const lastSucceeded = last !== undefined && last.status === 'completed'
+  const outcome: ExecutionHistorySummary['outcome'] = lastSucceeded
+    ? (failures > 0 ? 'converged' : 'first-pass')
+    : (failures > 0 ? 'still-failing' : undefined)
+  return {
+    rounds,
+    failures,
+    ...maxRounds.length === 0 ? {} : { maxRound: Math.max(...maxRounds) },
+    ...outcome === undefined ? {} : { outcome },
+  }
 }

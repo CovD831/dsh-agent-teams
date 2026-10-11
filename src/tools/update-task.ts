@@ -119,7 +119,7 @@ import { registry } from '../gates/index.ts'
 import { gitChangedPaths, observeWorkspaces, observedChangedPaths } from '../harness-compat.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
 import { appendTaskEvidence, repairCompletionVerdict, traceEvidenceConsumer } from '../quality-gates.ts'
-import { TERMINAL_TASK_STATUSES } from '../types.ts'
+import { TERMINAL_TASK_STATUSES, appendExecution } from '../types.ts'
 /**
  * ★ `needsWorktreeFor`：判"这条任务**应当**有隔离树吗" —— 用来把
  *   「本来就不建树」与「该建树而没建成」分开（后者是一个真缺陷）。
@@ -144,7 +144,7 @@ import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanD
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
 import { wireCompletion } from './update-task/completion.ts'
-import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
+import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, failureKindOf, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
 import { steerCaptainReport } from '../tools.ts'
 import { CommandResult, ReviewVerdict } from '../types.ts'
 import { AgentTeamsRuntime, applyQualityFollowUp, parseAcceptanceResults, parseCommandResults, parseFindings } from './shared/entities.ts'
@@ -1509,6 +1509,56 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             const transition = transitionError(task.status, args.status)
             if (transition !== undefined) throw new Error(transition)
             task.status = args.status
+          }
+          /**
+           * ── ★★★ t19：这一次执行发生了 ⇒ **记进历史**（有序、只追加）─────────────────
+           *
+           * 用户的原话（本格存在的理由）：
+           *   「一个收敛的循环，在用户眼里读成一串互不相干的红色失败」。
+           *
+           * ── ★★ 位置是刻意的：**在 `task.status` 已经落定之后** ──────────────────────
+           *
+           * ★ 若放在赋值**之前**，元素里记的就是**上一个**状态 —— 于是每一条历史
+           *   都比事实**晚一步**，而"它失败过两次然后通过了"这句话会读成
+           *   "它失败过三次"（收敛的那一次被记成前一次的重复）。
+           *   （与 C1 的 `noteStall` 必须排在 `recordFriction` 之前是同一条纪律，
+           *     只是方向相反：那里要的是**这一次**的次数，这里要的是**这一次**的结果。）
+           *
+           * ── ★ 为什么**只有落了终态**才追加 ─────────────────────────────────────────
+           *
+           * 一次 `in_progress` 的中间更新**不是一次执行** —— 它没有结论。
+           * ⇒ 若也记，历史里会塞满"还在跑"的元素，而"跑了几次"这个问句就废了
+           *   （它会等于"更新了几次"）。★ 判据是 `TERMINAL_TASK_STATUSES`。
+           *
+           * ── ★★ 而 `cancelled` 也记 ────────────────────────────────────────────────
+           *
+           * 一条被中止的任务**确实跑到过终态**，而"它被中止了、没通过"是一个
+           * 与"它还在跑"不同形的事实。⇒ 它进历史；读取端从 `status` 读得出它是中止。
+           */
+          if (args.status !== undefined && TERMINAL_TASK_STATUSES.includes(args.status)) {
+            appendExecution(task, {
+              at: Date.now(),
+              /** ★ 与 `TeamTask.attempt` 同一套编号；缺省 0（还没开始任何一代）。 */
+              attempt: task.attempt ?? 0,
+              ...task.attemptId === undefined ? {} : { attemptId: task.attemptId },
+              status: task.status,
+              /**
+               * ★★ `round` / `verdict` / `failureKind` **抄进历史**，而不是让读取端
+               *   去读 `TeamTask` 上那一格 —— 因为那几格是**单值**，会被下一轮覆盖。
+               *   ⇒ 不同步抄的话，"第 1 轮是 needs_revision"这件事下一轮就没了，
+               *     而"它失败过两次然后通过"正是要靠这几格才读得出来。
+               */
+              ...task.round === undefined ? {} : { round: task.round },
+              ...task.verdict === undefined ? {} : { verdict: task.verdict },
+              /**
+               * ★ 成因分类用**既有的那一份**（`failureKindOf`），不在这里重算 ——
+               *   与 t12 的 status 出口**同源**，于是"这条失败是哪一种"只有一个答案。
+               * ★ 只在 `failed` 上算：其余终态没有"失败成因"可言（`failureKindOf`
+               *   对非 failed 任务给的是缺省，抄进来会是一条**假事实**）。
+               */
+              ...task.status === 'failed' ? { failureKind: failureKindOf(task) } : {},
+              ...identity.name === undefined ? {} : { by: identity.name },
+            })
           }
           /**
            * ── ★★★ 落终态时，把 worktree 上的改动【提交】成一个 commit ──────────────
