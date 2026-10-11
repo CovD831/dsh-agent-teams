@@ -238,6 +238,52 @@ function statusOf(e) {
   return s === 'fixed' || s === 'scheduled' || s === 'open' || s === 'wontfix' ? s : 'unknown'
 }
 
+/**
+ * ── ★★★ C2：救援三态 —— 它读的是**显式字段**，与 `statusOf` 同一条纪律 ──────────
+ *
+ * `resolution.state` 回答的是「**这条台账记录**被处置了吗」（人回填了没有）；
+ * 而救援三态回答的是「**那个阻塞**是我们自己解掉的、还是解不掉的」。
+ * ★ 两件事不同轴 ⇒ 两个读法，**不许**合成一个（合成会让"没人回填台账"与
+ *   "没人解过这个卡点"同形，而它们的补救动作相反）。
+ *
+ * ── ★★ 缺字段 ⇒ `undefined`（**第四种形状**），而不是 `trying` ────────────────────
+ *
+ * `trying` 是"有人看过、判定还在自己解"；缺席是"这条记录没有救援读数"。
+ * 把后者读成前者会让**"没人标注过"伪装成"有人管着"** ——
+ * 正是 `statusOf` 对 `state` 防的那件事，这里防它同一个方向。
+ *
+ * ★ 而"不认识的取值"（比如有人写了 `rescue.state: 'fixed'`）⇒ 同样 `undefined`：
+ *   与缺席同形，而**不是**被猜成最接近的那一态。
+ *   猜错的方向必然是"把要人管的读成不用管"（或反过来把它藏起来）。
+ */
+function rescueStateOf(e) {
+  const s = e.rescue?.state
+  return s === 'solved' || s === 'cannot-solve' || s === 'trying' ? s : undefined
+}
+
+/**
+ * ── ★★★ C2：**只有** `cannot-solve` 进"需上报"池 ────────────────────────────────
+ *
+ * ★ 这是本文件里**唯一**读 `resolution.pool` 的地方（见下面两处调用点），
+ *   而它现在必须与 `rescue` 三态**一致** —— 于是"池子"这件事有了**一个**判据点。
+ *
+ * ── ★★ 为什么"没有 rescue 读数"的**老记录**按 `resolution.pool` 读（回退）──────
+ *
+ * 台账里现存的记录**写于 C2 之前** ⇒ 它们没有 `rescue` 那一格。
+ * 若一律按缺席处理，378 条历史的池子归属会在视图里**凭空改变** ——
+ * 那不是修复，那是把历史读数改掉。
+ * ⇒ 明写的回退：**有** `rescue` 读数 ⇒ 按它算；**没有** ⇒ 按记录里既有的
+ *   `resolution.pool`（那是当时那个人写下的判断，不是我们替他改的）。
+ *   ★ 而回退走的是哪一条**可见**（下面 `poolVia` 会被渲染出来），
+ *     于是"还有多少条在吃回退"这个问题答得出来。
+ */
+function poolOf(e) {
+  const rescue = rescueStateOf(e)
+  if (rescue !== undefined) return { pool: rescue === 'cannot-solve' ? 'escalate' : 'self', via: 'rescue' }
+  /** ★ 没有 C2 读数 ⇒ 不改写历史：按记录里既有的 pool（缺省仍是 `self`）。 */
+  return { pool: e.resolution?.pool === 'escalate' ? 'escalate' : 'self', via: 'resolution.pool' }
+}
+
 /** 每个状态的一句话解释 —— 让人不必猜这一栏是什么意思。 */
 const STATE_NOTE = {
   fixed: '已经修好并落地（有 commit / 有实测读数）。',
@@ -257,14 +303,41 @@ const STATUS_LABEL = {
 
 const POOL_LABEL = { escalate: '★ 需上报（要你做裁决）', self: '可自解（leader 已裁）' }
 
+/**
+ * ── ★★★ C2：救援三态在视图里的**标签与解释** ─────────────────────────────────────
+ *
+ * ★ 三态必须**文字上不同形**（不只是内部取值不同）：读 HTML 的人靠这一栏
+ *   判断"这件事还要不要我管"，而三态读起来一样就等于没有三态。
+ *
+ * ★ 而 `undefined`（没有 rescue 读数）**自成一格** —— 它与 `trying` 不同形，
+ *   否则"没人标注过"会被读成"有人管着"。
+ */
+const RESCUE_LABEL = {
+  solved: '★ 已自解',
+  'cannot-solve': '★ 解不掉（已上报）',
+  trying: '还在自己解',
+  absent: '★ 无救援读数',
+}
+
+const RESCUE_NOTE = {
+  solved: '★ 这个阻塞**我们自己解掉了** —— 所以它不进上报池，也不再是待办。',
+  'cannot-solve': '★ 我们**试过而解不掉** ⇒ 只有这一态会把事推到人面前，而它必须说清为什么。',
+  trying: '★ 默认目标就是自己解 —— 这一态**不要人做任何事**（用户原话：不阻塞任务的不算卡点）。',
+  absent: '★ 这条记录写于救援三态之前，没有救援读数 —— 它【不是】「还在自己解」，是「没人标注过」。',
+}
+
 function entryCard(e) {
   const ess = essenceOf(e)
   const st = statusOf(e)
+  const rescue = rescueStateOf(e)
+  const rescueKey = rescue ?? 'absent'
+  const { pool, via } = poolOf(e)
   return `
-  <article class="card ${esc(e.resolution?.pool ?? 'self')}">
+  <article class="card ${esc(pool)}">
     <header>
       <span class="id">${esc(e.id)}</span>
       <span class="pill ${st}">${esc(STATUS_LABEL[st])}</span>
+      <span class="pill rescue-${esc(rescueKey)}">${esc(RESCUE_LABEL[rescueKey])}</span>
       <span class="pill ess">${esc(ess.name)}</span>
       ${e.resolution?.blocking ? '<span class="pill block">阻塞任务</span>' : ''}
     </header>
@@ -275,11 +348,46 @@ function entryCard(e) {
       ${e.observed?.couldNotObserve?.length ? `<dt>没能观测到的</dt><dd><ul>${e.observed.couldNotObserve.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
       <dt>临时裁决</dt><dd>${esc(e.resolution?.leaderRuling)}</dd>
       <dt>后来怎么处理的</dt><dd>${esc(e.resolution?.fix)}${e.resolution?.whyPool ? `<div class="why">为什么进这个池子：${esc(e.resolution.whyPool)}</div>` : ''}</dd>
+      ${rescueCardRows(e, rescue)}
       ${e.unknown?.length ? `<dt>还不知道的</dt><dd><ul>${e.unknown.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
       ${e.notes?.length ? `<dt>备注</dt><dd><ul>${e.notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
       <dt>能不能重放</dt><dd>${e.index?.replayable ? '能' : '<b>不能</b> —— 这条记录缺复现所需的上下文'}</dd>
     </dl>
   </article>`
+}
+
+/**
+ * 救援那一栏的正文。
+ *
+ * ★ 三态在这里**形状不同**（不是措辞不同）：
+ *   `solved` ⇒ 有"谁解的"与"怎么解的"**两格**
+ *   `cannot-solve` ⇒ 有"为什么解不掉"**一格**
+ *   `trying` / `absent` ⇒ **两样都没有**（它们没有声称任何事）
+ * ★ 而"声称了解掉、却缺证据"的条目**显式报出来** ——
+ *   否则它与"有人真的解掉了"在页面上同形（README：未检验的声称与猜测同形）。
+ */
+function rescueCardRows(e, rescue) {
+  const note = `<div class="why">${esc(RESCUE_NOTE[rescue ?? 'absent'])}</div>`
+  if (rescue === 'solved') {
+    const by = e.rescue?.solvedBy
+    const how = e.rescue?.howSolved
+    const gaps = []
+    if (typeof by !== 'string' || by === '') gaps.push('solvedBy')
+    if (typeof how !== 'string' || how === '') gaps.push('howSolved')
+    const incomplete = gaps.length > 0
+      ? `<div class="why"><b>★ 缺证据：</b>声称已解，却没有 ${esc(gaps.join(' / '))} —— 未检验的声称与猜测同形</div>`
+      : ''
+    return `<dt>谁解的 / 怎么解的</dt><dd>${esc(by)} · ${esc(how)}${note}${incomplete}</dd>`
+  }
+  if (rescue === 'cannot-solve') {
+    const why = e.rescue?.whyCannotSolve
+    const incomplete = typeof why === 'string' && why !== ''
+      ? ''
+      : '<div class="why"><b>★ 缺证据：</b>声称解不掉，却说不出为什么 —— 而这一态是【唯一】把人请进来的那一态</div>'
+    return `<dt>为什么解不掉</dt><dd>${esc(why)}${note}${incomplete}</dd>`
+  }
+  /** ★ `trying` 与缺席：没有证据要交代（它们没声称任何事）。 */
+  return `<dt>救援</dt><dd>${note}</dd>`
 }
 
 function firstVerdict(e) {
@@ -451,9 +559,40 @@ if (!available) {
   process.exit(0)
 }
 
-// ── ① 池子 ──────────────────────────────────────────────────────────────────
-const escalate = entries.filter((e) => e.resolution?.pool === 'escalate')
-const self = entries.filter((e) => e.resolution?.pool !== 'escalate')
+// ── ① 池子（★ C2：由救援三态决定，见 `poolOf` 的长注释）───────────────────────
+const escalate = entries.filter((e) => poolOf(e).pool === 'escalate')
+const self = entries.filter((e) => poolOf(e).pool !== 'escalate')
+
+/**
+ * ── ★★★ C2：救援三态的分布（★ 而 `absent` 自成一格）────────────────────────────
+ *
+ * ★ 四个数字**不许合并** —— 它们回答的是四个不同的问题：
+ *   `solved`       —— 已经自己解掉的（**不再是待办**）
+ *   `cannot-solve` —— 试过而解不掉的（**只有这些进了上报池**）
+ *   `trying`       —— 还在自己解的（**不要人做任何事**）
+ *   `absent`       —— 没有救援读数的老记录（"没人标注过"，**不等于**"还在自己解"）
+ * ⇒ 合并任意两格都会让"要不要人管"这个问题的答案在页面上**读不出来**。
+ */
+const rescueBuckets = Object.fromEntries(
+  ['solved', 'cannot-solve', 'trying', 'absent'].map((s) => [s, entries.filter((e) => (rescueStateOf(e) ?? 'absent') === s)]),
+)
+/**
+ * ★ "声称已解、却缺证据"与"声称解不掉、却说不出为什么"的条目 —— **必须可见**。
+ *   否则一个空口声称与一条真读数在页面上同形（README：未检验的声称与猜测同形）。
+ */
+const rescueIncomplete = entries.filter((e) => {
+  const rescue = rescueStateOf(e)
+  if (rescue === 'solved') {
+    const by = e.rescue?.solvedBy
+    const how = e.rescue?.howSolved
+    return !(typeof by === 'string' && by !== '' && typeof how === 'string' && how !== '')
+  }
+  if (rescue === 'cannot-solve') {
+    const why = e.rescue?.whyCannotSolve
+    return !(typeof why === 'string' && why !== '')
+  }
+  return false
+})
 
 // ── ② 状态（读显式字段）──────────────────────────────────────────────────────
 const ALL_STATES = ['fixed', 'scheduled', 'open', 'wontfix', 'unknown']
@@ -528,20 +667,51 @@ ${broken.length ? `<div class="warn"><b>★ ${broken.length} 条记录读不出�
         `<a href="#st-${s}">${STATUS_LABEL[s]} ${byStatus[s].length}</a>`).join(' · ')}</div>
     <div><b>③ 按本质</b>（同族的放一起）<br>
       ${essenceGroups.map((g) => `· <a href="#es-${esc(g.id)}">${esc(g.name)} ${g.items.length}</a>`).join('<br>')}</div>
+    <div><b>④ 按救援</b>（★ C2：那个阻塞解掉了没有）<br>
+      <a href="#rs-solved">已自解 ${rescueBuckets.solved.length}</a> ·
+      <a href="#rs-cannot-solve">解不掉 ${rescueBuckets['cannot-solve'].length}</a> ·
+      <a href="#rs-trying">还在自己解 ${rescueBuckets.trying.length}</a> ·
+      <a href="#rs-absent">无救援读数 ${rescueBuckets.absent.length}</a></div>
   </div>
 </section>
 
+<section>
+  <h2>④ 救援三态 <span class="count">${entries.length} 条</span></h2>
+  <p class="sub">★ 这一维回答的是「<b>那个阻塞我们解掉了没有</b>」——
+     而 <b>只有 cannot-solve 会把事推到人面前</b>（用户原话：「卡点的默认归宿是自己解掉」）。
+     ★ 它与「按状态」<b>不同轴</b>：状态是「台账有没有回填」，救援是「阻塞解没解掉」。</p>
+  <div class="toc">
+    ${['solved', 'cannot-solve', 'trying', 'absent'].map((s) =>
+      `<div><b>${esc(RESCUE_LABEL[s])}</b> ${rescueBuckets[s].length} 条<br>
+        <span style="color:var(--dim);font-size:.85rem">${esc(RESCUE_NOTE[s])}</span></div>`).join('')}
+  </div>
+  ${rescueIncomplete.length ? `<div class="warn"><b>★ ${rescueIncomplete.length} 条救援读数缺证据</b>
+    <ul>${rescueIncomplete.map((e) => `<li>${esc(e.id)} — ${esc(e.rescue?.state)}</li>`).join('')}</ul>
+    <div class="why">声称解掉了却不说谁解的、怎么解的，与「有人真的解掉了」在页面上同形 —— 未检验的声称与猜测同形。</div></div>`
+    : '<p class="sub">★ 所有声称了结果的救援读数都带齐了证据（solved ⇒ 谁解的 + 怎么解的；cannot-solve ⇒ 为什么解不掉）。</p>'}
+</section>
+
+${['solved', 'cannot-solve', 'trying', 'absent'].map((s) => `
+<section id="rs-${s}"><h2>④ ${esc(RESCUE_LABEL[s])} <span class="count">${rescueBuckets[s].length} 条</span></h2>
+  <p class="sub">${esc(RESCUE_NOTE[s])}</p>
+  ${rescueBuckets[s].length ? `<div class="grid">${rescueBuckets[s].map(entryCard).join('')}</div>`
+    : '<p class="sub">（暂无）</p>'}</section>`).join('')}
+
 <section id="pool-escalate">
   <h2>① 需上报 <span class="count">${escalate.length} 条</span></h2>
-  <p class="sub">这些是【要你做裁决】的 —— 不是因为难，而是因为没有一个不依赖判断主体的正确答案。
+  <p class="sub">★ C2：<b>只有「解不掉」（cannot-solve）才在这里</b> ——
+     「还在自己解」与「没有救援读数」的老记录都<b>不</b>进这个池子。
+     实测曾有 214 条被【缺省值】推进这里，而它们本来不需要人。<br>
      ★ 上报的是【本质问题】，不是表象。</p>
   ${escalate.length ? `<div class="grid">${escalate.map(entryCard).join('')}</div>`
-    : '<p class="sub">（暂无）</p>'}
+    : '<p class="sub">（暂无 —— ★ 没有「解不掉」的卡点：这是一个<b>好</b>读数，不是一个空读数。）</p>'}
 </section>
 
 <section id="pool-self">
   <h2>① 可自解 <span class="count">${self.length} 条</span></h2>
-  <p class="sub">leader 已裁的 —— <b>也列给你看</b>：让你知道我自己做了什么裁决。</p>
+  <p class="sub">★ C2 的<b>默认归宿</b>：已自解的、还在自己解的、以及没有救援读数的老记录
+     （后者按它们自己写下的 <code>resolution.pool</code> 读 —— <b>不改写历史</b>）。
+     ★ <b>也列给你看</b>：让你知道我做了什么裁决。</p>
   <div class="grid">${self.map(entryCard).join('')}</div>
 </section>
 
@@ -580,5 +750,15 @@ if (broken.length) {
 console.log(`写出 ${OUT}`)
 console.log(`  ${entries.length} 条 · 需上报 ${escalate.length} · 可自解 ${self.length}`)
 console.log(`  已修 ${byStatus.fixed.length} · 已排任务 ${byStatus.scheduled.length} · 开着 ${byStatus.open.length}`)
+/**
+ * ★ C2：救援三态**逐个报出来**（不合成一个数字）。
+ *   四个数回答四个不同的问题，而"要不要人管"这个答案只在其中的两格：
+ *   `cannot-solve` ⇒ 要人管；其余三格 ⇒ 不要人管。
+ */
+console.log(`  救援：已自解 ${rescueBuckets.solved.length} · 解不掉 ${rescueBuckets['cannot-solve'].length}`
+  + ` · 还在自己解 ${rescueBuckets.trying.length} · 无救援读数 ${rescueBuckets.absent.length}`)
+if (rescueIncomplete.length) {
+  console.log(`  ★ ${rescueIncomplete.length} 条救援读数缺证据：${rescueIncomplete.map((e) => e.id).join(', ')}`)
+}
 console.log(`  本质分组：${essenceGroups.map((g) => `${g.name}(${g.items.length})`).join(' · ')}`)
 if (broken.length) console.log(`  ★ ${broken.length} 条读不出来：${broken.map((b) => b.file).join(', ')}`)

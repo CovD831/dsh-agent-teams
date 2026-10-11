@@ -1936,6 +1936,218 @@ export interface FrictionCapture {
 }
 
 /**
+ * 一个卡点的救解读数。
+ *
+ * ★ 它与 `resolution` **不同轴**，所以**并列**在记录上，而不是塞进 `resolution`：
+ *     `resolution` —— 回答「**这条记录**是怎么被处置的」（台账的动作：
+ *                      `state` / `fix` / `pool` / `leaderRuling`）
+ *     `rescue`     —— 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」
+ *                      （救援的动作，与"台账写没写"无关）
+ *   ★ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 —— 而它们的补救
+ *     动作相反：前者要人补一个 `state`，后者要人去**解**，或如实上报。
+ *
+ * ★★ 而 `solvedBy` / `howSolved` **只在 `solved` 时在场** —— 与 C1 的 `whyPool`
+ *   同一条纪律：一个没有被解掉的卡点**没有**"是谁解的"要交代，
+ *   于是"缺席"与"写了一句空的"必须不同形。
+ */
+/**
+ * ── ★★★ C2：一个**真卡点**（C1 的 `stalled`）后来怎么了 ──────────────────────────
+ *
+ * 用户的原话（`docs/PENDING-FRICTION-REFORM.md` §0）：
+ *
+ * > 「1. 如果卡点阻塞了任务，需要主会话**直接救援**，把这个阻塞解掉。
+ * >   2. 如果不阻塞任务，其实不算卡点。」
+ *
+ * ⇒ 一句话：**卡点的默认归宿是"我们自己解掉它"，而不是"上报给人"**。
+ *   上报是**例外**，而它必须是**说得出理由**的那一种。
+ *
+ * ── ★★ 为什么是三态，而不是一个布尔 ────────────────────────────────────────────
+ *
+ * 实测（同一份文档 §1）：**214 条记录被默认写进了 `pool: 'escalate'`** ——
+ * 它们把"本来不需要人做的事"推给了人。而它们的成因是**缺省值**：
+ * 一条记录若没有人为它写处置，读起来就落进了"要上报"。
+ *
+ * ⇒ 若只有 `solved` / `cannot-solve` 两态，"还没有人去试过"就**无处可放**，
+ *   于是它必然被并进某一态。并进 `solved` 是**谎报**（没人解过，而它读起来像解了）；
+ *   并进 `cannot-solve` 是**把 214 条请回来**（没人试过就上报给人）。
+ *   ⇒ 所以第三态 `trying` 是**必须**的，而不是三种里可选的一种。
+ *   ★ 而它与 C1 的 `trying` **是同一条生命周期上的同一个意思**（"还在自己解"），
+ *     不是一条并行的生命周期 —— 见本文件 `TaskStall` 与 `rescueFromStall`。
+ *
+ * ★★ 三态**必须不同形**，且"缺席"是**第四种**形状：缺席 = 没有 rescue 读数
+ *    （那与 `trying` 不同形：`trying` 是"有人看过、判定还在自己解"）。
+ */
+export type RescueState = 'solved' | 'cannot-solve' | 'trying'
+
+/**
+ * 三态的**完整名单**（供"读不出来 ⇒ 不猜"的读取端复用）。
+ *
+ * ★ 明写成一列，而不是散在各处的 `=== 'solved' || === 'trying'` ——
+ *   两处各写一遍，就会在加第四态时于其中一处漏掉（本仓反复记账的形态）。
+ */
+export const RESCUE_STATES: readonly RescueState[] = ['solved', 'cannot-solve', 'trying']
+
+/**
+ * 一个卡点的救解读数。
+ *
+ * ★ 它与 `resolution` **不同轴**，所以**并列**在记录上，而不是塞进 `resolution`：
+ *     `resolution` —— 回答「**这条记录**是怎么被处置的」（台账的动作：
+ *                      `state` / `fix` / `pool` / `leaderRuling`）
+ *     `rescue`     —— 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」
+ *                      （救援的动作，与"台账写没写"无关）
+ *   ★ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 —— 而它们的补救
+ *     动作相反：前者要人补一个 `state`，后者要人去**解**，或如实上报。
+ *
+ * ★★ 而 `solvedBy` / `howSolved` **只在 `solved` 时在场** —— 与 C1 的 `whyPool`
+ *   同一条纪律：一个没有被解掉的卡点**没有**"是谁解的"要交代，
+ *   于是"缺席"与"写了一句空的"必须不同形。
+ */
+export interface FrictionRescue {
+  /** ★ 三态本体。读不出来 ⇒ 别猜（见 {@link rescueStateOf}）。 */
+  state: RescueState
+  /**
+   * ★ 解掉它的是谁（成员名 / `main-session` / …）。
+   *   只在 `solved` 时在场 —— ★ 且 `solved` 时**必须**在场（见
+   *   {@link missingRescueEvidence}：缺它就是"有人说解了，而说不出是谁解的"）。
+   */
+  solvedBy?: string
+  /**
+   * ★ **怎么**解掉的 —— 而这一格是"下次遇到同一个坑"时唯一可复用的东西
+   *   （文档 §0：「经验 = 同一个坑被踩出来的次数」）。只在 `solved` 时在场。
+   */
+  howSolved?: string
+  /**
+   * ★ **为什么解不掉** —— 只在 `cannot-solve` 时在场，且那时**必须**在场。
+   *
+   * ★★ 它是本三态里**最要紧**的一格：`cannot-solve` 是**唯一**会把人请进来的那一态
+   *   （见 {@link poolForRescue}），而"把人请进来"这个动作必须**说出理由** ——
+   *   否则上报池又会变成 214 条那样的默认归宿。
+   *   ★ 这也是三态**不同形**的落点：`solved` 有"solved 那两格"，
+   *     `cannot-solve` 有"为什么解不掉"这一格，`trying` **两样都没有**。
+   */
+  whyCannotSolve?: string
+}
+
+/**
+ * 从一条台账记录里读出救解三态 —— ★ **读不出来 ⇒ `undefined`，不猜**。
+ *
+ * ★★ 为什么**不**把缺席当 `trying`：缺席是"这条记录没有 rescue 读数"，
+ *   而 `trying` 是"有人看过、判定还在自己解"。把前者读成后者会让
+ *   **"没人标注过"伪装成"有人管着"** —— 本仓记账的正是这一形态
+ *   （`frictions-html.mjs` 的 `statusOf` 对 `state` 做的正是同一件事）。
+ *
+ * ★ 而它**只认** {@link RESCUE_STATES} 里的取值：一个不认识的字符串
+ *   （比如有人写了 `'fixed'`）⇒ `undefined`，与缺席同形 —— 而不是被猜成
+ *   最接近的那一态（猜错的方向必然是"把要人管的读成不用管"）。
+ */
+export function rescueStateOf(record: { rescue?: { state?: unknown } } | undefined): RescueState | undefined {
+  const state = record?.rescue?.state
+  return RESCUE_STATES.find((known) => known === state)
+}
+
+/**
+ * ── ★★★ C2：从 C1 的 `stall` 读数给出**缺省救援读数** ────────────────────────────
+ *
+ * ★ 这里**不新建**一条生命周期：它把 C1 已经算出来的 `stall` 当作**唯一输入**，
+ *   产出一条 `trying` 的缺省 rescue —— 也就是"**还没有人去救过它**"。
+ *
+ * ── ★★ 为什么缺省是 `trying`，而不是从 `stalled` 推出 `cannot-solve` ─────────────
+ *
+ * 契约逐字：「`stalled` 是**什么可能变成** `solved` 或 `cannot-solve`；
+ *   **不要**发明一条并行的生命周期」。
+ *
+ * ⇒ 救援三态回答的是「**有人去救了吗、救成了吗**」，而"任务停没停"是**另一个问题**：
+ *   一个任务可以停住而**还没有任何人**去救它。那正是 `trying`。
+ *   ★ 若把 `stalled` 直接落成 `cannot-solve`，那 214 条会立刻回到上报池 ——
+ *     本任务要消掉的缺陷换个入口就回来了。
+ *   ★ 而若把 `stalled` 落成 `solved`，那是**谎报**（没人解过，而它读起来像解了）。
+ *
+ * ★★ 所以本函数**故意不读 `stall.state` 去分派** —— 因为 C1 的两态在这里
+ *   **都不足以**推出 `solved` 或 `cannot-solve`（那两态要一次**真实的救援**才写得出来）。
+ *   它唯一的用途是：给"被判据拒过、或从未被拒"的任务一个**显式的、可断言的**
+ *   缺省读数，好让读取端不必各自 `?? 'trying'`（四处各写一遍就是四处会分叉）。
+ *
+ * ★ 而 `stall` **在场/缺席**这个差别**不**在这里丢掉：它由 `noteStall` / `clearStall`
+ *   管着（C1 已钉），而 `class` / `resolution.blocking` 已经把它落进记录。
+ *   ⇒ 本函数不重复编码那件事，也不假装它读了。
+ */
+export function defaultRescueForStall(stall: TaskStall | undefined): FrictionRescue {
+  /**
+   * ★ `stall` 是入参而**不是**被忽略的：一条**从未被拒**的记录与一条
+   *   **被拒过**的记录，缺省 rescue 都是 `trying`（都还没人救过），
+   *   而调用方从 `stall` 拿到的正是"有没有被拒过"这件事 —— 它写进 C1 的
+   *   `class` 那一格，而不是在这里被重新编码一遍。
+   */
+  void stall
+  return { state: 'trying' }
+}
+
+/**
+ * ── ★★★ C2：**只有** `cannot-solve` 进"上报给人"的池子 ──────────────────────────
+ *
+ * 用户的原话：卡点的默认归宿是**自己解掉**；上报是例外。
+ * 而实测的现状是反过来的 —— 214 条被默认推进了 `escalate`。
+ *
+ * ★ 判据是**机械的**（不是措辞判断）：池子由**救援三态**决定，一个函数，一处：
+ *
+ *     `solved`       ⇒ `self` —— 已经解掉了。★ 它**不进上报池**，而且它
+ *                      **也不再是待办**（见 `actionForFriction` 的 no-action 分支）。
+ *     `trying`       ⇒ `self` —— 还在自己解。★ 这是**默认**，也是绝大多数。
+ *     `cannot-solve` ⇒ `escalate` —— **只有它**。
+ *     `undefined`（没有 rescue 读数）⇒ ★ 这里**不猜**
+ *
+ * ── ★★ 为什么"没有 rescue 读数"**不**落 `escalate` ────────────────────────────────
+ *
+ * 那正是 214 条的成因：**缺省值**把"还没人标注过"读成了"要上报给人"。
+ * ★ 而反过来落 `self` 也不是猜 —— 它**就是**用户裁定的默认（"默认目标是自己解"）。
+ *   ⇒ 缺省落 `self` 是**按裁定取默认值**，而不是从缺数据里推断事实。
+ *   ★ 而"这条有没有 rescue 读数"这件事**另外可见**（`rescueStateOf` 返回
+ *     `undefined`，HTML 与分诊器都把它单独报出来）—— 于是"没人标注过"不会
+ *     被藏起来，只是它不再自动等于"要人去管"。
+ */
+export function poolForRescue(state: RescueState | undefined): 'self' | 'escalate' {
+  return state === 'cannot-solve' ? 'escalate' : 'self'
+}
+
+/**
+ * ── ★★★ C2：三态**必须不同形** —— 这是"缺一即红"的那条判据 ──────────────────────
+ *
+ * 契约逐字：「The three rescue states are distinct in **shape**」。
+ *
+ * ★ 而"形状"不是措辞：一个把三态都写成 `{ state }` 的实现里，
+ *   `solved` 与 `cannot-solve` 只有**一个字符串**不同 —— 于是读取端要判断
+ *   "这条到底解没解掉"就**只能靠比那个字符串**，而那是代理读数。
+ *
+ * ⇒ 形状判据（可机械核，且**定向突变**打得红）：
+ *
+ *   `solved`       ⇒ 必须带 `solvedBy` **且** `howSolved`（谁解的 + 怎么解的）
+ *   `cannot-solve` ⇒ 必须带 `whyCannotSolve`，且**不许**带 `solvedBy` / `howSolved`
+ *   `trying`       ⇒ ★ 两者**都缺席**（没有人解过、也还没放弃）
+ *
+ * ★ 于是"它解掉了"这句话**在形状上**就与"它解不掉"不同：
+ *   前者有"solved"那两格，后者有"为什么解不掉"那一格。这也是"缺一即红"的落点 ——
+ *   一个写了 `state: 'solved'` 而没说**谁**解、**怎么**解的记录，
+ *   与"有人声称它解了"同形（README：未检验的声称与猜测同形）。
+ */
+export function missingRescueEvidence(rescue: FrictionRescue | undefined): string[] {
+  const state = rescue?.state
+  if (state === 'solved') {
+    const missing: string[] = []
+    if (typeof rescue?.solvedBy !== 'string' || rescue.solvedBy === '') missing.push('solvedBy')
+    if (typeof rescue?.howSolved !== 'string' || rescue.howSolved === '') missing.push('howSolved')
+    return missing
+  }
+  if (state === 'cannot-solve') {
+    return typeof rescue?.whyCannotSolve === 'string' && rescue.whyCannotSolve !== ''
+      ? []
+      : ['whyCannotSolve']
+  }
+  /** ★ `trying` 与"没有 rescue 读数"都**不需要**证据 —— 它们没声称任何事。 */
+  return []
+}
+
+
+/**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
  * 而读台账的人接下来要问的是「**是哪条判据**把它拒了」。
  */
@@ -2283,6 +2495,17 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
      */
     const stall: StallObservation = capture.stall ?? { stalled: false, count: 1, basis: 'first' }
     const recordClass: FrictionRecordClass = stall.stalled ? 'blocker' : 'rejection'
+    /**
+     * ── ★★★ C2：拒下这一条时，**救援进行到哪一步** ─────────────────────────────
+     *
+     * ★ 它在这里就被算出来（**一处**），因为下面 `resolution.pool` 与顶层 `rescue`
+     *   必须是**同一个读数**的两面 —— 两处各算一遍就会分叉，而分叉后
+     *   "为什么这条进了上报池"要读两处才能回答。
+     *
+     * ★★ 拒绝路径上**还没有人**去救过 ⇒ 缺省 `trying`（默认目标是自己解）。
+     *   见 {@link defaultRescueForStall} 的长注释：这不是"缺省 = 上报"。
+     */
+    const rescue: FrictionRescue = defaultRescueForStall(undefined)
     const record = {
       id,
       at: new Date().toISOString(),
@@ -2374,20 +2597,66 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
        *
        * ★ `whyPool` 只在 `escalate` 时在场：一条没有进上报池的记录**没有**"为什么
        *   进这个池子"要交代 —— 缺席与"写了一句空的"必须不同形（本仓记账的形态）。
+       *
+       * ── ★★★ C2：`pool` 现在由**救援三态**决定，而不再由 `class` 直接决定 ──────────
+       *
+       * ★ 这是 C2 与 C1 的接缝：C1 说"**停没停**"（`class` / `blocking`），
+       *   C2 说"**解没解掉**"（`rescue` / `pool`）。
+       *   ★ 两条轴**不同** —— 一个停住的任务在"有没有人救过"这件事上的答案是
+       *     **`trying`（还没有人去试）**，而不是"要上报给人"。
+       *     实测 214 条正是死在这个跳步上：**停住** ⇒ 直接 ⇒ **上报**，
+       *     而中间那一步"我们先自己解解看"从来没有对应的字段。
+       *
+       * ★★ 所以 `pool` 走 {@link poolForRescue} 这一条路（**唯一**的判据点），
+       *   而**只有** `cannot-solve` 会进 `escalate`。
+       *   ★ 而 `whyPool` 那时**必须**说得出"为什么解不掉"（`whyCannotSolve`）——
+       *     一个进上报池而没有理由的记录，正是 214 条的复现形态。
        */
       resolution: recordClass === 'blocker'
-        ? {
-            blocking: true,
-            fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1',
-            pool: 'escalate',
-            whyPool: `★ 同一个判据（${stall.basis === 'repeated' ? String(capture.auto?.gate ?? capture.point) : capture.point}）`
-              + `拒绝了同一个任务 ${stall.count} 次 ⇒ 任务没有继续往下走（判据是机械的：拒不拒绝，看它之后有没有动）`,
-          }
+        ? rescue.state === 'cannot-solve'
+          ? {
+              blocking: true,
+              fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1',
+              pool: poolForRescue(rescue.state),
+              whyPool: `★ 同一个判据（${stall.basis === 'repeated' ? String(capture.auto?.gate ?? capture.point) : capture.point}）`
+                + `拒绝了同一个任务 ${stall.count} 次，而**这次有人去解过、没解开**`
+                + `（${String(rescue.whyCannotSolve)}）⇒ 这才进上报池`
+                + '（C2：只有 cannot-solve 进这个池子）',
+            }
+          : {
+              blocking: true,
+              /**
+               * ★ 任务**确实停住了**（`blocking: true` 一个字不改 —— 那是 C1 的读数），
+               *   而它的**归宿是"我们自己解"**，不是"上报给人"。
+               *   ★ 于是这两格现在说的是两件不同的事，而它们**都对**：
+               *     停住 = 真的要有人动；`pool: 'self'` = 动的人**是我们**，不是用户。
+               */
+              fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1'
+                + ' (C2: the default goal is to solve it ourselves, so it is NOT in the report-to-human pool)',
+              pool: poolForRescue(rescue.state),
+            }
         : {
             blocking: false,
             fix: 'not blocking: the task kept moving — one rejection is not a stall, per C1',
-            pool: 'self',
+            pool: poolForRescue(rescue.state),
           },
+      /**
+       * ── ★★★ C2：**那个阻塞**后来怎么了（与 `resolution` 不同轴，所以并列）─────────
+       *
+       * ★ `resolution` 回答「**这条台账记录**是怎么被处置的」；
+       *   `rescue` 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」。
+       *   ⇒ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 ——
+       *     而它们的补救动作相反（前者要人补 `state`，后者要人去**解**）。
+       *
+       * ★★ 三态**不同形**（见 {@link missingRescueEvidence}）：
+       *   `solved` 有 `solvedBy` + `howSolved`；`cannot-solve` 有 `whyCannotSolve`；
+       *   `trying` 两样都**没有** —— 它没有声称任何事，所以没有证据要交代。
+       *
+       * ★ 这里的缺省是 `trying`（`defaultRescueForStall`）：拒绝路径上**还没有人**
+       *   去救过它 ⇒ "缺省 = 默认目标是自己解"，而不是"缺省 = 上报给人"
+       *   （那正是 214 条的成因）。
+       */
+      rescue,
       /**
        * ── ★★★ t91：自动记录的**来源** —— 而它缺席就是"人记的" ───────────────────────
        *

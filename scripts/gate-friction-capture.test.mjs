@@ -581,14 +581,46 @@ test('★★ 臂 7（C1 反向半边）：同一条判据拒 ≥2 次 ⇒ 任务
     blocker.resolution?.blocking, true,
     '★★★ 而它必须是 `true` 本身（不是缺席、不是别的真值）—— 三态不许合流',
   )
+  /**
+   * ── ★★★ C2 改写了这一格：**池子不再由"是不是卡点"决定，而由"救援到哪一步"决定** ──
+   *
+   * C2 之前：blocker ⇒ pool 'escalate'（有人必须动）。
+   * C2 之后：一个新卡点 rescue.state 是 `trying` ⇒ pool `self`（**先自己解**）。
+   *   只有 `cannot-solve` 才进「上报给人」的池子 —— 这是用户的原设计，
+   *   也正是这一格当初要修的东西：把 207 条判据拒绝并进 21 条真卡点，
+   *   与把"还没试"直接读成"要上报"是**同一类**错误。
+   *
+   * ★ 而本臂的**真正主体一个字没变**：卡点与拒绝必须**不同形**。
+   *   ⇒ 断言从"池子等于 escalate"改成"池子与拒绝路径不同形、且 blocking 为 true"，
+   *     这才是 6/7 两臂合起来要分开的那件事。
+   *   ★ 旧断言（pool==='escalate'）在 C2 下**不可满足**：成员实测过，
+   *     强行改 poolForRescue('trying')→'escalate' 会让 **臂 6 同时变红**，
+   *     即两臂合起来禁止新卡点的任何单一池子值。
+   */
   assert.equal(
-    blocker.resolution?.pool, 'escalate',
-    '★★★ 真卡点进「上报」池子（有人必须动）；rejection 进 `self`。'
-    + ' 两者同池 = 那 207 条又和 21 条混在一起了',
+    blocker.resolution?.pool, 'self',
+    '★★★ C2：一个新卡点 rescue.state=`trying` ⇒ 进 `self`（自己先解），'
+    + '**不是** `escalate` —— 只有 `cannot-solve` 才上报给人。'
+    + ' ★ 而它仍须与 rejection 不同形（见上一格 blocking 与下面 whyPool）',
   )
+  assert.equal(
+    blocker.rescue?.state, 'trying',
+    '★★ 新卡点的救援状态必须是 `trying` —— 那正是"先自己解"这一格的读数。'
+    + ' 缺席 ⇒ 会让"没人试过"与"试过解不掉"同形',
+  )
+  /**
+   * ── ★★ C2：`whyPool` 只在 `escalate` 时在场 ─────────────────────────────────────
+   *
+   * 本臂原先断言"卡点必须写出它为什么进这个池子"。C2 之后这**只在真的上报时**
+   * 才成立：一条还在 `trying`、进 `self` 的记录**没有**"为什么进上报池"要交代 ——
+   * 正如 {@link recordFriction} 那段注释所说，缺席与写了空话必须不同形。
+   * ⇒ 断言改成"**要么**说清了理由，**要么**根本没进上报池"，两者都不许是同形空话。
+   */
   assert.ok(
-    typeof blocker.resolution?.whyPool === 'string' && blocker.resolution.whyPool !== '',
-    '★★ 而"为什么进这个池子"必须写出来（不是一句空话）—— 缺席与写了一句话必须不同形',
+    blocker.resolution?.pool !== 'escalate'
+      || (typeof blocker.resolution?.whyPool === 'string' && blocker.resolution.whyPool !== ''),
+    '★★ `whyPool` 只在 `escalate` 时在场；若进了上报池就必须写得出理由。'
+    + ' ★ 缺席与"写了空话"必须不同形 —— 而 `self` 一侧本来就不该有这一格',
   )
   assert.notEqual(
     blocker.class, 'rejection',

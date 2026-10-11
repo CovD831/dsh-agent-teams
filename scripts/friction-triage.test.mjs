@@ -3397,3 +3397,208 @@ test('★ 臂 t15x3 ★★★ 依据④：`??` 那几处**不可观察**，因�
    */
   assert.equal(typeof withZeroNow, 'object', '★ 而它交出一个结果（不是炸掉）')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2（t8）：救援三态 —— ★ 已自解的卡点不再进待办清单
+//
+//   契约逐字：「An already-solved blocker no longer appears in the pending list,
+//   observable via actionForFriction's no-action branch in scripts/friction-triage.mjs」
+//
+// ★ 这一段的重点不是"`solved` 会返回 no-action"（那是一条容易写的断言），
+//   而是**三态各自落在不同的去处，而它们的理由不同形**：
+//     solved       ⇒ no-action（那个阻塞被解掉了 ⇒ 它不再让任何任务停）
+//     cannot-solve ⇒ escalate（试过、解不掉 ⇒ 这是**唯一**该推到人面前的一态）
+//     trying       ⇒ 不因 rescue 改判（还没人救过 ⇒ 原判据说了算）
+//   ⇒ 若把三态合流成两态（或都返回 no-action），**恢复原状的代价不同**：
+//     前者会让"解不掉"的事**没有人看见**，后者会让人重复做已经做过的事。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条 C2 形态的卡点记录：`class` 用 C1 的词汇表，`rescue` 用 C2 的三态。 */
+function c2Record(state, extra = {}) {
+  return {
+    id: 'f-0001',
+    title: 'update_task rejected: something',
+    class: 'blocker',
+    rescue: state === 'solved'
+      ? { state, solvedBy: 'leader', howSolved: 'fixed the gate input' }
+      : state === 'cannot-solve'
+        ? { state, whyCannotSolve: 'needs a human ruling on the contract' }
+        : { state },
+    resolution: { pool: 'self', blocking: true, fix: 'unfixed at the moment it happened' },
+    ...extra,
+  }
+}
+
+test('★★★ C2 臂 A — 已自解的卡点进 no-action（它不再让任何任务停下来）', () => {
+  const verdict = actionForFriction(c2Record('solved'))
+  assert.equal(
+    verdict.action, 'no-action',
+    '★★★ 一个**已经解掉**的阻塞不再让任务停住 ⇒ 它不是待办。'
+    + ` 实测：${JSON.stringify(verdict)}`,
+  )
+  assert.match(
+    String(verdict.why), /solved/u,
+    '★ 而理由必须说得出是**哪一态**判的 —— 与 `fixed` 同归宿但**不同形**，'
+    + '否则"台账说修好了"与"那个阻塞被解掉了"读起来一样',
+  )
+  assert.match(
+    String(verdict.why), /leader/u,
+    '★★ 而且要说得出**是谁解的**（`solvedBy`）—— 一个不指名行动者的"已解决"'
+    + '与"没人回填"同形',
+  )
+})
+
+test('★★★ C2 臂 B — `cannot-solve` 是唯一被推到人面前的一态，且它带出为什么', () => {
+  const verdict = actionForFriction(c2Record('cannot-solve'))
+  assert.equal(
+    verdict.action, 'escalate',
+    '★★★ 解不掉的卡点**不是一条可派的工作**（那会是 `candidate`），'
+    + '而是一件要人裁决的事 ⇒ 单独一格。'
+    + ` 实测：${JSON.stringify(verdict)}`,
+  )
+  assert.match(
+    String(verdict.why), /needs a human ruling/u,
+    '★ 而"为什么解不掉"必须被带出来 —— 一个把人请进来却不说理由的条目，'
+    + '正是那 214 条的形态（"需要用户裁定"而说不出裁什么）',
+  )
+})
+
+test('★★★ C2 臂 C — 三态【两两不同形】：把三态合流成两态会让本臂红', () => {
+  /**
+   * ── 为什么必须断言【两两不同】而不是三条各自等于某个值 ────────────────────────
+   *
+   * ★ 三条独立断言在"三态都被合流成同一个值"时**也会全绿**，只要那个值恰好
+   *   等于其中一条的期望。⇒ 而这里要钉的是**它们不是同一个东西**：
+   *   两两的动作与理由都必须不同，否则"三态"这个说法是空的。
+   *
+   * ★★ 而"缺席 rescue"必须**自成一格**：它不是 `trying`（"有人在解"），
+   *    也不是 `solved`（"解掉了"）。它落回原判据（`resolution.state`）——
+   *    因为**没有 C2 读数的记录不改写历史**。
+   */
+  const solved = actionForFriction(c2Record('solved'))
+  const cannot = actionForFriction(c2Record('cannot-solve'))
+  const trying = actionForFriction(c2Record('trying'))
+  const absent = actionForFriction(c2Record('trying', { rescue: undefined }))
+
+  assert.notEqual(solved.action, cannot.action, '★ solved 与 cannot-solve 的去处必须不同')
+  assert.notEqual(
+    solved.why, cannot.why,
+    '★★ 而理由也必须不同 —— 两个不同的动作配同一句理由，读的人无从分辨',
+  )
+  assert.notEqual(
+    trying.action, cannot.action,
+    '★★ `trying` 不许与 `cannot-solve` 同去处：把"还在自己解"推进上报池'
+    + '正是那 214 条的成因',
+  )
+  assert.equal(
+    absent.action, trying.action,
+    '★ 而"没有 rescue 读数"落回**同一条**原判据（`rescue` 不参与 ⇒ 走 `resolution.state`）'
+    + ' ⇒ 它与 `trying` 在**本函数**的去处相同，但在**记录形状**上不同'
+    + '（`rescue` 缺席 vs `rescue.state === \'trying\'`，见 HTML 侧的渲染断言）',
+  )
+})
+
+test('★★ C2 臂 D — 反向半边：`solved` 不掩盖一条【台账还欠动作】的记录', () => {
+  /**
+   * ── 这条防的是 C2 最危险的过度放宽 ────────────────────────────────────────────
+   *
+   * ★ "这个阻塞解掉了"与"这条台账还欠一个动作"是**两件事**。
+   *   若把 `solved` 检查放在四个 `state` 检查**之前**，一条
+   *   `resolution.state === 'open'`（真的还欠一个动作）的记录会被 rescue 静默放过
+   *   ⇒ **漏掉一条真的待办**。而那个漏法在清单上表现为"这个卡点从没存在过"。
+   */
+  const open = actionForFriction(c2Record('solved', {
+    resolution: { state: 'open', pool: 'self', blocking: true },
+  }))
+  assert.equal(
+    open.action, 'candidate',
+    '★★★ `resolution.state = open`（台账真的还欠一个动作）必须先于 rescue 被读到 —— '
+    + '`solved` 说的是"那个阻塞解掉了"，不是"这条记录不用回填了"。'
+    + ` 实测：${JSON.stringify(open)}`,
+  )
+  const fixed = actionForFriction(c2Record('solved', {
+    resolution: { state: 'fixed', pool: 'self', blocking: true },
+  }))
+  assert.equal(fixed.action, 'no-action', '★ 而 `fixed` 仍然是 no-action（两条各自成立）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2（t8）验收 ④：新字段**组合**已有字段，而不是与它重复；C1 的词汇表被**复用**
+//
+//   契约逐字：「The new fields compose with the existing `resolution` field rather
+//   than duplicating it, and the record-class vocabulary C1 introduced is reused
+//   rather than redefined」
+//
+// ★ 为什么这条不能靠"读一眼代码觉得没重复"来结案：`rescue` 与 `resolution`
+//   都在回答"这条卡点怎么处置的"。若它们回答**同一件事**，那就会有两份真值，
+//   而两份会分叉 —— 分叉之后"rescue 说解掉了、resolution 说还欠动作"在台账里
+//   同形，读的人无从判断该信哪一格。⇒ 必须**机械**钉住它们回答的是**两件事**。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ C2 臂 E — `rescue` 答复的是【那个阻塞】怎么了；`resolution` 答复的是【这条记录】怎么了', async () => {
+  const { missingRescueEvidence, rescueStateOf, poolForRescue, defaultRescueForStall } =
+    await import('../lib/tools/shared/entities.js')
+
+  /**
+   * ★★ 判据（"组合而非重复"的可执行形式）：**两格可以取到互不相同的组合**，
+   *   而每一种组合都表达一件真的事。
+   *   ⇒ 若 `rescue` 是 `resolution` 的重复，那么由 `resolution` 就能推出 `rescue`，
+   *     下列四种组合里至少有两种在语义上不可能同时出现。
+   */
+  const combos = [
+    { resolution: { state: 'open', blocking: true }, rescue: { state: 'trying' }, want: 'candidate' },
+    { resolution: { state: 'open', blocking: true }, rescue: { state: 'cannot-solve', whyCannotSolve: 'w' }, want: 'candidate' },
+    { resolution: { state: 'fixed', blocking: true }, rescue: { state: 'solved', solvedBy: 'leader', howSolved: 'h' }, want: 'no-action' },
+    { resolution: { state: 'scheduled', blocking: true }, rescue: { state: 'solved', solvedBy: 'leader', howSolved: 'h' }, want: 'no-action' },
+    { resolution: { pool: 'self', blocking: true }, rescue: { state: 'cannot-solve', whyCannotSolve: 'w' }, want: 'escalate' },
+    { resolution: { pool: 'self', blocking: true }, rescue: { state: 'solved', solvedBy: 'leader', howSolved: 'h' }, want: 'no-action' },
+  ]
+  const actions = combos.map((c) => actionForFriction({ id: 'f', class: 'blocker', ...c }).action)
+  assert.deepEqual(
+    actions, combos.map((c) => c.want),
+    '★★★ 六种组合必须各自成立。★ 而**前两条不是"去处分岔"** —— 实测把它们钉成同一格：'
+    + '`resolution.state = open` 说的是"**这条台账还欠一个动作**"，它优先于 rescue；'
+    + '而 rescue 说的是"那个阻塞解没解掉"。⇒ 一个已解掉（`cannot-solve` 也好、'
+    + '`solved` 也好）的阻塞，若台账自己写着 `open`，**那条待办仍然是真的**。'
+    + '★★ 这一格正是"组合而非重复"的**最强证据**：由 `resolution` 推不出 `rescue`'
+    + '（第 5/6 条同为 `pool:self` 而动作相反），由 `rescue` 也推不出 `resolution`'
+    + '（第 1/2 条同为 `open` 而 rescue 不同、动作相同）。'
+    + '★ 若两格是重复的，六条会塌成不超过三条互不相同的动作。实测：' + JSON.stringify(actions),
+  )
+
+  /**
+   * ★★ 而"不同形"必须落在**字段**上，不只落在状态字上：
+   *   `solved` 有 `solvedBy` + `howSolved`；`cannot-solve` 有 `whyCannotSolve`；
+   *   `trying` **两样都没有**。
+   */
+  assert.deepEqual(
+    missingRescueEvidence({ state: 'solved', solvedBy: 'leader', howSolved: 'h' }), [],
+    '★ `solved` 带齐两格 ⇒ 不缺证据',
+  )
+  assert.deepEqual(
+    missingRescueEvidence({ state: 'solved', solvedBy: 'leader' }),
+    ['howSolved'],
+    '★★ 而 `solved` 少了 `howSolved` ⇒ 必须报出**缺哪一格**（"解了但说不出怎么解的"'
+    + '在下次遇到同一个坑时没有任何可复用的东西）',
+  )
+  assert.deepEqual(
+    missingRescueEvidence({ state: 'trying' }), [],
+    '★ `trying` **不需要**证据 —— 它没有声称任何事。'
+    + '★ 而这也正是它必须与"缺席"分开的原因：一个不声称任何事的状态，'
+    + '与一个没有被写下的状态，在**证据要求**上相同，在**语义**上不同',
+  )
+
+  /** ★ 词汇表复用：C1 的 `class` 取值被 C2 沿用，而不是另立一套。 */
+  assert.deepEqual(
+    [poolForRescue('cannot-solve'), poolForRescue('solved'), poolForRescue('trying'), poolForRescue(undefined)],
+    ['escalate', 'self', 'self', 'self'],
+    '★★★ 池子的**唯一**判据是 rescue 三态：只有 `cannot-solve` 进上报池；'
+    + '★ 而 `undefined`（没有 rescue 读数的老记录）**不猜**，落 `self` ——'
+    + ' 它随后由读取端按记录里既有的 `resolution.pool` 复查（见 frictions-html 侧）',
+  )
+  assert.equal(
+    defaultRescueForStall(undefined).state, 'trying',
+    '★ 缺省是 `trying`（"还没有人去救过"）—— 这正是那 214 条该死的那一步：'
+    + '**停住 ⇒ 直接 ⇒ 上报**，而中间"我们先自己解解看"这一格现在存在了',
+  )
+})

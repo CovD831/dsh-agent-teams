@@ -224,6 +224,50 @@ export function actionForFriction(record) {
   if (state === 'scheduled') return { action: 'no-action', why: `resolution.state = scheduled（已排进 ${String(record?.resolution?.task ?? '某个任务')}）` }
   if (state === 'open') return { action: 'candidate', why: 'resolution.state = open（真的还欠一个动作）' }
   /**
+   * ── ★★★ C2：**已经自己解掉的**卡点不再进待办清单 ────────────────────────────────
+   *
+   * 用户原话：「卡点 = 任务停下来了」，而一个**已经解掉**的阻塞**不再让任何任务停下来**。
+   * ⇒ 它与 `fixed` 同归宿：**no-action**。
+   *
+   * ── ★★ 为什么它必须排在四个 `state` 检查【之后】─────────────────────────────────
+   *
+   * ★ 与 t91 给 `auto` 那条的规定**同一条理由**（见下面的长注释）：
+   *   契约的反向半边是「不许把有待处理的条目也一并放过 ——
+   *   若某条记录**已经有 resolution**，它仍该按那个 resolution 走。」
+   *   ⇒ 一条被标成 `resolution.state = 'open'`（还欠一个动作）的记录，
+   *     即使它的 rescue 说"已自解"，也**仍该按 `open` 走** ——
+   *     因为"这个阻塞解掉了"与"这条台账还欠一个动作"是两件事。
+   *   ★ 把顺序反过来会在那条路径上**漏掉一条真的待办**。
+   *
+   * ── ★ 而它与 `fixed` 的**理由不同**（所以 `why` 不同形）────────────────────────
+   *
+   *   `fixed`      —— 「台账说这条修好了」（人对**记录**的动作）
+   *   `solved`     —— 「**那个阻塞**被自己解掉了」（人对**卡点**的动作，台账可能还没回填）
+   * ⇒ 两个读数分开报，读的人才知道该去信哪一格。
+   */
+  if (record?.rescue?.state === 'solved') {
+    return {
+      action: 'no-action',
+      why: `rescue.state = solved（★ 那个阻塞我们**自己解掉了**：${String(record?.rescue?.solvedBy ?? '(没记是谁)')}）`
+        + ' —— 它不再让任何任务停下来，所以不是待办',
+    }
+  }
+  /**
+   * ── ★★ C2：`cannot-solve` 是**唯一**该被人看见的那一态 ──────────────────────────
+   *
+   * ★ 它**不**变成 `candidate`（那是"派一条任务去修"）：解不掉的卡点不是一条可派的工作，
+   *   它是一件**要人裁决**的事。⇒ 单独成一格，且**带出"为什么解不掉"**。
+   * ★ 而它排在 `solved` 之后、`auto` 之前：一个自动条目若已被判定"解不掉"，
+   *   那它**仍然**要人看（"自动记录的"不等于"不用管"）。
+   */
+  if (record?.rescue?.state === 'cannot-solve') {
+    return {
+      action: 'escalate',
+      why: `rescue.state = cannot-solve（★ 试过、解不掉：${String(record?.rescue?.whyCannotSolve ?? '(没记为什么)')}）`
+        + ' —— 只有这一态会把事推到人面前',
+    }
+  }
+  /**
    * ── ★★★ t91：**自动记录**与"还没回填"是两件事 ─────────────────────────────────
    *
    * MEASURED（t91 实测当前台账 209 条）：**165 条是自动记录的拒绝**
