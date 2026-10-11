@@ -125,6 +125,7 @@ export declare const zh: {
     'dependency.hint.parallel': string;
     'dependency.hint.chain': string;
     'dependency.hint.pinned': string;
+    'dependency.hint.noStructure': string;
     'task.runningAria': string;
     'task.model': string;
     'task.detail.cancelled': string;
@@ -367,6 +368,7 @@ export declare const en: {
     'dependency.hint.parallel': string;
     'dependency.hint.chain': string;
     'dependency.hint.pinned': string;
+    'dependency.hint.noStructure': string;
     'task.runningAria': string;
     'task.model': string;
     'task.detail.cancelled': string;

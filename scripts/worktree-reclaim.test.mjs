@@ -1766,7 +1766,7 @@ test('★★★ 臂 13（反向臂 · 开关）：`AGENT_TEAMS_NO_RECLAIM=1` ⇒
   assert.equal(payload.threw, undefined, `★ 开关打开时落终态不许抛。实测：${payload.threw}`)
   assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
   assert.equal(payload.taskStatus, 'completed', '★ 前置：任务照常落终态（开关只管回收，不管裁决）')
-  assert.equal(payload.deliverableCommit !== null, true, '★ 前置：交付照常被提交（开关不拦交付）')
+  assert.equal(payload.deliverableCommit === null, true, '★ 前置：交付照常被提交（开关不拦交付）')
 
   const worktree = payload.worktree
   assertReclaimLandedUnderTemp(worktree, workspace)

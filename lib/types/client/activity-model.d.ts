@@ -1,4 +1,5 @@
 /** Pure relationship projections used by the AgentTeams activity panel. */
+import type { AgentTeamsTranslate } from './locales.ts';
 /**
  * Statuses after which a task no longer moves; every other status is open work.
  * ★ Single source for this fact: both the loop projection and the member clock
@@ -177,7 +178,10 @@ export type LoopTone = 'converging' | 'failed' | 'unmeasured' | 'blocked' | 'ope
  *   (inconclusive) did its job and must read as convergence; a broken
  *   deliverable must stay red; an unmeasured stop is neither.
  */
-export declare function taskLoopTone(task: LoopTask): LoopTone;
+export declare function taskLoopTone(task: {
+    readonly status: string;
+    readonly failureKind?: string;
+}): LoopTone;
 /** How long one review/repair round has been reported as running. */
 export interface RoundElapsed {
     readonly round: number;
@@ -311,6 +315,37 @@ export declare function roundTailCounts<T extends LoopTask>(tasks: readonly T[],
  * words, and the two sets would drift the moment one of them is edited.
  */
 export declare const ROUND_TAIL_LABEL: Readonly<Record<RoundTailCountKey, string>>;
+/**
+ * Terminal-outcome tone for every surface that colours a task.
+ *
+ * ★ This is the fix for "a review that found problems renders as a red failure".
+ *   The three measured outcomes get three distinct tones: a consultative task
+ *   whose job was to find problems renders AMBER (`converging`), a genuinely
+ *   broken deliverable stays red, and an unmeasured stop renders as neither.
+ *
+ * ★ When the host has not published a classification, this returns the SAME
+ *   value `taskTone` did before, so nothing regresses on an older snapshot —
+ *   the new states only appear where they were actually measured.
+ */
+export declare function taskTerminalTone(task: {
+    readonly status: string;
+    readonly state: string;
+    readonly failureKind?: string;
+}): string;
+/** Human label for one raw task status, falling back to the status itself. */
+export declare function taskStatusLabel(status: string, t: AgentTeamsTranslate): string;
+/** One-line task description used as a `title` tooltip (`id · subject · extras`). */
+export declare function taskTitle(task: {
+    readonly id: string;
+    readonly subject: string;
+    readonly kind?: string;
+    readonly round?: number;
+    readonly verdict?: string;
+}, model: string): string;
+/** Compact task label for the tight DAG nodes. */
+export declare function compactTaskLabel(subject: string): string;
+/** Joined task-id list using the locale's list separator. */
+export declare function formatTaskIds(ids: readonly string[], t: AgentTeamsTranslate): string;
 /**
  * ── ★★★ R2：**谁该拥有秒表** ──────────────────────────────────────────────────
  *

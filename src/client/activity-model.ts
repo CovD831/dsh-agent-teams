@@ -1,5 +1,7 @@
 /** Pure relationship projections used by the AgentTeams activity panel. */
 
+import type { AgentTeamsLocaleKey, AgentTeamsTranslate } from './locales.ts'
+
 /**
  * Statuses after which a task no longer moves; every other status is open work.
  * ★ Single source for this fact: both the loop projection and the member clock
@@ -292,7 +294,7 @@ export type LoopTone = 'converging' | 'failed' | 'unmeasured' | 'blocked' | 'ope
  *   (inconclusive) did its job and must read as convergence; a broken
  *   deliverable must stay red; an unmeasured stop is neither.
  */
-export function taskLoopTone(task: LoopTask): LoopTone {
+export function taskLoopTone(task: { readonly status: string; readonly failureKind?: string }): LoopTone {
   if (task.status === 'cancelled') return 'cancelled'
   if (task.status === 'completed') return 'completed'
   if (task.status !== 'failed') return task.status === 'in_progress' ? 'running' : 'open'
@@ -539,6 +541,93 @@ export const ROUND_TAIL_LABEL: Readonly<Record<RoundTailCountKey, string>> = {
   unmeasured: 'task.status.notRun',
   running: 'task.status.inProgress',
   completed: 'task.status.completed',
+}
+
+/**
+ * ── ★★★ R3：任务着色读数（从 ActivityPanel.tsx 搬来，逐字未改）───────────────────
+ *
+ * ★ 这里保留的是原来那段**逐字的**判据：`taskTone` 是旧行为，而
+ *   `taskTerminalTone` 是 t13 引入的三态修正（"评审发现了问题"读成琥珀而不是红）。
+ *   `DependencyGraph.tsx` 与面板都要用它，所以它必须在两边都能 import 的地方 ——
+ *   而**不是**各留一份。
+ */
+/** Badge/bar coloring key: visual state, widened for terminal statuses. */
+function taskTone(state: string, status: string): string {
+  if (status === 'failed') return 'failed'
+  if (status === 'cancelled') return 'cancelled'
+  return state
+}
+
+/**
+ * Terminal-outcome tone for every surface that colours a task.
+ *
+ * ★ This is the fix for "a review that found problems renders as a red failure".
+ *   The three measured outcomes get three distinct tones: a consultative task
+ *   whose job was to find problems renders AMBER (`converging`), a genuinely
+ *   broken deliverable stays red, and an unmeasured stop renders as neither.
+ *
+ * ★ When the host has not published a classification, this returns the SAME
+ *   value `taskTone` did before, so nothing regresses on an older snapshot —
+ *   the new states only appear where they were actually measured.
+ */
+export function taskTerminalTone(task: { readonly status: string; readonly state: string; readonly failureKind?: string }): string {
+  if (task.status === 'cancelled') return 'cancelled'
+  if (task.status !== 'failed') return taskTone(task.state, task.status)
+  return taskLoopTone(task)
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ R3：任务面的**纯**展示读数（从 ActivityPanel.tsx 搬来，逐字未改）──────
+ *
+ * 这些函数原来长在面板里，而 R3 把依赖图搬进 `DependencyGraph.tsx` 之后，
+ * **两个文件都要用它们**。留在任一边都会造成两件事之一：
+ *   · 让 `DependencyGraph` 反向 import 面板 ⇒ 循环依赖（面板要 import 图）；
+ *   · 或者抄一份 ⇒ 同一句文案的第二份实现，一定会漂移。
+ *
+ * ⇒ 搬到本模块（两边都已经在 import 它），于是**各只有一份定义**。
+ *   ★ 这是纯粹的搬家：函数体一个字都没改，所以"搬丢了什么"能被集合比对抓住。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/** Badge text follows the raw task status (finer than the 4 visual states). */
+const TASK_STATUS_LABEL: Readonly<Record<string, AgentTeamsLocaleKey>> = {
+  pending: 'task.status.pending',
+  claimed: 'task.status.claimed',
+  in_progress: 'task.status.inProgress',
+  completed: 'task.status.completed',
+  failed: 'task.status.failed',
+  cancelled: 'task.status.cancelled',
+}
+
+/** Human label for one raw task status, falling back to the status itself. */
+export function taskStatusLabel(status: string, t: AgentTeamsTranslate): string {
+  const key = TASK_STATUS_LABEL[status]
+  return key === undefined ? status : t(key)
+}
+
+/** One-line task description used as a `title` tooltip (`id · subject · extras`). */
+export function taskTitle(
+  task: { readonly id: string; readonly subject: string; readonly kind?: string; readonly round?: number; readonly verdict?: string },
+  model: string,
+): string {
+  const extras = [
+    task.kind,
+    task.round === undefined ? undefined : `r${task.round}`,
+    task.verdict,
+    model === '' ? undefined : model,
+  ].filter((item): item is string => item !== undefined)
+  return extras.length === 0 ? `${task.id} · ${task.subject}` : `${task.id} · ${task.subject} · ${extras.join(' · ')}`
+}
+
+/** Compact task label for the tight DAG nodes. */
+export function compactTaskLabel(subject: string): string {
+  const withoutVerb = subject.replace(/^开发\s*/u, '').replace(/^\d+[-_.、\s]*/u, '')
+  const head = withoutVerb.split(/[（(·：:]/u)[0]?.trim() ?? withoutVerb
+  return head.length > 18 ? `${head.slice(0, 17)}…` : head
+}
+
+/** Joined task-id list using the locale's list separator. */
+export function formatTaskIds(ids: readonly string[], t: AgentTeamsTranslate): string {
+  return ids.join(t('format.listSeparator'))
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

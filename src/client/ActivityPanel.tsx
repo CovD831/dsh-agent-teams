@@ -26,6 +26,7 @@ import {
   IconStopFill16, IconWarningOutline16,
 } from './icons.tsx'
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Chevron, DependencyGraph, WorkGlyph } from './DependencyGraph.tsx'
 import { currentSessionId } from './session-navigation.ts'
 import type { ModelDirectory, ModelDirectoryResolver } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -35,28 +36,15 @@ import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/c
 import {
   activityPanelExpandedForSession,
   activityPanelShouldAutoExpand,
-  compactDagLayout,
-  COMPACT_DAG_NODE_HEIGHT,
-  COMPACT_DAG_NODE_WIDTH,
-  dependencyFocusTaskId,
+  formatTaskIds,
   memberRouteLabel,
   memberRowExpanded,
   memberRowKey,
   orderDelegationMembers,
   pruneMemberRows,
-  relatedTaskIds,
-  loopFacts,
-  nextLoopDisclosure,
-  reviewLoop,
-  roundTailCounts,
-  taskLoopTone,
   taskModelLabel,
   teamIsActive,
-  toggleLoopDisclosure,
   toggleMemberRow,
-  usesParallelTaskGrid,
-  type LoopDisclosure,
-  type LoopTask,
   type MemberExpansion,
 } from './activity-model.ts'
 import {
@@ -139,95 +127,6 @@ function initialPanelBounds(): PanelBounds {
   return { width: window.innerWidth, height: window.innerHeight, anchorRight: window.innerWidth }
 }
 
-/** Badge text follows the raw task status (finer than the 4 visual states):
- * claimed/pending/failed/cancelled keep their own labels and colors. */
-const TASK_STATUS_LABEL: Record<string, AgentTeamsLocaleKey> = {
-  pending: 'task.status.pending',
-  claimed: 'task.status.claimed',
-  in_progress: 'task.status.inProgress',
-  completed: 'task.status.completed',
-  failed: 'task.status.failed',
-  cancelled: 'task.status.cancelled',
-}
-
-function taskStatusLabel(status: string, t: AgentTeamsTranslate): string {
-  const key = TASK_STATUS_LABEL[status]
-  return key === undefined ? status : t(key)
-}
-
-function formatTaskIds(ids: readonly string[], t: AgentTeamsTranslate): string {
-  return ids.join(t('format.listSeparator'))
-}
-
-function taskTitle(task: ActivityTask, model: string): string {
-  const extras = [
-    task.kind,
-    task.round === undefined ? undefined : `r${task.round}`,
-    task.verdict,
-    model === '' ? undefined : model,
-  ].filter((item): item is string => item !== undefined)
-  return extras.length === 0 ? `${task.id} · ${task.subject}` : `${task.id} · ${task.subject} · ${extras.join(' · ')}`
-}
-
-/** Badge/bar coloring key: visual state, widened for terminal statuses. */
-function taskTone(state: ActivityTask['state'], status: string): string {
-  if (status === 'failed') return 'failed'
-  if (status === 'cancelled') return 'cancelled'
-  return state
-}
-
-/**
- * Terminal-outcome tone for every surface that colours a task.
- *
- * ★ This is the fix for "a review that found problems renders as a red failure".
- *   The three measured outcomes get three distinct tones: a consultative task
- *   whose job was to find problems renders AMBER (`converging`), a genuinely
- *   broken deliverable stays red, and an unmeasured stop renders as neither.
- *
- * ★ When the host has not published a classification, this returns the SAME
- *   value `taskTone` did before, so nothing regresses on an older snapshot —
- *   the new states only appear where they were actually measured.
- */
-function taskTerminalTone(task: ActivityTask): string {
-  if (task.status === 'cancelled') return 'cancelled'
-  if (task.status !== 'failed') return taskTone(task.state, task.status)
-  return taskLoopTone(task)
-}
-
-/**
- * Locale key for one round's tone label.
- *
- * Reuses the pre-existing `task.status.*` vocabulary: a parallel `round.*`
- * dictionary would be a second source of truth for the same words.
- */
-const ROUND_TONE_LABEL: Readonly<Record<string, AgentTeamsLocaleKey>> = {
-  converging: 'task.status.failed',
-  unmeasured: 'task.status.notRun',
-  failed: 'task.status.failed',
-  running: 'task.status.inProgress',
-  open: 'task.status.pending',
-  blocked: 'task.status.claimed',
-  completed: 'task.status.completed',
-  cancelled: 'task.status.cancelled',
-}
-
-function Chevron({ open }: { readonly open: boolean }) {
-  return (
-    <svg className={css.chevron} data-open={open} width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
-      <path d="M3.5 2l3 3-3 3" />
-    </svg>
-  )
-}
-
-function WorkGlyph({ active }: { readonly active: boolean }) {
-  return (
-    <svg className={css.workGlyph} data-active={active} width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden>
-      {[[0, 0], [4.2, 0], [8.4, 0], [0, 4.2], [4.2, 4.2], [8.4, 4.2]].map(([x, y], index) => (
-        <rect key={`${x}:${y}`} x={x} y={y} width="2.6" height="2.6" rx=".6" style={{ animationDelay: `${index * 0.15}s` }} />
-      ))}
-    </svg>
-  )
-}
 
 /** Collapsed badge: an always-visible corner pill while any team exists. */
 function CollapsedBadge({ count, busy, onClick, t }: {
@@ -255,11 +154,6 @@ function CollapsedBadge({ count, busy, onClick, t }: {
  * ★ 一行只应有一个"它在做什么"的口径，所以这里**不留**转发壳。
  */
 
-function compactTaskLabel(subject: string): string {
-  const withoutVerb = subject.replace(/^开发\s*/u, '').replace(/^\d+[-_.、\s]*/u, '')
-  const head = withoutVerb.split(/[（(·：:]/u)[0]?.trim() ?? withoutVerb
-  return head.length > 18 ? `${head.slice(0, 17)}…` : head
-}
 
 function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = false): string {
   const completed = team.tasks.filter((task) => task.status === 'completed')
@@ -308,272 +202,34 @@ function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = fal
  */
 
 /**
- * Review/repair rounds with the round markers that make convergence visible.
+ * ── ★★★ R3：进度**读数**只留一句话，色块条与图例都去掉 ────────────────────────────
  *
- * A gate that returns `needs_revision` is the system working: the host then
- * generates the next round. Rendered as disconnected red tasks, an external
- * observer sees a run of accidents; rendered as ordered rounds with tail
- * counts, the same durable data reads as one loop that is narrowing.
+ * MEASURED（用户原话）：「整个东西挺冗余的，比如它做一些 badge 之类的东西」。
  *
- * ★ Disclosure follows the first-party rule: a loop with anything unsettled
- *   opens by default, so an amber marker can never hide inside a collapsed row.
+ * ★ 原来的三件套是**同一个事实的三次表述**：
+ *   · `progressSegments` —— 一排色块，每块一个任务；而"完成了几项"在下面那行
+ *     已经用数字说了，色块只是把同一件事画了一遍；
+ *   · `progressLegend` —— `■ 进行中 N / ■ 等待依赖 N / ■ 已交付 N`；其中
+ *     "已交付 N" 与团队头上的 `{completed}/{total} 完成` 是**同一个数**；
+ *   · `progressSummary` —— 一句人话的总结，**这一件留下**，因为它说的
+ *     "等待前置/正在执行/全部交付"是前两者都没说的。
+ *
+ * ⇒ 减法之后：一句总结 + 一个语气点。数字仍在（团队头的 completed/total、
+ *   成员行自己的 done/total），所以**没有任何读数丢失**。
  */
-
-function ReviewLoopSection({ tasks, t, discarded = false, onSelectTask }: {
-  readonly tasks: readonly ActivityTask[]
-  readonly t: AgentTeamsTranslate
-  readonly discarded?: boolean
-  readonly onSelectTask?: (id: string | null) => void
-}) {
-  const loop = useMemo(() => reviewLoop(tasks as readonly LoopTask[]), [tasks])
-  const facts = useMemo(() => loopFacts(loop, discarded), [loop, discarded])
-  const [disclosure, setDisclosure] = useState<LoopDisclosure | undefined>(undefined)
-  /**
-   * ★ The disclosed state is REBUILT from durable facts on every change, and the
-   *   initial value (no previous state) likewise comes from the facts — never
-   *   from a remembered UI flag, so a remount cannot silently hide an abnormal
-   *   loop. See {@link nextLoopDisclosure} for the precedence rules.
-   */
-  useEffect(() => {
-    setDisclosure((current) => {
-      const next = nextLoopDisclosure(current, facts)
-      return current !== undefined
-        && current.open === next.open
-        && current.userSet === next.userSet
-        && current.mode === next.mode
-        && current.count === next.count
-        ? current
-        : next
-    })
-  }, [facts])
-  const open = disclosure?.open ?? facts.mode !== 'clean'
-  if (loop.tracked === 0 || loop.rounds.length === 0) return null
-  const tail = loop.rounds.map((entry) => `${entry.round}`).join(t('format.listSeparator'))
-  return (
-    <section className={css.loopSection} aria-label={t('dependency.aria')} data-review-loop data-tracked={loop.tracked}>
-      <header className={css.loopHead}>
-        <button type="button" className={css.loopToggle} onClick={() => { setDisclosure((current) => toggleLoopDisclosure(current ?? { ...facts, open: facts.mode !== 'clean', userSet: false })) }} aria-expanded={open} data-loop-toggle>
-          <Chevron open={open} />
-          <span className={css.loopTitle}>{t('members.toggle', { count: loop.rounds.length })}</span>
-        </button>
-        <span className={css.loopHint}>{open ? t('dependency.hint.chain') : t('task.summary.waitingSchedule')}</span>
-      </header>
-      {open && (
-        <ol className={css.loopList}>
-          {loop.rounds.map((entry) => (
-            <li key={entry.round} className={css.loopRound} data-tone={discarded ? 'cancelled' : entry.tone}>
-              <span className={css.loopRoundMarker} aria-hidden>{entry.round}</span>
-              <span className={css.loopRoundBody}>
-                <span className={css.loopRoundTone} data-tone={discarded ? 'cancelled' : entry.tone}>
-                  {discarded ? t('task.status.notRun') : t(ROUND_TONE_LABEL[entry.tone] ?? 'task.status.failed')}
-                </span>
-                <span className={css.loopRoundTasks}>
-                  {entry.tasks.map((task) => (
-                    <button
-                      key={task.id}
-                      type="button"
-                      className={css.loopTask}
-                      data-tone={discarded ? 'cancelled' : taskLoopTone(task as LoopTask)}
-                      onClick={() => { onSelectTask?.(task.id) }}
-                      title={taskTitle(task as ActivityTask, '')}
-                    >
-                      {task.id}
-                    </button>
-                  ))}
-                </span>
-              </span>
-              <span className={css.loopStatusTail} data-tone={discarded ? 'cancelled' : entry.tone}>
-                {discarded ? t('task.status.notRun') : roundTailCounts(entry.tasks as readonly LoopTask[], (key, params) => t(key as AgentTeamsLocaleKey, params), t('format.listSeparator'))}
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  )
-}
-
 function ProgressOverview({ team, t, discarded = false }: { readonly team: ActivityTeam; readonly t: AgentTeamsTranslate; readonly discarded?: boolean }) {
-  const running = discarded ? 0 : team.tasks.filter((task) => task.state === 'running').length
   const blocked = discarded ? 0 : team.tasks.filter((task) => task.state === 'blocked').length
-  const completed = discarded ? 0 : team.tasks.filter((task) => task.status === 'completed').length
   const settled = !discarded && team.tasks.length > 0 && team.tasks.every((task) => (
     task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
   ))
   const summaryTone = discarded ? 'discarded' : blocked > 0 || team.tasks.some(task => task.status === 'failed' || task.status === 'cancelled') ? 'warning' : settled ? 'completed' : 'running'
+  if (team.tasks.length === 0) return null
   return (
     <section className={css.progressOverview} aria-label={t('progress.aria')} data-progress-summary>
-      <span className={css.progressTitle}>{t('progress.title')}</span>
-      {team.tasks.length > 0 ? (
-        <span className={css.progressSegments} aria-hidden>
-          {team.tasks.map((task) => <span key={task.id} data-state={discarded ? 'cancelled' : taskTerminalTone(task)} />)}
-        </span>
-      ) : <span className={css.progressEmpty} />}
-      <span className={css.progressLegend}>
-        <span data-state="running">{t('progress.running', { count: running })}</span>
-        <span data-state="blocked">{t('progress.blocked', { count: blocked })}</span>
-        <span data-state="completed">{t('progress.delivered', { count: completed })}</span>
-      </span>
       <span className={css.progressSummary} data-state={summaryTone}>
         <span className={css.progressSummaryDot} />
         <span>{taskSummary(team, t, discarded)}</span>
       </span>
-    </section>
-  )
-}
-
-function DependencyMap({ tasks, members, t, discarded = false, workspace = false, onSelectTask }: {
-  readonly tasks: readonly ActivityTask[]
-  readonly members: readonly ActivityMember[]
-  readonly t: AgentTeamsTranslate
-  readonly discarded?: boolean
-  readonly workspace?: boolean
-  readonly onSelectTask?: (id: string | null) => void
-}) {
-  const [open, setOpen] = useState(true)
-  const [hoverTaskId, setHoverTaskId] = useState<string | null>(null)
-  const [keyboardTaskId, setKeyboardTaskId] = useState<string | null>(null)
-  const [pinnedTaskId, setPinnedTaskId] = useState<string | null>(null)
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const focusedTaskId = dependencyFocusTaskId(pinnedTaskId, keyboardTaskId, hoverTaskId)
-  const nodeWidth = workspace ? 164 : COMPACT_DAG_NODE_WIDTH
-  const nodeHeight = workspace ? 76 : COMPACT_DAG_NODE_HEIGHT
-  const layout = useMemo(() => compactDagLayout(tasks, workspace
-    ? { nodeWidth: 164, nodeHeight: 76, columnGap: 36, rowGap: 16 } : undefined), [tasks, workspace])
-  const parallel = useMemo(() => usesParallelTaskGrid(tasks), [tasks])
-  const related = useMemo(
-    () => focusedTaskId === null ? null : relatedTaskIds(focusedTaskId, tasks),
-    [focusedTaskId, tasks],
-  )
-  const scheduleHover = (id: string | null): void => {
-    if (hoverTimer.current !== null) {
-      clearTimeout(hoverTimer.current)
-      hoverTimer.current = null
-    }
-    if (id === null) {
-      setHoverTaskId(null)
-      return
-    }
-    hoverTimer.current = setTimeout(() => {
-      hoverTimer.current = null
-      setHoverTaskId(id)
-    }, 180)
-  }
-  useEffect(() => () => {
-    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current)
-  }, [])
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { setPinnedTaskId(null); onSelectTask?.(null) }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [onSelectTask])
-  if (tasks.length === 0) return null
-  const fallbackTask = tasks.find((task) => task.state === 'blocked')
-    ?? tasks.find((task) => task.state === 'running')
-    ?? tasks[0]!
-  const detailTask = tasks.find((task) => task.id === focusedTaskId) ?? fallbackTask
-  const detailModel = taskModelLabel(detailTask, members)
-  const waitingOn = detailTask.dependencies.filter((dependency) => (
-    tasks.find((task) => task.id === dependency)?.status !== 'completed'
-  ))
-  const dependents = tasks.filter((task) => task.dependencies.includes(detailTask.id))
-  return (
-    <section className={css.dependencySection} aria-label={t('dependency.aria')} data-dependency-map>
-      <header className={css.sectionHead}>
-        <button type="button" className={css.sectionToggleTitle} onClick={() => { setOpen((current) => !current) }} aria-expanded={open}>
-          <Chevron open={open} /><IconBranchOutline16 /> {t(parallel ? 'dependency.parallel' : 'dependency.title')}
-        </button>
-        <span className={css.sectionHint}>{pinnedTaskId === null
-          ? t(parallel ? 'dependency.hint.parallel' : workspace ? 'workspace.dependencies' : 'dependency.hint.chain')
-          : t('dependency.hint.pinned', { taskId: pinnedTaskId })}</span>
-      </header>
-      {open && (
-        <>
-          <div className={css.dagViewport}>
-            <div
-              className={css.dagCanvas}
-              data-layout={parallel ? 'parallel' : 'dependency'}
-              style={parallel ? undefined : { width: layout.width, height: layout.height }}
-            >
-              {!parallel && <svg className={css.dagEdges} width={layout.width} height={layout.height} aria-hidden>
-                {layout.edges.map((edge) => {
-                  const active = related !== null && related.has(edge.from) && related.has(edge.to)
-                  return <path key={`${edge.from}:${edge.to}`} d={edge.path} data-active={active} data-dimmed={related !== null && !active} />
-                })}
-              </svg>}
-              {layout.nodes.map(({ task, x, y }) => {
-                const model = taskModelLabel(task, members)
-                return (
-                  <button
-                    key={task.id}
-                    type="button"
-                    className={css.dagNode}
-                    style={parallel
-                      ? { height: nodeHeight }
-                      : { left: x, top: y, width: nodeWidth, height: nodeHeight }}
-                    data-task-id={task.id}
-                    data-state={discarded ? 'cancelled' : taskTerminalTone(task)}
-                    data-task-model={model || undefined}
-                    data-focused={related?.has(task.id) ?? false}
-                    data-dimmed={related !== null && !related.has(task.id)}
-                    aria-pressed={pinnedTaskId === task.id}
-                    title={taskTitle(task, model)}
-                    onClick={() => { const next = pinnedTaskId === task.id ? null : task.id; setPinnedTaskId(next); onSelectTask?.(next) }}
-                    onMouseEnter={() => { scheduleHover(task.id) }}
-                    onMouseLeave={() => { scheduleHover(null) }}
-                    onFocus={() => { setKeyboardTaskId(task.id) }}
-                    onBlur={() => { setKeyboardTaskId(null) }}
-                  >
-                    <span className={css.dagNodeHead}><span className={css.dagNodeDot} />{task.id}{workspace && <span className={css.dagOwner}>{task.assignee || t('task.assignee.unclaimed')}</span>}</span>
-                    <span className={css.dagNodeLabel}>
-                      {workspace ? task.subject : compactTaskLabel(task.subject)}
-                    </span>
-                    {task.state === 'running' && (
-                      <span className={css.dagRunningState} aria-label={t('task.runningAria')}>
-                        <WorkGlyph active />
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-          <section className={css.taskDetail} data-task-detail={detailTask.id}>
-            <span className={css.taskDetailHead}>
-              <span className={css.taskDetailId}>{detailTask.id}</span>
-              <span className={css.taskDetailSubject} title={detailTask.subject}>{detailTask.subject.replace(/^开发\s*/u, '')}</span>
-              <span className={css.taskDetailBadge} data-state={discarded ? 'cancelled' : taskTerminalTone(detailTask)}>
-                {discarded ? t('task.status.notRun') : taskStatusLabel(detailTask.status, t)}
-              </span>
-            </span>
-            <span className={css.taskDetailLine}>
-              {detailTask.assignee || t('task.assignee.unclaimed')} · {discarded
-                ? t('task.detail.notRun')
-                : detailTask.status === 'completed'
-                ? t('task.detail.completed')
-                : detailTask.status === 'cancelled'
-                  ? t('task.detail.cancelled')
-                : detailTask.status === 'failed'
-                  ? t('task.detail.failed')
-                : detailTask.dependencies.length === 0
-                ? t('task.detail.noPrerequisite')
-                : waitingOn.length === 0
-                  ? t('task.detail.ready')
-                  : t('task.detail.waitingOn', { tasks: formatTaskIds(waitingOn, t) })}
-            </span>
-            {detailModel !== '' && (
-              <span className={css.taskDetailModel} data-task-model={detailModel}>
-                {t('task.model', { model: detailModel })}
-              </span>
-            )}
-            <span className={css.taskDetailMeta}>{dependents.length === 0
-              ? t('task.detail.noDownstream')
-              : t('task.detail.unlocks', { tasks: formatTaskIds(dependents.map((task) => task.id), t) })}</span>
-          </section>
-        </>
-      )}
     </section>
   )
 }
@@ -678,9 +334,27 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
           <span className={css.teamName} title={team.name}>{team.name}</span>
           {historic && <span className={css.historicPill}>{t(discarded ? 'team.discarded' : 'team.ended')}</span>}
           {stopped && <span className={css.historicPill}>{t('team.stopped')}</span>}
+          {/**
+            * ── ★★★ R3：消息数**不在这块主面板上**（用户原话：badge-like elements）──
+            *
+            * ★ 消息计数是"队长邮箱里有多少条"，而不是第一屏要回答的那个问题
+            *   （"整队在不在动、谁在做什么"）。它作为**摘要**留在这一行里，
+            *   而不再占一格徽章位置。
+            * ★ 成员数与 completed/total 留下：前者是这一屏的主体，后者是唯一
+            *   一处说明"这一队做完了多少"的地方 —— 删了它就真的丢读数了。
+            */}
           <span className={css.teamStats}>
             <span data-stat="members">{t('team.stats.members', { count: team.members.length })}</span>
             <span data-stat="tasks">{t('team.stats.completed', { completed: completedCount, total: team.tasks.length })}</span>
+            {/**
+              * ── ★★★ R3：消息数**降级为行内文字**（不是删掉，也不是徽章）────────────
+              *
+              * 任务口径：「the message-count badge is not needed on the **primary**
+              * surface」—— 是"不该占一格徽章"，而**不是**"这条读数可以消失"。
+              * ⇒ 它仍在，只是成为这一行里的一个字串，与成员数/完成数同形。
+              * ★ 于是"删掉一个读数"与"换一种说法"在这里是两件不同的事：
+              *   前者会丢事实，后者只是减法。
+              */}
             <span data-stat="messages">{t('team.stats.messages', { count: team.messageCount })}</span>
           </span>
           {canStop && (
@@ -887,8 +561,20 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
         })()}
       </section>
 
-      <ReviewLoopSection tasks={team.tasks} t={t} discarded={discarded} onSelectTask={setSelectedTaskId} />
-      <DependencyMap tasks={team.tasks} members={team.members} t={t} discarded={discarded} workspace={workspace} onSelectTask={setSelectedTaskId} />
+      {/**
+        * ── ★★★ R3：**第二屏只剩下依赖图**（用户原话）──────────────────────────
+        *
+        *   "screen two probably only needs to keep the dependency graph"
+        *
+        * ★ 原来的第二屏有三块：收敛循环（ReviewLoopSection）、总进度色块条、
+        *   依赖图。而：
+        *   · 总进度已经在第一屏（成员列表之上）说过一次了；
+        *   · 收敛循环的**轮次信息在 R2 里已经搬到成员行上**（`memberRound`），
+        *     所以它在这里是同一件事的第二处 —— 而两处一定会漂移；
+        *   · 依赖图是这一屏**唯一**别处没有的东西（谁解锁谁）。
+        * ⇒ 只留图。
+        */}
+      <DependencyGraph tasks={team.tasks} members={team.members} t={t} discarded={discarded} workspace={workspace} onSelectTask={setSelectedTaskId} />
       </section>
       <Modal
         open={stopOpen}

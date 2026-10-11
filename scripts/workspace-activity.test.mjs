@@ -870,7 +870,35 @@ async function mount(element) {
   return {
     container,
     unmount: () => { act(() => { root.unmount() }) },
+    /**
+     * 真的**点一下**一个节点。
+     *
+     * ★ 走的是 React 自己接上去的那个 handler（`__reactProps$…`），而不是
+     *   手写一个 `onClick()` 调用 —— 后者测的是"函数能跑"，而不是"这一行接上了"。
+     */
+    click: async (node) => {
+      const key = Object.keys(node).find((name) => name.startsWith('__reactProps$'))
+      assert.ok(key !== undefined, '★ 这个节点上没有 React 的 handler —— 它不是一个真的控件')
+      const handler = node[key].onClick
+      assert.equal(typeof handler, 'function', '★ 这个节点上确实挂了 onClick')
+      await act(async () => { handler({ preventDefault() {}, stopPropagation() {}, currentTarget: node, target: node }) })
+    },
   }
+}
+
+/**
+ * 深度优先找**第一个**满足条件的节点。
+ *
+ * ★ 用它而不是 `querySelector`：这个最小 DOM 桩没有选择器引擎，
+ *   而"我找一个看起来像它的东西"不是判据 —— 条件本身写在调用处。
+ */
+function findFirst(node, predicate) {
+  if (predicate(node)) return node
+  for (const child of node.childNodes ?? []) {
+    const hit = findFirst(child, predicate)
+    if (hit !== null) return hit
+  }
+  return null
 }
 
 /**
@@ -1244,4 +1272,430 @@ test('★ 臂 26（模型格契约臂）：模型是**行内文字**且完整路
     '★ 反向半边：完整路由的 aria-label 同样只有一份')
   /** ★ 前置：而面板确实**会用**同一个布局类（否则上面两条是"两边都没有"的空断言）。 */
   assert.ok(panel.includes('css.memberModel'), '★ 前置：面板复用同一个布局类给这一行留位置')
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t29（R3）：第二屏 = 依赖图，默认收起，徽章去掉 ─────────────────────────
+ *
+ * 用户原话：
+ *   · "screen two probably only needs to keep the dependency graph"
+ *   · "the dependency graph can stay collapsed by default, because most of the
+ *      time you do not want to look at that thing"
+ *   · 「整个东西挺冗余的，比如它做一些 badge 之类的东西」
+ *
+ * ★ 本节的**核心**不是"图还在不在"，而是任务点名的那条纪律：
+ *   "Count the exported symbols and the rendered facts before and after and
+ *    compare as SETS, because 'I checked' and 'the fixtures still pass' cannot
+ *    distinguish a clean move from a silent deletion"。
+ *   ⇒ 所以下面第 27 臂把 HEAD 当成**外部参照**（不是"我记得"），
+ *     逐个集合比对；而反向半边是：故意从集合里拿掉一个键，那条断言必须变红。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const { readFile: readSource, readdir: readDirNames } = await import('node:fs/promises')
+const { execFileSync } = await import('node:child_process')
+
+const CLIENT_ROOT = new URL('../src/client/', import.meta.url)
+const REPO_ROOT = new URL('../', import.meta.url)
+
+/** Every source file that ships in the browser client. */
+async function clientSourceFiles() {
+  const names = await readDirNames(CLIENT_ROOT)
+  return names.filter((name) => /\.tsx?$/u.test(name)).sort()
+}
+
+/**
+ * Read one client file as it was at HEAD (the pre-move reference).
+ *
+ * ★ 参照必须是**外部事实**（git 里的那棵树），而不是"我记得它原来长什么样" ——
+ *   后者正是本臂要取代的那种断言。
+ */
+function readHeadFile(name) {
+  return execFileSync('git', ['show', `HEAD:src/client/${name}`], { cwd: new URL('.', REPO_ROOT).pathname, encoding: 'utf8' })
+}
+
+/**
+ * Every dotted lowercase string literal in a source file (raw vocabulary scan).
+ *
+ * ★ 口径：本模块里只有**两种**点号字面量 —— locale 键（`a.b.c`）与 CSS 选择器片段。
+ *   所以"点号字面量"是 locale 键的一个**可机检**代理，而且它不会漏掉三元形式
+ *   （`? t('a') : t('b')`）—— 那是 `/t\('/` 那种写法会漏掉的一格（本臂实测过）。
+ */
+function dottedLiterals(source) {
+  const found = new Set()
+  for (const match of source.matchAll(/'([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)'/gu)) {
+    found.add(match[1])
+  }
+  return found
+}
+
+/**
+ * ── ★★★ 「**声明**了」与「**渲染**了」是两件事，必须分开测 ────────────────────────
+ *
+ * MEASURED（本臂自己撞出来的）：第一版把两者合成一个投影，于是
+ *   · `progress.delivered` 被读成"还在" —— 因为它在 `locales.ts` 里**有词条**；
+ *   · 而它其实**已经没有任何一处渲染它**了。
+ * ⇒ 一个"词条还在"就放行的判据，正好会漏掉"读数不再出现"这一类删除 ——
+ *   而那恰恰是 R3 要做的减法。
+ *
+ * ★ 判据的分工：
+ *   · `declaredLocaleKeys` —— 词典里有哪些词条（`'a.b.c': '...'` 形式）；
+ *   · `referencedLocaleKeys` —— 组件里**引用**了哪些键（排除词典文件本身）。
+ *     两者都测，而**引用**那一侧才是"读数还在不在"的证据。
+ */
+function declaredLocaleKeys(source) {
+  const found = new Set()
+  for (const match of source.matchAll(/^\s*'([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)':/gmu)) {
+    found.add(match[1])
+  }
+  return found
+}
+
+/** Locale keys referenced by component code (the dictionary is excluded). */
+function referencedLocaleKeys(source) {
+  return dottedLiterals(source)
+}
+
+/** Every `data-*` probe name rendered by a source file. */
+function dataProbes(source) {
+  const found = new Set()
+  for (const match of source.matchAll(/\bdata-[a-z][a-z-]*/gu)) found.add(match[0])
+  return found
+}
+
+/** Every exported symbol name declared by a source file. */
+function exportedSymbols(source) {
+  const found = new Set()
+  const pattern = /^export (?:async )?(?:function|const|let|class|type|interface) ([A-Za-z0-9_]+)/gmu
+  for (const match of source.matchAll(pattern)) found.add(match[1])
+  return found
+}
+
+/** Union of one projection over a set of files (the set-comparison unit). */
+function unionOver(files, project, read) {
+  const total = new Set()
+  for (const name of files) {
+    let source
+    try { source = read(name) } catch { continue }
+    for (const item of project(source)) total.add(item)
+  }
+  return total
+}
+
+/** Async variant for readers that hit the filesystem. */
+async function unionOverAsync(files, project, read) {
+  const total = new Set()
+  for (const name of files) {
+    let source
+    try { source = await read(name) } catch { continue }
+    for (const item of project(source)) total.add(item)
+  }
+  return total
+}
+
+/** The client source files as they were at HEAD (pre-move reference). */
+function headClientFiles() {
+  return execFileSync('git', ['ls-tree', '-r', '--name-only', 'HEAD', '--', 'src/client'], {
+    cwd: new URL('.', REPO_ROOT).pathname, encoding: 'utf8',
+  }).trim().split('\n').map((line) => line.replace(/^src\/client\//u, '')).filter((name) => /\.tsx?$/u.test(name))
+}
+
+/** Elements of `before` that are absent from `after` (the "lost in transit" set). */
+function missingFrom(before, after) {
+  return [...before].filter((item) => !after.has(item)).sort()
+}
+
+test('★ 臂 27（R3 集合比对臂）：搬动之后**没有**任何渲染事实掉在路上', async () => {
+  /**
+   * ★★★ 这是任务的原话要求，做成一**集合比对**，而不是"我看过了"：
+   *   · 参照 = `HEAD`（搬动之前的树），**不是**我记忆里的样子；
+   *   · 逐个投影（locale 键 / data 探针 / 导出符号）分别比对；
+   *   · 而 R3 新加的**一个**文件也计入 after 侧，否则"搬进新文件"会被读成"丢了"。
+   */
+  const headFiles = headClientFiles()
+  const workFiles = await clientSourceFiles()
+
+  /**
+   * ── ★★★ 被**有意**去掉的事实（R3 的减法），逐条登记并给出替代 ─────────────────
+   *
+   * ★ 这一格是必须的，而不是"为了让臂变绿"：一条"任何差异都红"的臂会逼着下一个
+   *   人**不要**做减法；而一条"任何差异都放行"的臂（把 expected 一律算进去）
+   *   就等于没有这条臂。⇒ 只有**逐条登记 + 说明替代**才能同时做到两件事：
+   *   · 有意去掉的 → 在这里可核（而它的替代也写在下面）；
+   *   · 没登记的差异 → 仍然是红的（所以"悄悄删掉一件事实"跑不掉）。
+   */
+  const INTENTIONAL_REMOVALS = new Map([
+    // R3：收敛循环那一块整块删掉 —— 而它的轮次读数在 R2 里已经搬到成员行上。
+    ['data-review-loop', '轮次信息由 MemberRow 的 data-member-round 承载（R2）'],
+    ['data-loop-toggle', '展开/收起由成员行自己的 toggle 承载（R2）'],
+    ['data-tracked', '轮次计数由每行的 data-member-round 与轮次行本身承载（R2）'],
+    // R3：进度色块条与图例是同一批数字的第二、三次表述，留一句人话的总结。
+    ['progress.title', 'taskSummary 的那句人话总结仍在（progress.aria / data-progress-summary）'],
+    ['progress.running', 'taskSummary 的 task.summary.running/blockedAndRunning 仍报同一批数字'],
+    ['progress.blocked', 'taskSummary 的 task.summary.blocked 仍报同一批数字'],
+    ['progress.delivered', '团队头的 team.stats.completed（completed/total）报同一个数'],
+  ])
+
+  /** ★ 组件面：**排除词典文件本身**，否则"词条还在"会被读成"读数还在"。 */
+  const componentFiles = (names) => names.filter((name) => name !== 'locales.ts')
+  const headComponents = componentFiles(headFiles)
+  const workComponents = componentFiles(workFiles)
+
+  for (const [label, project, filesBefore, filesAfter] of [
+    ['被引用的 locale 键', referencedLocaleKeys, headComponents, workComponents],
+    ['渲染出的 data-* 探针', dataProbes, headComponents, workComponents],
+    ['导出符号', exportedSymbols, headComponents, workComponents],
+    ['词典词条', declaredLocaleKeys, headFiles, workFiles],
+  ]) {
+    const before = unionOver(filesBefore, project, readHeadFile)
+    const after = await unionOverAsync(filesAfter, project, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8'))
+    const lost = missingFrom(before, after)
+    const unexplained = lost.filter((item) => !INTENTIONAL_REMOVALS.has(item))
+    assert.deepEqual(unexplained, [],
+      `★ 搬动不得丢掉任何${label}（有意去掉的那些已在 INTENTIONAL_REMOVALS 里逐条登记并给出替代）。`
+      + `实测未登记的丢失：${JSON.stringify(unexplained)}`)
+    /** ★ 反向半边：这个投影**真的**能看见东西（否则"没丢"是恒真的空话）。 */
+    assert.ok(before.size > 0, `★ 反向半边：${label} 的参照集合不能是空的`)
+  }
+
+  /**
+   * ★★ 而登记本身也要有反向半边，否则它可以被当成一个"什么都能放行"的白名单：
+   *   · 登记表不许是空的（空表 = 这条臂退化成"任何差异都红"）；
+   *   · 而**每一条登记都必须真的发生过** —— 一条"登记了但根本没丢"的条目
+   *     说明这份登记在替未来的某次删除打掩护。
+   */
+  assert.ok(INTENTIONAL_REMOVALS.size > 0, '★ 登记表不许为空（空了这条臂就只是"任何差异都红"）')
+  const beforeAll = new Set([
+    ...unionOver(headComponents, referencedLocaleKeys, readHeadFile),
+    ...unionOver(headComponents, dataProbes, readHeadFile),
+    ...unionOver(headComponents, exportedSymbols, readHeadFile),
+  ])
+  const afterAll = new Set([
+    ...await unionOverAsync(workComponents, referencedLocaleKeys, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
+    ...await unionOverAsync(workComponents, dataProbes, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
+    ...await unionOverAsync(workComponents, exportedSymbols, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8')),
+  ])
+  const neverLost = [...INTENTIONAL_REMOVALS.keys()].filter((item) => afterAll.has(item) || !beforeAll.has(item))
+  assert.deepEqual(neverLost, [],
+    `★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**（或在参照里根本不存在）——`
+    + `一份会替未来删除打掩护的登记表比没有登记更坏。实测：${JSON.stringify(neverLost)}`)
+})
+
+test('★ 臂 27b（R3 反向半边）：把一条事实从集合里拿掉 ⇒ 上面那条必须变红', async () => {
+  /**
+   * ★ 缺了这一半，"没丢"可能来自一个**读不出东西**的采集器。
+   *   做法：拿真实的 after 集合，人为删掉一个已知的键，然后跑**同一条**判据。
+   */
+  const workFiles = await clientSourceFiles()
+  const after = await unionOverAsync(workFiles, dottedLiterals, (name) => readSource(new URL(name, CLIENT_ROOT), 'utf8'))
+  /** ★ 前置：(a) 采集器真的读出东西了，(b) 被删的那一条**证明确实在场**。 */
+  assert.ok(after.size > 0, '★ 前置：采集器必须真的读出东西（否则"删掉一条"无从谈起）')
+  assert.ok(after.has('task.summary.running'), '★ 前置：被删掉的这一条真的在原始集合里')
+  const sabotaged = new Set(after)
+  sabotaged.delete('task.summary.running')
+  assert.deepEqual(missingFrom(after, sabotaged), ['task.summary.running'],
+    '★ 反向半边：拿掉一条 ⇒ 差异集合必须**正好**报出那一条（证明采集器有分辨力）')
+  /** ★ 而"没东西可丢"与"丢了没报"必须不同形：空集合与满集合的差异不同。 */
+  assert.deepEqual(missingFrom(new Set(), sabotaged), [],
+    '★ 对照：参照为空时差异必为空 —— 这正是上面那条前置要挡住的恒真态')
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * 臂 28-31：R3 的四条行为读数（每条都带反向半边）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const { DependencyGraph } = await import('../lib/client/DependencyGraph.js')
+
+/** A task fixture for the graph arms. */
+const graphTask = (id, deps = [], extra = {}) => ({
+  id, subject: `task ${id}`, status: 'pending', state: 'open',
+  assignee: 'ui-eng', dependencies: deps, depth: deps.length, ...extra,
+})
+
+test('★ 臂 28（默认收起臂）：依赖图**默认是收起的**，而用户按下之后才展开', async () => {
+  /**
+   * ★ 用户原话："the dependency graph can stay collapsed by default, because most
+   *   of the time you do not want to look at that thing"。
+   * ★ 这条断言的是**渲染结果**（图里有没有节点），不是源码里的 `useState(false)`：
+   *   一个把状态初始化对了却在渲染时忽略它的实现，源码断言看不出差别。
+   */
+  const tasks = [graphTask('a'), graphTask('b', ['a'])]
+  const mounted = await mount(React.createElement(DependencyGraph, {
+    tasks, members: [], t: (key) => key, onSelectTask: () => {},
+  }))
+  const collapsed = textOf(mounted.container)
+  assert.match(collapsed, /dependencyTitle|dependency\.title|dependency\.parallel/, '★ 标题行必须还在（收起不等于看不见）')
+  assert.doesNotMatch(collapsed, /task a/, '★ 默认收起：节点内容不许渲染出来')
+
+  /** ★ 反向半边：按下标题行 ⇒ **必须**展开（否则"默认收起"可能是"永远收起"）。 */
+  const toggle = findFirst(mounted.container, (node) => node._attrs?.get('aria-expanded') === 'false')
+  assert.ok(toggle !== null, '★ 前置：标题行是一个 aria-expanded=false 的折叠控件')
+  await mounted.click(toggle)
+  const expanded = textOf(mounted.container)
+  assert.match(expanded, /task a/, '★ 反向半边：按下之后必须真的展开（内容出现）')
+  assert.notEqual(collapsed, expanded, '★ 展开必须改变渲染结果')
+  mounted.unmount()
+})
+
+test('★ 臂 29（无空骨架臂）：空队 / 单任务 / 全是孤立任务 ⇒ **不画**一张空图', async () => {
+  /**
+   * ★ 验收原话："An empty or single-task team does not render an empty graph skeleton"。
+   *
+   * ★ MEASURED（这条臂立之前实测到的形状）：单任务在 `usesParallelTaskGrid` 里
+   *   为真 ⇒ 走并行分支 ⇒ 渲染出 `dagViewport` + `dagCanvas`，而**一条边都没有**。
+   *   那正是一块"占了位置却什么都没说"的骨架。
+   */
+  for (const [label, tasks] of [
+    ['空队', []],
+    ['单任务', [graphTask('only')]],
+    ['全是孤立任务', [graphTask('x'), graphTask('y')]],
+  ]) {
+    const mounted = await mount(React.createElement(DependencyGraph, {
+      tasks, members: [], t: (key) => key, onSelectTask: () => {},
+    }))
+    const canvas = findFirst(mounted.container, (node) => node._attrs?.has('data-layout'))
+    assert.equal(canvas, null, `★ ${label}：不许渲染依赖图画布（实测渲染出了 data-layout）`)
+    const viewport = findFirst(mounted.container, (node) => node.className?.includes?.('dagViewport'))
+    assert.equal(viewport, null, `★ ${label}：不许渲染图的可视区（那是空骨架）`)
+    /** ★ 而"没有图"**不是**"这一屏坏了"：标题与说明仍在（否则就是一块空白）。 */
+    const text = textOf(mounted.container)
+    assert.notEqual(text, '', `★ ${label}：整块不许空白 —— 它必须说明"为什么没有图"`)
+    assert.match(text, /dependency\.hint\.noStructure|dependency\.title|dependency\.parallel/,
+      `★ ${label}：必须有一句话说明当前没有依赖结构`)
+    mounted.unmount()
+  }
+
+  /** ★ 反向半边：**有边的**任务图必须真的画出来（否则上面测的是"图永远不画"）。 */
+  const mounted = await mount(React.createElement(DependencyGraph, {
+    tasks: [graphTask('a'), graphTask('b', ['a'])], members: [], t: (key) => key, onSelectTask: () => {},
+  }))
+  const expandedToggle = findFirst(mounted.container, (node) => node._attrs?.get('aria-expanded') === 'false')
+  await mounted.click(expandedToggle)
+  const canvas = findFirst(mounted.container, (node) => node._attrs?.has('data-layout'))
+  assert.ok(canvas !== null, '★ 反向半边：有依赖边时**必须**画出图（否则上面那条是"图永远不画"）')
+  mounted.unmount()
+})
+
+test('★ 臂 30（第二屏只有图臂）：第二屏渲染的是依赖图，循环块与进度色块都不在', async () => {
+  /**
+   * ★ 验收原话："Screen two contains the dependency graph and nothing else"。
+   * ★ 判据落在**源码里的渲染点**，因为"第二屏"是一个渲染顺序的概念：
+   *   TeamSection 的返回里，成员列表之后**只**许出现一个 `<DependencyGraph ...>`，
+   *   而 `ReviewLoopSection` / `ProgressOverview` 都不许再作为兄弟节点出现。
+   */
+  const panel = await readSource(new URL('ActivityPanel.tsx', CLIENT_ROOT), 'utf8')
+  const section = panel.slice(
+    panel.indexOf('export function TeamSection('),
+    panel.indexOf('\nexport function historicCardTeam('),
+  )
+  assert.ok(section.length > 0, '★ 前置：必须取到 TeamSection 的实现体')
+  /**
+   * ★★ 图是第二屏**唯一**的块 —— 而"唯一"必须**数**出来，不能只问"在不在"。
+   *
+   * MEASURED（本臂自己的反向半边抓到的）：第一版用 `.includes('<DependencyGraph ')`，
+   * 而**再插一个** `<DependencyGraph>` 进去它照样绿 —— 因为 `.includes` 只问在不在，
+   * 不问有几个。⇒ 改成**计数**，于是"第二屏只有一个块"这句话才真的被测到。
+   */
+  const renderedGraphs = section.match(/<DependencyGraph[\s>]/gu) ?? []
+  assert.equal(renderedGraphs.length, 1,
+    `★ 第二屏必须**恰好**渲染一个依赖图（实测 ${renderedGraphs.length} 个）—— `
+    + '"contains the dependency graph and nothing else" 里的 nothing else 也包含"没有第二份图"')
+  /** ★ 而这些块**不许**再作为第二屏的兄弟出现。 */
+  assert.equal(section.includes('<ReviewLoopSection'), false,
+    '★ 收敛循环块不许再出现在这一屏（轮次已在成员行上，那是 R2 的读数）')
+  assert.equal(section.includes('<DependencyMap'), false, '★ 旧名字不许留着（那是第二份实现）')
+  /** ★ 而"进度读数"仍在第一屏 —— 只是不再是一条色块 / 图例。 */
+  assert.ok(section.includes('<ProgressOverview'), '★ 前置：进度**读数**仍在第一屏（只是减法之后的形状）')
+
+  /**
+   * ★ 反向半边：这条判据对**别的地方**不能也成立 —— 也就是它确实是在测
+   *   "第二屏的构成"，而不是"整个文件里没有这些字符串"。
+   */
+  assert.ok(panel.includes('DependencyGraph'),
+    '★ 反向半边：字符串本身在文件里是找得到的，所以上面那几条确实定位在第二屏这一段')
+})
+
+test('★ 臂 31（无第二实现臂）：DependencyGraph 只有一份定义，且被面板**引用**而非复制', async () => {
+  /**
+   * ★ 验收原话："each extracted piece is used by reference, asserted from source"。
+   * ★ 缺了这一条，一次"抄一份到面板里"的重构会让臂 27 的集合比对照样绿
+   *   （同一批事实两侧都在），而两份实现从此可以各自漂移。
+   */
+  const files = await clientSourceFiles()
+  const definitions = []
+  const graphLiterals = new Set()
+  for (const name of files) {
+    const source = await readSource(new URL(name, CLIENT_ROOT), 'utf8')
+    for (const match of source.matchAll(/export function DependencyGraph\b/gu)) {
+      definitions.push(name)
+    }
+    if (!name.startsWith('DependencyGraph')) continue
+    for (const item of dataProbes(source)) graphLiterals.add(item)
+  }
+  assert.deepEqual(definitions, ['DependencyGraph.tsx'],
+    `★ DependencyGraph 必须**只**在 DependencyGraph.tsx 里定义一次，实测：${JSON.stringify(definitions)}`)
+
+  /** ★ 而面板必须是**引用**它（import + 使用），不是复制它的渲染体。 */
+  const panel = await readSource(new URL('ActivityPanel.tsx', CLIENT_ROOT), 'utf8')
+  assert.match(panel, /import \{[^}]*DependencyGraph[^}]*\} from '\.\/DependencyGraph\.tsx'/u,
+    '★ 面板必须从 DependencyGraph.tsx **import** 它')
+  /** ★ 反向半边：面板里不许出现依赖图**自己的**探针（那才是复制）。 */
+  const panelProbes = dataProbes(panel)
+  for (const probe of ['data-layout', 'data-dependency-map', 'data-focused', 'data-dimmed', 'data-task-detail']) {
+    assert.equal(panelProbes.has(probe), false,
+      `★ 反向半边：面板里不许出现依赖图的探针 ${probe}（出现了就是复制了一份实现）`)
+  }
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * 臂 32：被**搬走**的那些读数，契约跟着代码走（不跟着文件名走）
+ *
+ * ── 这一条为什么必须存在（而且和 R2 的臂 26 是同一条纪律）──────────────────────
+ *
+ * `scripts/verify.mjs` 里有两条 check 是拿 **`ActivityPanel.tsx` 的文本**来判的：
+ *   · "running DAG tasks reuse the animated work glyph…"
+ *   · "running tasks surface the assignee model on the activity card"
+ * 而 R3 把依赖图整体搬进了 `DependencyGraph.tsx`（**这正是本任务要求的**），
+ * 于是那两条 check 变成"在错误的文件里找正确的字符串"。
+ *
+ * ★ "读不到"与"它违反了"必须不同形（本仓三态纪律）：那两条红**不代表**读数没了，
+ *   只代表**它现在在另一个文件里**。
+ * ⇒ 所以这里对着**真正的实现处**把同一批契约重立一遍，以 `DependencyGraph.tsx` 为源。
+ *   verify.mjs 不在本任务的 inScope 内，所以这里**不**改它 —— 只补上这条读数。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★ 臂 32（搬走的读数仍可核臂）：DAG 的动画与模型探针在**实现处**一样不少', async () => {
+  const graph = await readSource(new URL('DependencyGraph.tsx', CLIENT_ROOT), 'utf8')
+  const cssSource = await readSource(new URL('ActivityPanel.module.css', CLIENT_ROOT), 'utf8')
+
+  /**
+   * ★ 前置：这一批读数**确实**搬进来了（否则下面测的是空字符串）。
+   * ★ 判据用**定义**而不是调用点（`<DependencyGraph …>` 是面板那边的用法）——
+   *   本臂要证的正是"实现住在这个文件里"。
+   */
+  assert.ok(graph.includes('export function DependencyGraph('), '★ 前置：这里就是依赖图的实现处')
+
+  for (const [label, needle] of [
+    ['运行中任务的判定', "task.state === 'running'"],
+    ['运行中的动画挂点', 'className={css.dagRunningState}'],
+    ['工作动画本体', '<WorkGlyph active />'],
+    ['节点上的模型探针', 'data-task-model={model || undefined}'],
+    ['详情卡上的模型探针', 'data-task-model={detailModel}'],
+    ['详情卡的模型样式', 'css.taskDetailModel'],
+  ]) {
+    assert.ok(graph.includes(needle), `★ 「${label}」必须随代码搬到实现处：${needle}`)
+  }
+  /** ★ 而 CSS 是**同一份**样式表（两个文件 import 同一个 module）—— 所以样式没搬家的问题。 */
+  assert.ok(cssSource.includes(".dagNode[data-state='running'][data-dimmed='true']"),
+    '★ 依赖焦点的样式仍在同一份样式表里')
+  assert.ok(cssSource.includes('.dagRunningState {'), '★ 运行中动画的样式同样还在')
+
+  /**
+   * ★★ 反向半边：**面板里不该再有一份** DAG 读数（那才是"两份实现"）——
+   *   缺了这一半，一次"抄回面板"的重构会让上面每一条照样绿。
+   */
+  const panel = await readSource(new URL('ActivityPanel.tsx', CLIENT_ROOT), 'utf8')
+  assert.equal(panel.includes('data-task-model={model || undefined}'), false,
+    '★ 反向半边：面板里不许有第二份 DAG 模型探针')
+  assert.equal(panel.includes('css.dagRunningState'), false,
+    '★ 反向半边：面板里不许有第二份运行中动画挂点')
 })
