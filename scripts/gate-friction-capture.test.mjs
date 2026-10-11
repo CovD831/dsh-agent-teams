@@ -568,9 +568,40 @@ test('★★ 臂 7（C1 反向半边）：同一条判据拒 ≥2 次 ⇒ 任务
   /**
    * ── ★★★ 两类记录必须【不同形】—— 这是"合并回一条 ⇒ 臂红"瞄准的那一格 ───────────
    *
-   * ★ 判据不是"有没有 `class` 这个字段"（那是形状），而是**三格结论**：
-   *   `class` / `resolution.blocking` / `resolution.pool`。
-   *   把两类合并回一条（三格都写成 rejection 的取值）会让这里当场红。
+   * ★ 判据不是"有没有 `class` 这个字段"（那是形状），而是**结论本身**：
+   *   `class` / `resolution.blocking` / `resolution.pool` / `rescue.state`。
+   *   把两类合并回一条（都写成 rejection 的取值）会让这里当场红。
+   *
+   * ── ★★★ C2 修正（本行是 `pool` 那一格第二次被改）────────────────────────────────
+   *
+   * MEASURED：C1 落地时本臂断言 `blocker.resolution.pool === 'escalate'`，
+   * 而**那是 C2 之前的口径**。C2 把"停住"与"该不该上报"拆成两件事
+   * （用户的原始设计，已由用户直接裁定）：
+   *
+   *     一个**刚停住**的卡点 ⇒ `rescue.state = 'trying'`（**还没有任何人去救过它**）
+   *                          ⇒ `pool: 'self'`（默认目标是自己解）
+   *     只有**试过而解不掉**（`cannot-solve`）才进 `escalate`。
+   *
+   * ⇒ 所以"真卡点 ⇒ escalate"这条断言，在 C2 之后是**错的**，而且它错得有意义：
+   *   那正是 214 条被缺省推进上报池的成因（"停住 ⇒ 直接 ⇒ 上报"，中间那一步不存在）。
+   *
+   * ★★★ 而本臂的**真正主题一个字不改** —— 它要证明的是
+   *   "**真卡点与判据拒绝不是同一个形状**"（这正是臂 6/7 成对存在的理由）。
+   *   ⇒ 那个主题现在由**下面几格**共同承载，而 `pool` 从"必然 escalate"改成
+   *     "由 rescue 决定、且此刻不是 escalate"：
+   *
+   *       `class`              : blocker ≠ rejection        （两类不同）
+   *       `resolution.blocking`: true ≠ false               （有人必须动 vs 不用动）
+   *       `rescue.state`       : trying（这一轴 C2 新增）    （还没有人去救过）
+   *       `resolution.pool`    : self（**此刻**不占用人）     （默认自己解）
+   *
+   * ★★ 而"此刻不占用人"这一格，两类**取得相同的值**，所以它**不再是**分开两类的那一格 ——
+   *   分开两类的是 `class` 与 `resolution.blocking`（见本臂末尾那段受控对照）。
+   *   ★ 把这一点写清楚，是因为"两类都写 self"读起来像"两类同形"，
+   *     而它们是**因为不同的理由**都不占用人：
+   *       rejection ⇒ 它**不是**一个卡点（压根没有"要不要人动"这件事）；
+   *       blocker   ⇒ 它是卡点、**有人必须动**（`blocking: true`），
+   *                   只是那个动的人**是我们**，而不是用户。
    */
   assert.notEqual(
     blocker.resolution?.blocking, false,
@@ -581,46 +612,26 @@ test('★★ 臂 7（C1 反向半边）：同一条判据拒 ≥2 次 ⇒ 任务
     blocker.resolution?.blocking, true,
     '★★★ 而它必须是 `true` 本身（不是缺席、不是别的真值）—— 三态不许合流',
   )
-  /**
-   * ── ★★★ C2 改写了这一格：**池子不再由"是不是卡点"决定，而由"救援到哪一步"决定** ──
-   *
-   * C2 之前：blocker ⇒ pool 'escalate'（有人必须动）。
-   * C2 之后：一个新卡点 rescue.state 是 `trying` ⇒ pool `self`（**先自己解**）。
-   *   只有 `cannot-solve` 才进「上报给人」的池子 —— 这是用户的原设计，
-   *   也正是这一格当初要修的东西：把 207 条判据拒绝并进 21 条真卡点，
-   *   与把"还没试"直接读成"要上报"是**同一类**错误。
-   *
-   * ★ 而本臂的**真正主体一个字没变**：卡点与拒绝必须**不同形**。
-   *   ⇒ 断言从"池子等于 escalate"改成"池子与拒绝路径不同形、且 blocking 为 true"，
-   *     这才是 6/7 两臂合起来要分开的那件事。
-   *   ★ 旧断言（pool==='escalate'）在 C2 下**不可满足**：成员实测过，
-   *     强行改 poolForRescue('trying')→'escalate' 会让 **臂 6 同时变红**，
-   *     即两臂合起来禁止新卡点的任何单一池子值。
-   */
-  assert.equal(
-    blocker.resolution?.pool, 'self',
-    '★★★ C2：一个新卡点 rescue.state=`trying` ⇒ 进 `self`（自己先解），'
-    + '**不是** `escalate` —— 只有 `cannot-solve` 才上报给人。'
-    + ' ★ 而它仍须与 rejection 不同形（见上一格 blocking 与下面 whyPool）',
-  )
   assert.equal(
     blocker.rescue?.state, 'trying',
-    '★★ 新卡点的救援状态必须是 `trying` —— 那正是"先自己解"这一格的读数。'
-    + ' 缺席 ⇒ 会让"没人试过"与"试过解不掉"同形',
+    '★★★ C2：一个**刚刚停住**的卡点，在"有没有人救过"这一轴上的答案是 `trying` —— '
+    + '**还没有任何人去试过**。★ 而它**不许**落 `cannot-solve`：那会把 214 条的缺陷'
+    + '换个入口请回来（`entities.ts` 的 `defaultRescueForStall` 长注释逐字记了这条）',
   )
-  /**
-   * ── ★★ C2：`whyPool` 只在 `escalate` 时在场 ─────────────────────────────────────
-   *
-   * 本臂原先断言"卡点必须写出它为什么进这个池子"。C2 之后这**只在真的上报时**
-   * 才成立：一条还在 `trying`、进 `self` 的记录**没有**"为什么进上报池"要交代 ——
-   * 正如 {@link recordFriction} 那段注释所说，缺席与写了空话必须不同形。
-   * ⇒ 断言改成"**要么**说清了理由，**要么**根本没进上报池"，两者都不许是同形空话。
-   */
-  assert.ok(
-    blocker.resolution?.pool !== 'escalate'
-      || (typeof blocker.resolution?.whyPool === 'string' && blocker.resolution.whyPool !== ''),
-    '★★ `whyPool` 只在 `escalate` 时在场；若进了上报池就必须写得出理由。'
-    + ' ★ 缺席与"写了空话"必须不同形 —— 而 `self` 一侧本来就不该有这一格',
+  assert.equal(
+    blocker.resolution?.pool, 'self',
+    '★★★ C2 修正：真卡点此刻进的是【自己解】的池子，**不是**上报池。'
+    + ' ★ 上报池只对 `cannot-solve` 开放（试过、解不掉）—— 那是本任务的验收 ② 。'
+    + ' ★★ 而这一格与 rejection 的 `self` **不同形**，见本块末尾那条断言',
+  )
+  assert.notEqual(
+    blocker.resolution?.pool, undefined,
+    '★★ 而 `pool` 必须在场 —— "缺席"与"判成 self"不同形（本仓记账的形态）',
+  )
+  assert.equal(
+    blocker.resolution?.whyPool, undefined,
+    '★★ 而 `whyPool` 此刻**必须缺席**：一条**没有**进上报池的记录，'
+    + '没有"为什么进这个池子"要交代 —— 违规地写上一句空话会让"没进池"读成"进了池而说不出理由"',
   )
   assert.notEqual(
     blocker.class, 'rejection',
@@ -647,6 +658,50 @@ test('★★ 臂 7（C1 反向半边）：同一条判据拒 ≥2 次 ⇒ 任务
     all.map((record) => record.class), ['rejection', 'blocker'],
     '★★★ 同一个任务、同一条判据、唯一变的自变量是【次数】⇒ 两条记录必须分属两类。'
     + ` 实测：${JSON.stringify(all.map((record) => record.class))}`,
+  )
+  /**
+   * ── ★★★ C2 之后，两类"不同形"到底落在哪几格（★ 这一块是 C2 的读数，不是猜测）────
+   *
+   * MEASURED（本臂当场读回来的两条记录）：
+   *
+   *                class       resolution.blocking   rescue.state   resolution.pool
+   *   rejection    rejection   false                 trying         self
+   *   blocker      blocker     true                  trying         self
+   *
+   * ★★ 于是有两个结论**必须说出来**，否则本臂会读成一个它没测过的东西：
+   *
+   *   ① `resolution.pool` **不再**把两类分开 —— 两条都是 `self`。
+   *      这正是 C2 的**目的**：一个刚停住的卡点默认是"我们自己解"，与一条判据拒绝
+   *      都不占用人。★ 而它**不是**"两类同形"：把人请进来的那条路只对
+   *      `cannot-solve` 开放，而那需要一次**真实的、失败的救援**才写得出来。
+   *   ② `rescue` 也**不**把两类分开（两条都是 `trying`）——
+   *      `recordFriction` 对每条记录都写它（一个读数、两处使用，见那里的长注释）。
+   *
+   * ⇒ ★★★ 所以"两类不同形"在 C2 之后由**这两格**承载：
+   *      `class`（rejection ≠ blocker）与 `resolution.blocking`（false ≠ true）。
+   *   而它们恰是**后果相反**的那一格：`blocking: false` = 那条记录不用人动，
+   *   `blocking: true` = **有人必须动**（只是那个人是我们，不是用户）。
+   *
+   * ★ 下面两条断言把这件事**钉成可核的**：若有人把两类合并回一条
+   *   （rejection 也写 `blocking: true`、`class: 'blocker'`），这两条当场红。
+   */
+  const [rejection, blockerRecord] = all
+  assert.equal(
+    rejection?.resolution?.blocking, false,
+    '★★★ `blocking` 才是 C2 之后真正分开两类的那一格：一条判据拒绝**不阻塞**。'
+    + ' 它与下面那条成对 —— 合流会让"真卡点不需要动"与"判据拒绝不需要动"读成同一件事',
+  )
+  assert.equal(
+    blockerRecord?.resolution?.blocking, true,
+    '★★★ 而真卡点是 `true` —— 与上面那条成对。★ 合流会让"真卡点不需要动"与'
+    + '"判据拒绝不需要动"读成同一件事，而那正是本任务要修的那一半',
+  )
+  assert.equal(
+    rejection?.rescue?.state, blockerRecord?.rescue?.state,
+    '★★ C2 的诚实读数：**两类此刻的 `rescue.state` 相同**（都是 `trying`）。'
+    + ' ★ 记下这一条是为了不让读者以为"rescue 分开了两类"—— 它没有；'
+    + ' 它给两类都补上"有没有人救过"这一轴，而该轴的第三态 `cannot-solve`'
+    + ' 只在**一次失败的救援之后**才出现（那是 `pool: escalate` 的唯一入口）',
   )
 })
 
