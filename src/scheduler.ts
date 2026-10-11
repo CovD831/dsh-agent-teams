@@ -49,6 +49,21 @@ export const DEPENDENCY_OUTPUT_MAX_CHARS = 2_000
 export const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12_000
 
 /**
+ * ── ★★★ 一次邮箱投递的**硬上限** ────────────────────────────────────────────────
+ *
+ * MEASURED：投递外层套着 `serializeMember`，而那条队列是**链式**的 ——
+ * 一次不返回，`release()` 就永不执行，**之后所有**对同一成员的写入永久排队；
+ * 又因为 `withTeamLock(teamLockKey…)` 在它内部，**整个团队**的写入一起卡住。
+ * 表现出来就是工具调用"卡在 complete / reassign_task 上"。
+ *
+ * ★ 30 秒是**取决于用途**的：投递是"把一条已经在邮箱里的消息推给一个活着的会话"，
+ *   正常是毫秒级。超过 30 秒它不是慢，而是**那个会话已经不接东西了** ——
+ *   此时正确的处置是把消息**留在邮箱**（`releaseMailboxDelivery`），
+ *   让下一次扫描再试，而不是**无限期占着队列**。
+ */
+export const DELIVER_TIMEOUT_MS = 30_000
+
+/**
  * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
  *
  * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
@@ -723,10 +738,39 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         })
         if (unread.length > 0) {
           const prompt = mailboxPrompt(team.id, member.name, unread)
-          const signal = new AbortController().signal
-          const accepted = config.dispatch === undefined
-            ? await deliverToMember(ctx, captain, member.id, prompt, signal, 'steer')
-            : await config.dispatch(captain, team.id, member.name, prompt, signal, 'steer')
+          /**
+           * ── ★★★ 投递必须**有上限**，否则它会把整条成员队列钉死 ─────────────────────
+           *
+           * MEASURED（本仓实测）：这里原来写的是 `new AbortController().signal`，
+           * 而全文件**创建了 2 个 AbortController、`.abort()` 出现 0 次**
+           * （`grep -c` 当场可数）。⇒ 那个 signal **永远不可能触发**，是死重：
+           * 代码**看起来**有取消能力，而实际一步都取消不了。
+           *
+           * ★ 而它与本函数外层的 `serializeMember(queueKey, …)` 合起来就卡死了：
+           *   队列是**链式**的（`previous.then(() => gate)`，见 `serializeMember`），
+           *   只要**一次** `deliverToMember` 不返回，`gate` 就永不 `release()`，
+           *   于是**之后所有**对同一成员的写操作全部**永久排队**。
+           *   ⇒ 而 `withTeamLock(teamLockKey…)` 在它内部 ⇒ **整个团队的写入**一起卡住。
+           *
+           * ★ 表现出来就是用户看到的那一幕：`reassign_task`、`update_task`、
+           *   `complete` **看起来"卡在工具调用上"**，而落盘**可能早就完成了** ——
+           *   于是重试既成功又失败，来回几次之后整轮就再也推不动。
+           *
+           * ★ 处置：给投递一个**真实的**上限。超时**不算投递成功**（`accepted = false`），
+           *   消息**留在邮箱里**由下一次扫描再投 —— 这正是 `else` 那一支已经在做的
+           *   `releaseMailboxDelivery`，所以没有事实丢失，只是**不再无限期占着队列**。
+           */
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), DELIVER_TIMEOUT_MS)
+          let accepted: boolean
+          try {
+            accepted = config.dispatch === undefined
+              ? await deliverToMember(ctx, captain, member.id, prompt, controller.signal, 'steer')
+              : await config.dispatch(captain, team.id, member.name, prompt, controller.signal, 'steer')
+          }
+          finally {
+            clearTimeout(timer)
+          }
           if (accepted) {
             await withTeamLock(teamLockKey(stateRoot, team.id), () => (
               markMailboxDelivered(stateRoot, team!.id, member!.name, unread.map(message => message.id))
@@ -1035,18 +1079,33 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         }
 
         const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)
-        const signal = new AbortController().signal
         /**
-         * ★★★ t43：把投递结果【带成因】地取回来 —— 见下面的失败分支。
-         *   ★ 旧写法 `accepted = await deliverToMember(…)` 丢掉成因，
-         *     而 `if (accepted) {…}` 之外【什么都不记】⇒ 静默回滚。
+         * ★★★ 同一个死重 pattern（见上面邮箱投递那一处的长注释）：这一行原来也是
+         *   `new AbortController().signal`，而全文件的 `.abort()` 出现 0 次 ⇒
+         *   一个**永远不会触发**的 signal。这里的后果同形 —— 派发也在
+         *   `serializeMember` 的链式队列里，一次不返回就把该成员的后续写入全部钉死。
+         *   ⇒ 给一个真实上限；超时走**已有的**失败分支（带成因），消息留在邮箱。
          */
-        const delivered = config.dispatch === undefined
-          ? await deliverToMemberDetailed(ctx, captain, ticket.memberId, prompt, signal)
-          : await (async () => {
-            const ok = await config.dispatch!(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
-            return ok ? { ok: true as const } : { ok: false as const, reason: 'the configured dispatch hook returned false' }
-          })()
+        const controller = new AbortController()
+        const signal = controller.signal
+        const timer = setTimeout(() => controller.abort(), DELIVER_TIMEOUT_MS)
+        let delivered: { ok: true } | { ok: false, reason: string }
+        try {
+          /**
+           * ★★★ t43：把投递结果【带成因】地取回来 —— 见下面的失败分支。
+           *   ★ 旧写法 `accepted = await deliverToMember(…)` 丢掉成因，
+           *     而 `if (accepted) {…}` 之外【什么都不记】⇒ 静默回滚。
+           */
+          delivered = config.dispatch === undefined
+            ? await deliverToMemberDetailed(ctx, captain, ticket.memberId, prompt, signal)
+            : await (async () => {
+              const ok = await config.dispatch!(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
+              return ok ? { ok: true as const } : { ok: false as const, reason: 'the configured dispatch hook returned false' }
+            })()
+        }
+        finally {
+          clearTimeout(timer)
+        }
         const accepted = delivered.ok
         if (accepted) {
           /**

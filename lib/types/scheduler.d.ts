@@ -19,6 +19,20 @@ export declare const DEPENDENCY_OUTPUT_MAX_CHARS = 2000;
 /** Combined dependency-output budget in the assignment prompt. */
 export declare const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12000;
 /**
+ * ── ★★★ 一次邮箱投递的**硬上限** ────────────────────────────────────────────────
+ *
+ * MEASURED：投递外层套着 `serializeMember`，而那条队列是**链式**的 ——
+ * 一次不返回，`release()` 就永不执行，**之后所有**对同一成员的写入永久排队；
+ * 又因为 `withTeamLock(teamLockKey…)` 在它内部，**整个团队**的写入一起卡住。
+ * 表现出来就是工具调用"卡在 complete / reassign_task 上"。
+ *
+ * ★ 30 秒是**取决于用途**的：投递是"把一条已经在邮箱里的消息推给一个活着的会话"，
+ *   正常是毫秒级。超过 30 秒它不是慢，而是**那个会话已经不接东西了** ——
+ *   此时正确的处置是把消息**留在邮箱**（`releaseMailboxDelivery`），
+ *   让下一次扫描再试，而不是**无限期占着队列**。
+ */
+export declare const DELIVER_TIMEOUT_MS = 30000;
+/**
  * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
  *
  * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
