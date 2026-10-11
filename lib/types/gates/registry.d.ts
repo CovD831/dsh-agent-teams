@@ -42,6 +42,26 @@ export type GateVerdict = {
 } | {
     ok: false;
     unmeasured: string;
+    /**
+     * ── ★★★ t21：「我说不出」是不是这个**任务**的错？─────────────────────────────
+     *
+     * `'refuse'`（缺省）—— 说不出 ⇒ 拒。保守档，向后兼容（逐字等于今天的行为）。
+     * `'tolerate'`        —— 说不出 ⇒ 不拒，但**留痕**（进 `observed.unmeasured`）。
+     *
+     * ★★ 为什么这个记号在**裁决**上、而不是只在注册上：同一条判据对**不同任务**
+     *   可以答出两种性质完全不同的"说不出"。实测（t21）：
+     *
+     *     `contract.task-atomicity` 在 `implementation` 上：契约既不写 verify 也不写
+     *        inScope ⇒ ★ 那是**契约的缺陷**（写类任务**被要求**有这两格）⇒ `refuse`
+     *     同一条判据在 `review` 上：`review` **不被要求**有 inScope ⇒
+     *        "没有 inScope"是**正当留白** ⇒ `tolerate`
+     *
+     *   ⇒ 若把记号钉在**注册**上（整条判据一个值），那么"对 review 容忍"必然
+     *     也意味着"对 implementation 容忍" —— 而那会**打开一条**
+     *     "判不了的契约静默进入工作"的路，正是本任务验收第 2 条禁止的。
+     *   ★ 落在裁决上，判据就能**逐任务**回答，而那才是它真正知道的事。
+     */
+    unmeasuredDisposition?: 'refuse' | 'tolerate';
 };
 export type InsertionPoint = typeof INSERTION_POINTS[number];
 /**
@@ -270,9 +290,22 @@ export declare function blocked(...blockers: Array<string | string[]>): {
     ok: false;
     blockers: string[];
 };
-export declare function unmeasured(reason: string): {
+/**
+ * ── ★★★ t21：`unmeasured` 的第二个实参 —— 「我说不出」是不是这个**任务**的错？──────
+ *
+ * 见 `GateVerdict` 里那段长注释。判据**逐任务**回答；缺省 `'refuse'`（保守档）。
+ *
+ * ★ 为什么做成**可选第二实参**而不是新工厂（`toleratedUnmeasured(...)`）：
+ *   后者会让"说不出"有**两个入口**，而它们的差别只能靠读函数名分辨 ——
+ *   一个没注意到新工厂的作者会写出**静默更严格**的代码（今天的行为），
+ *   而那恰好是最难发现的一种：它不报错，只是拒得比该拒的多。
+ *   ⇒ 一个入口、一个可选记号：`unmeasured(why)` 与今天逐字相同，
+ *     `unmeasured(why, 'tolerate')` 是**显式**的、要在同一行里读到的声明。
+ */
+export declare function unmeasured(reason: string, disposition?: 'refuse' | 'tolerate'): {
     ok: false;
     unmeasured: string;
+    unmeasuredDisposition?: 'refuse' | 'tolerate';
 };
 /**
  * 一个注册表实例。判据按 point 分组，组内按注册顺序求值（顺序稳定，便于复现）。

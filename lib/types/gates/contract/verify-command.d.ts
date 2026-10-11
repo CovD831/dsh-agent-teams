@@ -87,12 +87,31 @@ export declare const VERIFY_COMMAND_GATE_ID = "contract.verify-command";
  *     注入   ⇒ 真的跑一次 ⇒ 结论是**观察**（"这条命令退出 3"），可被独立复核
  *     不注入 ⇒ 只有静态分析 ⇒ 结论降级成 `unmeasured`（见 gate 里那段注释）
  *
- * ⇒ 而 `unmeasured` 在本插件里**等于拒绝**（`rejectOnContractGates` 对 unmeasured
+ * ⇒ 而 `unmeasured` 在本插件里**缺省等于拒绝**（`rejectOnContractGates` 对 unmeasured
  *   抛错）。这正是 t17/t18 实测过的形态：
  *
  *     contract 的两个调用点都没注入 ⇒ `contract.verify-command` 在生产路径上
  *     永远 `unmeasured` ⇒ **implementation / repair 这类必须验的契约连
  *     create_task 都过不去**（一道永远关着的门）。
+ *
+ * ── ★★★ t21 修订：上面那句「等于拒绝」现在**带一个条件**，而本判据的处置没变 ──────
+ *
+ * MEASURED（t21）：位置级合并此后会读判据在**每一条裁决**上声明的
+ * `unmeasuredDisposition`（见 `registry.ts` 里 `GateVerdict` 那段）：
+ *
+ *     `'refuse'`（**缺省**）⇒ 说不出 ⇒ 位置级拒。★ 与本文件上面那段口径**逐字相同**。
+ *     `'tolerate'`          ⇒ 说不出 ⇒ 不拒，但**留痕**（进 `observed.unmeasured`）。
+ *
+ * ★★ 而**本判据不接受 `'tolerate'`，也不该接受**：`execVerifyCommand` 缺席
+ *   恰恰就是 t17/t18 那条"一道永远关着的门" —— 契约要的那一格**该被接上**，
+ *   而"没接上"是**接线缺陷**，不是留白。⇒ 它继续走缺省 `refuse`。
+ *
+ * ★ 于是本文件那段论证**一个字都没有被推翻**，它只是不再**替别的判据**说话：
+ *   原来那句话的适用范围是"本插件里所有的 unmeasured"，
+ *   而 t21 之后它是"所有**声明了** `refuse` 的 unmeasured" —— 而缺省就是 `refuse`，
+ *   所以**每一扇以那句话为据的门都照旧关着**。
+ *   ⇒ 唯一被放过的是**主动声明**了"这一格对这类任务是正当留白"的那几条
+ *     （实测：`contract.task-atomicity` 在**非写类**任务上；它在写类上仍是 `refuse`）。
  *
  * ⇒ 所以这一格【必须】进 requires：它缺席不是"这条判据安静一点"，而是
  *   "这条判据说不出它唯一想说的事"。核对层报出它，与判据自己报 `unmeasured`

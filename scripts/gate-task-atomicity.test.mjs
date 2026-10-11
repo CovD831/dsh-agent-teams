@@ -702,3 +702,134 @@ test('★★★ 臂 10 声明臂：`description` 必须如实说它判【形状�
   assert.match(description, /征兆/, '★ 而"形状不等于结论"要写出来（形状只是"可能不可归因"的一个征兆）')
   assert.match(description, /不接生产/, '★ "它不接生产"必须写在给人看的那一句里（否则读者会以为它在把关）')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 11（t21）：★★★ 「说不出」的处置 —— 正当留白放行、契约缺陷照旧拒
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂钉的是 t21 的核心分辨，而它是**逐任务**的，不是逐判据的 ──────────────────
+ *
+ * MEASURED（t21，逐 kind 实测位置级读数）：
+ *
+ *     review · verification · integration · requirements  ⇒ **放行**（正当留白）
+ *     implementation · repair                            ⇒ **仍然拒**（契约缺陷）
+ *
+ * ★★ 为什么两种必须**同一条判据**答出：`contract.task-atomicity` 对六个 kind
+ *   都在做同一件事（"契约声明面的形状能不能判"），而**差别在任务类型**：
+ *   只有 `WRITE_KINDS`（`implementation` / `repair`）**被要求**有 inScope + verify
+ *   （`src/quality-gates.ts:726-733` 在建任务时就强制）。
+ *   ⇒ 于是"两格都缺席"对写类是**缺陷**，对其余四类是**留白**。
+ *
+ * ★★★ 反向半边（本臂存在的全部理由）：一条**只**放行、不拒的实现同样能让
+ *   上面那四条断言全绿 —— 而那正是本任务验收第 2 条禁止的
+ *   （"不许开出一条判不了的契约静默进入工作的路"）。⇒ 下面**成对**断言。
+ */
+test('★★★ 臂 11（t21）：`unmeasured` 的处置逐任务 —— 正当留白放行，写类的契约缺陷照旧拒', async () => {
+  const { registry } = await import('../lib/gates/index.js')
+
+  /** 四类**不被要求**有 inScope 的质量任务 ⇒ 说不出是**正当留白** ⇒ 放行。 */
+  const tolerated = ['review', 'verification', 'integration', 'requirements']
+  for (const kind of tolerated) {
+    const verdict = await registry.evaluate('contract', { task: { id: `t21-${kind}`, kind, objective: 'o' } })
+    console.log(`    ℹ ${kind.padEnd(15)} ⇒ ok=${verdict.ok} · observed.unmeasured=${verdict.observed.unmeasured.length}`)
+    assert.equal(
+      verdict.ok, true,
+      `★★★ 一个 \`${kind}\` 任务（契约**不要求**它有 inScope）在契约位置被拒了 ——\n`
+      + '   这是「没能测量」并进「没通过」：一条判据问了它答不了的问题，而合法任务因此被挡。',
+    )
+    /**
+     * ★★ 而"放行"**绝不等于"丢掉"**：那条事实必须**仍然读得出来**。
+     *   ⇒ 否则本改动把一条可见的缺口换成了一条看不见的缺口。
+     */
+    assert.equal(
+      verdict.observed.unmeasured.length, 1,
+      `★★ ${kind}：放行了，却没有留下"这一步没被检查"的痕迹 —— 那是静默放行，比拒绝更坏`,
+    )
+    assert.match(
+      verdict.observed.unmeasured[0], /contract\.task-atomicity/,
+      '★ 痕迹必须**指名**是哪条判据说不出（不指名的话读的人无从补救）',
+    )
+    /** ★ 而它在 `ran` 里**如实**标着 unmeasured + observed —— "跑了"与"被采纳"两件事都读得出来。 */
+    const entry = verdict.ran.find((item) => item.id === 'contract.task-atomicity')
+    assert.equal(entry?.verdict, 'unmeasured', '★ 判据的裁决在 ran 里必须如实是 unmeasured')
+    assert.equal(entry?.observed, true, '★ 而"它被放过"这件事也必须读得出来')
+  }
+
+  /**
+   * ── ★★★ 反向半边：**写类照旧拒** ─────────────────────────────────────────────
+   *
+   * ★ 缺了这一半，一个"一律放行"的实现能通过上面全部断言 ——
+   *   而那会让**一个判不了的契约静默进入工作**。
+   */
+  for (const kind of ['implementation', 'repair']) {
+    const verdict = await registry.evaluate('contract', { task: { id: `t21-${kind}`, kind, objective: 'o' } })
+    console.log(`    ℹ ${kind.padEnd(15)} ⇒ ok=${verdict.ok} · unmeasured=${verdict.unmeasured === undefined ? 'no' : 'YES'}`)
+    assert.equal(
+      verdict.ok, false,
+      `★★★ 一个 \`${kind}\` 任务（契约**被要求**有 inScope + verify）在本该说不出时**没有**被拒 ——\n`
+      + '   ⇒ 那开出了一条"判不了的契约静默进入工作"的路，正是 t21 验收第 2 条禁止的。',
+    )
+    assert.equal(typeof verdict.unmeasured, 'string', '★ 而且它必须**如实**说这是"没能测量"，不是"发现了问题"')
+  }
+})
+
+/**
+ * ── 臂 12（t21）：★★★ 定向突变 —— 把两种处置**合成一种** ⇒ 臂 11 必须翻脸 ────────────
+ *
+ * 「把机制单独去掉，对应的臂必须红。」
+ *
+ * ★ 用**对照实现**（本仓既有的做法，见 `verify-unmeasured-consumers.test.mjs` 臂 4）：
+ *   两个端点跑**同一份**输入、**同一条**读数函数，断言它们给出**相反**结论。
+ *   ⇒ 于是臂 11 的失败模式（"恰好也绿"）被排除掉。
+ */
+test('★★★ 臂 12（t21·定向突变）：把「留白」与「缺陷」合成一种 ⇒ 臂 11 的断言必须翻脸', async () => {
+  const { registry } = await import('../lib/gates/index.js')
+
+  /** ★ 读数函数：**只有一条**，两个端点共用它 —— 差别只在被测实现。 */
+  const outcomeOf = (evaluation) => (evaluation.ok === true
+    ? 'passed'
+    : evaluation.unmeasured === undefined ? 'blocked' : 'refused-as-unmeasured')
+
+  const probes = [
+    ['review', { task: { id: 'p', kind: 'review', objective: 'o' } }],
+    ['implementation', { task: { id: 'p', kind: 'implementation', objective: 'o' } }],
+  ]
+
+  /** ── 端点 A：**现实现**（逐任务处置）────────────────────────────────────────── */
+  const honest = {}
+  for (const [label, ctx] of probes) honest[label] = outcomeOf(await registry.evaluate('contract', ctx))
+
+  /**
+   * ── 端点 B：**把两种处置合成一种** —— 用"观察模式"把每一条判据的否决权都拿掉 ────
+   *
+   * ★ 为什么这是那个突变：`observing` 让**所有**判据的裁决都不进决定 ⇒ 于是
+   *   "留白放行"与"缺陷拒"**在读数上同形**（两个都变成 passed）。
+   *   ⇒ 那正是"合并回一条"的机械形式。
+   */
+  const ids = registry.list().contract.map((entry) => entry.id)
+  try {
+    for (const id of ids) registry.observe(id, { reason: 't21 directed mutation: collapse both dispositions' })
+    const collapsed = {}
+    for (const [label, ctx] of probes) collapsed[label] = outcomeOf(await registry.evaluate('contract', ctx))
+
+    console.log(`    ℹ 现实现     ⇒ ${JSON.stringify(honest)}`)
+    console.log(`    ℹ 合并处置后 ⇒ ${JSON.stringify(collapsed)}`)
+
+    /** ★ 现实现下两种**必须不同形** —— 这就是臂 11 测到了机制的证据。 */
+    assert.notEqual(
+      honest.review, honest.implementation,
+      '★★★ 现实现下"正当留白"与"契约缺陷"必须给出**相反**的结局 —— 否则臂 11 测的不是这条分辨',
+    )
+    /** ★ 突变的**反向半边**：合并之后它们**必须同形**，否则这个突变什么都没做。 */
+    assert.equal(
+      collapsed.review, collapsed.implementation,
+      '★ 合并处置之后两者仍不同形 ⇒ 这个定向突变没有真的把机制拆掉（它是个空操作）',
+    )
+    /** ★ 而合并后的读数**不再是**那个诚实的结局 —— 于是"合并"这件事是可观测的。 */
+    assert.notDeepEqual(collapsed, honest, '★ 合并前后必须读得出差别（否则本臂测的是一个没有效果的突变）')
+  } finally {
+    /** ★ 无论如何都要还原 —— 一条留在观察集里的判据会让同进程的其它用例凭空少一层否决权。 */
+    for (const id of ids) registry.unobserve(id)
+  }
+})

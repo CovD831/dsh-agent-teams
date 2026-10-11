@@ -39,7 +39,30 @@ import { checkRequires, createRequiresAuditPolicy, type RequiresAuditMode, type 
 export type GateVerdict =
   | { ok: true; [produced: string]: unknown }
   | { ok: false; blockers: string[] }
-  | { ok: false; unmeasured: string }
+  | {
+    ok: false
+    unmeasured: string
+    /**
+     * ── ★★★ t21：「我说不出」是不是这个**任务**的错？─────────────────────────────
+     *
+     * `'refuse'`（缺省）—— 说不出 ⇒ 拒。保守档，向后兼容（逐字等于今天的行为）。
+     * `'tolerate'`        —— 说不出 ⇒ 不拒，但**留痕**（进 `observed.unmeasured`）。
+     *
+     * ★★ 为什么这个记号在**裁决**上、而不是只在注册上：同一条判据对**不同任务**
+     *   可以答出两种性质完全不同的"说不出"。实测（t21）：
+     *
+     *     `contract.task-atomicity` 在 `implementation` 上：契约既不写 verify 也不写
+     *        inScope ⇒ ★ 那是**契约的缺陷**（写类任务**被要求**有这两格）⇒ `refuse`
+     *     同一条判据在 `review` 上：`review` **不被要求**有 inScope ⇒
+     *        "没有 inScope"是**正当留白** ⇒ `tolerate`
+     *
+     *   ⇒ 若把记号钉在**注册**上（整条判据一个值），那么"对 review 容忍"必然
+     *     也意味着"对 implementation 容忍" —— 而那会**打开一条**
+     *     "判不了的契约静默进入工作"的路，正是本任务验收第 2 条禁止的。
+     *   ★ 落在裁决上，判据就能**逐任务**回答，而那才是它真正知道的事。
+     */
+    unmeasuredDisposition?: 'refuse' | 'tolerate'
+  }
 
 export type InsertionPoint = typeof INSERTION_POINTS[number]
 
@@ -285,11 +308,31 @@ export function blocked(...blockers: Array<string | string[]>): { ok: false; blo
   return { ok: false, blockers: list }
 }
 
-export function unmeasured(reason: string): { ok: false; unmeasured: string } {
+/**
+ * ── ★★★ t21：`unmeasured` 的第二个实参 —— 「我说不出」是不是这个**任务**的错？──────
+ *
+ * 见 `GateVerdict` 里那段长注释。判据**逐任务**回答；缺省 `'refuse'`（保守档）。
+ *
+ * ★ 为什么做成**可选第二实参**而不是新工厂（`toleratedUnmeasured(...)`）：
+ *   后者会让"说不出"有**两个入口**，而它们的差别只能靠读函数名分辨 ——
+ *   一个没注意到新工厂的作者会写出**静默更严格**的代码（今天的行为），
+ *   而那恰好是最难发现的一种：它不报错，只是拒得比该拒的多。
+ *   ⇒ 一个入口、一个可选记号：`unmeasured(why)` 与今天逐字相同，
+ *     `unmeasured(why, 'tolerate')` 是**显式**的、要在同一行里读到的声明。
+ */
+export function unmeasured(reason: string, disposition?: 'refuse' | 'tolerate'): { ok: false; unmeasured: string; unmeasuredDisposition?: 'refuse' | 'tolerate' } {
   if (typeof reason !== 'string' || reason.trim() === '') {
     throw new Error('unmeasured() must say what could not be measured')
   }
-  return { ok: false, unmeasured: reason }
+  /** ★ 拼错 ⇒ 抛（与 `assertVerdict` 同一条纪律：不许静默退回缺省）。 */
+  if (disposition !== undefined && disposition !== 'refuse' && disposition !== 'tolerate') {
+    throw new Error(`unmeasured() got an unknown disposition (${JSON.stringify(disposition)}); use 'refuse' (the default) or 'tolerate'`)
+  }
+  return {
+    ok: false,
+    unmeasured: reason,
+    ...disposition === undefined ? {} : { unmeasuredDisposition: disposition },
+  }
 }
 
 /** 校验一条裁决的形状。非法形状【抛错】而不是被当成通过 —— 一个形状错误的裁决是最危险的。 */
@@ -309,6 +352,17 @@ function assertVerdict(verdict: unknown, id: string): GateVerdict {
     }
     if (hasBlockers && hasUnmeasured) {
       throw new Error(`gate "${id}" returned both blockers and unmeasured; pick one — "found problems" and "could not measure" are different claims`)
+    }
+    /**
+     * ── ★★ t21：处置记号**拼错就抛**，不许静默退回缺省 ─────────────────────────────
+     *
+     * ★ 与 `requires` 的校验同一条纪律：一个形状不对的**可选**字段若被静默丢掉，
+     *   "我声明了容忍"与"我没声明"随后在行为上同形 —— 而缺省是 `'refuse'`（保守档），
+     *   所以静默退回意味着**一条故意的宽松消失了，而没人会发现**。
+     */
+    const disposition = v['unmeasuredDisposition']
+    if (disposition !== undefined && disposition !== 'refuse' && disposition !== 'tolerate') {
+      throw new Error(`gate "${id}" returned an unknown unmeasuredDisposition (${JSON.stringify(disposition)}); use 'refuse' (the default) or 'tolerate' — a typo must not silently fall back to the strict default, because then a deliberate tolerance would vanish without a reading`)
     }
   }
   return verdict as GateVerdict
@@ -459,7 +513,10 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
       if (byId.has(id)) {
         throw new Error(`gate "${id}" is already registered; unregister it first (silent replacement would make "swapped" and "both ran" look identical)`)
       }
-      byId.set(id, { id, point, description, gate, appliesTo, ...requires === undefined ? {} : { requires } })
+      byId.set(id, {
+        id, point, description, gate, appliesTo,
+        ...requires === undefined ? {} : { requires },
+      })
       return registration
     },
 
@@ -693,6 +750,29 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
         }
         const reason = `[${reg.id}] ${String(verdict['unmeasured'])}`
         if (observeOnly) {
+          observedUnmeasured.push(reason)
+          ran.push({ id: reg.id, verdict: 'unmeasured', observed: true })
+          continue
+        }
+        /**
+         * ── ★★★ t21：这条判据的「说不出」该不该**拒**，由它**自己声明**──────────────
+         *
+         * 见 `GateVerdict` 里 `unmeasuredDisposition` 那段。要点复述：
+         *
+         *   `'tolerate'` ⇒ **不并进 `unmeasuredReasons`**（于是不影响裁决），
+         *                  但**并进 `observed.unmeasured`** —— ★ "留痕"是这一档的
+         *                  全部意义：它说的仍然是"这一步没被检查"，只是**不拒**。
+         *   `'refuse'`（缺省）⇒ 与今天**逐字相同**：并进 `unmeasuredReasons` ⇒ 位置级拒。
+         *
+         * ★★ 而"不拒"**绝不等于"丢掉"**：`observed.unmeasured` 是既有字段
+         *   （观察模式用的那一个），它本来就承担"开火了但裁决没被采纳"的语义 ——
+         *   而这里的形状**恰好是**那件事：判据开火了（它说了"我说不出"），
+         *   而它的裁决**按声明**没有被采纳。⇒ ★ 复用它是**对的**，不是将就：
+         *   新造一个平级字段会让"哪一个才是真的读数"变成要读两处才能回答的问题。
+         *   ★ 而它**同时**在 `ran` 里如实标着 `verdict: 'unmeasured'`，
+         *     于是"这条判据跑了"与"它的裁决有没有被采纳"两件事都读得出来。
+         */
+        if (verdict['unmeasuredDisposition'] === 'tolerate') {
           observedUnmeasured.push(reason)
           ran.push({ id: reg.id, verdict: 'unmeasured', observed: true })
           continue

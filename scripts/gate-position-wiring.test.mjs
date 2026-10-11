@@ -1091,3 +1091,62 @@ test('★ t18 臂 5（finding A 的守门臂）：contract 位置必须注入执
   assert.equal(created.status, 'pending', '★ implementation 契约必须能建出来 —— 这要求 contract 位置拿得到执行器')
   assert.equal(created.kind, 'implementation')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3b（t21）：★★★ 位置级的「说不出」处置 —— 逐任务，且**不许**把两态合流
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂钉的是**位置级**那一半（臂 2 钉的是"措辞不同形"，本臂钉的是"谁该被拒"）───
+ *
+ * ★ t21 之前，位置级是**一刀切**的：任一条判据说不出 ⇒ 整个位置拒。
+ *   而实测（t21）那会让**一个合法的 `review` 任务**因为
+ *   `contract.task-atomicity` 答不出"它原不原子"而被拒 ——
+ *   而 `review` **本来就不被要求**有 inScope（只有 `WRITE_KINDS` 被要求）。
+ *
+ * ★★ 而它**同时**钉住另一半：写类的契约缺陷**照旧拒**。
+ *   缺了这一半，一个"一律放行"的实现能让本臂全绿 —— 而那会开出一条
+ *   "判不了的契约静默进入工作"的路。
+ */
+test('★★★ 臂 3b（t21·位置级）：说不出对「正当留白」放行、对「契约缺陷」仍拒 —— 且留痕', async () => {
+  /** ── 留白那一半：`review` 不被要求有 inScope ⇒ 位置级应当**放行** ────────────── */
+  const tolerated = await registry.evaluate('contract', {
+    task: { id: 't21-position-review', kind: 'review', objective: 'o' },
+  })
+  console.log(`    ℹ 位置级 · review ⇒ ok=${tolerated.ok} · observed.unmeasured=${tolerated.observed.unmeasured.length}`)
+
+  assert.equal(
+    tolerated.ok, true,
+    '★★★ 位置级把一个合法的 `review` 任务拒了 —— 而它只是因为一条判据答不出\n'
+    + '   "它原不原子"（而 `review` **不被要求**有 inScope）。\n'
+    + '   ★ 那就是「没能测量」并进「没通过」，而位置级是这条合流的最后一站。',
+  )
+  /** ★ 放行**不等于**丢掉：那条事实仍须在位置级的读数里。 */
+  assert.equal(
+    tolerated.observed.unmeasured.length, 1,
+    '★★ 位置级放行了，却没有留下"这一步没被检查"的痕迹 —— 那是静默放行',
+  )
+  assert.match(
+    tolerated.observed.unmeasured[0], /contract\.task-atomicity/,
+    '★ 痕迹必须指名是哪条判据（不指名的话不知道去补什么）',
+  )
+
+  /** ── 缺陷那一半：写类**被要求**有 inScope + verify ⇒ 位置级应当**仍然拒** ────── */
+  const refused = await registry.evaluate('contract', {
+    task: { id: 't21-position-impl', kind: 'implementation', objective: 'o' },
+  })
+  console.log(`    ℹ 位置级 · implementation ⇒ ok=${refused.ok} · unmeasured=${refused.unmeasured === undefined ? 'no' : 'YES'}`)
+
+  assert.equal(
+    refused.ok, false,
+    '★★★ 位置级把一个"判不了的写类契约"放过去了 ——\n'
+    + '   那开出了一条"判不了的契约静默进入工作"的路（t21 验收第 2 条禁止的）。',
+  )
+  assert.equal(typeof refused.unmeasured, 'string', '★ 而且它必须如实说"没能测量"，不是"发现了问题"')
+
+  /** ★ 反向半边之二：两态**必须不同形** —— 否则本臂测的不是这条分辨。 */
+  assert.notEqual(
+    tolerated.ok, refused.ok,
+    '★ "正当留白"与"契约缺陷"在位置级给了同一个结局 ⇒ 两态被合流了',
+  )
+})

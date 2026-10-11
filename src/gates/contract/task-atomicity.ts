@@ -654,6 +654,35 @@ export function appliesTo(ctx: TaskAtomicityContext | undefined): boolean {
   return QUALITY_KINDS.has(task.kind ?? 'work')
 }
 
+/**
+ * ── ★★★ t21：这条判据"说不出"时，那是不是**这个任务**的错？───────────────────────
+ *
+ * 判据只有这里有资格回答这个问题，因为它**知道自己的语义**：
+ *
+ *   `implementation` / `repair`（`WRITE_KINDS`）⇒ 契约**被要求**有 `inScope` + `verify`
+ *     （`src/quality-gates.ts:726-733` 在建任务时就强制）。
+ *     ⇒ ★ 于是"两格都缺席"**只能是契约的缺陷** ⇒ `refuse`：
+ *       一个判不了的契约不许静默进入工作（`verify-command.ts:88-97` 那条口径）。
+ *
+ *   其余四个质量类（`review` / `verification` / `integration` / `requirements`）
+ *     ⇒ 契约**不被要求**有 `inScope`（只有两条确切的 verify 要求）。
+ *     ⇒ ★ 于是"没有 inScope"是**正当留白**，不是缺陷 ⇒ `tolerate`：
+ *       因为一条判据问了它答不了的问题而拒绝一个**合法任务**，
+ *       正是本队记账最久的合流（「没能测量」并进「没通过」）。
+ *
+ * ★★ 而判据是**逐任务**回答的（记号落在裁决上），所以同一份代码在
+ *   `implementation` 上仍然是 `refuse` —— 那条口径一个字节都没放宽。
+ * ★ 为什么这份知识在这里而不是在注册表：位置级只看到一个字符串与一个 kind，
+ *   而"这个 kind 的契约要不要那两格"是**契约层的知识**（见 `quality-gates.ts`）。
+ *   让它住在知道它的地方，是本仓 `requires` 那条纪律的同一条。
+ */
+const WRITE_KINDS = new Set(['implementation', 'repair'])
+function dispositionFor(taskKind: string | undefined): 'refuse' | 'tolerate' {
+  /** ★ 缺省 `'work'` 与 `QUALITY_KINDS` 那条口径同源（kind 缺席 = work）。 */
+  const kind = taskKind ?? 'work'
+  return WRITE_KINDS.has(kind) ? 'refuse' : 'tolerate'
+}
+
 export function gate(ctx: TaskAtomicityContext): GateVerdict {
   const task = ctx?.task
   const verify = Array.isArray(task?.verify) ? task!.verify!.filter((item) => typeof item === 'string' && item.trim() !== '') : undefined
@@ -682,6 +711,11 @@ export function gate(ctx: TaskAtomicityContext): GateVerdict {
       + `so there is no discriminating surface to count and no write scope to compare — `
       + `"cannot judge" is NOT the same as "atomic", and a task whose contract states neither `
       + `is precisely the kind whose failure cannot be attributed`,
+      /**
+       * ★★★ t21：这一条是不是**这个任务的错**，由判据按 kind 回答（见 `dispositionFor`）。
+       *   ★ 写类 ⇒ `refuse`（契约缺陷，必须拒）；其余质量类 ⇒ `tolerate`（正当留白，别拒）。
+       */
+      dispositionFor(task?.kind),
     )
   }
 
@@ -830,6 +864,13 @@ export function gate(ctx: TaskAtomicityContext): GateVerdict {
       `cannot judge whether this task is atomic: the contract declares a verify list but every entry is blank, `
       + `and there is no inScope — a blank command is not a discriminating surface, so counting them would report "0 reasons" `
       + `for a task that has no reason written down at all`,
+      /**
+       * ★★★ t21：第二态同理 —— 但**这一格更硬**：`verify` **在场**而全是空串，
+       *   说明有人**写了** verify 却写成了空的。★ 那对**任何** kind 都是**契约缺陷**
+       *   （写类本来就要求非空 verify；非写类既然写了这一格，空串就是笔误而非留白）。
+       *   ⇒ 于是它**恒 `refuse`**，与上面那一条不同。
+       */
+      'refuse',
     )
   }
 
