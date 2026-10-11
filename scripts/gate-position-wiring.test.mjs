@@ -637,7 +637,9 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
    *   ★ 少了 `registered`，"没检查"与"这个位置本来就没判据"会同形。
    */
   assert.equal(created.runtime_gates?.evaluated, 0, '★ 这一轮没有任何一条运行判据适用 ⇒ evaluated=0，不是"跑了一条什么都对的判据"')
-  assert.equal(created.runtime_gates?.registered, 1, '★ runtime 位置必须真的挂着 t6 的探活判据')
+  /** ★ t6：runtime 现在挂着**两条**（liveness + 新增的 `runtime.stall`）。
+   *  本行断言的实质是「**这个位置确实挂着判据**」（不是空的），数字随接线变。 */
+  assert.equal(created.runtime_gates?.registered, 2, '★ runtime 位置必须真的挂着判据（liveness + stall）')
   assert.equal(
     (created.runtime_gates?.ran ?? []).filter((entry) => entry.verdict !== 'skipped').length,
     0,

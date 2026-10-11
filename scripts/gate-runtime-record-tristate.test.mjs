@@ -219,5 +219,7 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
   )
   assert.doesNotMatch(outcome, /^blocked:\s*$/, '★ 真实路径仍写出空的 `blocked: ` —— t66 的缺陷还在')
   assert.equal(created?.runtime_gates?.evaluated, 0, '★ 前提：这一轮确实没有任何运行判据适用')
-  assert.equal(created?.runtime_gates?.registered, 1, '★ 前提：runtime 位置确实挂着判据（否则那是"空位置"，属于臂 4）')
+  /** ★ t6：runtime 现在挂着**两条**判据（liveness + 新增的 `runtime.stall`）。
+   *  本行断言的是**前提**「这个位置不是空的」，数字随接线变。 */
+  assert.equal(created?.runtime_gates?.registered, 2, '★ 前提：runtime 位置确实挂着判据（liveness + stall；否则那是"空位置"，属于臂 4）')
 })

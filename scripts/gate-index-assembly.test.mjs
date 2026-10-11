@@ -138,6 +138,12 @@ const NEW_POSITION_GATES = [
    */
   { binding: 'runtimeLiveness', id: 'runtime.liveness', point: 'runtime' },
   /**
+   * ★ t6（C4）：runtime 位置的**第二条**判据 —— 机械停滞哨兵。
+   *   登记问的是"它装在哪个位置、会不会被求值"；而它比 liveness 强一层：
+   *   返回类型排除了 `blockers`，所以它**在类型上就拒绝不了**（契约 §5）。
+   */
+  { binding: 'runtimeStall', id: 'runtime.stall', point: 'runtime' },
+  /**
    * ── ★★★ t4（接线）：contract 位置的第三条 ───────────────────────────────────────
    *
    * 它此前【已在盘上、夹具也有，而一次都不会跑】—— `ALL_GATES` 里没有它
@@ -803,7 +809,14 @@ test('臂 3f ★ 集成臂：runtime 上"观察模式"与"不拒绝流程"是双
 
   const notApplicable = await registry.evaluate('runtime', { event: notAProbeEvent })
   assert.equal(notApplicable.evaluated, 0, `★ 不适用的事件（${notAProbeEvent}）⇒ 这一轮没有判据被求值`)
-  assert.equal(notApplicable.registered, 1, '★ 而不适用 ≠ 位置为空：判据仍然注册着')
+  /**
+   * ★ t6：`runtime` 位置现在有**两条**判据（liveness + 新增的 stall）。
+   *   ★ 本行断言的是**「不适用 ≠ 位置为空」**这条性质，而不是那个具体数字 ——
+   *     所以它随位置变满是正常的；
+   *   该断言与断言值的两半分别是「注册数 > 0」（性质）与「= 本位置的条数」（当时快照），
+   *     后者只与位置相关、与断言无关。
+   */
+  assert.equal(notApplicable.registered, 2, '★ 而不适用 ≠ 位置为空：判据仍然注册着（runtime 现在两条：liveness + stall）')
   assert.deepEqual(notApplicable.blockers, [], '★ "没跑"不许在任何字段上读成"发现问题"')
 
   /** ② 不在观察 ⇒ 告警进 `blockers`。 */
@@ -1003,7 +1016,13 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
      *   ★ 与 t4 的 `contract: 2 → 3` 同一条纪律：这条快照的存在意义就是
      *     "分布变了必须有人说得出为什么"。
      */
-    { admission: 0, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 1 },
+    /**
+     * ★ t6：`runtime: 1 → 2` —— 新增 `runtime.stall`（C4 的机械停滞哨兵）。
+     *   ★ 本行断言的实质是**「在这个分布上，每条判据都声明了输入面」** ——
+     *     而那条实质在新分布上**仍然成立**（否则下面那一段会红）。
+     *   ⇒ 这个数字是**位置快照**，随接线变；性质不随。
+     */
+    { admission: 0, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 2 },
     '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })
