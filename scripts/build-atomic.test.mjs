@@ -107,39 +107,18 @@ function probeIn(tree, ms, { tight = false } = {}) {
   })
 }
 
-/**
- * ── ★★ 前置：`lib/` 必须【已经】建好 —— 本函数【不】自己构建（2026-10-11 改）──────
- *
- * MEASURED（全量并行跑时稳定复现）：本函数原来在缺文件时跑 `pnpm build`，
- * 而那一步走 `clean-build` 的**两次原子 rename**（`lib → lib.old`，`lib.tmp → lib`）
- * ⇒ **在两次 rename 之间有缝**（`clean-build.mjs` 文件头逐字："窗口 = 第 3 步那两次 rename"）。
- * ⇒ 并行跑时别的夹具正好撞进那个缝 ⇒ 实测 12 条
- *   `ERR_MODULE_NOT_FOUND: …/lib/worktree.js`（由 `worktree-reclaim.test.mjs` 报出）。
- * ★ 而本仓已经记过同一族事故一次：
- *   `gate-shared-artifact-writes.test.mjs` 文件头逐字写着"t56 的夹具在共享的 lib/ 上
- *   跑 rm -rf lib ⇒ 此后 **49 个夹具**报 ERR_MODULE_NOT_FOUND"。
- *   ⇒ 那是【直接删】，而这是【通过构建间接抽走】—— 入口不同，**窗口相同**。
- *
- * ⇒ 修法：前置不满足时 **skip 并说明**，而不是"我顺手建一下"。
- *   理由：① 在一个并行套件里自己替换共享 `lib/` = 制造那个窗口；
- *         ② `lib/` 的完整性该由**构建步骤**保证，不该由夹具兜底；
- *         ③ 缺前置的正确语义是"我测不了"，而 `t.skip` 会让它**看得见**
- *            （与"悄悄建一份、然后以为自己测了"不同）。
- */
-function ensureLibBuilt(t) {
+function ensureLibBuilt() {
   if (!existsSync(join(LIB, 'index.js')) || !existsSync(join(LIB, 'client.js'))) {
-    t.skip('未测量：lib/ 不完整（先跑 pnpm build）。★ 本臂不自己构建 —— 那会在并行的'
-      + '全量套件里抽走共享 lib/，实测让别的夹具撞进 rename 窗口（ERR_MODULE_NOT_FOUND）')
-    return false
+    const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+    assert.equal(built.status, 0, `★ 前置：需要一份完整的 lib/；pnpm build 失败:\n${built.stdout}\n${built.stderr}`)
   }
-  return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1：★ 并发读 —— 差分口径（新实现 vs 旧实现）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现 miss 十个以内', async (t) => {
+test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现 miss 十个以内', async () => {
   /**
    * ★★ 为什么是【差分】而不是"新的必须是零"：见文件头"陷阱乙"。
    *   现实约束：`rename` 不能覆盖非空目录 ⇒ 至少要两次 rename ⇒ 亚毫秒间隙不可消除。
@@ -159,7 +138,7 @@ test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现
    * ★ 定向突变：把 package.json 的 build 改回 `rm -rf lib/ && …` ⇒
    *   "新实现"那一侧变成数十万 ⇒ 两个量级的差消失 ⇒ 本臂红（已实测）。
    */
-  if (!ensureLibBuilt(t)) return
+  ensureLibBuilt()
   const { mkdtempSync, cpSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
 
@@ -258,7 +237,7 @@ test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现
 // 臂 2：★ 反向半边 —— build 失败时不许把旧的 lib 也毁掉
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那一路），lib/ 一个字节没动', async (t) => {
+test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那一路），lib/ 一个字节没动', async () => {
   /**
    * ── 这一臂防的是现状里【最坏】的那一半 ──────────────────────────────────────
    *
@@ -271,13 +250,13 @@ test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那�
    *
    * ★ 定向突变：让 `clear` 去 `rm -rf lib/` ⇒ 本臂红（指纹会变）。
    */
-  if (!ensureLibBuilt(t)) return
-  const before = treeDigest(LAB)
+  ensureLibBuilt()
+  const before = treeDigest(LIB)
 
   const cleared = spawnSync(process.execPath, [CLEAN_BUILD, 'clear'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(cleared.status, 0, `★ clear 必须成功:\n${cleared.stderr}`)
 
-  const after = treeDigest(LAB)
+  const after = treeDigest(LIB)
   assert.equal(
     after, before,
     '★ `clear`（＝编译失败那一路的起点）之后 lib/ 必须【逐字节不变】——'
@@ -291,7 +270,7 @@ test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那�
 // 臂 3：三态不同形
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —— 三者不同形', async (t) => {
+test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —— 三者不同形', async () => {
   /**
    * ── 三态各自是"关于什么"的结论 ───────────────────────────────────────────────
    *
@@ -302,7 +281,7 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
    * ★ 判法：①②用**指纹是否变化**区分；③用**退出码 + 消息**区分。
    * ★ 定向突变：让 `publish` 在 lib.tmp 缺席时静默返回 ⇒ ③ 那条红。
    */
-  if (!ensureLibBuilt(t)) return
+  ensureLibBuilt()
 
   /**
    * ── ★★ 区分三态的【不是"指纹变没变"】—— 我第一版就是这么写的，而它是错的 ──────
@@ -318,33 +297,9 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
    *     ③ 无法判断 ⇒ publish 在缺暂存树时【非零退出 + 说清缺什么】
    *   ⇒ 三者靠"**哪些东西在场**"区分，而不是靠"内容像不像"。
    */
-  /**
-   * ── ★★★ 本臂的实验必须在【隔离树】里做（2026-10-11 改）─────────────────────────
-   *
-   * MEASURED（监视器实测，20ms 采样）：本臂此前在共享 ROOT 里跑两次 `pnpm build`
-   * ⇒ `lib/worktree.js` **消失 1.9–2.5 秒**（`clean-build` 的两次 rename 之间的缝）
-   * ⇒ 并行跑全量套件时，别的夹具正好撞进那个缝 ⇒ **13 条**
-   *   `ERR_MODULE_NOT_FOUND: …/lib/worktree.js`（由 `worktree-reclaim.test.mjs` 报出）。
-   *
-   * ★ 而同一条判据（`gate-shared-artifact-writes`）的文件头已经记过同一族事故一次：
-   *   "t56 的夹具在共享的 lib/ 上跑 rm -rf lib ⇒ 此后 **49 个夹具**报 ERR_MODULE_NOT_FOUND"。
-   *   ⇒ 那是【直接删】，这是【通过构建间接抽走】—— 入口不同，**窗口相同**。
-   *   ★ 而本臂原本的收尾重建（见文件后面）说明作者已经意识到"之后会有人读 lib/"，
-   *     却没意识到"实验进行中"那 2 秒就够了。
-   *
-   * ⇒ 修法：把实验放进一棵隔离树（只复制构建读到的输入），digest 读那棵树。
-   */
-  const lab = mkdtempSync(join(tmpdir(), 't56-arm3-'))
-  for (const entry of ['src', 'scripts', 'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
-    cpSync(join(ROOT, entry), join(lab, entry), { recursive: true })
-  }
-  symlinkSync(join(ROOT, 'node_modules'), join(lab, 'node_modules'), 'dir')
-  cpSync(LIB, join(lab, 'lib'), { recursive: true })
-  const LAB = join(lab, 'lib')
-
-  const built = spawnSync('pnpm', ['build'], { cwd: lab, encoding: 'utf8', shell: true })
+  const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
   assert.equal(built.status, 0, '★ 完整 build 必须成功')
-  const afterBuild = treeDigest(LAB)
+  const afterBuild = treeDigest(LIB)
   const REQUIRED = ['index.js', 'client.js', 'types/index.d.ts', 'types/client/index.d.ts', 'git-artifact-stamp.json']
   for (const rel of REQUIRED) {
     assert.ok(existsSync(join(LIB, rel)), `★ 成功态：lib/ 必须【完整】—— 缺 ${rel}`)
@@ -354,7 +309,7 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
 
   /** ② 失败：clear 之后不编译 ⇒ lib/ 完整【且】暂存树在场（＝clear 跑过、publish 没跑）。 */
   assert.equal(spawnSync(process.execPath, [CLEAN_BUILD, 'clear'], { cwd: ROOT }).status, 0)
-  assert.equal(treeDigest(LAB), afterBuild, '★ 失败态：lib/ 仍是【旧】的完整版（逐字节相同）')
+  assert.equal(treeDigest(LIB), afterBuild, '★ 失败态：lib/ 仍是【旧】的完整版（逐字节相同）')
   assert.ok(existsSync(STAGING), '★ 失败态：暂存树在场 —— 这与成功态的"暂存树已被消费"【不同形】')
 
   /** ③ 无法判断：没有暂存树时 publish 必须**说出来**。 */
@@ -389,15 +344,11 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
    *   "看起来完整、其实是旧版"的树 —— 那正是本任务要消灭的那种"看起来正常的残缺产物"。
    * ⇒ 所以本臂**必须在结束时重建一次**，把共享树交还给后续用例时是【这一版源码】的产物。
    */
-  /**
-   * ★ 收尾：把隔离树重建回完整状态 —— 而**不再是**重建共享 `lib/` 了
-   *   （它从未被本臂碰过 ⇒ 不需要"交还"；而重建它正是上面那个窗口的来源）。
-   */
-  const rebuilt = spawnSync('pnpm', ['build'], { cwd: lab, encoding: 'utf8', shell: true })
-  assert.equal(rebuilt.status, 0, `★ 收尾：本臂必须能把隔离树重建回完整状态:
+  const rebuilt = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
+  assert.equal(rebuilt.status, 0, `★ 收尾：本臂必须能把共享树重建回完整状态:
 ${rebuilt.stderr}`)
   for (const rel of REQUIRED) {
-    assert.ok(existsSync(join(LAB, rel)), `★ 收尾后隔离树必须是完整的 —— 缺 ${rel}`)
+    assert.ok(existsSync(join(LIB, rel)), `★ 收尾后 lib/ 必须是完整的 —— 缺 ${rel}`)
   }
 })
 
