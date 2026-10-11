@@ -8,7 +8,7 @@
  * @module dsh-agent-teams/snapshot
  */
 import type { Context } from '@deepseek-ai/cordis';
-import { type MemberLiveness, type StrandedWorktrees } from './members.ts';
+import { type MemberLiveness, type StrandedWorktrees, type MemberSubagents, type LiveSubagent } from './members.ts';
 import { type MemberStatus, type TeamState } from './types.ts';
 import type { FailureKind } from './state.ts';
 /** Visual task state for the activity panel. */
@@ -41,6 +41,33 @@ export interface TeamActivityMember {
     readonly livenessReason?: string;
     /** ★ 名下有在飞任务而会话已不在 ⇒ 有一份工作悬在半空。 */
     readonly stranded: boolean;
+    /**
+     * ── ★★★ t27：这个成员底下**正在跑的**子代理（面板的展开层）───────────────────
+     *
+     * 用户的要求是明确的：第一屏显示持久成员，**点开一个成员**要能看到它底下
+     * 正在跑的子代理，连同轮次信息。而 MEASURED（开工时）：`src/snapshot.ts` 里
+     * `subagent` 只出现在**注释**里 —— 一处代码都没有 ⇒ 那次重建会有一个
+     * **空的展开层**（本仓已经撞过两次的「做出来了但没接上」形状）。
+     *
+     * ★ 三态：`observed`（`subagents: []` = 真的没有）/ `could-not-measure`。
+     *   把后者圆成前者会让面板**永远**说"没有子代理" —— 而那与"确实没有"同形。
+     */
+    readonly subagents: MemberSubagents['status'];
+    /** `observed` 时在场：这个成员名下的活子代理（**空数组** = 真的没有）。 */
+    readonly liveSubagents: MemberSubagents['subagents'];
+    /** `could-not-measure` 时在场：未能测量的成因。 */
+    readonly subagentsReason?: string;
+    /**
+     * ── ★★ 轮次信息（用户要求的那一半）────────────────────────────────────────────
+     *
+     * ★ 它**不**从子代理推：轮次挂在**任务**上（`TeamTask.round`），而子代理挂的是
+     *   会话 —— 两者没有共同的外键。⇒ 这里报的是这个成员**名下有轮次的任务**里
+     *   最大的那一轮（"它现在做到第几轮了"），而每一轮的细节仍由 `tasks[]` 承载。
+     *
+     * ★ 一个没有轮次的任务（`round === undefined`）**不进**这个最大值：
+     *   把缺省当 `0` 会让"没有轮次概念"与"第 0 轮"同形。
+     */
+    readonly round?: number;
     readonly progress: number;
     readonly done: number;
     readonly total: number;
@@ -96,6 +123,17 @@ export interface TeamActivitySnapshot {
      * ★ `clear` 与 `could-not-measure` **必须不同形**（见 `StrandedWorktrees`）。
      */
     readonly strandedWork: StrandedWorktrees;
+    /**
+     * ── ★★★ t27：父会话定不下来的活子代理 ──────────────────────────────────────────
+     *
+     * 一个活着的会话，其 `parentSession` **不是本队成员** —— 可能是一次性委派、
+     * 本队之外的子代理、或父会话已不在的孤儿。★ 三件事**都不许**发生：
+     * 丢掉它（读的人以为没有）、硬塞给某个成员（把**别人的**子代理画在这个成员底下，
+     * 而"归属错了"与"归属对了"在界面上同形）、或并进 `could-not-measure`
+     * （把一个**可判定的事实**报成一次读取失败）。
+     * ⇒ 它自成一格，如实交出去。
+     */
+    readonly unattributedSubagents: readonly LiveSubagent[];
     readonly messageCount: number;
     readonly captainInbox: readonly TeamActivityMessage[];
 }

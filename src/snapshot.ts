@@ -11,7 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, type MemberLiveness, type StrandedWorktrees } from './members.ts'
+import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, liveSessionRefs, parentSessionOf, attributeSubagents, memberSubagents, type MemberLiveness, type StrandedWorktrees, type SubagentAttribution, type MemberSubagents, type LiveSubagent } from './members.ts'
 import { gitChangedPaths } from './harness-compat.ts'
 import { worktreeDirName } from './worktree.ts'
 import {
@@ -52,6 +52,33 @@ export interface TeamActivityMember {
   readonly livenessReason?: string
   /** ★ 名下有在飞任务而会话已不在 ⇒ 有一份工作悬在半空。 */
   readonly stranded: boolean
+  /**
+   * ── ★★★ t27：这个成员底下**正在跑的**子代理（面板的展开层）───────────────────
+   *
+   * 用户的要求是明确的：第一屏显示持久成员，**点开一个成员**要能看到它底下
+   * 正在跑的子代理，连同轮次信息。而 MEASURED（开工时）：`src/snapshot.ts` 里
+   * `subagent` 只出现在**注释**里 —— 一处代码都没有 ⇒ 那次重建会有一个
+   * **空的展开层**（本仓已经撞过两次的「做出来了但没接上」形状）。
+   *
+   * ★ 三态：`observed`（`subagents: []` = 真的没有）/ `could-not-measure`。
+   *   把后者圆成前者会让面板**永远**说"没有子代理" —— 而那与"确实没有"同形。
+   */
+  readonly subagents: MemberSubagents['status']
+  /** `observed` 时在场：这个成员名下的活子代理（**空数组** = 真的没有）。 */
+  readonly liveSubagents: MemberSubagents['subagents']
+  /** `could-not-measure` 时在场：未能测量的成因。 */
+  readonly subagentsReason?: string
+  /**
+   * ── ★★ 轮次信息（用户要求的那一半）────────────────────────────────────────────
+   *
+   * ★ 它**不**从子代理推：轮次挂在**任务**上（`TeamTask.round`），而子代理挂的是
+   *   会话 —— 两者没有共同的外键。⇒ 这里报的是这个成员**名下有轮次的任务**里
+   *   最大的那一轮（"它现在做到第几轮了"），而每一轮的细节仍由 `tasks[]` 承载。
+   *
+   * ★ 一个没有轮次的任务（`round === undefined`）**不进**这个最大值：
+   *   把缺省当 `0` 会让"没有轮次概念"与"第 0 轮"同形。
+   */
+  readonly round?: number
   readonly progress: number
   readonly done: number
   readonly total: number
@@ -110,6 +137,17 @@ export interface TeamActivitySnapshot {
    * ★ `clear` 与 `could-not-measure` **必须不同形**（见 `StrandedWorktrees`）。
    */
   readonly strandedWork: StrandedWorktrees
+  /**
+   * ── ★★★ t27：父会话定不下来的活子代理 ──────────────────────────────────────────
+   *
+   * 一个活着的会话，其 `parentSession` **不是本队成员** —— 可能是一次性委派、
+   * 本队之外的子代理、或父会话已不在的孤儿。★ 三件事**都不许**发生：
+   * 丢掉它（读的人以为没有）、硬塞给某个成员（把**别人的**子代理画在这个成员底下，
+   * 而"归属错了"与"归属对了"在界面上同形）、或并进 `could-not-measure`
+   * （把一个**可判定的事实**报成一次读取失败）。
+   * ⇒ 它自成一格，如实交出去。
+   */
+  readonly unattributedSubagents: readonly LiveSubagent[]
   readonly messageCount: number
   readonly captainInbox: readonly TeamActivityMessage[]
 }
@@ -162,6 +200,30 @@ export async function assembleTeamSnapshot(
   const activity = options.historic === true
     ? new Map<string, 'running' | 'idle' | 'ready'>()
     : memberActivity(ctx, roster.map((member) => member.id))
+  /**
+   * ── ★★★ t27：枚举**一次**活会话，然后按父会话归组（全员共用那一份）───────────────
+   *
+   * ★ 为什么只枚举**一次**而不是每个成员各枚举一次：`ctx.agents.list()` 是
+   *   O(全会话) 的，而按成员各调一次会让这一份快照变成 O(成员 × 全会话) ——
+   *   面板是轮询的，那个乘积会直接变成 UI 的延迟。
+   *
+   * ★ 归档团队（`historic`）**不读**：那些会话按定义已经停了，读它会报一整排
+   *   "没有子代理"，而那是关于"它是历史"的**已知事实**，不是一次观测
+   *   （与 `memberLiveness` 的归档支同一条口径）。
+   *
+   * ★★ 三态在这里被**如实传递**：枚举读不到 ⇒ `projection` 报
+   *   `could-not-measure` ⇒ `attribution` 是 `undefined` ⇒ 每个成员的
+   *   `subagents` 都是 `could-not-measure`（**不是**空数组）。
+   *   这条链上任何一环把它圆成"空"，面板就会静默地说"没有子代理"。
+   */
+  const projection = options.historic === true ? undefined : liveSessionRefs(ctx)
+  /**
+   * ★ 归组只在**读到了**的时候做。`undefined` 是"这一层没能观察"的载体 ——
+   *   而 `attributeSubagents` 永不返回 `undefined`，所以两者不同形。
+   */
+  const attribution: SubagentAttribution | undefined = projection?.status !== 'observed'
+    ? undefined
+    : attributeSubagents(projection.subagents, roster.map((member) => member.id))
   const unreadByMember = new Map<string, number>()
   for (const member of roster) {
     try {
@@ -181,6 +243,20 @@ export async function assembleTeamSnapshot(
      */
     const live = options.historic === true ? undefined : memberLiveness(ctx, member)
     const open = owned.filter((task) => !TERMINAL_TASK_STATUSES.includes(task.status)).map((task) => task.id)
+    /**
+     * ★ t27：这个成员名下的活子代理。归档团队支报 `observed` + 空数组 ——
+     *   那些会话按定义已经停了（"它是历史"是一个**已知事实**，不是一次观测），
+     *   与 `liveness` 的归档支同一条口径。
+     */
+    const subs = options.historic === true
+      ? { status: 'observed' as const, subagents: [] }
+      : memberSubagents(ctx, member.id, attribution, projection?.status === 'observed' ? undefined : projection?.reason)
+    /**
+     * ★ 轮次：这个成员名下**有轮次的任务**里最大的那一轮。
+     *   缺省（没有任务带 `round`）⇒ 这一格**缺席**，而不是 `0` ——
+     *   "没有轮次概念"与"第 0 轮"必须不同形。
+     */
+    const rounds = owned.map((task) => task.round).filter((round): round is number => typeof round === 'number')
     return {
       id: member.id,
       name: member.name,
@@ -211,6 +287,10 @@ export async function assembleTeamSnapshot(
         livenessReason: live?.reason ?? 'this is an archived team, so whether its member sessions are alive is not a question about the present',
       },
       stranded: live !== undefined && strandedWork(live, open),
+      subagents: subs.status,
+      liveSubagents: subs.subagents,
+      ...subs.reason === undefined ? {} : { subagentsReason: subs.reason },
+      ...rounds.length === 0 ? {} : { round: Math.max(...rounds) },
       progress: owned.length === 0 ? 0 : Math.round((done / owned.length) * 100),
       done,
       total: owned.length,
@@ -254,6 +334,12 @@ export async function assembleTeamSnapshot(
     ...state.halted === true ? { halted: true } : {},
     members,
     strandedWork: strandedWorkReadout,
+    /**
+     * ★★★ t27：父会话定不下来的活子代理（见 `TeamActivitySnapshot` 上那段）。
+     *   ★ 归档团队支 ⇒ `attribution` 缺席 ⇒ 空数组：那些会话已经停了，
+     *     "没有正在跑的外来子代理"是一个**已知事实**，不是一次观测。
+     */
+    unattributedSubagents: attribution?.unattributed ?? [],
     tasks: tasks.map((task) => ({
       id: task.id,
       subject: task.subject,

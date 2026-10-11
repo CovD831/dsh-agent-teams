@@ -318,3 +318,231 @@ test('the panel route carries failure_kind, and only for a failed task', async (
   assert.equal('failureKind' in byId.get('ok'), false,
     'a non-failed task must NOT carry a failureKind - absence is not one of the kinds')
 })
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t27：成员的**活子代理**必须到达 /state 负载（面板的展开层）───────────────
+ *
+ * ── 这一节修的是什么（MEASURED，t27 开工时）──────────────────────────────────
+ *
+ *     grep -n "subagent|childSession|parentSession" src/snapshot.ts
+ *     ⇒ 只命中两处**注释**，一处代码都没有。
+ *
+ * ⇒ 用户要的"点开一个成员看到它底下的子代理"会展开成**一块空白** ——
+ *   而 `snapshot` 里那个"live subagent activity"的模块注释会让读代码的人
+ *   以为它已经做了。这正是本仓撞过两次的 **「做出来了但没接上」**。
+ *
+ * ── ★ 夹具：一个**真的** parent/child 对 ──────────────────────────────────────
+ *
+ * 形状按宿主的 `Agent` 复现（`id`、`status`、`session.header.parentSession`、
+ * `session.ownEvents()`），而**不是**手搓一个"看起来像"的对象 —— 这样臂测的
+ * 才是投影真的会走的那条路。
+ * ★ 子会话带 `ownEvents: () => []`：`sessionOwnEvents` 在没有 `ownEvents` 且没有
+ *   legacy `events` 时**抛错**（刻意的契约检查），所以一个"会话形状不对"的夹具
+ *   会让投影走上另一条路 —— 那正是臂 3 要单独钉的那一格。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const { liveSessionRefs, attributeSubagents, memberSubagents } = await import('../lib/members.js')
+
+/** 一个宿主形状的活会话。★ `parent` 只写在 header 上（与真宿主一致）。 */
+function liveSession(id, { parent, status = 'running', withLog = true } = {}) {
+  return {
+    id,
+    status,
+    session: {
+      header: parent === undefined ? {} : { parentSession: parent },
+      ...withLog ? { ownEvents: () => [] } : {},
+    },
+  }
+}
+
+/** panel ctx：`list()` 交出一份活会话清单；`get()` 按 id 找。 */
+function panelCtx(sessions) {
+  return {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    agents: {
+      get: (id) => sessions.find((s) => s.id === id),
+      list: () => sessions,
+    },
+  }
+}
+
+test('★ 臂 13（t27 归属臂）：一个真 parent/child 对 ⇒ 子代理挂在【正确的】父成员底下', async () => {
+  /**
+   * ★ 用户要求的那件事，逐字：第一屏显示持久成员，**点开一个成员**看到它底下的
+   *   子代理。本臂断言那条链真的接通了 —— 从 `ctx.agents.list()` 到载荷里的
+   *   `members[i].liveSubagents`。
+   */
+  const sessions = [liveSession('m1'), liveSession('child-a', { parent: 'm1' })]
+  const ctx = panelCtx(sessions)
+  const state = {
+    id: 'team', name: 'Team', captainSessionId: 'cap', createdAt: 1, taskSeq: 0, phase: 'running',
+    members: [
+      { id: 'm1', name: 'ui-eng', role: 'eng', status: 'running', provider: 'p', model: 'm' },
+      { id: 'm2', name: 'other', role: 'eng', status: 'idle', provider: 'p', model: 'm' },
+    ],
+    tasks: [durable({ id: 't1', status: 'in_progress', assignee: 'ui-eng', round: 3 })],
+  }
+  const snapshot = await assembleTeamSnapshot(ctx, '/nonexistent-root', 'w', state)
+  const byName = new Map(snapshot.members.map((member) => [member.name, member]))
+
+  assert.equal(byName.get('ui-eng').subagents, 'observed', '★ 前置：这一格必须是被**观测**到的')
+  assert.deepEqual(
+    byName.get('ui-eng').liveSubagents.map((sub) => sub.id), ['child-a'],
+    '★ 子代理必须出现在**它的父成员**底下（实测：'
+    + JSON.stringify(byName.get('ui-eng').liveSubagents.map((sub) => sub.id)) + '）',
+  )
+  /** ★ 用户要求的另一半：轮次信息与展开层一起到达。 */
+  assert.equal(byName.get('ui-eng').round, 3, '★ 轮次信息必须与子代理一起到达（用户明确要求）')
+
+  /**
+   * ★★ 反向半边 ①：**没有**子代理的成员不许被分到一个"幽灵孩子"。
+   *   缺了这一半，一个"给每个成员都挂上所有会话"的实现会让上面那条照样绿 ——
+   *   而面板会把别人的子代理画在这个成员底下。
+   */
+  assert.deepEqual(
+    byName.get('other').liveSubagents, [],
+    '★ 一个没有子代理的成员必须拿到空数组 —— 分到幽灵孩子比漏掉更坏（归属错了看不见）',
+  )
+
+  /**
+   * ★★ 反向半边 ②：父会话**不是**本队成员 ⇒ 不得挂到任何成员底下。
+   *   `outsider` 的父是一个本队之外的会话（一次性委派的典型形状）。
+   */
+  const withOutsider = await assembleTeamSnapshot(
+    panelCtx([liveSession('m1'), liveSession('child-a', { parent: 'm1' }), liveSession('outsider', { parent: 'not-our-member' })]),
+    '/nonexistent-root', 'w', state,
+  )
+  for (const member of withOutsider.members) {
+    assert.deepEqual(
+      member.liveSubagents.map((sub) => sub.id).filter((id) => id === 'outsider'), [],
+      `★ 父会话不是本队成员的子代理不得被挂到 "${member.name}" 底下 —— 那是"随意归属"`,
+    )
+  }
+  /** ★ 而它**也不许被丢掉**：它必须出现在自己的那一格里（见下一条臂）。 */
+  assert.deepEqual(
+    withOutsider.unattributedSubagents.map((sub) => sub.id).sort(), ['outsider'],
+    '★ 父定不下来的子代理必须**自成一格**被交出去 —— 丢掉它 = 面板上它根本不存在',
+  )
+})
+
+test('★ 臂 14（t27 三态臂）："读不到子代理数据"必须与"这个成员没有子代理"不同形', async () => {
+  /**
+   * ★★ 这是本任务点名的那条纪律（验收第 3 条）。一个把"枚举入口不在"圆成
+   *   空数组的实现，会让面板**永远**显示"没有子代理" —— 而那与"确实没有"
+   *   在读者眼里一模一样。缺了这一臂，本任务的整个三态设计就是一句注释。
+   */
+  const noEnumeration = { logger: snapshotCtx.logger, agents: { get: () => undefined } }
+  const state = teamStateWith([durable({ id: 't1', status: 'completed' })])
+
+  const blind = await assembleTeamSnapshot(noEnumeration, '/nonexistent-root', 'w', state)
+  assert.equal(
+    blind.members[0].subagents, 'could-not-measure',
+    '★ 没有可用的会话枚举 ⇒ `could-not-measure`，**不是**"这个成员没有子代理"',
+  )
+  assert.equal(typeof blind.members[0].subagentsReason, 'string', '★ 未能测量必须带上成因')
+  assert.ok(blind.members[0].subagentsReason.length > 0)
+
+  /**
+   * ★★ 对照臂（缺了它，"could-not-measure"可能来自任何东西）：**同一个成员**、
+   *   同一个团队，唯一的差别是**枚举可用** ⇒ 那时必须是 `observed` + 空数组。
+   *   ⇒ 两态在同一条输入上真的不同形。
+   */
+  const sighted = await assembleTeamSnapshot(panelCtx([]), '/nonexistent-root', 'w', state)
+  assert.equal(
+    sighted.members[0].subagents, 'observed',
+    '★ 枚举可用且一个子代理都没有 ⇒ `observed`（真的没有），不是 could-not-measure',
+  )
+  assert.deepEqual(sighted.members[0].liveSubagents, [])
+  assert.notEqual(
+    blind.members[0].subagents, sighted.members[0].subagents,
+    '★ 两态必须在同一条输入上真的不同形 —— 否则"读不到"与"没有"在读者眼里同形',
+  )
+
+  /**
+   * ★★★ 定向突变臂的可执行形式：把三态**塌缩**掉（把 could-not-measure 当成
+   *   observed + 空数组）⇒ 上面那条断言必须红。这正是那个歪路的最小复现。
+   */
+  const collapsed = (member) => ({ ...member, subagents: 'observed', liveSubagents: [] })
+  assert.notEqual(
+    collapsed(blind.members[0]).subagents, blind.members[0].subagents,
+    '★ 塌缩之后读数必须**变了** —— 没变说明这条断言测的不是它声称的东西（突变是空操作）',
+  )
+
+  /**
+   * ★ 反向半边：枚举入口**在**、而它**抛错** ⇒ 同样是 could-not-measure
+   *   （一次失败的基础设施不许被读成"没有子代理"）。
+   */
+  const throwing = {
+    logger: snapshotCtx.logger,
+    agents: { get: () => undefined, list: () => { throw new Error('registry exploded') } },
+  }
+  const broken = await assembleTeamSnapshot(throwing, '/nonexistent-root', 'w', state)
+  assert.equal(broken.members[0].subagents, 'could-not-measure',
+    '★ 枚举抛错 ⇒ could-not-measure（不是"没有子代理"）')
+  assert.match(broken.members[0].subagentsReason, /registry exploded/,
+    '★ 成因必须带上真正的原因，而不是一句泛泛的"读不到"')
+})
+
+test('★ 臂 15（t27 只读臂）：投影**只读** —— 一个碰一下就抛的 ctx 走完全程', () => {
+  /**
+   * ── ★★ 这一臂把"只读"从**约定**变成**机械断言**（验收第 4 条）────────────────
+   *
+   * 用户与契约都要求："this must not spawn, steer or mutate anything"。
+   * ★ "我记得我只写了读"不是证据 —— 一条会在**下一次**改动里悄悄失效。
+   *   做法是把**所有**已知的"会改变东西"的入口都换成一个**碰一下就抛**的桩，
+   *   然后跑完整条投影路径：只要它碰到任何一个，本臂当场红。
+   *
+   * ★ 桩的清单来自真实的宿主契约（`Context` 上那几个入口）：
+   *   `subagents.start` / `startContinuable` / `interrupt` / `sendMessage`、
+   *   `agent.steer` / `agent.whenIdle` / `agent.interrupt`，以及
+   *   `ctx.tools.register`（注册一个工具也是改变世界）。
+   */
+  const tripped = []
+  const boom = (name) => (...args) => {
+    tripped.push(name)
+    throw new Error(`★ 投影碰到了会改变世界的入口：${name}（args: ${JSON.stringify(args).slice(0, 80)}）`)
+  }
+  const sessions = [liveSession('m1'), liveSession('child-a', { parent: 'm1' })]
+  /** ★ 会话对象本身也上桩：`steer`/`whenIdle` 挂在那里。 */
+  const stubbed = sessions.map((session) => ({
+    ...session,
+    steer: boom('agent.steer'),
+    whenIdle: boom('agent.whenIdle'),
+    interrupt: boom('agent.interrupt'),
+  }))
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    subagents: {
+      start: boom('subagents.start'),
+      startContinuable: boom('subagents.startContinuable'),
+      interrupt: boom('subagents.interrupt'),
+      sendMessage: boom('subagents.sendMessage'),
+    },
+    tools: { register: boom('tools.register') },
+    agents: {
+      get: (id) => stubbed.find((s) => s.id === id),
+      list: () => stubbed,
+      isOwnedBy: boom('agents.isOwnedBy'),
+    },
+    effect: boom('ctx.effect'),
+  }
+
+  /** ★ 三个纯读入口各自单独过一遍（不经过快照），出错即红。 */
+  const projection = liveSessionRefs(ctx)
+  assert.equal(projection.status, 'observed', '★ 前置：这一支必须真的读到了')
+  const attribution = attributeSubagents(projection.subagents, ['m1'])
+  memberSubagents(ctx, 'm1', attribution)
+
+  assert.deepEqual(
+    tripped, [],
+    '★ 投影碰到了会改变世界的入口 —— 契约要求它**只读**：\n' + tripped.join('\n'),
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：桩**真的**会在被碰时抛 —— 缺了这一半，
+   *   一个"桩根本没接上"的夹具会让 `tripped` 恒为空，而它什么都没测到。
+   */
+  assert.throws(() => ctx.subagents.start(), /投影碰到了会改变世界的入口/,
+    '★ 反向半边：桩必须真的会抛，否则"没碰到"是恒真的')
+})
+

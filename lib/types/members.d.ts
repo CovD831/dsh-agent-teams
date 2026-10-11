@@ -462,4 +462,161 @@ export interface FrozenCandidate {
 export declare function strandedWorktrees(candidates: readonly FrozenCandidate[], dirtyOf: (worktreePath: string) => number | undefined): StrandedWorktrees;
 /** 把那一格说成一句人话（含**补救动作** —— 只说"冻着"不改变任何人的下一步）。 */
 export declare function describeStrandedWorktrees(readout: StrandedWorktrees): string;
+/**
+ * ── ★★★ 这一格修的是什么 ───────────────────────────────────────────────────────
+ *
+ * 用户的要求是明确的：**第一屏显示持久成员，点开一个成员要能看到它底下正在跑的
+ * 子代理**（连同轮次信息）。而 MEASURED（本任务开工时的普查）：
+ *
+ *     grep -n "subagent|childSession|parentSession" src/snapshot.ts
+ *     ⇒ 只命中两处**注释**，一处代码都没有。
+ *
+ * ⇒ 于是那次"重建"会有一个**空的展开层**，而那正是本仓已经撞过两次的
+ *   **「做出来了但没接上」**（shipped inert）形状：旋钮在、线没接。
+ *
+ * ── ★★ 为什么读得到（都不需要新机制）──────────────────────────────────────────
+ *
+ *   ① `ctx.agents.list()` —— 枚举**活的**会话。`src/capabilities.ts` 已经在用
+ *      （`for (const agent of ctx.agents.list()) attach(agent)`），所以它是在
+ *      **真实宿主**上验证过的入口，不是猜的。
+ *   ② `session.header.parentSession` —— 把一个子会话连到它的父会话。
+ *   ③ `foldSubagentDescriptor(sessionOwnEvents(child.session))` —— 交出描述符，
+ *      它的 `label` 带着身份。
+ *
+ * ── ★★★ 只读（验收第 4 条）──────────────────────────────────────────────────────
+ *
+ * 本函数**不** spawn、**不** steer、**不** `whenIdle`、**不**投递、**不**写团队文件。
+ * 它只调三个**纯读**入口：`agents.list()`（文档明说返回"a fresh array"）、
+ * `session.header`（一个已存在的字段）、`sessionOwnEvents`（读日志）。
+ * ⇒ 这一点由一条臂**机械地**钉住（用一个"碰一下就抛"的 ctx 去跑投影），
+ *   而不是靠"我记得没写"。
+ *
+ * ── ★★★ 三态，且"读不到"绝不圆成"它没有子代理"（验收第 3 条）────────────────────
+ *
+ * ```
+ * { status: 'observed', subagents: [...] }   —— 读了；这些就是此刻活着的子代理
+ *                                            （**空数组** = 真的一个都没有，可判定）
+ * { status: 'could-not-measure', reason }    —— 读不到（宿主没提供那个入口）
+ * ```
+ *
+ * ★ 后两态**必须不同形**。一个"枚举入口不存在就把数组当空"的实现，会让
+ *   **面板永远显示"没有子代理"** —— 而那与"确实没有"在读者眼里一模一样。
+ *   这正是本任务点名要防的形态（同 `strandedWorktrees` 的 `clear` vs
+ *   `could-not-measure`、`memberLiveness` 的 `never-spawned` vs `could-not-measure`）。
+ *
+ * ── ★ 为什么"父会话定不下来"的子代理**单独成一态**（验收第 2 条）─────────────────
+ *
+ * 一个活着的会话，如果它的 `parentSession` **在成员名单里找不到**，有几种可能：
+ * 一个一次性委派、一个本队之外的子代理、或一个父会话已经不在的孤儿。
+ * ★ 而这几种情形里**唯一不能做**的事就是**随便挑一个成员挂上去** ——
+ *   那会让面板把一个**别人的**子代理画在这个成员底下，而读的人无从分辨
+ *   （"归属错了"与"归属对了"在界面上同形，且错的那个看起来更"有内容"）。
+ * ⇒ 它们被放在**自己的一格**（`unattributed`）里如实交出去，而不是被丢掉、
+ *   更不是被硬塞给某个成员。
+ */
+export interface LiveSubagent {
+    /** 子会话 id（`agent.id`）。 */
+    readonly id: string;
+    /** 描述符的 `label`（缺席 ⇒ `''`，见下注）。 */
+    readonly label: string;
+    /** 描述符的 `mode`；读不到描述符 ⇒ 缺席（**不是**编一个 `one-shot`）。 */
+    readonly mode?: 'one-shot' | 'continuable';
+    /** 它此刻的驱动状态（`running` / `idle` / …）—— 原样交出，不翻译。 */
+    readonly status: string;
+    /**
+     * ── ★ 父会话 id（**归组的输入**，不是输出）──────────────────────────────────────
+     *
+     * 它是"谁生了它"，而归属是"它算谁的" —— 两者在**父不是本队成员**时**不同**：
+     * 那时归属落在 `unattributed`，而父会话是那件事的**证据**。
+     * ⇒ 这一格留着，读的人（与夹具）才分得出"它没有父"与"它的父不是我们的人"。
+     */
+    readonly parentSession?: string;
+}
+/** 三态：读了 / 读不到。★ `observed` 里**空数组**是"真的没有"，与 `could-not-measure` 不同形。 */
+export type SubagentProjection = {
+    readonly status: 'observed';
+    readonly subagents: readonly LiveSubagent[];
+} | {
+    readonly status: 'could-not-measure';
+    readonly reason: string;
+};
+/**
+ * 一个成员底下的子代理（面板展开层的一行）。
+ *
+ * ★ `round` **不在**这里：轮次挂在**任务**上（`TeamTask.round`），而子代理挂的是
+ *   会话。两格由**调用方**按自己的口径合起来（见 `snapshot.ts` 里那段）——
+ *   在这里猜一个轮次就是造第二份真相。
+ */
+export interface MemberSubagents {
+    readonly status: SubagentProjection['status'];
+    /** `observed` 时在场：这个成员名下的活子代理（**空数组** = 真的没有）。 */
+    readonly subagents: readonly LiveSubagent[];
+    /** `could-not-measure` 时在场。 */
+    readonly reason?: string;
+}
+/** 宿主没有可用的会话枚举入口时的成因。 */
+export declare const AGENT_ENUMERATION_UNAVAILABLE = "the host exposes no live-session enumeration, so whether a member has subagents cannot be read";
+/**
+ * 从**活的会话清单**里读出"谁的子代理是谁"。
+ *
+ * ── ★★ 为什么入参是"一份会话清单"而不是 `ctx` ────────────────────────────────────
+ *
+ * 判据是**纯数据变换**：输入（父 id → 子会话）→ 输出（归属）。把 `ctx.agents`
+ * 整个交进来会让这个函数**有能力**去 spawn/steer —— 而"它只读"就变成了
+ * "我记得它只读"。★ 只收一份已经取好的**值的数组**，等于在**签名上**证明
+ * 它不可能改变任何会话（它拿不到任何能改变东西的句柄）。
+ *
+ * ★ 同 `strandedWorktrees(candidates, dirtyOf)` 的分工：I/O 由调用方做，
+ *   纯变换留在这里。
+ * ★ 这也就是 {@link attributeSubagents} 只收 `LiveSubagent[]` 而不是收 `ctx` 的理由。
+ */
+/**
+ * 枚举 `ctx.agents.list()`，并把它折成 {@link LiveSubagent} 的清单。
+ *
+ * ★ 这是**唯一**碰宿主对象的地方（`ctx.agents`），而它只**读**。
+ * @param ctx - 插件上下文（注入 `agents`）。
+ * @returns 三态：读了（可能为空）/ 读不到。
+ */
+export declare function liveSessionRefs(ctx: Context): SubagentProjection;
+/** 一个已被枚举的会话的父会话 id（顶层会话缺席）。 */
+export declare function parentSessionOf(entry: unknown): string | undefined;
+/**
+ * 把一份活会话清单**按父会话**归组，然后交给每个成员。
+ *
+ * @param refs - 已经读到的活会话（含它们各自的父会话 id）。
+ * @param memberIds - 本队的成员会话 id（**成员**才可能是父）。
+ * @returns 成员会话 id → 它名下的子代理；外加 `unattributed`（父定不下来的那些）。
+ *
+ * ── ★★ 为什么 `unattributed` 是一格**而不是一个错误** ────────────────────────────
+ *
+ * "父会话不在本队成员名单里"是一个**可判定的事实**，不是一次读取失败：
+ * 那个会话确实活着、确实有父、而那个父不是我们的成员。把它并进
+ * `could-not-measure` 会让"一个外来子代理"看起来像"基础设施坏了"，
+ * 而它的补救动作完全不同（前者无需动作，后者要去查宿主）。
+ *
+ * ★ 而它**绝不**被并进某个成员：见上面 `MemberSubagents` 那段 ——
+ *   随便挂一个会让"归属错了"与"归属对了"在界面上同形。
+ */
+export interface SubagentAttribution {
+    /** 成员会话 id → 它名下的活子代理（**每个成员都有键**，缺席 ⇒ 空数组）。 */
+    readonly byMember: ReadonlyMap<string, readonly LiveSubagent[]>;
+    /** 父会话定不下来的活会话。★ 如实交出去，不丢、不硬塞。 */
+    readonly unattributed: readonly LiveSubagent[];
+}
+/**
+ * 归组算法。★ 顺序无关、不重排（调用方交进来的顺序就是它读得出的顺序）。
+ *
+ * ★ 一个父会话 id **只**在它真的是本队成员时才算归属 —— 这就是"随意归属"的
+ *   唯一防线（`memberIds` 是那张白名单，且它来自**持久记录**，不是猜的）。
+ */
+export declare function attributeSubagents(refs: readonly LiveSubagent[], memberIds: readonly string[]): SubagentAttribution;
+/**
+ * 一个成员底下的子代理读数 —— **面板要的那一格**。
+ *
+ * @param ctx - 插件上下文（注入 `agents`），只用它的**读**入口。
+ * @param memberId - 那个成员的会话 id（`''` ⇒ 它根本没起来 ⇒ 确定没有子代理）。
+ * @param attribution - {@link attributeSubagents} 的结果（由调用方算一次、全员共用）。
+ * @returns 三态读数。★ `subagents: []` 是"读了，真的没有"，与 `could-not-measure` 不同形。
+ */
+export declare function memberSubagents(ctx: Context, memberId: string, attribution: SubagentAttribution | undefined, projectionReason?: string): MemberSubagents;
 export {};
