@@ -1838,13 +1838,39 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * ★ 少一样，一次清理就会变成一次**改判** —— 那是本仓记过的那类最贵的浪费。
            */
           if (landedTerminal) {
-            const scan = await reclaimTerminalWorktrees({
+            /**
+             * ── ★★★ 回收扫描**不许挂在完成路径上** ──────────────────────────────────
+             *
+             * MEASURED（本仓实测）：这一扫要 **19.6 秒**（29 棵 worktree × 约 37 个
+             * git 子进程 —— `execFileSync` 是**同步**的），而它原来写的是
+             * `const scan = await reclaimTerminalWorktrees(…)` 紧跟一句 `void scan`。
+             *
+             * ★ 那个 `void` 是**症状**：写它的人**想要**"发了就不管"，而 `await`
+             *   让它在**返回之前**跑完。`void` 在这里没有任何作用 —— 一个 `await`
+             *   过的值再 `void`，只是把一句"我本想异步"的意图留在了代码里。
+             *
+             * ★ 后果就是用户看到的那一幕：`complete` / `update_task` **卡住十几秒**
+             *   甚至更久，而 **team.json 早就写完了**。调用方以为失败、去重试，
+             *   而每次重试**再付一次 19.6 秒** ⇒ 看起来就是"卡在 complete 上"。
+             *   ★ 而它还持有团队的写锁窗口，所以别的成员一起被拖慢。
+             *
+             * ★ 处置：**真的**不阻塞 —— 扫描在后台跑，完成路径立刻返回。
+             *   它本来就不产出完成所必需的任何读数（唯一的消费是那句 `void scan`），
+             *   所以推迟它**不改变任何裁决**，只改变"谁等谁"。
+             *   ★ 而失败必须**被记下来**而不是被吞掉：一个静默失败的后台任务
+             *     与"没有后台任务"同形，那正是本仓反复记过的形态。
+             */
+            const scanTask = reclaimTerminalWorktrees({
               repo: workspace,
               tasks: fresh.tasks,
               teamId: fresh.id,
               logger: ctx.logger,
             })
-            void scan
+            void scanTask.catch((error: unknown) => {
+              ctx.logger?.warn?.(
+                `agent-teams: background terminal-worktree scan failed for team "${fresh.id}" — nothing was deleted: ${describeError(error)}`,
+              )
+            })
           }
           /**
            * ── ★★ 成员提交一次更新 ⇒ 顺手**读一遍它的会话日志**（这是第二个观察时刻）──
