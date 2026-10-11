@@ -45,7 +45,7 @@ import { installHmrTrace } from './hmr-trace.ts'
 import { pluginRoot } from './tools/shared/entities.ts'
 import { TEAM_TOOL_NAMES } from './tool-names.ts'
 
-import { authenticatedWebRoutes, readJsonRequest, RequestBodyError, type BrowserRequestGate, type WebRouteHost } from './web-routes.ts'
+import { authenticatedWebRoutes, loopbackOnlyRoute, pluginShell, readJsonRequest, RequestBodyError, type BrowserRequestGate, type ShellStatus, type WebRouteHost } from './web-routes.ts'
 
 /** Web-server service key candidates, newest first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer'] as const
@@ -54,6 +54,18 @@ const WORKSPACE_KEYS = ['workspaceRegistry', 'workspace'] as const
 
 export const name = 'agent-teams'
 export const inject = ['tools', 'llm', 'subagents', 'systemPrompt', 'agents']
+
+/**
+ * 本插件每一棵宿主 Context 上的**挂载状态**（t18）。
+ *
+ * ★ 用 `WeakMap` 而不是 `ctx.<我们的字段>`：宿主对象不是我们的公告板，
+ *   而"我们往它上面挂过什么"不该成为别人要读源码才知道的事。
+ * ★ 弱引用 ⇒ 一棵 Context 被丢弃时它跟着走，不留全局增长的状态。
+ */
+const shellState = new WeakMap<Context, ShellStatus>()
+
+/** 降级状态的读取路径（回环围栏）。★ 与其余路由同一命名空间，但**不**共用鉴权链。 */
+const DEGRADED_ROUTE = '/plugins/dsh-agent-teams/degraded'
 
 /** Plugin configuration. */
 export interface Config {
@@ -152,7 +164,89 @@ export function usageSectionText(toolNames: string, profilesText = ''): string {
 Tools: ${toolNames}${profilesText === '' ? '' : `\n\n${profilesText}`}`
 }
 
+/**
+ * ── ★★★ 挂载外壳（t18）：AgentTeams 的缺陷只让它自己降级 ──────────────────────────
+ *
+ * MEASURED（t18，本机 cordis 4.0.4；`scripts/gate-fault-isolation.test.mjs` 钉住）：
+ *
+ *     一个插件的 `apply()` 抛错 ⇒ cordis **已经**把它隔离了：
+ *     同步抛出被 `composeError` 捕获 ⇒ `ctx.plugin()` 正常返回 ⇒ **兄弟插件照常挂载**
+ *     ⇒ 而错误**只**落进 `ctx.logger.error(...)` 一行。
+ *
+ * ★★ 所以本任务的缺口**不是**"宿主会崩"，而是**失败了读不出来**：
+ *   一行日志会随滚动消失，而**读不到原文的失败与健康启动在观测上同形** ——
+ *   这正是本队记账最久的形态（也是本任务契约原话要求"用路由而不是只用控制台"的原因）。
+ *
+ * ── 因此外壳做两件事，而它们**缺一不可** ────────────────────────────────────────
+ *
+ *   ① **永不抛错**：`apply` 的同步抛出与 promise rejection 都接住（见 `pluginShell`）。
+ *      ★ 这保证"我们这一行"再怎么坏也不会成为宿主挂载事务里的一个异常源。
+ *   ② **把失败变成可查询的**：状态挂在 `ctx` 上的一个**弱引用**里，由
+ *      `GET /plugins/dsh-agent-teams/degraded` 读出来（回环围栏，见 `loopbackOnlyRoute`）。
+ *
+ * ★ 而第 ① 条有个必须防的副作用：**"吞掉异常然后报健康"比不隔离更坏**
+ *   （它把一次可见的崩溃换成一次静默的半吊子启动）⇒ 所以降级态**不许**并进 healthy，
+ *   三态必须不同形（外壳自己保证了这一条，并由夹具的定向突变钉住）。
+ */
 export function apply(ctx: Context, config: Config): void {
+
+  const shell = pluginShell(name, {
+    apply: () => applyInner(ctx, config),
+    log: (entry) => {
+      /**
+       * ★ 日志**保留**（它是给人看的第一现场），但它**不是**唯一的出口 ——
+       *   那正是本任务要修的那一格。措辞把它与"普通告警"分开：
+       *   读的人要能一眼看出"这一行**没挂起来**"，而不是"它抱怨了一句"。
+       */
+      ctx.logger.error(
+        `agent-teams: this plugin FAILED TO MOUNT at stage "${entry.stage}" and is degraded`
+        + ` (the host plugin tree is unaffected): ${entry.reason}`,
+      )
+    },
+  })
+
+  /**
+   * ★ 把读到的状态**镜像**进弱表 —— 路由读的是它。
+   *   外壳的 `status` 是活的 getter，所以每次挂载后重新镜像一次即可。
+   *
+   * ★★ 而**无论如何**都要同步（包括挂载失败之后）：
+   *   路由必须在"我们这一行坏了"时**仍然读得到**，否则它就只是又一个"只在健康时可用"
+   *   的读数 —— 而那与没有这个路由是同形的。
+   */
+  void shell.mount().then((status) => {
+    shellState.set(ctx, status)
+  }).catch((error: unknown) => {
+    /**
+     * ★ 这一支**理论上不可达**（外壳永不抛错），但"不可达"是**要防守的假设**：
+     *   若它真的到了这里，那说明外壳自己坏了 —— 而那必须**读得出来**，
+     *   不许因为"我们觉得不可能"而静默。
+     */
+    shellState.set(ctx, {
+      plugin: name,
+      state: 'degraded',
+      degraded: [{
+        plugin: name,
+        stage: 'apply',
+        reason: `the isolation shell itself threw (this should be unreachable): ${error instanceof Error ? error.message : String(error)}`,
+        at: new Date().toISOString(),
+      }],
+    })
+  })
+}
+
+/**
+ * ★ `apply` 的**本体** —— 名字与原实现逐字相同，只是被外壳包了一层。
+ *
+ * ★★ 为什么保持它同步：外壳 `await` 它的返回值，于是同步抛出与 rejected promise
+ *   在**同一条路**上被接住；把它改成 async 只会多一层没有信息量的包装。
+ */
+function applyInner(ctx: Context, config: Config): void {
+  /**
+   * ★ 起始态是 `not-mounted`（**不是** healthy）：外壳还没跑完。
+   *   路由读它时若挂载还在进行，读到的就是这一态 —— 而它与"挂好了"不同形。
+   */
+  shellState.set(ctx, { plugin: name, state: 'not-mounted', degraded: [] })
+
   const resolved: ToolsConfig = {
     stateDir: config.stateDir ?? '.agent-teams',
     memberProvider: config.memberProvider ?? 'spawn',
@@ -232,6 +326,32 @@ export function apply(ctx: Context, config: Config): void {
     if (rawWebServer === undefined || workspaceRegistry === undefined) return
     const webServer = authenticatedWebRoutes(rawWebServer, () => ctx.get('connection') as BrowserRequestGate | undefined)
     webRegistered = true
+
+    /**
+     * ── ★★★ 降级状态路由（t18）—— 它**必须**是最早注册的那一条 ────────────────────
+     *
+     * 契约原话：「把失败状态通过一条路由报出来，而不是只报在控制台。」
+     *
+     * ★★★ 而它**不经过** `authenticatedWebRoutes`（那是**别的**路由要的网闸）：
+     *   本路由自己带**回环围栏**（`loopbackOnlyRoute`）。理由是本任务的核心语义：
+     *
+     *     一个"这个插件为什么没挂起来"的读数，如果它挂在**我们插件自己的鉴权链**上，
+     *     那么**在我们插件坏掉的那一天，它也跟着坏** ——
+     *     而"插件降级"恰恰是它唯一该说话的时刻。
+     *
+     *   ⇒ ★ 这正是本队记账的形态：一个读数若与它所描述的东西共命运，
+     *     它就**永远说不了那句最该说的话**。
+     *     ⇒ 所以：它只依赖 `webServer`（宿主的），不依赖我们的 `connection` 网闸、
+     *       不依赖 workspace 注册表、不依赖 `registerAgentTeamsTools` 的任何产出。
+     *     ⇒ 也因此在 `registerWebSurface` 里**先于**那几条业务路由注册。
+     *
+     * ★ 回环围栏保护的是信息（错误原文里可能带绝对路径），见 `loopbackOnlyRoute`。
+     */
+    ctx.effect(() => loopbackOnlyRoute(rawWebServer, DEGRADED_ROUTE, () => shellState.get(ctx) ?? {
+      plugin: name,
+      state: 'not-mounted',
+      degraded: [],
+    }), 'agent-teams: degraded route')
 
     // Activity panel data route: the browser floater polls this for team
     // snapshots (disk truth + live subagent activity). Mirrors the Claude
