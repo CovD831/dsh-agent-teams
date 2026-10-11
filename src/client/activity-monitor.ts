@@ -1,5 +1,78 @@
 /** Shared, demand-driven state for the AgentTeams browser monitor. */
 
+/**
+ * The three-way classification of a `failed` task: why it stopped.
+ *
+ * Its values mirror the host's `FailureKind` (`src/state.ts` `failureKindOf`) and
+ * are deliberately NOT renamed here, so a third vocabulary cannot appear.
+ * This is the presentation-side mirror of a server fact, not a second source of
+ * truth: the client never recomputes the rules, only renders the value it got.
+ */
+export type TaskFailureKind = 'inconclusive' | 'failed_delivery' | 'failed_context'
+
+/** Every classification the client can render for a task's terminal state. */
+export type TaskFailureTone = TaskFailureKind | 'unknown'
+
+/**
+ * Render-facing classification of a terminal failure.
+ *
+ * ★ `unknown` is load-bearing, not a default to be styled away: an absent or
+ *   unrecognised `failureKind` means "the host did not measure this", which must
+ *   never be drawn as any of the three measured kinds. It falls back to today's
+ *   single `failed` behaviour instead — see {@link taskFailureTone}.
+ */
+export const TASK_FAILURE_TONES: readonly TaskFailureTone[] = [
+  'inconclusive', 'failed_delivery', 'failed_context', 'unknown',
+]
+
+/** Task shape needed to classify a failure (the optional kind field plus status). */
+export interface FailureKindTask {
+  readonly status: string
+  /** Published by the host only for a task whose status is `failed`. */
+  readonly failureKind?: string
+}
+
+/**
+ * Classify one task's terminal state for rendering.
+ *
+ * Returned per task so the UI can render the three states distinctly AND so a
+ * test can assert *why* without reading CSS.
+ *
+ * @param task - host task row; `failureKind` may be absent on older hosts.
+ * @returns `'inconclusive'` (review found problems — the gate did its job),
+ *   `'failed_delivery'` (the deliverable really broke),
+ *   `'failed_context'` (no measured evidence), or `'unknown'`.
+ */
+export function failureToneOf(task: FailureKindTask): TaskFailureTone {
+  if (task.status !== 'failed') return 'unknown'
+  const kind = task.failureKind
+  if (kind === 'inconclusive' || kind === 'failed_delivery' || kind === 'failed_context') return kind
+  /**
+   * ★ Fall back rather than guess. An absent `failureKind` is "not measured",
+   *   and the conservative render is today's undifferentiated failure — never
+   *   an amber "found problems" that nobody actually found.
+   */
+  return 'unknown'
+}
+
+/**
+ * Whether this terminal task should read as amber convergence rather than red.
+ * True only when the host MEASURED that the review/repair loop did its job.
+ */
+export function isConsultativeFailure(task: FailureKindTask): boolean {
+  return failureToneOf(task) === 'inconclusive'
+}
+
+/** Whether this terminal task carries measured evidence that the work broke. */
+export function isBrokenFailure(task: FailureKindTask): boolean {
+  return failureToneOf(task) === 'failed_delivery'
+}
+
+/** Whether nothing was measured either way — neither red nor green. */
+export function isUnmeasuredFailure(task: FailureKindTask): boolean {
+  return failureToneOf(task) === 'failed_context'
+}
+
 /** One member row of a host snapshot. */
 export interface ActivityMember {
   readonly id: string
@@ -11,6 +84,12 @@ export interface ActivityMember {
   readonly executionPrompt?: string
   readonly status?: 'idle' | 'working' | 'removed'
   readonly activity: 'working' | 'idle' | 'unknown'
+  /**
+   * Session-liveness state published by the host: whether the member's session
+   * is still alive at all. ★ Distinct from `activity`, which is a durable field
+   * that keeps saying `working` after the session dies; absent on older hosts.
+   */
+  readonly liveness?: string
   readonly progress: number
   readonly done: number
   readonly total: number
@@ -32,6 +111,12 @@ export interface ActivityTask {
   readonly kind?: string
   readonly round?: number
   readonly verdict?: string
+  /**
+   * Why a `failed` task stopped, as classified by the host (see TaskFailureKind).
+   * ★ Optional: older snapshots and non-failed tasks omit it, and the UI must
+   *   then fall back to the undifferentiated failure rather than guessing.
+   */
+  readonly failureKind?: string
   /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
   readonly updatedAt?: number
 }

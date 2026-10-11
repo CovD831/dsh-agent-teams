@@ -2235,3 +2235,352 @@
 .team[data-workspace-team] .dagOwner { white-space: nowrap; max-width: 105px; }
 /* The page scrolls as a whole; an overlay approval bar would cover form saves. */
 .team[data-workspace-team] .planApproveRow { position: static; }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Review convergence (t13): rounds, tones, and the member elapsed clock.
+ *
+ * ★ Colour comes only from host --dsw-alias-* tokens, so the panel keeps
+ *   following the host theme (including dark mode) with no second palette.
+ *   The loop laid out here follows the first-party conventions: a 32px row,
+ *   16px markers/dots, and a fixed-width status column so tails align.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.loopSection {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 0 0;
+}
+
+.loopHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.loopToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.loopToggle:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.loopTitle {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.loopHint {
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loopList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 0 16px;
+  list-style: none;
+}
+
+/* ★ First-party run/phase row height: 32px. */
+.loopRound {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 32px;
+}
+
+/* ★ First-party leading slot: 16px, fixed so markers align vertically. */
+.loopRoundMarker {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.loopRound[data-tone='converging'] .loopRoundMarker {
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.loopRound[data-tone='failed'] .loopRoundMarker {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.loopRound[data-tone='completed'] .loopRoundMarker {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 16%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.loopRound[data-tone='running'] .loopRoundMarker {
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.loopRoundBody {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.loopRoundTone {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loopRoundTone[data-tone='converging'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.loopRoundTone[data-tone='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.loopRoundTone[data-tone='completed'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.loopRoundTone[data-tone='running'] {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.loopRoundTasks {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.loopTask {
+  padding: 0 5px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.loopTask[data-tone='converging'] {
+  background: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+.loopTask[data-tone='failed'] {
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+.loopTask[data-tone='unmeasured'] {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+.loopTask[data-tone='completed'] {
+  background: var(--dsw-alias-state-success-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+/* ★ Fixed-width status column, right-aligned, so every round's tail aligns. */
+.loopStatusTail {
+  display: inline-flex;
+  flex: none;
+  width: 132px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loopStatusTail[data-tone='converging'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.loopStatusTail[data-tone='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.loopStatusTail[data-tone='completed'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.loopStatusTail[data-tone='running'] {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+/* ── Member elapsed clock (identity + status only; no logs or outputs) ───────── */
+
+.memberClock {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ★ Stalled is qualitatively different from elapsed work: a dead session's open
+ *   task keeps counting, and counting that as progress is the reading t4 removed. */
+.memberClock[data-kind='stale'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+/* ── Member row: 16px status dot + fixed-width status tail (t13) ─────────────── */
+
+/* ★ The member row grid gains one leading 16px slot for the status dot, so the
+ *   dot column and the fixed-width tail align across every member row. */
+.memberRow {
+  grid-template-columns: 46px 16px minmax(0, 1fr) 96px;
+  gap: 6px;
+}
+
+/**
+ * ★ First-party member status dot: 16px, fixed, colour from host tokens only.
+ *   `stalled` is amber because a dead session with open work is a thing to act
+ *   on, not a green "still going" — see memberDotTone for the reading order.
+ */
+.memberDot {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px solid var(--dsw-alias-bg-layer-1);
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberDot[data-tone='running'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.memberDot[data-tone='stalled'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.memberDot[data-tone='delivered'] {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.memberDot[data-tone='idle'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberDot[data-tone='dormant'] {
+  background: transparent;
+  border-color: var(--dsw-alias-border-l3);
+}
+
+/* ★ Fixed-width status tail so every member row's status aligns vertically. */
+.memberStatusTail {
+  display: inline-flex;
+  flex: none;
+  width: 96px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* ── Terminal tones reuseable by every task surface (t13) ────────────────────── */
+
+.dagNode[data-state='converging'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 52%, var(--dsw-alias-border-l2));
+}
+
+.dagNode[data-state='converging'] .dagNodeDot {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.dagNode[data-state='unmeasured'] .dagNodeDot {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.progressSegments > span[data-state='converging'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.progressSegments > span[data-state='unmeasured'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.assignmentChip[data-state='converging'] {
+  background: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+}
+
+.assignmentChip[data-state='unmeasured'] {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+.taskDetailBadge[data-state='converging'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 42%, var(--dsw-alias-border-l2));
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.taskDetailBadge[data-state='unmeasured'] {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-tertiary);
+}

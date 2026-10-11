@@ -15,10 +15,11 @@ import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, type M
 import { gitChangedPaths } from './harness-compat.ts'
 import { worktreeDirName } from './worktree.ts'
 import {
-  CAPTAIN_KEY, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
+  CAPTAIN_KEY, failureKindOf, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
   taskDepthsById, taskVisualState,
 } from './state.ts'
 import { TERMINAL_TASK_STATUSES, type MemberStatus, type TeamState, type TeamTask } from './types.ts'
+import type { FailureKind } from './state.ts'
 
 /** Visual task state for the activity panel. */
 export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -72,6 +73,13 @@ export interface TeamActivityTask {
   readonly kind?: string
   readonly round?: number
   readonly verdict?: string
+  /**
+   * Why a `failed` task stopped, as classified by `failureKindOf` in src/state.ts.
+   * ★ Present ONLY when `status === 'failed'`: its absence then means "not
+   *   applicable", which must stay distinguishable from any of the three kinds —
+   *   otherwise an unmeasured stop would read as one specific kind of failure.
+   */
+  readonly failureKind?: FailureKind
   /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
   readonly updatedAt: number
 }
@@ -259,6 +267,24 @@ export async function assembleTeamSnapshot(
       ...task.kind === undefined ? {} : { kind: task.kind },
       ...task.round === undefined ? {} : { round: task.round },
       ...task.verdict === undefined ? {} : { verdict: task.verdict },
+      /**
+       * ── ★★★ `failed` 的【三种】成因（t13 的客户端那一半）──────────────────────
+       *
+       * `status` 只有一个值 `failed`，而它同时盖着三件补救动作完全不同的事：
+       *
+       *     inconclusive    —— 这个任务的性质就是"找问题"，而它【找到了】
+       *                        （审查给了 needs_revision / reject）
+       *     failed_delivery —— 交付物【真的坏了】（验收项 failed / verify 非 0）
+       *     failed_context  —— 没有测到任何证据（★ 缺省，最保守）
+       *
+       * ★ 把它们压成一个 `failed`，面板就只能画成红色 —— 于是"这道门做成了它
+       *   该做的事"被读成"东西做砸了"。分类的判据**不在本文件**：它逐字来自
+       *   `src/state.ts` 的 `failureKindOf`，这里只是把它【交出去】。
+       *
+       * ★ 只在 `status === 'failed'` 时在场 —— 于是"不适用"与"三种之一"不同形：
+       *   一个没有失败的任务不带这一格，而不是带一个假的 `failed_context`。
+       */
+      ...task.status !== 'failed' ? {} : { failureKind: failureKindOf(task) },
       updatedAt: task.updatedAt,
     })),
     messageCount: captainInbox.length

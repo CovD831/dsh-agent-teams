@@ -1,4 +1,12 @@
 /** Pure relationship projections used by the AgentTeams activity panel. */
+/**
+ * Statuses after which a task no longer moves; every other status is open work.
+ * ★ Single source for this fact: both the loop projection and the member clock
+ *   read it from here, so a second list cannot drift out of step.
+ */
+export declare const TERMINAL_TASK_STATUSES: readonly ["completed", "failed", "cancelled"];
+/** Whether a task stopped for good, independent of why. */
+export declare function taskIsTerminal(status: string): boolean;
 /** Minimum task shape needed to derive dependency relationships. */
 export interface RelationshipTask {
     readonly id: string;
@@ -151,6 +159,188 @@ export declare function activityPanelShouldAutoExpand({ alreadyAutoOpened, pageS
  * chain from someone navigating the task map with the keyboard.
  */
 export declare function dependencyFocusTaskId(pinnedTaskId: string | null, keyboardTaskId: string | null, hoverTaskId: string | null): string | null;
+/** Minimal task shape needed to classify a failure outcome for rendering. */
+export interface LoopTask {
+    readonly id: string;
+    readonly status: string;
+    readonly round?: number;
+    /** The host's classification when `status` is `failed`; absent on older hosts. */
+    readonly failureKind?: string;
+}
+/** Presentation tone for one terminal outcome, including the undifferentiated fallback. */
+export type LoopTone = 'converging' | 'failed' | 'unmeasured' | 'blocked' | 'open' | 'running' | 'completed' | 'cancelled';
+/**
+ * Render-facing tone of one terminal task.
+ *
+ * ★ This is the one place the three outcomes become three UI states. The
+ *   distinction is the whole point: a review that returned `needs_revision`
+ *   (inconclusive) did its job and must read as convergence; a broken
+ *   deliverable must stay red; an unmeasured stop is neither.
+ */
+export declare function taskLoopTone(task: LoopTask): LoopTone;
+/** How long one review/repair round has been reported as running. */
+export interface RoundElapsed {
+    readonly round: number;
+    readonly ms: number;
+}
+/**
+ * One review/repair round: its durable index, its tasks, and its tone.
+ *
+ * ★ The tone is the round's, not any single task's: a round where the review
+ *   found problems is converging even while its repair is still running, so the
+ *   marker stays amber instead of flipping through every task's own colour.
+ */
+export interface LoopRound<T extends LoopTask> {
+    readonly round: number;
+    readonly tasks: readonly T[];
+    readonly tone: LoopTone;
+}
+/** Complete, display-ordered review/repair loop projection. */
+export interface ReviewLoop<T extends LoopTask> {
+    readonly rounds: readonly LoopRound<T>[];
+    /** Durable task ids carrying an explicit round index. */
+    readonly tracked: number;
+}
+/**
+ * The tone of one round as a whole.
+ *
+ * Precedence is deliberate: an unsettled outcome outranks a settled one, so a
+ * round whose review found problems cannot be painted green by the completed
+ * tasks riding alongside it. Within the unsettled group the order is
+ * failed > converging > unmeasured > running, i.e. the most consequential
+ * reading wins, and a round with nothing left to decide reads as completed.
+ */
+export declare function roundTone<T extends LoopTask>(tasks: readonly T[]): LoopTone;
+/**
+ * How abnormal a loop is, derived only from the durable round tones.
+ *
+ * ★ `abnormal` includes `converging` on purpose. The first-party rule opens
+ *   abnormal levels so the marker can be seen; a collapsed amber marker is
+ *   invisible, and invisible is indistinguishable from absent — which would
+ *   quietly turn "the gate found problems" back into "nothing happened".
+ */
+export type LoopMode = 'abnormal' | 'running' | 'clean';
+/** Durable facts about a loop, with no UI state mixed in. */
+export interface LoopFacts {
+    readonly mode: LoopMode;
+    /** Count of tracked round tasks; a new round changes this. */
+    readonly count: number;
+}
+/** Disclosure state: durable facts plus the user's explicit choice. */
+export interface LoopDisclosure extends LoopFacts {
+    readonly open: boolean;
+    /** True once the user toggled; their choice then outranks the derived default. */
+    readonly userSet: boolean;
+}
+/**
+ * Derive a loop's disclosure facts from durable data.
+ *
+ * @param loop - the loop projection.
+ * @param discarded - a discarded plan has no outcomes, only "never ran".
+ */
+export declare function loopFacts<T extends LoopTask>(loop: ReviewLoop<T>, discarded?: boolean): LoopFacts;
+/**
+ * Resolve the next disclosure state.
+ *
+ * ★ With no previous state the initial value is rebuilt from the durable facts,
+ *   never remembered from a prior mount: a remount must not silently hide a
+ *   loop that the facts say is abnormal.
+ *
+ * ★ Once `userSet`, an unchanged set of facts leaves the user's choice alone —
+ *   that is what "the choice survives re-renders" means. But escalation or a
+ *   new round reopens it: something happened, and hiding it would be the same
+ *   defect as collapsing it in the first place.
+ */
+export declare function nextLoopDisclosure(current: LoopDisclosure | undefined, facts: LoopFacts): LoopDisclosure;
+/** Apply one explicit user toggle; the result is a user choice from then on. */
+export declare function toggleLoopDisclosure(current: LoopDisclosure): LoopDisclosure;
+/** Whether a review/repair loop exists: ≥2 rounds, the shape a single run never has. */
+export declare function hasReviewLoop<T extends LoopTask>(tasks: readonly T[]): boolean;
+/**
+ * Project the review/repair loop as ordered rounds with round markers.
+ *
+ * A review that returns `needs_revision` is not a failure: the host generates
+ * the next round (`planQualityFollowUp` in src/quality-gates.ts). Reading that
+ * as an unrelated red task is exactly what this projection exists to prevent,
+ * so tasks are grouped by their durable `round` index instead of being listed
+ * by id and hoping the reader notices `review-round-2` follows `review-round-1`.
+ *
+ * @param tasks - team tasks; only those carrying a `round` index participate.
+ * @returns rounds ascending by index; the ascending order IS the loop.
+ */
+export declare function reviewLoop<T extends LoopTask>(tasks: readonly T[]): ReviewLoop<T>;
+/** One status tail value: which durable task states map to which tail text. */
+export type RoundTailCountKey = 'converging' | 'failed' | 'unmeasured' | 'running' | 'completed';
+/** Locale key of one round-tail count. */
+export type RoundTailKey = `round.tail.${RoundTailCountKey}`;
+/**
+ * Format one round's status tail as counts per outcome.
+ *
+ * Statuses that need a decision come first and always list together, so a round
+ * that found problems never reads as "everything finished". Completed rides
+ * along only when the round is otherwise still open, mirroring the first-party
+ * `phaseStatusSummary` ordering (completed leading when nothing is active).
+ *
+ * ★ The tail only ever counts outcomes the host actually measured: an
+ *   unclassified failure falls back to `failed` inside {@link taskLoopTone},
+ *   which is today's behaviour, so the tail never invents a fourth kind.
+ */
+export declare function roundTailCounts<T extends LoopTask>(tasks: readonly T[], t: (key: string, params?: Record<string, unknown>) => string, separator: string): string;
+/**
+ * Locale keys for one round-tail count.
+ *
+ * These reuse the pre-existing `task.status.*` vocabulary on purpose: adding a
+ * parallel `round.*` dictionary would be a second source of truth for the same
+ * words, and the two sets would drift the moment one of them is edited.
+ */
+export declare const ROUND_TAIL_LABEL: Readonly<Record<RoundTailCountKey, string>>;
+/** What one member's elapsed readout means. */
+export type MemberClockKind = 
+/** The member's own session is live and working; the clock counts real progress. */
+'running'
+/** Work is still open but nothing is driving it; the clock counts abandonment, not work. */
+ | 'stale'
+/** Nothing open to time. */
+ | 'none';
+/** Complete elapsed readout for one member row. */
+export interface MemberClock {
+    readonly kind: MemberClockKind;
+    readonly ms: number;
+}
+/** Minimal member shape the clock needs (matches one snapshot member row). */
+export interface ClockMember {
+    readonly name: string;
+    readonly activity?: string;
+    /** Session-liveness state when the host publishes it; absent on older snapshots. */
+    readonly liveness?: string;
+    readonly currentTask?: string;
+}
+/** Minimal task shape the clock needs. */
+export interface ClockTask {
+    readonly id: string;
+    readonly assignee: string;
+    readonly status: string;
+    /** Durable last-write stamp written by the host on every durable change. */
+    readonly updatedAt?: number;
+}
+/**
+ * Read how long a member has been on the task it is currently on.
+ *
+ * The stamp comes from the task's durable `updatedAt` — a fact the host writes
+ * on every change — never from a timer started in the browser, which would be
+ * a guess that resets on reload.
+ *
+ * ★ The clock distinguishes running from stale because a dead member's open
+ *   task still carries a fresh-looking stamp. Counting that as elapsed work is
+ *   precisely the reading task t4 removed, so it is rendered as stalled instead.
+ *
+ * @param member - the member row; `liveness` decides running vs stale when present.
+ * @param tasks - the team's tasks, supplying the durable stamps.
+ * @param now - observation instant, injected so this stays pure.
+ */
+export declare function memberClock(member: ClockMember, tasks: readonly ClockTask[], now: number): MemberClock;
+/** Compact elapsed copy for one row: `4s`, `12m`, `1h 5m`. */
+export declare function formatElapsed(ms: number): string;
 /** Group tasks by their precomputed dependency depth. */
 export declare function taskStages<T extends RelationshipTask>(tasks: readonly T[]): readonly RelationshipStage<T>[];
 /**

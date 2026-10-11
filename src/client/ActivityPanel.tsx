@@ -40,12 +40,22 @@ import {
   COMPACT_DAG_NODE_HEIGHT,
   COMPACT_DAG_NODE_WIDTH,
   dependencyFocusTaskId,
+  formatElapsed,
+  memberClock,
   memberRouteLabel,
   orderDelegationMembers,
   relatedTaskIds,
+  loopFacts,
+  nextLoopDisclosure,
+  reviewLoop,
+  roundTailCounts,
+  taskLoopTone,
   taskModelLabel,
   teamIsActive,
+  toggleLoopDisclosure,
   usesParallelTaskGrid,
+  type LoopDisclosure,
+  type LoopTask,
 } from './activity-model.ts'
 import {
   ACTIVITY_HALT_URL,
@@ -83,6 +93,8 @@ import css from './ActivityPanel.module.css'
 
 /** Grace before the panel collapses once no team remains. */
 const AUTOCLOSE_GRACE_MS = 2000
+/** Elapsed readouts refresh once a second while a member is actually working. */
+const MEMBER_CLOCK_TICK_MS = 1000
 /**
  * Page-settle window after mount: activity restored on page load only shows
  * the collapsed badge, so the panel never yanks the conversation column
@@ -179,6 +191,41 @@ function taskTone(state: ActivityTask['state'], status: string): string {
   return state
 }
 
+/**
+ * Terminal-outcome tone for every surface that colours a task.
+ *
+ * ★ This is the fix for "a review that found problems renders as a red failure".
+ *   The three measured outcomes get three distinct tones: a consultative task
+ *   whose job was to find problems renders AMBER (`converging`), a genuinely
+ *   broken deliverable stays red, and an unmeasured stop renders as neither.
+ *
+ * ★ When the host has not published a classification, this returns the SAME
+ *   value `taskTone` did before, so nothing regresses on an older snapshot —
+ *   the new states only appear where they were actually measured.
+ */
+function taskTerminalTone(task: ActivityTask): string {
+  if (task.status === 'cancelled') return 'cancelled'
+  if (task.status !== 'failed') return taskTone(task.state, task.status)
+  return taskLoopTone(task)
+}
+
+/**
+ * Locale key for one round's tone label.
+ *
+ * Reuses the pre-existing `task.status.*` vocabulary: a parallel `round.*`
+ * dictionary would be a second source of truth for the same words.
+ */
+const ROUND_TONE_LABEL: Readonly<Record<string, AgentTeamsLocaleKey>> = {
+  converging: 'task.status.failed',
+  unmeasured: 'task.status.notRun',
+  failed: 'task.status.failed',
+  running: 'task.status.inProgress',
+  open: 'task.status.pending',
+  blocked: 'task.status.claimed',
+  completed: 'task.status.completed',
+  cancelled: 'task.status.cancelled',
+}
+
 function Chevron({ open }: { readonly open: boolean }) {
   return (
     <svg className={css.chevron} data-open={open} width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
@@ -260,6 +307,44 @@ function memberStatusText(
   return t(member.activity === 'idle' ? 'member.status.idle' : 'member.status.unknown')
 }
 
+/** Presentation tone of one member's 16px status dot. */
+export type MemberDotTone = 'running' | 'stalled' | 'delivered' | 'idle' | 'dormant'
+
+/** Context flags that decide which member dot tone applies. */
+interface MemberDotContext {
+  readonly discarded?: boolean
+  readonly stopped?: boolean
+  readonly staged?: boolean
+  readonly historic?: boolean
+}
+
+/**
+ * The tone of one member's status dot.
+ *
+ * ★ Liveness is read BEFORE `activity`, and the order is the whole point:
+ *   `activity` is a durable field that keeps saying `working` after the member's
+ *   session dies, so a dead member would keep a "running" dot forever — the
+ *   residual reading task t4 exists to remove. A member whose session is gone
+ *   while its work is still open therefore reads `stalled` (amber), not `running`.
+ *
+ * ★ When the host publishes no liveness field, this falls back to `activity`
+ *   exactly as before rather than inferring a state nobody measured.
+ */
+function memberDotTone(member: ActivityMember, context: MemberDotContext): MemberDotTone {
+  if (context.discarded === true || context.staged === true) return 'dormant'
+  if (context.stopped === true || context.historic === true) return 'idle'
+  const liveness = member.liveness
+  if (liveness !== undefined && liveness !== '') {
+    if (liveness === 'working') return 'running'
+    if (liveness === 'not-live') return 'stalled'
+    if (liveness === 'never-spawned') return 'dormant'
+    /** `idle` / `could-not-measure`: alive but not driving, or unmeasured. */
+    return 'idle'
+  }
+  if (member.activity === 'working') return 'running'
+  return member.activity === 'idle' ? 'idle' : 'dormant'
+}
+
 function compactTaskLabel(subject: string): string {
   const withoutVerb = subject.replace(/^开发\s*/u, '').replace(/^\d+[-_.、\s]*/u, '')
   const head = withoutVerb.split(/[（(·：:]/u)[0]?.trim() ?? withoutVerb
@@ -299,6 +384,109 @@ function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = fal
   return t('task.summary.waitingSchedule')
 }
 
+/**
+ * Now-stamp for elapsed readouts.
+ *
+ * ★ A member's elapsed time is read from the task's durable `updatedAt` against
+ *   this stamp, never from a timer started in the browser — a browser timer would
+ *   be an invented fact that resets on every reload.
+ */
+function useElapsedNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => { setNow(Date.now()) }, MEMBER_CLOCK_TICK_MS)
+    return () => { clearInterval(timer) }
+  }, [active])
+  return now
+}
+
+/**
+ * Review/repair rounds with the round markers that make convergence visible.
+ *
+ * A gate that returns `needs_revision` is the system working: the host then
+ * generates the next round. Rendered as disconnected red tasks, an external
+ * observer sees a run of accidents; rendered as ordered rounds with tail
+ * counts, the same durable data reads as one loop that is narrowing.
+ *
+ * ★ Disclosure follows the first-party rule: a loop with anything unsettled
+ *   opens by default, so an amber marker can never hide inside a collapsed row.
+ */
+
+function ReviewLoopSection({ tasks, t, discarded = false, onSelectTask }: {
+  readonly tasks: readonly ActivityTask[]
+  readonly t: AgentTeamsTranslate
+  readonly discarded?: boolean
+  readonly onSelectTask?: (id: string | null) => void
+}) {
+  const loop = useMemo(() => reviewLoop(tasks as readonly LoopTask[]), [tasks])
+  const facts = useMemo(() => loopFacts(loop, discarded), [loop, discarded])
+  const [disclosure, setDisclosure] = useState<LoopDisclosure | undefined>(undefined)
+  /**
+   * ★ The disclosed state is REBUILT from durable facts on every change, and the
+   *   initial value (no previous state) likewise comes from the facts — never
+   *   from a remembered UI flag, so a remount cannot silently hide an abnormal
+   *   loop. See {@link nextLoopDisclosure} for the precedence rules.
+   */
+  useEffect(() => {
+    setDisclosure((current) => {
+      const next = nextLoopDisclosure(current, facts)
+      return current !== undefined
+        && current.open === next.open
+        && current.userSet === next.userSet
+        && current.mode === next.mode
+        && current.count === next.count
+        ? current
+        : next
+    })
+  }, [facts])
+  const open = disclosure?.open ?? facts.mode !== 'clean'
+  if (loop.tracked === 0 || loop.rounds.length === 0) return null
+  const tail = loop.rounds.map((entry) => `${entry.round}`).join(t('format.listSeparator'))
+  return (
+    <section className={css.loopSection} aria-label={t('dependency.aria')} data-review-loop data-tracked={loop.tracked}>
+      <header className={css.loopHead}>
+        <button type="button" className={css.loopToggle} onClick={() => { setDisclosure((current) => toggleLoopDisclosure(current ?? { ...facts, open: facts.mode !== 'clean', userSet: false })) }} aria-expanded={open} data-loop-toggle>
+          <Chevron open={open} />
+          <span className={css.loopTitle}>{t('members.toggle', { count: loop.rounds.length })}</span>
+        </button>
+        <span className={css.loopHint}>{open ? t('dependency.hint.chain') : t('task.summary.waitingSchedule')}</span>
+      </header>
+      {open && (
+        <ol className={css.loopList}>
+          {loop.rounds.map((entry) => (
+            <li key={entry.round} className={css.loopRound} data-tone={discarded ? 'cancelled' : entry.tone}>
+              <span className={css.loopRoundMarker} aria-hidden>{entry.round}</span>
+              <span className={css.loopRoundBody}>
+                <span className={css.loopRoundTone} data-tone={discarded ? 'cancelled' : entry.tone}>
+                  {discarded ? t('task.status.notRun') : t(ROUND_TONE_LABEL[entry.tone] ?? 'task.status.failed')}
+                </span>
+                <span className={css.loopRoundTasks}>
+                  {entry.tasks.map((task) => (
+                    <button
+                      key={task.id}
+                      type="button"
+                      className={css.loopTask}
+                      data-tone={discarded ? 'cancelled' : taskLoopTone(task as LoopTask)}
+                      onClick={() => { onSelectTask?.(task.id) }}
+                      title={taskTitle(task as ActivityTask, '')}
+                    >
+                      {task.id}
+                    </button>
+                  ))}
+                </span>
+              </span>
+              <span className={css.loopStatusTail} data-tone={discarded ? 'cancelled' : entry.tone}>
+                {discarded ? t('task.status.notRun') : roundTailCounts(entry.tasks as readonly LoopTask[], (key, params) => t(key as AgentTeamsLocaleKey, params), t('format.listSeparator'))}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
 function ProgressOverview({ team, t, discarded = false }: { readonly team: ActivityTeam; readonly t: AgentTeamsTranslate; readonly discarded?: boolean }) {
   const running = discarded ? 0 : team.tasks.filter((task) => task.state === 'running').length
   const blocked = discarded ? 0 : team.tasks.filter((task) => task.state === 'blocked').length
@@ -312,7 +500,7 @@ function ProgressOverview({ team, t, discarded = false }: { readonly team: Activ
       <span className={css.progressTitle}>{t('progress.title')}</span>
       {team.tasks.length > 0 ? (
         <span className={css.progressSegments} aria-hidden>
-          {team.tasks.map((task) => <span key={task.id} data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)} />)}
+          {team.tasks.map((task) => <span key={task.id} data-state={discarded ? 'cancelled' : taskTerminalTone(task)} />)}
         </span>
       ) : <span className={css.progressEmpty} />}
       <span className={css.progressLegend}>
@@ -420,7 +608,7 @@ function DependencyMap({ tasks, members, t, discarded = false, workspace = false
                       ? { height: nodeHeight }
                       : { left: x, top: y, width: nodeWidth, height: nodeHeight }}
                     data-task-id={task.id}
-                    data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)}
+                    data-state={discarded ? 'cancelled' : taskTerminalTone(task)}
                     data-task-model={model || undefined}
                     data-focused={related?.has(task.id) ?? false}
                     data-dimmed={related !== null && !related.has(task.id)}
@@ -450,7 +638,7 @@ function DependencyMap({ tasks, members, t, discarded = false, workspace = false
             <span className={css.taskDetailHead}>
               <span className={css.taskDetailId}>{detailTask.id}</span>
               <span className={css.taskDetailSubject} title={detailTask.subject}>{detailTask.subject.replace(/^开发\s*/u, '')}</span>
-              <span className={css.taskDetailBadge} data-state={discarded ? 'cancelled' : taskTone(detailTask.state, detailTask.status)}>
+              <span className={css.taskDetailBadge} data-state={discarded ? 'cancelled' : taskTerminalTone(detailTask)}>
                 {discarded ? t('task.status.notRun') : taskStatusLabel(detailTask.status, t)}
               </span>
             </span>
@@ -501,6 +689,7 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
   const [stopOpen, setStopOpen] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [stopError, setStopError] = useState('')
+  const elapsedNow = useElapsedNow(!historic && team.phase === 'running')
   const discarded = historic && team.phase === 'staged'
   const stopped = !historic && team.halted === true
   const busyCount = team.members.filter((member) => member.activity === 'working').length
@@ -647,6 +836,8 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                 {visibleMembers.map((member) => {
                   const owned = team.tasks.filter((task) => task.assignee === member.name)
                   const memberModel = memberRouteLabel(member)
+                  /** Time on the current task: read from durable stamps, never invented. */
+                  const clock = memberClock(member, team.tasks, elapsedNow)
                   return (
               <div key={member.id || member.name} className={css.memberBlock} data-activity={member.activity} data-selected-member={workspace && selectedAssignee === member.name || undefined}>
                 <span className={css.memberBranch} aria-hidden><span /></span>
@@ -668,6 +859,21 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                     )}
                     <img className={css.stateArt} data-activity={member.activity} src={ACTION_ART[member.activity]} alt="" aria-hidden />
                   </span>
+                  {/**
+                   * ★ First-party 16px member status dot.
+                   *
+                   * It reads liveness BEFORE `activity`: `activity` is a durable
+                   * field that keeps saying `working` after the session dies, so a
+                   * dead member would otherwise keep a "running" dot — the exact
+                   * reading task t4 exists to remove. Without a liveness field we
+                   * fall back to `activity`, which is today's behaviour, not a guess.
+                   */}
+                  <span
+                    className={css.memberDot}
+                    data-tone={memberDotTone(member, { discarded, stopped, staged: team.phase === 'staged', historic })}
+                    role="img"
+                    aria-label={memberStateLabel(member, team.tasks, historic, t)}
+                  />
                   <span className={css.memberInfo}>
                     <span className={css.memberLine}>
                       <span className={css.memberName}>{member.name}</span>
@@ -703,7 +909,19 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                         ? t('member.status.settled')
                       : memberStatusText(member, team.tasks, t)}</span>
                   </span>
-                  <span className={css.memberCount}>{member.done}/{member.total}</span>
+                  {/* ★ Fixed-width status tail: elapsed time and the done/total
+                      count share one aligned column, so every member row's
+                      status reads at the same horizontal position. */}
+                  <span className={css.memberStatusTail}>
+                    {clock.kind !== 'none' && (
+                      <span className={css.memberClock} data-kind={clock.kind}>
+                        {clock.kind === 'stale'
+                        ? `${formatElapsed(clock.ms)} · ${t('member.state.waiting')}`
+                        : formatElapsed(clock.ms)}
+                      </span>
+                    )}
+                    <span className={css.memberCount}>{member.done}/{member.total}</span>
+                  </span>
                 </button>
                 <div className={css.assignmentLine}>
                   <span className={css.assignmentLabel}>{t(discarded
@@ -721,7 +939,7 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
                             <span
                               key={task.id}
                               className={css.assignmentChip}
-                              data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)}
+                              data-state={discarded ? 'cancelled' : taskTerminalTone(task)}
                               data-task-model={model || undefined}
                               title={taskTitle(task, model)}
                             >
@@ -740,6 +958,7 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
         })()}
       </section>
 
+      <ReviewLoopSection tasks={team.tasks} t={t} discarded={discarded} onSelectTask={setSelectedTaskId} />
       <DependencyMap tasks={team.tasks} members={team.members} t={t} discarded={discarded} workspace={workspace} onSelectTask={setSelectedTaskId} />
       </section>
       <Modal

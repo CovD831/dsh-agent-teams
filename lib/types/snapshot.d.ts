@@ -10,6 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { type MemberLiveness, type StrandedWorktrees } from './members.ts';
 import { type MemberStatus, type TeamState } from './types.ts';
+import type { FailureKind } from './state.ts';
 /** Visual task state for the activity panel. */
 export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled';
 /** One member row of the activity snapshot. */
@@ -60,6 +61,13 @@ export interface TeamActivityTask {
     readonly kind?: string;
     readonly round?: number;
     readonly verdict?: string;
+    /**
+     * Why a `failed` task stopped, as classified by `failureKindOf` in src/state.ts.
+     * ★ Present ONLY when `status === 'failed'`: its absence then means "not
+     *   applicable", which must stay distinguishable from any of the three kinds —
+     *   otherwise an unmeasured stop would read as one specific kind of failure.
+     */
+    readonly failureKind?: FailureKind;
     /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
     readonly updatedAt: number;
 }
