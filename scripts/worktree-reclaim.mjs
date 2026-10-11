@@ -256,13 +256,31 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
      *   按文件落盘的那一类树，其 HEAD **不是**主干的祖先（那正是原来的缺陷）。
      *   ⇒ 于是那一行日志会对一棵"内容已落盘"的树宣称它"是祖先" ——
      *     而读日志的人据此去 `git merge-base` 复核会得到相反的答案。
-     * ⇒ 所以它按权威给出的 `how` 分两句说（`'ancestor'` / `'content'`）。
-     *   ★ 这两句**没有**做任何判断：`how` 是权威传下来的字段，
+     * ⇒ 所以它按权威给出的 `how` 分句说。
+     *   ★ 这些句子**没有**做任何判断：`how` 是权威传下来的字段，
      *     本脚本只决定"怎么把它说成人话"。
+     *
+     * ── ★★★ t34：现在是**三**句，而它们必须**互不同形** ────────────────────────────
+     *
+     *   `'ancestor'` —— 真的并进去了  ⇒ 复核：`git merge-base --is-ancestor`
+     *   `'content'`  —— patch-id 命中（cherry-pick 那类）⇒ 复核：`git patch-id`
+     *   `'files'`    —— ★ 逐文件相同（**手工落盘**）⇒ 复核：`git rev-parse <ref>:<path>`
+     *   ★★ 若把 `'files'` 并进 `'content'` 那一句（本文件此前只有两句），
+     *     读日志的人会去查 patch-id —— 而**恰恰**是 patch-id 不命中的那一类
+     *     ⇒ 复核动作指向一个必然失败的查法，而那读起来像"日志在撒谎"。
      */
-    why: verdict.how === 'content'
-      ? `the commit's content is already on ${mainRef} (landed by file), and no uncommitted source file is unique to it`
-      : `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
+    why: verdict.how === 'ancestor'
+      ? `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`
+      : verdict.how === 'content'
+        ? `the commit's change is already on ${mainRef} with the same patch-id (cherry-picked), and no uncommitted source file is unique to it`
+        : verdict.how === 'files'
+          ? `every file the commit touched is byte-identical at ${mainRef}'s tip (landed by hand), and no uncommitted source file is unique to it`
+          /**
+           * ★★ 第四句：与上一句**必须不同形**，且要点明"主干顶端可能已经又动过"。
+           *   ⇒ 两者的**复核动作不同**：`'files'` 对主干顶端逐文件比；
+           *     `'contained'` 要在主干**历史**里找那份内容（`git log <tip> --find-object`）。
+           */
+          : `the content of every file the commit touched is contained in ${mainRef}'s history (merged in; the tip may have moved on), and no uncommitted source file is unique to it`,
   })
   return {
     status: 'reclaimable',
@@ -271,7 +289,7 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
     behind,
     hasDeps,
     reason: verdict.reason,
-    /** ★ 权威给的那一格（`'ancestor'`｜`'content'`）—— 原样透传，读的人据此复核。 */
+    /** ★ 权威给的那一格（`'ancestor'`｜`'content'`｜`'files'`）—— 原样透传，读的人据此复核。 */
     how: verdict.how,
     human: describeReclaimability(verdict),
   }

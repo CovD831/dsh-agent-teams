@@ -763,7 +763,7 @@ test('★★★ 臂 13（真实读数臂）：对本仓跑一次干跑，如实�
 /**
  * ── 这一节防的是什么（MEASURED，本任务的由来）───────────────────────────────────
  *
- * `judgeWorktreeReclaimable` 与 `describeReclaimability` 在 `src/worktree.ts` 里
+ * `judgeWorktree` 与 `describeReclaimability` 在 `src/worktree.ts` 里
  * 写好了、导出了，而**全仓零调用方**（`gate-producer-consumer` 普查点名）。
  * 而本脚本自己又实现了一遍同样的问题。
  *
@@ -779,7 +779,7 @@ test('★★★ 臂 13（真实读数臂）：对本仓跑一次干跑，如实�
  *     · 臂 T25-4：`describeReclaimability` 也被执行（零消费的另一条）
  */
 
-test('★ 臂 T25-1：脚本【调用】judgeWorktreeReclaimable —— 而不是留一份内联副本', async () => {
+test('★ 臂 T25-1：脚本【调用】judgeWorktree —— 而不是留一份内联副本', async () => {
   /**
    * ── 这条臂怎么是【可判定】的（而不是"读源码看着像"）─────────────────────────
    *
@@ -1033,10 +1033,10 @@ test('★ 臂 T25-5：三态**不同形**（没有两个共用同一组字段）
 /**
  * ── 这一节防的是什么失效（MEASURED，本任务的由来）───────────────────────────────
  *
- * `judgeWorktreeReclaimable`（`src/worktree.ts:528`）与 `scripts/worktree-reclaim.mjs`
+ * `judgeWorktree`（`src/worktree.ts:528`）与 `scripts/worktree-reclaim.mjs`
  * 都写好了、都导出了，而**全仓零调用方**：
  *
- *     $ grep -rn "judgeWorktreeReclaimable" src/     ⇒ 只有定义处
+ *     $ grep -rn "judgeWorktree" src/     ⇒ 只有定义处
  *     $ grep -rn "worktree-reclaim"        src/     ⇒ 0 处
  *     $ grep -rn "worktreePath"            src/tools*  ⇒ 0 处（那是内存 ticket 的字段）
  *
@@ -2663,4 +2663,420 @@ test('★★★★ 臂 E（defect 2 · 开关）：`AGENT_TEAMS_NO_RECLAIM=1` �
   /** ★ 而它也**没有**留下"扫描跑了"的那条总读数（连扫都没扫）。 */
   const scanLine = payload.logs.map(([, m]) => m).find((m) => /terminal worktree scan —/.test(m))
   assert.equal(scanLine, undefined, `★ 开关拨上时不许出现"扫描跑了"的读数。实测：${scanLine}`)
+})
+
+/**
+ * ── ★★★ t34：手工落盘（形态 Ⅲ）也要被认出来 ─────────────────────────────────────
+ *
+ * ── 它补的是哪些臂没盖住的那一格（MEASURED，captain 的受控对照）─────────────────
+ *
+ * 上面那一族 t9 臂（10b/10f）钉的是**patch-id 命中**那一形 —— 而它们的夹具
+ * `landByFile` 恰好让 B 的 diff **与 A 完全一样**（只 add 同一个文件）
+ * ⇒ patch-id 相等 ⇒ 走的是形态 Ⅱ。★ 所以那一族**盖不到**本任务这一格。
+ *
+ * 真实的**手工落盘**常常不保 patch-id：
+ *
+ *   · captain 落盘时**挑文件**、或在主干上**顺手改了一行**；
+ *   · 或者他落完盘之后，主干**又前进了若干提交**（patch-id 只比主干**顶端**）。
+ *   ⇒ 那时两条判据都不命中，而**文件内容明明已经在主干上**。
+ *
+ * ★★ captain 量到的实物：`t18` 的 `src/web-routes.ts` 与 `src/index.ts` 与主干
+ *   **逐字节相同**，而裁决是 `not-absorbed`；紧接着 `t33`（**cherry-pick** 落的，
+ *   保住了 patch-id）当场被认出 ⇒ "1 reclaimable, 1692.5 MiB"。
+ *   **同一份代码、同一条判据、相反的裁决，唯一的差别是落盘手法。**
+ * ★ 量到的后果：sweep 报 "0 reclaimable, 26 kept"，其中 **12GB** 的树
+ *   内容早已在主干上。
+ */
+
+/**
+ * 把几个文件**逐字**落进主干，但**故意让 patch-id 对不上**。
+ *
+ * ★ 做法：落盘的那条提交里**多带一个无关文件**（`NOTES-landed.md`）。
+ *   ⇒ B 的 diff ≠ A 的 diff ⇒ patch-id **必然不同**（这就是形态 Ⅲ 的形状）。
+ *   ★ 而那些**产物文件本身**在主干上与 A 的**逐字节相同** ⇒ 逐文件那一格命中。
+ *   ★ 这是刻意的：它把"patch-id 命中"与"逐文件命中"**分开**，于是本组臂
+ *     测的**只**是后者。
+ */
+function landByFileWithoutPatchId(f, wt, paths, message = 'land by hand (patch-id will differ)') {
+  for (const relative of paths) {
+    const target = join(f.repo, relative)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, readFileSync(join(wt, relative)))
+  }
+  /** ★ 多带一个文件 ⇒ B 的 diff 与 A 的不同 ⇒ patch-id 对不上。 */
+  writeFileSync(join(f.repo, 'NOTES-landed.md'), 'a note that makes this commit differ from the one in the worktree\n')
+  git(f.repo, ['add', '--', ...paths, 'NOTES-landed.md'])
+  git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', message])
+  return f.head()
+}
+
+/** 前置：两条提交的 patch-id **必须真的不同**（否则本组臂测的是形态 Ⅱ）。 */
+function patchIdOf(cwd, ref) {
+  const shown = execFileSync('git', ['show', ref], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  return execFileSync('git', ['patch-id', '--stable'], { cwd, encoding: 'utf8', input: shown }).trim().split(/\s+/)[0]
+}
+
+test('★★★ t34 臂 15（★ 两种形状对照臂）：吸收的与唯一的**同时**种下 ⇒ 相反的裁决', async () => {
+  /**
+   * ── ★ 契约原话：「An arm plants both shapes -- absorbed-by-content and
+   *   unique-work -- and shows they get opposite verdicts」─────────────────────
+   *
+   * ★★ 一条只喂"该被清"的臂**测不出**"它什么都清"。⇒ 必须**同一轮**里种下两种，
+   *   并要求它们**相反的裁决** —— 那才证明判据在**分辨**。
+   *   （本仓那条一般形式：「正向臂只喂『该被拒』的输入，所以它测不出『一律拒绝』」。）
+   */
+  const absorbed = fixture()
+  const unique = fixture()
+  try {
+    /** ── 形状 A：产物已逐文件落盘，**没有**唯一产物 ⇒ 应当可清 ── */
+    const baseA = absorbed.head()
+    const wtA = absorbed.worktreeAt(baseA, 'task-shape-absorbed')
+    git(wtA, ['config', 'user.email', 't@t'])
+    git(wtA, ['config', 'user.name', 't'])
+    writeFileSync(join(wtA, 'src', 'landed.ts'), 'export const landed = 1\n')
+    git(wtA, ['add', '-A'])
+    git(wtA, ['commit', '-qm', 'shape A'])
+    landByFileWithoutPatchId(absorbed, wtA, ['src/landed.ts'])
+    const verdictA = judgeWorktree({ repo: absorbed.repo, worktree: wtA })
+
+    /** ── 形状 B：同样的落盘，**外加**一个只存在于这里的源码文件 ⇒ 应当保留 ── */
+    const baseB = unique.head()
+    const wtB = unique.worktreeAt(baseB, 'task-shape-unique')
+    git(wtB, ['config', 'user.email', 't@t'])
+    git(wtB, ['config', 'user.name', 't'])
+    writeFileSync(join(wtB, 'src', 'landed.ts'), 'export const landed = 2\n')
+    git(wtB, ['add', '-A'])
+    git(wtB, ['commit', '-qm', 'shape B'])
+    landByFileWithoutPatchId(unique, wtB, ['src/landed.ts'])
+    /** ★ 那一个"只存在于这里"的文件：**未提交**，且内容不在任何提交里。 */
+    writeFileSync(join(wtB, 'src', 'only-here.ts'), 'export const onlyHere = "unique to this worktree"\n')
+    const verdictB = judgeWorktree({ repo: unique.repo, worktree: wtB })
+
+    /** ★★★ 相反的裁决 —— 这是本臂的全部要点。 */
+    assert.equal(
+      verdictA.status, 'reclaimable',
+      `★★★ 形状 A（已吸收、无唯一产物）必须可清。实测：${JSON.stringify(verdictA)}`,
+    )
+    assert.equal(
+      verdictB.status, 'keep',
+      `★★★ 形状 B（同一个落盘 + 一个只存在于这里的源码文件）必须**保留**。`
+      + ` 实测：${JSON.stringify(verdictB)}`,
+    )
+    assert.notEqual(
+      verdictA.status, verdictB.status,
+      '★★★ 两种形状必须得到**相反**的裁决 —— 若两者相同，说明判据没有在分辨',
+    )
+    /** ★ 而形状 B 的理由**必须指名什么是唯一的**（契约原话）。 */
+    assert.equal(verdictB.reason, 'unique-work', JSON.stringify(verdictB))
+    assert.match(
+      String(verdictB.detail), /only-here\.ts/u,
+      `★★★ 保留的理由必须**点名**那一个唯一的文件，否则读的人无从复核。实测：${verdictB.detail}`,
+    )
+    /** ★ 反向半边：形状 A 的裁决**不许**也变成 unique-work（否则判据恒留）。 */
+    assert.notEqual(verdictA.reason, 'unique-work', '★ 形状 A 没有唯一产物，不许报成 unique-work')
+  } finally {
+    absorbed.done()
+    unique.done()
+  }
+})
+
+test('★★ t34 臂 16（★ 不改弱旧判据）：祖先命中的仍然报 `ancestor`，且三条依据两两不同形', async () => {
+  /**
+   * ★★ 契约原话：「The existing judgement is not weakened: the two conditions that
+   *   protect unique work remain in force」＋「reports WHICH basis it used」。
+   *
+   * ★ 本臂钉的是**依据那一格的分形**：三条依据必须**互不同形**，
+   *   否则"真的并进去了"与"文件被手工落盘了"在读数上合流 ——
+   *   而两者的**复核动作不同**（查 merge / 逐文件比对）。
+   */
+  const f = fixture()
+  try {
+    const base = f.head()
+    /** ── 形态 Ⅰ：真的把这条提交并进主干（fast-forward 的等价物）── */
+    const wt = f.worktreeAt(base, 'task-shape-ancestor')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'merged.ts'), 'export const merged = 1\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t34): ancestor shape'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+    /** ★ 把主干的引用**直接指到 A**（于是 A 成为主干 HEAD，祖先关系成立）。 */
+    git(f.repo, ['merge', '--ff-only', a])
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(verdict.status, 'reclaimable', JSON.stringify(verdict))
+    assert.equal(
+      verdict.how, 'ancestor',
+      `★★★ 祖先命中的必须报 'ancestor' —— **不许**被新那一条抢走（顺序 = 先祖先、再 patch-id、最后逐文件）。`
+      + ` 实测：${JSON.stringify(verdict.how)}`,
+    )
+    /** ★ 而祖先那一句人话必须与另外两句**不同形**。 */
+    assert.match(verdict.human, /absorbed into the trunk/u, `★ 人话必须说"并进去了"。实测：${verdict.human}`)
+    assert.doesNotMatch(
+      verdict.human, /byte-identical|patch-id/u,
+      '★★★ 祖先那种吸收**不许**用另外两种依据的措辞 —— 三条依据必须互不同形',
+    )
+  } finally {
+    f.done()
+  }
+})
+
+/**
+ * ── ★★★ t34 臂 17（前进臂 · merge 落盘）：内容并入主干后被后续提交推进 ⇒ 仍须判【可清】──
+ *
+ * ── 它复现的是 captain 量到的**真实形状**（t28）─────────────────────────────────
+ *
+ * `contentAbsorbed`（patch-id）只在**干净的 cherry-pick**（顶端即同一个 patch、
+ * 且无后续提交）上命中。而 t28 是：
+ *
+ *   成员在自己的检出里提交 ⇒ commit A
+ *   captain 落盘时**解了冲突**，于是落盘那条提交**之上还有一条解决提交**
+ *   ⇒ 主干顶端的那次提交与 A 的 patch-id **不同** ⇒ 形态 Ⅱ 不命中
+ *   ⇒ 而 A 的产物**明明已经在主干上**（在落盘那条提交里，且此后被**正常前进**推进过）
+ *
+ * MEASURED（captain，真实仓库）：t28 的 20 个改动文件里 12 个与主干顶端不同，
+ *   而那 12 个**正是它自己的交付物**；它们的内容出现在 `2386323` 与
+ *   `3ce3e76`（"merge: land R3…"）里，而后者**是主干的祖先**。
+ *
+ * ★★ 本臂把它缩成三件必须同时成立的事，缺一它就退化成另一条臂：
+ *   ① A **不是**主干顶端（否则祖先/patch-id 会顺手命中，本臂测不到 containment）
+ *   ② A 的 patch-id **与主干顶端的不同**（否则走的是形态 Ⅱ）
+ *   ③ 而 A 的产物**在主干上**，且主干此后**又前进过一次**（内容被推进）
+ *   ⇒ 那时三条旧判据都不命中，而 containment **必须**命中。
+ */
+test('★★★ t34 臂 17（前进臂）：内容并入主干后又被正常提交推进过 ⇒ 仍判【可清】，且 how=contained', async () => {
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-merge-landed')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'feature.ts'), 'export const feature = 42\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t34): worktree deliverable'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+
+    /** ② 落盘：把产物写进主干，并**多带一个无关文件** ⇒ patch-id 必然不同。 */
+    writeFileSync(join(f.repo, 'src', 'feature.ts'), readFileSync(join(wt, 'src', 'feature.ts')))
+    writeFileSync(join(f.repo, 'NOTES.md'), 'lands together with the product\n')
+    git(f.repo, ['add', '--', 'src/feature.ts', 'NOTES.md'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'land the product'])
+    const landed = f.head()
+
+    /**
+     * ③ ★★ 主干**又前进一次**（推进那个文件）—— 这一步是本臂的关键：
+     *   它让主干顶端的内容与 A 的**逐字节不同**（于是 `filesAbsorbed` 不命中），
+     *   而那份工作**仍然是主干的**（它是在 landed 那条提交里并进去的）。
+     *   ★ 这正是 t28 的形状：并进去之后主干继续往前走。
+     */
+    writeFileSync(join(f.repo, 'src', 'feature.ts'), 'export const feature = 42\nexport const more = 1\n')
+    git(f.repo, ['add', '--', 'src/feature.ts'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'advance the feature further'])
+
+    /** ── 三条前置：证明 A 的那三条旧判据**都不命中**（否则本臂测不到 containment）── */
+    let isAncestor = true
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', a, f.head()], { cwd: f.repo, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch { isAncestor = false }
+    assert.equal(isAncestor, false, '★ 前置 ①：A 不许是主干顶端的祖先')
+    assert.notEqual(patchIdOf(wt, a), patchIdOf(f.repo, f.head()), '★ 前置 ②：patch-id 必须不同（否则走形态 Ⅱ）')
+    assert.notEqual(
+      git(wt, ['rev-parse', `${a}:src/feature.ts`]), git(f.repo, ['rev-parse', `${f.head()}:src/feature.ts`]),
+      '★ 前置 ③：主干顶端的内容必须与 A 的不同（否则 `files` 会顺手命中，本臂测不到 containment）',
+    )
+    /** ★ 而那份产物**确实在历史里**（落地那条提交带着 A 的 blob）。 */
+    assert.equal(
+      git(f.repo, ['rev-parse', `${landed}:src/feature.ts`]), git(wt, ['rev-parse', `${a}:src/feature.ts`]),
+      '★ 前置 ④：落盘那条提交必须带着 A 的那份内容',
+    )
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'reclaimable',
+      `★★★ 内容已并入主干（此后又被正常推进）⇒ 必须判可清。`
+      + ` 若答 keep，那棵树**永远不会被回收** —— 而那正是 t28 的缺陷。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.reason, 'absorbed', JSON.stringify(verdict))
+    assert.equal(
+      verdict.how, 'contained',
+      `★★★ 依据必须是 'contained'，**不许**报成 'files'（顶端并不相同）或 'content'（patch-id 不命中）—— `
+      + ` 读的人据此复核，而三者的复核动作不同。实测：${JSON.stringify(verdict.how)}`,
+    )
+    assert.match(verdict.human, /contained in the trunk history/iu, `★ 人话必须说清依据。实测：${verdict.human}`)
+  } finally {
+    f.done()
+  }
+})
+
+/**
+ * ── ★★★ t34 臂 18（★ 强制臂 · 撤销）：落盘**随后被 revert** 的内容 ⇒ 必须【保留】────
+ *
+ * ── ★ 为什么这一条是**强制的**（captain 逐字要求的理由）────────────────────────────
+ *
+ *   > 「这是一个真实风险，而我想要不管怎样都有一条臂。」
+ *   > 理由：本仓库的整个失效形态就是**一个读起来像成功的读数，而东西已经没了**。
+ *   > 一个**被撤销的**交付读成"已吸收"，正是那个形态最纯的现身 ——
+ *   > 于是 sweep 会去删掉那份**被明确 undo 的**工作的**唯一副本**。
+ *
+ * ── ★★★ 而本臂抓到了实现里一个**真的**缺陷（MEASURED）────────────────────────────
+ *
+ *   第一版 containment 只做了「主干历史里有没有这份内容」—— 而**被 revert 的内容
+ *   仍然在历史里** ⇒ 它**照样**答 `reclaimable` ⇒ 会删掉那棵树。
+ *   ★★ 这正是本臂存在的理由：**没有它，那个缺陷会带着一整套绿臂上线。**
+ *
+ * ── 判据（两条都要）────────────────────────────────────────────────────────────────
+ *   ① 主干历史里有提交在那个路径上**就是**这份内容；
+ *   ② ★ 而主干**顶端**那个文件**还在**（没有被删掉/撤销）。
+ *   ⇒ revert 让②不成立 ⇒ keep。而"并入后被正常推进"（臂 17）让②仍然成立 ⇒ absorbed。
+ */
+test('★★★ t34 臂 18（★ 强制 · 撤销臂）：落盘后又被 revert 的内容 ⇒ 必须【保留】，不许读成已吸收', async () => {
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-reverted')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'doomed.ts'), 'export const doomed = "landed then undone"\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t34): worktree deliverable'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+
+    /** ① 落盘：产物进主干。 */
+    writeFileSync(join(f.repo, 'src', 'doomed.ts'), readFileSync(join(wt, 'src', 'doomed.ts')))
+    git(f.repo, ['add', '--', 'src/doomed.ts'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'land the product'])
+    /** ★ 前置：此刻它**应当**是可清的（内容确实在主干上）。 */
+    const landed = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      landed.status, 'reclaimable',
+      `★ 前置：刚落盘时必须是可清的（否则本臂测不到"撤销改变了裁决"这件事）。实测：${JSON.stringify(landed)}`,
+    )
+
+    /** ② ★★ **撤销它** —— 这一半是本臂的全部要点。 */
+    git(f.repo, ['rm', '-q', 'src/doomed.ts'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'REVERT: that product was wrong'])
+
+    /** ★ 前置：那份内容**仍然在主干的历史里**（这正是第一版误判的成因）。 */
+    const blob = git(wt, ['rev-parse', `${a}:src/doomed.ts`])
+    const inHistory = git(f.repo, ['log', 'main', '--format=%H', `--find-object=${blob}`]).trim()
+    assert.notEqual(
+      inHistory, '',
+      '★★ 前置：被撤销的内容**必须仍然在历史里** —— 否则本臂证明不了"只看历史会误判"',
+    )
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'keep',
+      `★★★ 内容**已被撤销** ⇒ 必须**保留**。`
+      + ` 「历史里有这份内容」不等于「主干上还有这份工作」—— 把撤销读成吸收，`
+      + ` 就会删掉那份被明确 undo 的工作的**唯一副本**。实测：${JSON.stringify(verdict)}`,
+    )
+    assert.notEqual(verdict.status, 'reclaimable', '★★★ 撤销**不许**被判成可清（那是本仓最贵的失效形态）')
+    assert.equal(verdict.reason, 'not-absorbed', JSON.stringify(verdict))
+    /** ★ 而理由必须说得清"它不在主干上"（读的人要能复核）。 */
+    assert.match(
+      String(verdict.detail), /not in the trunk yet/u,
+      `★ 保留的理由必须说清它没在主干上。实测：${verdict.detail}`,
+    )
+  } finally {
+    f.done()
+  }
+})
+
+/**
+ * ── ★★★ t34 臂 19（★ 构建产物臂）：构建产物**不参与** containment，而源码仍然说话 ──────
+ *
+ * ── ★ 为什么必须有一条臂直接钉它（MEASURED：本任务实测出来的缺口）───────────────
+ *
+ *   我把 `isBuildProduct` 改成恒 false（即"构建产物也要 containment"），
+ *   **40 条臂全部照绿**。⇒ 那个排除**当时没有任何一条臂在看它** ——
+ *   而它恰好是让 t28 可判的那一格：
+ *
+ *     MEASURED（真实仓库）：t28 的 20 个改动文件里，唯一不满足 containment 的是
+ *     **`lib/client.js`** —— 而它内嵌 worktree 路径（本树的名字在它正文里出现 4 次），
+ *     每次 build 重生成 ⇒ **永远不可能**被主干包含。
+ *     ⇒ 要求它，就是要求一件**永不可为真**的事 ⇒ t28 永远判 keep。
+ *     ★ 那正是本任务要修的**同一个缺陷**，只是换了一条判据继续活着。
+ *
+ * ── ★★ 本臂的两个半边（缺一即恒真）────────────────────────────────────────────
+ *
+ *   · **源码那半边**：产物在主干上、而**源码也在**（且此后被推进）⇒ 必须判**可清**。
+ *     ★ 若把排除去掉 ⇒ 这一个半边**变红**（因为 lib/ 那份永远不满足 containment）。
+ *   · **只动构建产物的那一半**：一次提交**只有** `lib/` 改动 ⇒ **不算命中**（保留）。
+ *     ★ 那是保守方向：「什么都没交付」不许读成「交付了」。
+ *
+ * ★ 而"产物不算唯一工作"这一条**不是**本臂新立的规矩：
+ *   本文件的 (b) guard 早就按同一条排除了 `lib/`（原文：「`lib/` 是构建产物，
+ *   每次 build 重生成」）。⇒ 两处**同一套口径**。
+ */
+test('★★★ t34 臂 19（★ 构建产物臂）：含 lib/ 的提交仍须可清（产物不可被 containment 要求）；只动 lib/ ⇒ 保留', async () => {
+  const f = fixture()
+  try {
+    const base = f.head()
+    const wt = f.worktreeAt(base, 'task-with-build-product')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'feature.ts'), 'export const feature = 1\n')
+    /**
+     * ★ `lib/client.js` **内嵌本树的路径** —— 这正是真实仓库里那一个文件的形态，
+     *   也是它"永远不可能被主干包含"的**成因**。夹具必须复现这个成因，
+     *   否则本臂测不到那个永远不成立的条件。
+     */
+    /** ★ 夹具的仓库里没有 `lib/` ⇒ 先建出来（真实仓库里它由 build 产出）。 */
+    mkdirSync(join(wt, 'lib'), { recursive: true })
+    writeFileSync(join(wt, 'lib', 'client.js'), `// built in ${wt}\nexport const bundle = 1\n`)
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'task(t34): worktree deliverable'])
+    const a = git(wt, ['rev-parse', 'HEAD'])
+
+    /** 落盘：只落**源码**（captain 落盘时挑文件是常态）+ 一个无关文件（让 patch-id 不同）。 */
+    writeFileSync(join(f.repo, 'src', 'feature.ts'), readFileSync(join(wt, 'src', 'feature.ts')))
+    writeFileSync(join(f.repo, 'NOTES.md'), 'note\n')
+    git(f.repo, ['add', '--', 'src/feature.ts', 'NOTES.md'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'land source only'])
+    /** ★ 主干再前进一次 ⇒ 顶端逐字节不同 ⇒ `files` 不命中，只能靠 containment。 */
+    writeFileSync(join(f.repo, 'src', 'feature.ts'), 'export const feature = 1\nexport const more = 2\n')
+    git(f.repo, ['add', '--', 'src/feature.ts'])
+    git(f.repo, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'advance'])
+
+    /** ★ 前置：那份 lib/ 产物**确实不在**主干历史的任何提交里（这正是它的成因）。 */
+    const libBlob = git(wt, ['rev-parse', `${a}:lib/client.js`])
+    const libFound = git(f.repo, ['log', 'main', '--format=%H', `--find-object=${libBlob}`]).trim()
+    assert.equal(
+      libFound, '',
+      '★★ 前置：夹具里那份 `lib/` 产物必须真的**不在**主干历史里 —— 否则本臂测不到"要求它=永不可为真"',
+    )
+
+    const verdict = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(
+      verdict.status, 'reclaimable',
+      `★★★ 源码已在主干上 ⇒ 必须可清。★ 而那次提交**同时**带着一个永远不可能被包含的 `
+      + ` \`lib/\` 产物 ⇒ 若把构建产物也要求 containment，这一格会变红（而 t28 就永远清不掉）。`
+      + ` 实测：${JSON.stringify(verdict)}`,
+    )
+    assert.equal(verdict.how, 'contained', `★ 依据是 containment（顶端已被推进过）。实测：${verdict.how}`)
+
+    /** ── 反向半边：一次**只**改了构建产物的提交 ⇒ **不算命中**（保守方向）── */
+    const onlyLib = fixture()
+    try {
+      const b2 = onlyLib.head()
+      const wt2 = onlyLib.worktreeAt(b2, 'task-only-build-product')
+      git(wt2, ['config', 'user.email', 't@t'])
+      git(wt2, ['config', 'user.name', 't'])
+      mkdirSync(join(wt2, 'lib'), { recursive: true })
+      writeFileSync(join(wt2, 'lib', 'client.js'), '// only a build product\n')
+      git(wt2, ['add', '-A'])
+      git(wt2, ['commit', '-qm', 'task(t34): only a build product'])
+      const v2 = judgeWorktree({ repo: onlyLib.repo, worktree: wt2 })
+      assert.equal(
+        v2.status, 'keep',
+        `★★★ 一次**只**动了构建产物的提交 ⇒ **保留**（「什么都没交付」不许读成「交付了」）。`
+        + ` 实测：${JSON.stringify(v2)}`,
+      )
+    } finally {
+      onlyLib.done()
+    }
+  } finally {
+    f.done()
+  }
 })
