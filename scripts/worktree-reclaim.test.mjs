@@ -1766,7 +1766,25 @@ test('★★★ 臂 13（反向臂 · 开关）：`AGENT_TEAMS_NO_RECLAIM=1` ⇒
   assert.equal(payload.threw, undefined, `★ 开关打开时落终态不许抛。实测：${payload.threw}`)
   assert.equal(payload.mtimeAdvanced, true, '★ 前置：这一次更新真的落盘了')
   assert.equal(payload.taskStatus, 'completed', '★ 前置：任务照常落终态（开关只管回收，不管裁决）')
-  assert.equal(payload.deliverableCommit === null, true, '★ 前置：交付照常被提交（开关不拦交付）')
+  /**
+   * ★★★ 这一条曾被**写反**，而写反的方式值得记下来。
+   *
+   * MEASURED：本行在 `3ce3e76`（R3 的合并提交）里变成了 `deliverableCommit === null`，
+   *   而它的中文话说的是**相反**的事 ——「交付照常被提交（开关不拦交付）」。
+   *   原作者的写法（`69b9be6`）是 `!== null`。一次不该改这一行的合并把判据**取反**了。
+   *
+   * ★ 而它为什么**必须**是 `!== null`：本臂要证的是「开关只管回收，**不管交付**」——
+   *   即同一个环境变量在**交付**那一支上毫无影响。把它写成 `=== null`，
+   *   断言的就变成了「交付**没有**发生」，于是：
+   *     · 交付正常发生 ⇒ 本臂**红**（而现在正是这个读数 —— 夹具在报错，机制是对的）；
+   *     · 而一旦有人真把交付弄坏了，它反而**绿**。
+   *   ⇒ 一条方向反了的断言，比没有断言更坏：它把"机制正确"读成"测试失败"，
+   *     同时替"机制真的坏了"打掩护。
+   *
+   * ★ 相邻那条臂（臂 12，`deliverableCommit !== null`）一直是**对的** ——
+   *   两条臂的输入刻意相同、只有开关不同，所以它们的这一格**必须同向**。
+   */
+  assert.equal(payload.deliverableCommit !== null, true, '★ 前置：交付照常被提交（开关不拦交付）')
 
   const worktree = payload.worktree
   assertReclaimLandedUnderTemp(worktree, workspace)
