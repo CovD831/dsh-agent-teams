@@ -185,6 +185,133 @@ export declare function requireMember(team: TeamState, name: string): TeamMember
 export declare function requireTask(team: TeamState, taskId: string): TeamTask;
 export declare function trimmedOptional(value: string | null | undefined): string | undefined;
 export declare function memberOpenTask(team: TeamState, memberName: string, exceptTaskId?: string): TeamTask | undefined;
+/**
+ * ── ★★★ t26：作用域的**两条机械检查**（在**建任务的那一刻**跑）──────────────────────
+ *
+ * 契约原话：*"Two distinct failures, each one assertion"* —— 而它们在本轮里
+ * 各自吃过完整的派发往返，由四个成员独立撞到。
+ *
+ * ── ① CONTRADICTION：同一个路径同时出现在 `inScope` 与 `outOfScope` ──────────────
+ *
+ * MEASURED（t19）：一次修订更新了 `inScope` 而没更新 `outOfScope`，于是
+ * `src/types.ts` **两边都在**。★ 而校验器**按 out-of-scope 那一侧执行** ⇒
+ * 那个任务**无解**：它要改的文件是它被禁止改的文件。
+ * ★★ 最坏的地方不是"任务难做"，而是**它读起来完全正常** ——
+ * 一行 `In scope: …; Out of scope: …`，两个列表都在场，而**交集没人算**。
+ *
+ * ── ② TOUCH：为了满足某条验收标准，**必须改的每一个路径**是否都在 `inScope` 里 ────
+ *
+ * MEASURED（t24）：它的验收标准是**把判据从 `src/tools/shared/entities.ts` 搬走**，
+ * 于是那个文件需要**两处**改动（一个 import、一个 re-export 中转），
+ * 而 `inScope` 只写了**目的地**。
+ * ★★ 这一类在**任何** move / relocate / extract 任务上都会复发 ——
+ * 因为它们**天生**有一个源与一个目的地，而生成器只列目的地。
+ *
+ * ── ★ 判据是保守的：**只在能机械读出时开火** ─────────────────────────────────────
+ *
+ * 一个靠猜的检查会在散文上误报，而**误报会教人忽略门禁**（与漏报同样有害）。
+ * ⇒ 下面两条都只认**明确读得出来的东西**：路径形的 token、以及 move 类动词。
+ */
+/** 一条作用域检查的失败（**逐条指名** —— 读的人要能直接去改）。 */
+export interface ScopeContradiction {
+    /**
+     * ★ t26：三条各自可指名的检查（队长证据包里的第 1/2/3 条子类）。
+     *   ★ 逐条指名是刻意的：读的人要能直接知道**哪一条**拦住了它，以及去改什么。
+     */
+    readonly check: 'contradiction' | 'emit' | 'touch';
+    readonly detail: string;
+}
+/**
+ * ① 同一个路径同时在 inScope 与 outOfScope 里。
+ * ★ 复用 `quality-gates.ts` 的 `inScopeOverlap`（**同一份**判据，不重写一份 —— 两份会漂移）。
+ */
+export declare function scopeContradictions(inScope: readonly string[] | undefined, outOfScope: readonly string[] | undefined): ScopeContradiction[];
+export declare function scopeTouchGaps(acceptance: readonly string[] | undefined, inScope: readonly string[] | undefined, outOfScope: readonly string[] | undefined): ScopeContradiction[];
+/**
+ * ── ★★★ ④（EMIT）构建产物的声明 —— 队长证据包里**最便宜、最可机械计算**的一条 ──────────
+ *
+ * 契约原话把它称为 *"the build-products rule, now proved twice and in both directions"*。
+ * 两次实测：
+ *
+ *   · t24 写了 `lib/types.d.ts` —— 而本仓 `declarationDir` 是 `lib/types`
+ *     ⇒ 那一路径**永远产不出来**（`lib/types/types.d.ts` 在，`lib/types.d.ts` 不在）。
+ *   · t19 写了 `lib/types/types.d.ts` 而**漏了 `lib/types.js`** ——
+ *     而后者才是**真正跑起来的那一个**（+61 行，夹具 import 的就是它）。
+ *
+ * ★★★ 而 t19 那一次的决定性证据是：**每一个别的列了 `src/types.ts` 的任务
+ *   （t3 / t14 / t24）都已经声明了 `lib/types.js`**。
+ *   ⇒ 所以那从来不是一次判断，**只是一次分叉** —— 而这正是本判据要消灭的东西。
+ *
+ * ── 规则（纯计算，不读盘、不猜）─────────────────────────────────────────────────
+ *
+ *     每一个 `src/X.ts` 在 inScope 里 ⇒ 产出集必须声明：
+ *        `lib/X.js`              （tsc 的 outDir 产物 —— 真正被 import 的那一个）
+ *        `lib/types/X.d.ts`      （declarationDir 产物 —— 类型面）
+ *     ★ 见 `tsconfig.json`：`outDir: lib`、`declarationDir: lib/types`、`rootDir: src`。
+ *     ⇒ 所以 `<root>/<rel>` 那张映射是**编译配置的直接后果**，不是约定。
+ *
+ * ★ 而 `lib/types.d.ts` 那种"把目录名当成文件名"的形状由 t23 的
+ *   `structurallyImpossiblePath` 负责（它在 `quality-gates.ts`，不在这里）——
+ *   本函数**只**管"漏了产出"，两条各司其职、不重叠。
+ */
+export declare function emittedProductGaps(inScope: readonly string[] | undefined, 
+/**
+ * ── ★★★ 根目录**可注入**，而判据是"**这个文件真的在盘上吗**"（t26 实测的修正）──────
+ *
+ * MEASURED（t26）：第一版对**每一个** `src/*.ts` 都要求声明产物 ——
+ * 而那当场打红了**九条既有的臂**，因为它们的夹具用的是**象征性路径**
+ * （`src/a.ts` / `lib/a.js`，那些文件**根本不存在**，永远不会被 build 产出）。
+ *
+ * ★★ 而真正的缺陷（t19 漏 `lib/types.js`、t24 写 `lib/types.d.ts`）都发生在
+ *   **真实存在的、被 git 跟踪的**源文件上。⇒ 判据是：
+ *
+ *     这个 `src/X.ts` **真的在盘上**（⇒ build 真的会为它产出东西）⇒ 要求声明产物
+ *     它不在盘上（⇒ 这是一个**还没被创建**的文件，或一个**象征性**的夹具路径）
+ *       ⇒ ★ 不报：产物**还不存在**是正常的，那不是"漏声明"
+ *
+ * ★ 这与 t23 的 (ii) 是**同一条纪律的两面**：
+ *   那边管"inScope 里的路径**结构上不可能**产出来"，
+ *   这边管"**真的会**产出来的那些，产物有没有被声明"。
+ *   而两者都只对**能机械核对**的事实说话 —— 不猜。
+ */
+root?: string): ScopeContradiction[];
+/** 跑上面两条并合集 —— 建任务时调用一次，**逐条指名**。 */
+export declare function scopeViolations(input: {
+    inScope?: readonly string[];
+    outOfScope?: readonly string[];
+    acceptance?: readonly string[];
+}): ScopeContradiction[];
+/**
+ * ── ★★★ t26：成员收到的**任务说明**是从**被强制执行的那份记录**投影出来的 ─────────────
+ *
+ * 契约原话：*"the ASSIGNMENT TEXT handed to members has now diverged from the enforced
+ * team.json list FIVE times"*（t22 / t13 / t16 / t24 / t19）—— 而 t13 那次
+ * **差一点发出去一个 inert 的 UI**：真正喂面板的那个文件在**被强制**的清单里、
+ * 却在**说明文字**里缺席。
+ *
+ * ── 本函数**就是**那句"assignment text" ─────────────────────────────────────────
+ *
+ * MEASURED（t26）：成员拿到的那段说明是 `taskDetails(...)` 的返回值，
+ * 由 `src/tools/claim.ts` 在两处（首领 / 幂等重领）交给 `task_details`。
+ * ⇒ 所以"说明文字"**不是一个单独维护的副本** —— 它就是这里的投影。
+ *
+ * ── ★★ 而"投影"必须**被核对过**，否则它只是"把存着的原样印出来" ────────────────────
+ *
+ * 此前它把两个列表原样拼成一行：
+ *
+ *     `In scope: …; Out of scope: …`
+ *
+ * ★ 于是**交集没人算**：一条 `src/types.ts` 同时在两边、从而**无解**的任务，
+ *   在说明里读起来**完全正常**（t19 的实测形状）。
+ * ⇒ 现在投影**先跑一遍那两条检查**，并把结果**写进那段说明本身**：
+ *   一条有矛盾的任务**不许**以"看起来没问题"的样子交到成员手上。
+ *
+ * ★★★ 而它**不**在这里抛错：`taskDetails` 是一条**只读**的投影（成员在 claim 时拿到它），
+ *   在那个时刻拒绝会**卡住一个已经在跑的任务** —— 而"已经在跑"与"该不该建"是两件事。
+ *   ⇒ **拒绝**发生在**建任务时**（`create-task.ts` 调 `scopeViolations`）；
+ *     投影这一侧的职责是**如实标出来**，而不是替它做那个决定。
+ *   ★ 两者是同一个判据的两个出口：一个拦在门口，一个让已在里面的人看得见。
+ */
 export declare function taskDetails(team: TeamState, task: TeamTask): string;
 export declare function captainOpenTask(team: TeamState, exceptTaskId?: string): TeamTask | undefined;
 export declare function stopTeamMemberActivations(ctx: Context, captain: Agent, members: readonly TeamMember[], signal?: AbortSignal): Promise<void>;
