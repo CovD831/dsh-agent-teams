@@ -107,18 +107,44 @@ function probeIn(tree, ms, { tight = false } = {}) {
   })
 }
 
-function ensureLibBuilt() {
+/**
+ * ── ★★★ t35：前置不满足 ⇒ **skip 并说明**，本函数【不】自己构建 ─────────────────────
+ *
+ * ── 恢复的那次修改（它随 077c107 的 revert 一起被丢掉了，本任务把它拿回来）──────
+ *
+ * MEASURED（全量并行跑时稳定复现）：本函数原来在缺文件时跑 `pnpm build`，
+ * 而那一步走 `clean-build` 的**两次原子 rename**（`lib → lib.old`，`lib.tmp → lib`）
+ * ⇒ **两次 rename 之间有缝**（`clean-build.mjs` 文件头逐字："窗口 = 第 3 步那两次 rename"）。
+ * ⇒ 并行跑时别的夹具正好撞进那个缝 ⇒ 实测 **13 条**
+ *   `ERR_MODULE_NOT_FOUND: …/lib/worktree.js`（由 `worktree-reclaim.test.mjs` 报出）。
+ *
+ * ★★ 而本仓已经记过**同一族**事故一次：`gate-shared-artifact-writes.test.mjs` 的文件头逐字写着
+ *   "t56 的夹具在共享的 `lib/` 上跑 `rm -rf lib` ⇒ 此后 **49 个夹具**报 ERR_MODULE_NOT_FOUND"。
+ *   ⇒ 那是【直接删】，这是【通过构建间接抽走】—— **入口不同，窗口相同**。
+ *
+ * ⇒ 修法：前置不满足时 **skip 并说明**，而不是"我顺手建一下"。三条理由：
+ *   ① 在一个并行套件里自己替换共享 `lib/` ＝ **制造那个窗口**；
+ *   ② `lib/` 的完整性该由**构建步骤**保证，不该由夹具兜底；
+ *   ③ 缺前置的正确语义是"**我测不了**"，而 `t.skip` 会让它**看得见** ——
+ *      与"悄悄建一份、然后以为自己测了"**不同形**（本队最老的那条合流）。
+ *
+ * ★★ 返回 `boolean` 是刻意的：调用点写 `if (!ensureLibBuilt(t)) return`，
+ *   于是"没前置"这条路上**一条断言都不会跑到**，而不是拿到一个残缺的 lib/ 继续往下撞。
+ */
+function ensureLibBuilt(t) {
   if (!existsSync(join(LIB, 'index.js')) || !existsSync(join(LIB, 'client.js'))) {
-    const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
-    assert.equal(built.status, 0, `★ 前置：需要一份完整的 lib/；pnpm build 失败:\n${built.stdout}\n${built.stderr}`)
+    t.skip('未测量：lib/ 不完整（先跑 pnpm build）。★ 本臂不自己构建 —— 那会在并行的'
+      + '全量套件里抽走共享 lib/，实测让别的夹具撞进 rename 窗口（ERR_MODULE_NOT_FOUND）')
+    return false
   }
+  return true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 1：★ 并发读 —— 差分口径（新实现 vs 旧实现）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现 miss 十个以内', async () => {
+test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现 miss 十个以内', async (t) => {
   /**
    * ★★ 为什么是【差分】而不是"新的必须是零"：见文件头"陷阱乙"。
    *   现实约束：`rename` 不能覆盖非空目录 ⇒ 至少要两次 rename ⇒ 亚毫秒间隙不可消除。
@@ -138,7 +164,7 @@ test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现
    * ★ 定向突变：把 package.json 的 build 改回 `rm -rf lib/ && …` ⇒
    *   "新实现"那一侧变成数十万 ⇒ 两个量级的差消失 ⇒ 本臂红（已实测）。
    */
-  ensureLibBuilt()
+  if (!ensureLibBuilt(t)) return
   const { mkdtempSync, cpSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
 
@@ -237,7 +263,7 @@ test('臂 1 ★★ 并发读（差分）：旧实现 miss 数十万 · 新实现
 // 臂 2：★ 反向半边 —— build 失败时不许把旧的 lib 也毁掉
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那一路），lib/ 一个字节没动', async () => {
+test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那一路），lib/ 一个字节没动', async (t) => {
   /**
    * ── 这一臂防的是现状里【最坏】的那一半 ──────────────────────────────────────
    *
@@ -250,7 +276,7 @@ test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那�
    *
    * ★ 定向突变：让 `clear` 去 `rm -rf lib/` ⇒ 本臂红（指纹会变）。
    */
-  ensureLibBuilt()
+  if (!ensureLibBuilt(t)) return
   const before = treeDigest(LIB)
 
   const cleared = spawnSync(process.execPath, [CLEAN_BUILD, 'clear'], { cwd: ROOT, encoding: 'utf8' })
@@ -270,7 +296,7 @@ test('★ 臂 2 反向臂：`clear` 之后若编译没跑（＝build 失败那�
 // 臂 3：三态不同形
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —— 三者不同形', async () => {
+test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —— 三者不同形', async (t) => {
   /**
    * ── 三态各自是"关于什么"的结论 ───────────────────────────────────────────────
    *
@@ -280,8 +306,59 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
    *
    * ★ 判法：①②用**指纹是否变化**区分；③用**退出码 + 消息**区分。
    * ★ 定向突变：让 `publish` 在 lib.tmp 缺席时静默返回 ⇒ ③ 那条红。
+   *
+   * ── ★★★ t35 修（本臂的第三个缺陷，也是本任务最要紧的那一半）────────────────────
+   *
+   * MEASURED（captain 在恢复这次修改时发现）：
+   *   本臂在**一棵隔离树**里做实验，却**在真实树上断言** ——
+   *   于是那些"成功态"的断言检查的是**另一个目录**，
+   *   而其中一条**永远不可能通过**：臂 2 会**合法地**把暂存目录留在真实树里。
+   *
+   * ★★ 根因是**一句话里的两个名词指的不是同一个东西**：
+   *   "build 到 lab" 与 "读 ROOT 的 lib/" —— 而它们在读起来都叫"这棵树"。
+   *   ⇒ 而它**不是**"断言写错了"那么简单：一个**跨树**的断言
+   *     可能因为**另一棵树**的状态而红（或绿），于是它的红/绿**不指向它声称的那件事**。
+   *
+   * ⇒ 修法：**实验与断言必须在同一棵树里** —— 下面统一用 `tree`（那棵隔离树），
+   *   而 `lib.tmp` / `lib.old` / `clean-build` 的调用也全部指到那棵树的对应路径。
+   *   ★ 而真实树**从头到尾只被读**（那正是本任务要保住的性质：见下面臂 10）。
    */
-  ensureLibBuilt()
+  if (!ensureLibBuilt(t)) return
+
+  /**
+   * ── ★ 隔离树：只复制构建**读得到**的输入，`node_modules` 用软链（只读、省一次几百 MB 拷贝）──
+   *   ★ 与臂 1 同一套做法（同一份形态只有一处实现，不另造一份）。
+   */
+  const { mkdtempSync, cpSync, symlinkSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const tree = mkdtempSync(join(tmpdir(), 't35-arm3-'))
+  for (const entry of ['src', 'scripts', 'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+    cpSync(join(ROOT, entry), join(tree, entry), { recursive: true })
+  }
+  symlinkSync(join(ROOT, 'node_modules'), join(tree, 'node_modules'), 'dir')
+  cpSync(LIB, join(tree, 'lib'), { recursive: true })
+  /**
+   * ★★ 而这四个名字**全部**指到那棵树 —— 这是本修的核心一行。
+   *   它们此前是模块级的 `LIB` / `STAGING` / `PREVIOUS` / `CLEAN_BUILD`（都指 ROOT）。
+   */
+  const treeLib = join(tree, 'lib')
+  const treeStaging = join(tree, 'lib.tmp')
+  const treePrevious = join(tree, 'lib.old')
+  const treeCleanBuild = join(tree, 'scripts', 'clean-build.mjs')
+  /** ★ 而"跑构建"用那棵树里 `package.json` 的那条命令（理由与臂 1 逐字相同）。 */
+  const { readFileSync: readTreePkg } = await import('node:fs')
+  const treeBuildScript = JSON.parse(readTreePkg(join(tree, 'package.json'), 'utf8')).scripts.build
+  const runTreeBuild = () => spawnSync(treeBuildScript, { cwd: tree, encoding: 'utf8', shell: true, env: { ...process.env, PATH: `${join(ROOT, 'node_modules', '.bin')}:${process.env.PATH ?? ''}` } })
+
+  /**
+   * ── ★★★ 共享树的【事前快照】—— 收尾要拿它与事后比 ─────────────────────────────────
+   *   ★ 而这就是本任务那句话的可执行形式：**"隔离"意味着共享树一个字节都没变**，
+   *     而"没变"只有**先记下来**才读得出（见收尾那一段）。
+   */
+  const sharedLibBefore = treeDigest(LIB)
+  const sharedStagingBefore = existsSync(STAGING)
+
+  try {
 
   /**
    * ── ★★ 区分三态的【不是"指纹变没变"】—— 我第一版就是这么写的，而它是错的 ──────
@@ -297,29 +374,29 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
    *     ③ 无法判断 ⇒ publish 在缺暂存树时【非零退出 + 说清缺什么】
    *   ⇒ 三者靠"**哪些东西在场**"区分，而不是靠"内容像不像"。
    */
-  const built = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
-  assert.equal(built.status, 0, '★ 完整 build 必须成功')
-  const afterBuild = treeDigest(LIB)
+  const built = runTreeBuild()
+  assert.equal(built.status, 0, `★ 完整 build 必须成功（在隔离树里）:\n${String(built.stderr).slice(0, 400)}`)
+  const afterBuild = treeDigest(treeLib)
   const REQUIRED = ['index.js', 'client.js', 'types/index.d.ts', 'types/client/index.d.ts', 'git-artifact-stamp.json']
   for (const rel of REQUIRED) {
-    assert.ok(existsSync(join(LIB, rel)), `★ 成功态：lib/ 必须【完整】—— 缺 ${rel}`)
+    assert.ok(existsSync(join(treeLib, rel)), `★ 成功态：那棵树的 lib/ 必须【完整】—— 缺 ${rel}`)
   }
-  assert.equal(existsSync(STAGING), false, '★ 成功态：暂存树必须已被消费掉（留着它说明 publish 没跑完）')
-  assert.equal(existsSync(PREVIOUS), false, '★ 成功态：旧版必须已被清理（留着它说明收尾没做）')
+  assert.equal(existsSync(treeStaging), false, '★ 成功态：暂存树必须已被消费掉（留着它说明 publish 没跑完）')
+  assert.equal(existsSync(treePrevious), false, '★ 成功态：旧版必须已被清理（留着它说明收尾没做）')
 
   /** ② 失败：clear 之后不编译 ⇒ lib/ 完整【且】暂存树在场（＝clear 跑过、publish 没跑）。 */
-  assert.equal(spawnSync(process.execPath, [CLEAN_BUILD, 'clear'], { cwd: ROOT }).status, 0)
-  assert.equal(treeDigest(LIB), afterBuild, '★ 失败态：lib/ 仍是【旧】的完整版（逐字节相同）')
-  assert.ok(existsSync(STAGING), '★ 失败态：暂存树在场 —— 这与成功态的"暂存树已被消费"【不同形】')
+  assert.equal(spawnSync(process.execPath, [treeCleanBuild, 'clear'], { cwd: tree }).status, 0)
+  assert.equal(treeDigest(treeLib), afterBuild, '★ 失败态：那棵树的 lib/ 仍是【旧】的完整版（逐字节相同）')
+  assert.ok(existsSync(treeStaging), '★ 失败态：暂存树在场 —— 这与成功态的"暂存树已被消费"【不同形】')
 
   /** ③ 无法判断：没有暂存树时 publish 必须**说出来**。 */
-  const noStaging = spawnSync(process.execPath, [CLEAN_BUILD, 'publish'], { cwd: ROOT, encoding: 'utf8' })
+  const noStaging = spawnSync(process.execPath, [treeCleanBuild, 'publish'], { cwd: tree, encoding: 'utf8' })
   /**
    * ★ 此时 lib.tmp 是 clear 建出来的**空目录** —— 所以这里要先把空目录删掉，
    *   才是真正的"没有暂存树"。
    */
-  if (existsSync(STAGING)) execFileSync('rm', ['-rf', STAGING])
-  const missingStaging = spawnSync(process.execPath, [CLEAN_BUILD, 'publish'], { cwd: ROOT, encoding: 'utf8' })
+  if (existsSync(treeStaging)) execFileSync('rm', ['-rf', treeStaging])
+  const missingStaging = spawnSync(process.execPath, [treeCleanBuild, 'publish'], { cwd: tree, encoding: 'utf8' })
   assert.ok(
     missingStaging.status !== 0,
     '★ 无法判断/缺输入时 publish 必须【以非零退出码失败】并说清 —— 静默当成功会让"没换成"与"换成了"同形',
@@ -330,25 +407,37 @@ test('臂 3 ★ 三态臂：成功 / 失败（旧版完好）/ 无法判断 —�
   )
   void noStaging
   /** ④ 未知子命令也必须拒绝（否则一个拼错的子命令会静默什么都不做）。 */
-  const bogus = spawnSync(process.execPath, [CLEAN_BUILD, 'wat'], { cwd: ROOT, encoding: 'utf8' })
+  const bogus = spawnSync(process.execPath, [treeCleanBuild, 'wat'], { cwd: tree, encoding: 'utf8' })
   assert.notEqual(bogus.status, 0, '★ 未知子命令必须拒绝 —— 静默 no-op 会让"参数打错"与"构建成功"同形')
 
   /**
-   * ── ★★ 收尾：把共享树恢复成【完整】状态（本臂自己造成的污染，必须自己收拾）──────
+   * ── ★★★ t35：收尾从"**重建共享树**"变成"**证明共享树没被动过**"────────────────────
    *
-   * MEASURED（本任务，实测）：本臂把 lib/ 留在了"失败态"（clear 跑过、publish 没跑），
-   * 而**lib.tmp 一旦留在那里，下一个 build 的 `clear` 会正常处理它**
-   * —— 但**在此刻**，lib/ 与 lib.tmp 同时在场，而 lib/ 里那棵树是**旧的**。
+   * ── 这里原来那段话，以及它为什么会消失 ────────────────────────────────────────
    *
-   * ★ 而真正的危害是：如果**本臂之后**有别的东西读 lib/，它会读到一棵
-   *   "看起来完整、其实是旧版"的树 —— 那正是本任务要消灭的那种"看起来正常的残缺产物"。
-   * ⇒ 所以本臂**必须在结束时重建一次**，把共享树交还给后续用例时是【这一版源码】的产物。
+   * 原文（保留它是为了记住这个坑）：*"本臂把 lib/ 留在了失败态 … 所以本臂**必须在结束时
+   * 重建一次**，把共享树交还给后续用例时是这一版源码的产物。"*
+   *
+   * ★★ 而那句话是**隔离之前的必要之恶**：本臂当时真的在共享树上做破坏性实验，
+   *   所以它必须自己收拾。⇒ 而它同时是**两个问题的来源**：
+   *
+   *   ① 收拾本身要跑一次 `pnpm build` ⇒ **又制造一次那个两秒窗口**
+   *      （13 条 `ERR_MODULE_NOT_FOUND` 的来源之一）；
+   *   ② 它与臂 2 的收尾**互相覆盖** —— 两条臂各修一次共享树，
+   *      谁是"最后那一版"取决于**执行顺序**，而那是不该被依赖的东西。
+   *
+   * ⇒ 现在实验在隔离树里 ⇒ **共享树一个字节都没被碰过** ⇒
+   *   收尾不是"修回来"，而是**断言它没被动过**（那一句才是本任务真正想说的话）。
+   *   ★ 见下面臂 10：它把这条性质提升成一条**独立的臂**。
    */
-  const rebuilt = spawnSync('pnpm', ['build'], { cwd: ROOT, encoding: 'utf8', shell: true })
-  assert.equal(rebuilt.status, 0, `★ 收尾：本臂必须能把共享树重建回完整状态:
-${rebuilt.stderr}`)
-  for (const rel of REQUIRED) {
-    assert.ok(existsSync(join(LIB, rel)), `★ 收尾后 lib/ 必须是完整的 —— 缺 ${rel}`)
+  assert.equal(
+    treeDigest(LIB), sharedLibBefore,
+    '★★★ 本臂的实验**完全没有碰到共享树** —— 否则"隔离"这个词就是空的',
+  )
+  assert.equal(existsSync(STAGING), sharedStagingBefore, '★ 共享树的暂存目录状态也不许被本臂改变')
+  } finally {
+    /** ★ 隔离树是本臂**自己的**产物 ⇒ 它自己收拾（共享树由上面那两条断言保证没被碰）。 */
+    rmSync(tree, { recursive: true, force: true })
   }
 })
 
@@ -568,4 +657,95 @@ test('★★★ 臂 9（顺序臂）：守卫必须在 `rm` 【之前】—— �
     assert.equal(existsSync(join(base, 'lib.old', 'keep-me-too.txt')), true,
       '★★★ lib.old 同理')
   } finally { rmSync(base, { recursive: true, force: true }) }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 10（t35）：★★★ 隔离臂 —— 在隔离树里跑一次完整构建，而共享树**一个字节都不变**
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一臂为什么必须**独立**存在，而不是只留在臂 3 的收尾里 ────────────────────────
+ *
+ * 臂 3 的收尾**也**断言了共享树没被动过（那两句是它的收尾）。
+ * ★ 而"某一条臂顺带断言了 X"与"有一条臂**专门**钉住 X"是两件事：
+ *   前者在**有人重构臂 3** 时会跟着消失，而消失的方式是**静默的**
+ *   （那两句只是被删掉，测试照常绿）。
+ *
+ * ★★★ 而这一条性质是本任务的**全部要点**，值得它自己的臂：
+ *
+ *     MEASURED（本轮，两次独立事故，同一族）：
+ *       · t56 的夹具在**共享的 lib/** 上跑 `rm -rf lib` ⇒ 此后 **49 个夹具**报 ERR_MODULE_NOT_FOUND
+ *       · 本夹具原来在共享树里跑 `pnpm build` ⇒ `lib/worktree.js` 消失 1.9–2.5 秒
+ *         ⇒ 并行跑全量套件时 **13 条** ERR_MODULE_NOT_FOUND（由 `worktree-reclaim.test.mjs` 报出）
+ *     ⇒ 两次的**入口不同**（直接删 vs 通过构建间接抽走），而**窗口相同**。
+ *
+ * ⇒ 本臂把"构建只发生在一棵一次性树里"变成一条**可执行的**读数：
+ *   在隔离树里跑**完整构建**，然后逐字节比对共享 `lib/`。
+ *
+ * ★ 反向半边：若哪天有人把构建搬回共享树（例如"顺手重建一下"），
+ *   本臂**当场红** —— 而那正是它存在的理由。
+ */
+test('臂 10 ★★★（t35 隔离臂）：在隔离树里跑完整构建 ⇒ 共享 lib/ 逐字节不变', async (t) => {
+  if (!ensureLibBuilt(t)) return
+
+  const { mkdtempSync, cpSync, symlinkSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+
+  /** ★ 事前快照：共享 lib/ 的指纹、以及共享树上那几个**会被构建挪动**的兄弟路径。 */
+  const libBefore = treeDigest(LIB)
+  const stagingBefore = existsSync(STAGING)
+  const previousBefore = existsSync(PREVIOUS)
+  /** ★ 同时盯住"读得到"这件事本身：共享 lib/ 必须一直是**可用**的。 */
+  const indexBefore = existsSync(join(LIB, 'index.js'))
+
+  const tree = mkdtempSync(join(tmpdir(), 't35-isolation-'))
+  try {
+    for (const entry of ['src', 'scripts', 'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']) {
+      cpSync(join(ROOT, entry), join(tree, entry), { recursive: true })
+    }
+    symlinkSync(join(ROOT, 'node_modules'), join(tree, 'node_modules'), 'dir')
+    cpSync(LIB, join(tree, 'lib'), { recursive: true })
+
+    const { readFileSync: readTreePkg } = await import('node:fs')
+    const buildScript = JSON.parse(readTreePkg(join(tree, 'package.json'), 'utf8')).scripts.build
+    const built = spawnSync(buildScript, {
+      cwd: tree,
+      encoding: 'utf8',
+      shell: true,
+      env: { ...process.env, PATH: `${join(ROOT, 'node_modules', '.bin')}:${process.env.PATH ?? ''}` },
+    })
+    console.log(`    ℹ 隔离树里的完整构建 ⇒ exit ${built.status}`)
+
+    assert.equal(built.status, 0, `★ 前置：隔离树里的构建必须成功，否则本臂测不了隔离:\n${String(built.stderr).slice(0, 400)}`)
+
+    /** ★ 而它**真的**动了那棵树（否则"隔离"是因为什么都没做 —— 那是恒真）。 */
+    assert.ok(
+      existsSync(join(tree, 'lib', 'index.js')),
+      '★ 前置：隔离树里的构建必须真的产出了东西 —— 否则下面那条"共享树没变"是恒真的',
+    )
+
+    /**
+     * ── ★★★ 读数：共享树逐字节没变 ────────────────────────────────────────────────
+     */
+    assert.equal(
+      treeDigest(LIB), libBefore,
+      '★★★ 隔离树里的一次完整构建让**共享 lib/** 变了 —— 那意味着构建被搬回了共享树，\n'
+      + '   而那正是 13 条 ERR_MODULE_NOT_FOUND 的成因（本文件的文件头记着它）。',
+    )
+    assert.equal(existsSync(STAGING), stagingBefore, '★ 共享树的 `lib.tmp` 状态不许被改变')
+    assert.equal(existsSync(PREVIOUS), previousBefore, '★ 共享树的 `lib.old` 状态不许被改变')
+    /**
+     * ★★ 第三个读数，与上面三个**不同形**：不是"没变"，而是"**一直读得到**"。
+     *   上面那三条在"构建把 lib/ 抽走两秒又放回来"时**都会通过**
+     *   （快照是在构建**之后**取的）—— 而那个两秒窗口正是真正的危害。
+     *   ⇒ 所以本臂**同时**断言那些必需产物在**事后**仍然在位，
+     *     而"窗口期"的守卫由 ensureLibBuilt 的 skip 语义承担（它不再触发构建）。
+     */
+    assert.equal(
+      existsSync(join(LIB, 'index.js')), indexBefore,
+      '★ 共享 lib/ 的核心产物必须在场 —— 本臂的实验不许让它消失',
+    )
+  } finally {
+    rmSync(tree, { recursive: true, force: true })
+  }
 })
