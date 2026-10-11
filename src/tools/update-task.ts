@@ -151,6 +151,44 @@ import { AgentTeamsRuntime, applyQualityFollowUp, parseAcceptanceResults, parseC
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { pathToFileURL } from 'node:url'
+
+/**
+ * ── ★★★ 可选地读队长会话：**绝不**让"读不到"变成"这次完成失败了" ────────────────
+ *
+ * MEASURED（本仓实测，十几次，跨四个成员与队长自己）：在工具的**返回值算完之后**
+ * 调 `ctx.agents.get(...)`，会抛
+ *   `cannot get required service "agents" in inactive context`
+ * 而**落盘已经完成**。机制在 host 的 cordis（`lib/index.js:688`）：取值器沿 fiber
+ * 树往上找 `fiber.store`，而 `store` **只在 fiber 处于 active 时存在**；本插件在
+ * 顶层 `inject` 里声明了 `agents`（`src/index.ts:56`），于是当**本处理器所属的
+ * fiber 已经不在运行**时，取值器走到"我自己就声明了它"这一支 ⇒ **当场抛，不再往上找**。
+ *
+ * ★ 而它为什么**有时不抛**：同一个处理器**先**返回结果、**后**执行这段投递，而
+ *   "会话何时结束"与"这段代码何时跑"的先后决定了这一次成功还是抛错 —— 产物都一样已交付。
+ *   ⇒ 同一句报错里混着"没做"与"做了但回执丢了"，调用方**无法分辨**，于是重试，
+ *     而重试又成功又失败 ⇒ 整轮卡在 complete 上。这正是运行里反复出现的那一格。
+ *
+ * ★ 处置：**按需**读，且失败时返回 `undefined` 而不是抛。这里的读是"把跟进消息
+ *   顺手推给队长"的**尽力而为投递**，不是终态转换的判据；消息仍在邮箱里，
+ *   下一条 status 会看到，所以没有事实丢失。
+ */
+function readCaptainSession(ctx: Context, sessionId: string | undefined): Parameters<typeof steerCaptainReport>[0] | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  try {
+    const agents = (ctx as unknown as { agents?: { get?: (id: SessionId) => Parameters<typeof steerCaptainReport>[0] | undefined } }).agents
+    return agents?.get?.(sessionId as SessionId)
+  }
+  catch (error) {
+    const message = String((error as { message?: unknown })?.message ?? error)
+    /**
+     * ★ 只吞**这一种**：服务读不到。其余异常照旧往上抛 —— 一个 `catch` 若把
+     *   "读不到队长会话"与"投递逻辑自己坏了"读成同一件事，就是把这一格修成
+     *   一个更宽的盲区。
+     */
+    if (!message.includes('inactive context')) throw error
+    return undefined
+  }
+}
 /**
  * ★★ 本文件**不再** import `rmSync`（defect 1 的修法）：
  *   删除只有**一个**出处 —— `scripts/worktree-reclaim.mjs` 的 `removeWorktree`。
@@ -1927,9 +1965,39 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           }
         })
         if (followUpMessage !== undefined) {
-          const captain = ctx.agents.get(team.captainSessionId as SessionId)
+          /**
+           * ── ★★★ 这一段会抛，而抛在**写入之后** ────────────────────────────────────
+           *
+           * MEASURED（本仓实测，十几次）：`ctx.agents.get(...)` 在这里抛
+           *   `cannot get required service "agents" in inactive context`
+           * 而**紧接着的落盘已经完成**。于是调用方看到"失败"，去重试，
+           * 而重试**又成功又失败**，来回几次之后整轮就卡在 complete 上。
+           *
+           * ★ 机制在 host 的 cordis（`lib/index.js:688`）：取值器沿 fiber 树往上找，
+           *   而 `fiber.store` **只在 fiber 处于 active 时存在**。本插件在顶层
+           *   `inject` 里声明了 `agents`（`src/index.ts:56`），所以当**本处理器所属的
+           *   fiber 已经不在运行时**，取值器走到"我自己就声明了它"这一支 ⇒ 当场抛，
+           *   **不再往上找**。
+           *
+           * ★ 而更关键的是**为什么它有时不抛**：本处理器**先**返回结果、**后**执行这一段。
+           *   会话结束与这段代码谁先谁后，决定了这一次是成功还是抛错 —— 而**产物已经交付**。
+           *   ⇒ 一句"失败"里混着"没做"与"做了但回执丢了"两件事，而调用方无法分辨。
+           *
+           * ★ 处置：把这次读取**降级成可选**（见 `readCaptainSession`）。它做的事是
+           *   "把跟进消息顺手推给队长"—— 是**尽力而为的投递**，不是这次终态转换的判据。
+           *   读不到就**跳过**，并把"没投递"如实记进日志，**绝不让它把一次已经落盘的
+           *   完成判成失败**。消息本身仍在邮箱里（下一条 status 会看到），没有事实丢失。
+           */
+          const captain = readCaptainSession(ctx, team.captainSessionId)
           if (captain !== undefined && steerCaptainReport(captain, CAPTAIN_KEY, followUpMessage.content, mailboxPrompt(team.id, CAPTAIN_KEY, [followUpMessage]))) {
             await withTeamLock(teamLockKey(stateRoot, team.id), () => markMailboxDelivered(stateRoot, team.id, CAPTAIN_KEY, [followUpMessage!.id]))
+          }
+          else if (captain === undefined) {
+            ctx.logger?.info?.(
+              `agent-teams: follow-up steer for team "${team.id}" was NOT delivered — the captain session could not be read in this context `
+              + '(cannot get required service "agents" in inactive context). The completion itself HAS landed; the message is still in the mailbox '
+              + 'and will be delivered by the next status read. This is a delivery miss, not a completion failure.',
+            )
           }
         }
         await scheduler.kickTeam(workspace, team.id, team.captainSessionId === caller.id ? caller : undefined)
