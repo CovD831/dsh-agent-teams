@@ -619,12 +619,15 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           if (scopeProblems.length > 0) {
             const lines = scopeProblems.map((problem) => `  (${problem.check}) ${problem.detail}`)
             throw new Error(
-              `create_task rejected: the scope is internally inconsistent — ${scopeProblems.length} problem(s):\n`
+              `create_task refused: the scope is internally inconsistent (contract defect, NOT an unmeasured reason) — ${scopeProblems.length} problem(s):\n`
               + `${lines.join('\n')}\n`
               + '★ 每一条都是**当场算出来的**，不是形容词。修法：\n'
               + '  (contradiction) 从 outOfScope 里拿掉那个路径，或从 inScope 里拿掉它 —— 不能两边都在；\n'
               + '  (emit) 把产物加进 inScope（src/X.ts ⇒ lib/X.js 与 lib/types/X.d.ts）；\n'
-              + '  (touch) 把**源**文件也加进 inScope —— move 类任务要改源与目的地两处。',
+              + '  (touch) 把**源**文件也加进 inScope —— move 类任务要改源与目的地两处。\n'
+              + '★★ 用 `refused` 而不是 `rejected`：本仓的 `rejected` 前缀专指**判据拒绝**，'
+              + '而这一条是**契约形状**问题（当场算出来的三态之一）。两者同前缀会让'
+              + '`gate-update-task-unmeasured` 那条臂分不清"真拒绝"与"没能测量"。',
             )
           }
           if (fresh.halted === true) {

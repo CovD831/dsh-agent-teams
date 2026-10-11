@@ -250,18 +250,35 @@ test('★★★ 臂 4（待修读数）：清单必须真的被装载器交给�
    *   而不是源码文本。⇒ 这正是"断言钉性质，不钉字面"。
    */
   /**
-   * ★ 复刻装载器的**真实**读法（逐字照抄 `completion.ts` 的那两步）——
+   * ★ 复刻装载器的**真实**读法（逐字照抄 `completion.ts` 的那一步）——
    *   而不是另写一份"应该怎么读"。夹具另写一份的话，测的是夹具的算术。
+   *
+   * ── ★★★ 这里此前【照抄错了】，而注释还写着"逐字照抄"（t10 实测）──────────────
+   *
+   * MEASURED（verifier 在 t10 上实测，captain 逐字复核）：产品代码那一行传的是
+   *   **`raw`**（整个对象，`parseKnownBaselineFailures` 自己取 `.knownFailures`），
+   *   而本夹具传的是 **`raw.knownFailures`**（先把数组取出来再传）。
+   * ⇒ 产品**通过**、夹具**抛错**，而那个手写的 `catch { return undefined }`
+   *   把抛错吞成 `undefined` ⇒ 装载器读成"清单缺席" ⇒
+   *   **`gate-backtest-baseline` 打印「实际 0 条 · 清单 17 条」，把 17 条 pin 全报成陈旧**。
+   *
+   * ★ 形态：同一个 bug（7742a27 修掉的那个）在夹具里**被复现**了一次，
+   *   而注释声称它是逐字复制品 —— **一份"看起来是复制品"的副本与真品不同形**，
+   *   正是本仓反复记账的那一类。
+   *
+   * ★ 而它**不许**再靠 `catch` 兜底：产品那句注释写明"形状坏了 ⇒ 让它抛出去，**不吞**"。
+   *   吞掉的 catch 会让"读不出来"与"清单不存在"同形 —— 而这两件事的处置相反。
    */
   const load = () => {
+    let raw
     try {
-      const raw = JSON.parse(readFileSync(LIST, 'utf8'))
-      /** ★ 这一行逐字照抄产品代码：它传的是 `raw.knownFailures`（数组）。 */
-      return parseKnownBaselineFailures(raw.knownFailures)
+      raw = JSON.parse(readFileSync(LIST, 'utf8'))
     } catch {
-      /** ★ 而这里逐字照抄那个 `catch`：它 **continue**（吞掉）⇒ 候选走完 ⇒ `undefined`。 */
+      /** ★ 候选**不存在** ⇒ 这才是"清单缺席"（与产品同形：只在读文件那一步落回 undefined）。 */
       return undefined
     }
+    /** ★ 逐字照抄产品代码：传的是 **`raw`**，不是 `raw.knownFailures` —— 且**不吞**。 */
+    return parseKnownBaselineFailures(raw)
   }
 
   const loaded = load()
