@@ -51,6 +51,10 @@ export declare const zh: {
     'task.status.cancelled': string;
     'task.status.notRun': string;
     'member.model.sealedReason': string;
+    'roster.title': string;
+    'roster.readonly': string;
+    'roster.empty': string;
+    'roster.noModel': string;
     'member.state.working': string;
     'member.state.failed': string;
     'member.state.waiting': string;
@@ -267,6 +271,10 @@ export declare const en: {
     'task.status.cancelled': string;
     'task.status.notRun': string;
     'member.model.sealedReason': string;
+    'roster.title': string;
+    'roster.readonly': string;
+    'roster.empty': string;
+    'roster.noModel': string;
     'member.state.working': string;
     'member.state.failed': string;
     'member.state.waiting': string;

@@ -1,0 +1,151 @@
+/**
+ * ── 花名册设置表面的样式（t20）────────────────────────────────────────────────
+ *
+ * ★ 全部走宿主的设计令牌（`--dsw-alias-*`），与其它客户端表面同一口径 ——
+ *   硬编码颜色会让这一块在宿主的明/暗主题下与周围不一致，而那种不一致
+ *   读起来像"这里坏了"。
+ */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+/**
+ * ★ 只读徽标：它**必须在标题旁边**，因为"这一份能不能改"是用户看这一块时
+ *   第一个会问的问题。藏在 tooltip 里等于没说。
+ */
+.readonlyBadge {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+/** ★ 理由**可见**，不是 hover 提示 —— 见组件头那段"失效控件比没有控件更坏"。 */
+.reason {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 14px;
+}
+
+.empty {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 5px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.team {
+  flex: none;
+  max-width: 96px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9.5px;
+}
+
+.name {
+  flex: none;
+  font-weight: 600;
+}
+
+.role {
+  flex: none;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9.5px;
+}
+
+/** 模型用等宽体：模型名里的 `-` / `.` 在比例字体下容易看错。 */
+.model {
+  margin-left: auto;
+  flex: none;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+}
+
+/**
+ * ★ "该身份没有解析出模型" —— 与 `.model` **不同形**（弱化 + 斜体）：
+ *   它说的是一个**读数**，而不是"这一格还没读到"。
+ */
+.unset {
+  margin-left: auto;
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  font-style: italic;
+}
+
+.effort {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 8.5px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row { transition: none; }
+}
