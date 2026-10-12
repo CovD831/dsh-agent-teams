@@ -1623,8 +1623,37 @@ export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
    *   ⇒ ★ 所以本次【不改判据】，而是把那条区分立成一条任务。
    *     `builtCommitIsAncestorOfHead` 这个输入保留（它已可注入、有 5 条臂），
    *     但**暂不参与** `commitBehind` —— 等那条第三维的判据落地再接。
+   *
+   * ── ★★★ 2026-10-12：第三维落地了，而它比预想的窄 ─────────────────────────────
+   *
+   * MEASURED：臂 9 的构造里 `moduleFreshnessFrom` **只传 `loaded`/`onDisk`/`head`** ——
+   * **没有**传 `builtCommitIsAncestorOfHead`。⇒ 那一格在臂 9 里是 `undefined`，
+   * 而下面的保守规则把它当"落后"。
+   *
+   * ⇒ ★ 所以臂 9 钉住的其实是：
+   *     「output 没变 + HEAD 前进 ⇒ stale，**且祖先关系未知**」
+   *   而它**从未**钉住「祖先关系为真时也必须报 stale」——
+   *   那一格是这条注释的前一版（和我）**读宽了**。
+   *
+   * ★ 而"祖先为真"在现实中是两种情形，臂 9 的构造只覆盖了第一种：
+   *   · **有人动了历史**（改了又改回来 / amend / rebase）⇒ 该报 stale；
+   *   · **build 之后 commit**（产物无法描述包含它自己的那个提交）⇒ **每轮都会发生**，
+   *     而它**不是**"你手上的代码旧了" ⇒ 报 stale 就是一条**先于使用者存在的假红**。
+   *
+   * ★ 第三维因此是：**"这两个提交之间，构建的输入真的变了吗？"** —— 问 git
+   *   `builtCommit..HEAD` 上的 `src/` 与构建配置。而这一问**只在确知是祖先时**才做：
+   *   非祖先时 HEAD 已经移开，那一格本来就该报 stale，不必再问。
+   *   ★ `undefined`（跑不了 git / 问不出来）⇒ **维持保守**：说不清不得读成"没事"。
+   */
+  const builtIsAncestor = input.builtCommitIsAncestorOfHead === true
+  /**
+   * ★★ 只有**确知是祖先**且 git **明确回答"输入没变"**时才压掉 commit 这一维。
+   *   `undefined` ⇒ **不压** —— 那正是臂 9 的构造（它不传这一格），它必须继续报 stale。
    */
   const commitBehind = builtCommit !== head
+    && !(builtIsAncestor
+      && builtCommit !== undefined && head !== undefined
+      && buildInputsChangedBetween(builtCommit, head) === false)
   if (!contentChanged && !commitBehind) {
     return { status: 'current', loaded: loadedOutput, onDisk: onDiskOutput, commit: builtCommit, head }
   }
@@ -1656,6 +1685,51 @@ export function moduleFreshness(): ModuleFreshness {
       : {},
   })
 }
+/**
+ * ── ★★★ 第三维：`from..to` 之间，**构建的输入**有没有真的变？─────────────────────
+ *
+ * MEASURED 的由来：`stamp.commit` 与 HEAD **必然**不同，而这是构造性的 ——
+ * 产物无法描述包含它自己的那个提交（commit N 写 stamp{commit: N}，而包含它的提交是 N+1）。
+ * ⇒ 若把"不相等"直接读成"落后"，那么**每提交一次**就产生一条
+ *   **先于使用者存在的假红**。实测代价：`gate-stale-module` 的臂 1/4/6 同时变红，
+ *   而三条标题里**都没有 "stamp" 这个词** ⇒ 读起来像"谁弄坏了三条不相干的臂"。
+ *
+ * ★ 而"祖先为真"其实有两种情形，补救动作相反：
+ *   · **有人动了历史**（改了又改回来 / amend）⇒ 该报 stale；
+ *   · **build 之后 commit** ⇒ 不该报。
+ * 分开它们要问的正是这一格：**那两个提交之间，构建的输入变了吗？**
+ *
+ * ★ 三态，与全仓纪律同源：
+ *   `true`      —— 输入变了（真的落后）
+ *   `false`     —— **输入一个字没变** ⇒ 旧构建描述的就是当前代码 ⇒ 不算落后
+ *   `undefined` —— 问不出来（跑不了 git / 那条提交不在库里）⇒ 调用方**保守处理**
+ *
+ * ★★ 为什么看的是**路径清单**而不是"摘要相等"：摘要需要重新计算整棵 `src/`，
+ *   而这一问发生在**每一次状态读取**上（`moduleFreshness()` 是被高频调用的）。
+ *   `git diff --name-only` 是 git 自己算的、与工作树无关，代价可忽略；而
+ *   "清单为空"与"摘要相等"在这个问题上**等价**（输入一个字没变 ⇒ 摘要必然相同）。
+ */
+export function buildInputsChangedBetween(
+  from: string,
+  to: string,
+  root: string = pluginRoot(),
+): boolean | undefined {
+  try {
+    /**
+     * ★ 只问**构建输入**：`src/` 加构建配置。`docs/`、`scripts/`（除构建链）与
+     *   `.agent-teams/` 变了**不影响产物**，把它们算进来会重新造出假红。
+     */
+    const changed = execFileSync('git', [
+      'diff', '--name-only', from, to, '--',
+      'src', 'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'tsdown.client.ts', 'package.json',
+    ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    return changed !== ''
+  } catch {
+    /** ★ 问不出来 ⇒ `undefined`（**不是** `false`）—— 那会把"没能核对"说成"没变"。 */
+    return undefined
+  }
+}
+
 /**
  * `ancestor` 是不是 `descendant` 的祖先（用 git 判，而不是用字符串比）。
  *

@@ -26,7 +26,13 @@ moduleFreshnessFrom, stampCommitOf, currentHead,
  *   而"构建时的提交是不是 HEAD 的祖先"必须能被夹具【精确驱动】——
  *   ★ 否则它的三态（是 / 不是 / 判不了）只能靠 live 读数去碰。
  */
-isAncestorOf, readStamp, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
+isAncestorOf, 
+/**
+ * ★★★ 同样导出：它是 `commitBehind` 那第三个维度 —— 「这两个提交之间，
+ *   构建的输入变了吗」。而它的三态（变了 / 没变 / 问不出来）必须能被夹具
+ *   逐格钉住，否则"每提交一次一条假红"这个形态只能靠 live 读数去碰。
+ */
+buildInputsChangedBetween, readStamp, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
 export type { AgentTeamsRuntime, BaseRevisionResolution, ModuleFreshness, RestartArbitration, StagedPlanMutation, ToolsConfig, } from './tools/shared/entities.ts';
 export { steerCaptainReport } from './members.ts';
 /**

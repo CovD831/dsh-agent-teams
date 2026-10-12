@@ -649,6 +649,31 @@ export interface FreshnessInput {
 export declare function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness;
 export declare function moduleFreshness(): ModuleFreshness;
 /**
+ * ── ★★★ 第三维：`from..to` 之间，**构建的输入**有没有真的变？─────────────────────
+ *
+ * MEASURED 的由来：`stamp.commit` 与 HEAD **必然**不同，而这是构造性的 ——
+ * 产物无法描述包含它自己的那个提交（commit N 写 stamp{commit: N}，而包含它的提交是 N+1）。
+ * ⇒ 若把"不相等"直接读成"落后"，那么**每提交一次**就产生一条
+ *   **先于使用者存在的假红**。实测代价：`gate-stale-module` 的臂 1/4/6 同时变红，
+ *   而三条标题里**都没有 "stamp" 这个词** ⇒ 读起来像"谁弄坏了三条不相干的臂"。
+ *
+ * ★ 而"祖先为真"其实有两种情形，补救动作相反：
+ *   · **有人动了历史**（改了又改回来 / amend）⇒ 该报 stale；
+ *   · **build 之后 commit** ⇒ 不该报。
+ * 分开它们要问的正是这一格：**那两个提交之间，构建的输入变了吗？**
+ *
+ * ★ 三态，与全仓纪律同源：
+ *   `true`      —— 输入变了（真的落后）
+ *   `false`     —— **输入一个字没变** ⇒ 旧构建描述的就是当前代码 ⇒ 不算落后
+ *   `undefined` —— 问不出来（跑不了 git / 那条提交不在库里）⇒ 调用方**保守处理**
+ *
+ * ★★ 为什么看的是**路径清单**而不是"摘要相等"：摘要需要重新计算整棵 `src/`，
+ *   而这一问发生在**每一次状态读取**上（`moduleFreshness()` 是被高频调用的）。
+ *   `git diff --name-only` 是 git 自己算的、与工作树无关，代价可忽略；而
+ *   "清单为空"与"摘要相等"在这个问题上**等价**（输入一个字没变 ⇒ 摘要必然相同）。
+ */
+export declare function buildInputsChangedBetween(from: string, to: string, root?: string): boolean | undefined;
+/**
  * `ancestor` 是不是 `descendant` 的祖先（用 git 判，而不是用字符串比）。
  *
  * ★ 三态：`true` / `false` / `undefined`（**跑不了 git ⇒ 判不了**）。
