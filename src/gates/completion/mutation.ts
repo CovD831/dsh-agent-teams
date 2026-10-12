@@ -42,6 +42,10 @@
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
 /**
+ * ★ 预算停止的认出（2026-10-12）。同层 import —— 见 `../budget-stop.ts` 文件头。
+ */
+import { isCompletionBudgetStop } from '../budget-stop.ts'
+/**
  * ★ t54：从**非判据**的纯模块拿（不是从 `./r5.ts`）——
  *   判据之间不许互相 import（`verify-gates-integration` ④ 的显式 allowlist），
  *   而那条约束防的正是"一条判据调另一条"。
@@ -50,9 +54,13 @@ import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
 import { gateRequirementFor, loadKindRequirementsOfHost, type KindRequirementsLoad } from './kind-requirements.ts'
 import type { CtxPaths } from '../requires.ts'
 import {
+  capMutants,
   classifyRun,
+  DEFAULT_MAX_MUTANTS,
+  DEFAULT_MAX_PER_OPERATOR,
   generateMutants,
   loadInvariants,
+  MIN_SCORED_FOR_VERDICT,
   noScorableMutants,
   parseTestSummary,
   probeReach,
@@ -178,7 +186,29 @@ export interface MutationContext {
   minKillRate?: number
   /** L3 的锚点越界是否算错。默认 true —— 落在改动范围外就是"变异了无关区域"。 */
   enforceL3Range?: boolean
+  /**
+   * ── ★★★ 跑批总条数上限（2026-10-12 真正接线）─────────────────────────────────
+   *
+   * ★ 这一格此前**声明了但从未被读过**（`gate()` 里零使用点）—— 也就是
+   *   "参数在、效果不在"，而它与"没有这个参数"在**每一次运行的读数上完全同形**。
+   *   本仓把这一族叫「声明了但没接线」。
+   *
+   * ★ 缺省 {@link DEFAULT_MAX_MUTANTS}。**超限时丢弃数必须被报进裁决文本**
+   *   （见 `gate()` 的 `truncation`）—— 静默拉小分母正是 R1（只变异改动行）要防的
+   *   那件事的另一个入口：分母小了，不代表分数变好，只代表它变得更不可信。
+   */
   maxMutants?: number
+  /**
+   * 同一个算子在**一个文件**里最多产出几条变异体。
+   *
+   * ★ 与 `maxMutants` 是两条**不同**的闸门，不能只留一条：
+   *   · `maxPerOperator` 管的是**分布** —— 一个文件里 200 个 `+` 会把分母撑爆，
+   *     让"这个算子的变异体全存活"淹没在噪声里；
+   *   · `maxMutants` 管的是**总量** —— 跨文件、跨算子、含镜像的总预算。
+   *   只有前者时，10 个改动文件仍会跑到 10 × 13 × 4 条；只有后者时，
+   *   单个文件里的一个高频符号会把配额吃光。
+   */
+  maxPerOperator?: number
   /** 语料 = 这条判据覆盖到的文件，被交出去给下游读。 */
   corpus?: readonly string[]
 }
@@ -369,6 +399,15 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     }
   }
 
+  /**
+   * ── ★★★ 两条闸门（2026-10-12）───────────────────────────────────────────────
+   *
+   * `maxPerOperator` 收紧**分布**，`maxMutants` 收紧**总量**。两者都在
+   * `gate()` 内部生效，而不是靠调用方自觉 —— 上一版它们只在类型里存在。
+   */
+  const maxPerOperator = ctx.maxPerOperator ?? DEFAULT_MAX_PER_OPERATOR
+  const maxMutants = ctx.maxMutants ?? DEFAULT_MAX_MUTANTS
+
   /** 组装全部变异体（含镜像），逐条应用 → 跑套件 → 还原。 */
   const plans: MutantPlan[] = []
   for (const file of declaredFiles) {
@@ -394,6 +433,7 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
       endLine: Math.max(...effective),
       changedLines: effective,
       file,
+      maxPerOperator,
       ...(ctx.operators === undefined ? {} : { operators: ctx.operators }),
     })
     for (const mutant of generated) {
@@ -425,8 +465,24 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     return unmeasured(noScorableMutants({ file: declaredFiles.join(', '), startLine: ranges[0]!.startLine, endLine: ranges[ranges.length - 1]!.endLine }))
   }
 
+  /**
+   * ── ★★★ 总量闸门，以及它的【读数】─────────────────────────────────────────────
+   *
+   * ★ 截断必须被报出来，理由与 R1（只变异改动行）逐字同源：分母的大小**改变
+   *   这条分数的含义**。一个"40 条里杀掉 30 条"与"325 条里杀掉 30 条"读起来都是
+   *   `0.75` 与 `0.09`，但前者是抽样估计、后者是全量测量 —— 而它们在只看分数时同形。
+   *
+   * ★ 所以截断作为一条**自己的文本**进裁决（ok 与 blocked 两条路径都带），
+   *   而不是被并进 `scope` 那句已经很长的话里 —— 读的人要能一眼看到它。
+   */
+  const selected = capMutants(plans, maxMutants)
+  const dropped = plans.length - selected.length
+  const truncation = dropped === 0
+    ? ''
+    : `the mutant batch was truncated by its own total cap: ${selected.length} of ${plans.length} candidate(s) were run (even-stride sample), so ${dropped} mutant(s) were NOT measured — the kill rate below is over a sample, not over every changed line`
+
   const results: MutantResult[] = []
-  for (const plan of plans) {
+  for (const plan of selected) {
     const mutatedText = plan.mutant.mutated ?? spliceOnce(plan.originalText, plan.mutant.find, plan.mutant.replace)
     try {
       await writeFile(plan.file, mutatedText)
@@ -445,11 +501,44 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
       const run = await runTest(command)
       observed = classifyRun(run, plan.mutant)
     } catch (error) {
-      observed = {
-        outcome: 'error',
-        reason: `running the killer suite raised: ${error instanceof Error ? error.message : String(error)}`,
-        killedBy: [],
-      }
+      /**
+       * ── ★★★ 预算停止 ≠ 变异体出错（2026-10-12，修一个**假通过**）────────────────
+       *
+       * MEASURED（本轮加总预算时当场发现）：`scoreMutants` 里
+       *
+       *     scored = results.filter(o => o.outcome === 'killed' || o.outcome === 'survived')
+       *     errored = results.filter(o => o.outcome === 'error')      ← 不进分母
+       *
+       * ⇒ 若预算在半路跑光，**剩下每一条变异体都会立刻抛**（`inBudget` 见
+       *   `remaining <= 0` 即抛），而它们全被记成 `error` ⇒ **不进分母**。
+       *   分母于是塌缩成"还来得及跑的那几条"：前面几条若恰好都被杀，
+       *   `mutationScore` 会是 1.0 > 阈值 ⇒ ★ **报 ok**。
+       *
+       *   一次「那条链今天没跑完」因此被读成「这个成员的测试很强」—— 假通过，
+       *   而且它与一次真正的满分在报告里**完全同形**。
+       *
+       * ── 修法：预算停止记 `unmeasured`，其余抛出仍记 `error` ─────────────────────
+       *
+       * `unmeasuredRuns.length > 0` 本来就会把整份报告打成 `disposition: 'unmeasured'`
+       * （`scoreMutants`）⇒ 位置级给 `unmeasured`、**不给分、也不给 ok**。
+       * 那正是这件事的正确读法：没能测量。
+       *
+       * ★ 而"其余抛出仍记 error"是刻意的：一次真正的执行器故障（套件起不来、
+       *   路径不存在）必须与"预算跑光"不同形 —— 前者要人去看代码/环境，
+       *   后者要人去调预算或让链更快。把两者并进同一个 outcome 就是把
+       *   两种相反补救动作合流（本仓的老账）。
+       */
+      observed = isCompletionBudgetStop(error)
+        ? {
+            outcome: 'unmeasured',
+            reason: `BUDGET stop（不是测试失败、也不是这条变异体的问题）：${error instanceof Error ? error.message : String(error)}`,
+            killedBy: [],
+          }
+        : {
+            outcome: 'error',
+            reason: `running the killer suite raised: ${error instanceof Error ? error.message : String(error)}`,
+            killedBy: [],
+          }
     } finally {
       /** ★ 还原必须被【验证】：把原文写回去并读回来比对。一次没还原的测量不可信。 */
       try {
@@ -479,7 +568,13 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
    */
   const readSuite = ctx.readSuite ?? ((path: string) => readFile(path))
   const unreachable: string[] = []
-  for (const file of unique(plans.map((plan) => plan.file))) {
+  /**
+   * ★ 2026-10-12：这里此前读的是 `plans`（**全部候选**）而跑的是 `plans` —— 两者
+   *   同源所以看不出来。现在跑的是 `selected`，于是这一格必须跟着改：否则
+   *   "某个文件的变异体一条都没跑（被截断）"会被读成"它的探针够不到"
+   *   ⇒ 一份关于**分片**的事实被报成一份关于**探针**的事实。
+   */
+  for (const file of unique(selected.map((plan) => plan.file))) {
     const reach = probeReach({ file }, suites, readSuite)
     if (reach.files.length === 0) unreachable.push(`${file}: ${reach.reason}`)
   }
@@ -494,10 +589,43 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     return unmeasured(report.unmeasured ?? 'the mutation run produced no interpretable result')
   }
 
+  /**
+   * ── ★★★ 样本下限：我们自己裁出来的小样本，不许产生任何裁决（2026-10-12）──────────
+   *
+   * MEASURED（本轮加配额时当场发现，方向是**放行**，也就是最贵的方向）：
+   *
+   *     截断到 6 条、杀 5 条 ⇒ 0.833 ≥ 0.6 ⇒ **ok**
+   *     同样一份实现不截断（135 条里杀 5 条）⇒ 0.037 < 0.6 ⇒ blocked
+   *
+   * ⇒ 一个 n=6 的估计被**直接**拿去和一个固定阈值比，没有任何样本量意识：
+   *   分数够高就放行，而"分数够高"在 n=6 时可以是运气。
+   *
+   * ★ 只对【被截断】的跑批生效（`dropped > 0`）：候选本来就少是**这次改动的事实**
+   *   （样本即总体，没有抽样误差），对它设下限等于凭空造拒；而被我们裁过是
+   *   **这次测量的选择**，选择造成的弱样本由我们负责。
+   *
+   * ★ 返回 `unmeasured` 而不是 `blocked`：这份跑批没能给出读数（去调配额 / 缩小改动面），
+   *   与"这个成员的测试是装饰性的"（去补测试）是两件不同的事 —— 补救动作相反。
+   */
+  if (dropped > 0 && report.totals.scored < MIN_SCORED_FOR_VERDICT) {
+    return unmeasured(
+      `the mutant batch was truncated to ${selected.length} (from ${plans.length} candidate(s)) by its own total cap, `
+      + `which is below the ${MIN_SCORED_FOR_VERDICT}-mutant floor for ANY verdict — a kill rate over so few mutants `
+      + `can fall on either side of the threshold by luck, so this run says nothing about the delivered tests. `
+      + `Raise the cap (ctx.maxMutants) or shrink what this task changed, then re-run.`,
+    )
+  }
+
   const threshold = ctx.minKillRate ?? DEFAULT_MIN_KILL_RATE
   const scope =
     `coverage: ${report.coverage.file} lines ${report.coverage.startLine}-${report.coverage.endLine} ` +
-    `(${report.coverage.linesMutated} line(s) in range, ${report.totals.considered} mutant(s) considered, ${report.totals.scored} scored)`
+    `(${report.coverage.linesMutated} line(s) in range, ${report.totals.considered} mutant(s) considered, ${report.totals.scored} scored)` +
+    /**
+     * ★ 截断读数**并入 scope**（而不是只挂在 ok 那一支上）：被拒的成员同样需要
+     *   知道"这个分数是抽样出来的" —— 否则他会去修一个抽样噪声，而那与真正的
+     *   覆盖缺口在报告里同形。
+     */
+    (truncation === '' ? '' : `; ${truncation}`)
 
   /**
    * ★ 装饰性测试 ⇒ blocked，且必须【报出存活数与覆盖范围】。
@@ -523,6 +651,20 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     killed: report.totals.killed,
     survived: report.totals.survived,
     corpus: [...corpus],
+    /**
+     * ★ 这一轮的**闸门读数**：两条上限的生效值 + 被丢弃的条数。
+     *   ★ 只在真的发生截断时才挂 `truncated`（`undefined` 与 `0` 不同形：
+     *     前者是"没截断"，后者是"截断了 0 条"—— 后者不可能，但不该靠约定）。
+     *   ★ 上限值**恒在场**：它是"这一轮的分数是在什么界内量出来的"的一部分，
+     *     而读数缺席会让"用了缺省"与"限制没生效"同形。
+     */
+    batch: {
+      maxMutants,
+      maxPerOperator,
+      considered: plans.length,
+      ran: selected.length,
+      ...dropped === 0 ? {} : { truncated: dropped },
+    },
     scope,
   }
 }

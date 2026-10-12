@@ -1389,6 +1389,39 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           /** ★ `wantsCompleted` 在段内算出、而段外还要用 ⇒ 由模块交出来。 */
           const wantsCompleted = completionWiring.wantsCompleted
           /**
+           * ── ★★★ 2026-10-12：预算停止与变异恢复，必须【在日志里露头】───────────────
+           *
+           * ★ 这两条都是**基础设施**的事实，不是任何成员的工作结论。不报的话：
+           *   · 预算停止 ⇒ 判据报 unmeasured ⇒ 与"这些命令都超时了"同形，
+           *     而两者补救动作相反（调预算 / 查为什么慢 vs 去看代码）；
+           *   · 恢复发生 ⇒ 说明**上一次**崩在了就地变异中途，而这件事在
+           *     `team.json` 与会话里**一个字都没有**。
+           */
+          const completionBudget = completionWiring.budget
+          if (completionBudget.exhausted) {
+            ctx.logger.warn(
+              `agent-teams: the completion chain for task "${task.id}" hit its `
+              + `${Math.round(completionBudget.totalMs / 1000)}s wall-clock budget after ${completionBudget.calls} command(s) `
+              + `(${Math.round(completionBudget.elapsedMs / 1000)}s elapsed, stopped on: ${completionBudget.exhaustedBy.join(' | ') || 'n/a'}). `
+              + `The gates that could not run will report "could not measure" — that is a BUDGET stop, NOT a failing test.`,
+            )
+          }
+          const mutationRecovery = completionWiring.mutationRecovery
+          if (mutationRecovery !== undefined && mutationRecovery.restored.length > 0) {
+            ctx.logger.warn(
+              `agent-teams: restored ${mutationRecovery.restored.length} file(s) that this task's mutation run left in a mutated state: `
+              + `${mutationRecovery.restored.join(', ')} — byte-for-byte back to their pre-mutation content`,
+            )
+          }
+          if (mutationRecovery !== undefined && (mutationRecovery.conflicts.length > 0 || mutationRecovery.failed.length > 0)) {
+            ctx.logger.error(
+              `agent-teams: the mutation journal for task "${task.id}" could not be fully recovered — `
+              + `conflicts: ${mutationRecovery.conflicts.map((item) => item.file).join(', ') || 'none'}; `
+              + `failed: ${mutationRecovery.failed.map((item) => item.file).join(', ') || 'none'}. `
+              + `Those files were left EXACTLY as found, because rolling a conflict back would discard real work.`,
+            )
+          }
+          /**
            * ── ★ t13 的运行时出口：有判据、却一条都没跑 ────────────────────────────
            *
            * ★★ t14：这条告警**已被下面的 `completionNotChecked` 取代** —— 见那里。

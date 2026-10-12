@@ -730,6 +730,26 @@ test('④ 每条判据只 import registry.ts（或另一个纯函数模块），
          *     仍然不许出现 `completion/r5.ts imports "./mutation.ts"`。
          */
         || specifier === './kind-requirements.ts'
+        /**
+         * ── ★ 2026-10-12：预算停止的记号（`../budget-stop.ts`）──────────────────
+         *
+         * ★ 这一行**不是放宽**，而是 `./kind-requirements.ts` 那条先例的**又一个实例**：
+         *   它在 `src/gates/` 下、**不是判据**（不 export id / point / gate）、
+         *   **零 import**、也不带任何一条判据的语义。
+         *
+         * ★ 为什么它必须存在（依赖方向逼出来的，不是偏好）：
+         *   认出这个记号的两个地方是 `registry.ts` 与 `completion/mutation.ts`
+         *   （都在 gates 层），而**抛出它的是 tools 层**（`runWithinBudget`）。
+         *   若把记号定义在 tools 层，gates 就必须反向 import tools ——
+         *   而那违反本仓的单向纪律（见 `src/gates/runtime/stall.ts` 的注释：
+         *   「gates 层今天不 import 任何 tools/」）。
+         *   ⇒ 记号只能住在一个**两层都顺向引得到**的叶子模块里。
+         *
+         * ★★ 而"判据之间不许互相调用"这条能力**一个字都没变**：
+         *   仍然不许 `completion/r5.ts imports "./mutation.ts"` ——
+         *   本行放行的是一个**共享的纯函数模块**，与 `./kind-requirements.ts` 同类。
+         */
+        || specifier === '../budget-stop.ts'
       if (!allowed) offenders.push(`${rel} imports "${specifier}"`)
     }
   }

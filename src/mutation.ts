@@ -105,6 +105,87 @@ export const OFTEN_EQUIVALENT: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * ── ★★★ 上界：一次变异跑批【最多】能跑多少条（2026-10-12 接线）─────────────────
+ *
+ * ── 它防的是什么失效（MEASURED，本仓 t34 事故）────────────────────────────────
+ *
+ * `completion.mutation` 是**唯一**让 `agent_teams_update_task` 永不返回的那条路径。
+ * 实测 914 次调用里 completed 分支的 p90 = 127.7 s、max = 3215.6 s（53 分钟）。
+ *
+ * 时长 = O(改动行数 × 算子数 × 套件耗时)，而**只有最后一项被 120 s 的单命令超时
+ * 管住**。前两项此前完全无界：13 个算子 × `maxPerOperator` 25 × 每个改动文件
+ * = 上限 325 条/文件，而每条都要重跑一遍杀手套件（本仓实测 24.6 s）
+ * ⇒ **2.2 小时/次 attempt**，而失败还会让 attempt 翻倍。
+ *
+ * ── ★ 诚实口径：这是拿【测量强度】换【有界】──
+ *
+ * 抽样会让分数变"粗"：分母不再是全部改动行上的全部变异体。这是**有代价的**，
+ * 代价必须被读出来，所以：
+ *
+ *   · `capMutants()` 的丢弃数**必须由调用方报进裁决文本**（不许静默拉小分母）；
+ *   · 抽样用**确定性等距**（不是"取前 N 条"）—— 前者跨算子、跨行铺开，
+ *     后者会把算子表里靠前的 `ge-to-gt` 全测完而把靠后的 `plus-to-minus` 全丢掉，
+ *     于是"某个算子的变异体全存活"这件事永远看不到。
+ *
+ * ★ 取前 N 与等距抽样在【条数】这个读数上同形，而在【覆盖了哪些算子】上完全不同
+ *   —— 这正是本仓反复记账的那种合流。
+ */
+export const DEFAULT_MAX_PER_OPERATOR = 4
+
+/** 一次 `completion.mutation` 跑批的总条数上限（跨文件、跨算子、含镜像）。 */
+export const DEFAULT_MAX_MUTANTS = 40
+
+/**
+ * ── ★★★ 样本下限：**我们自己裁出来的**小样本，不许给任何裁决（2026-10-12）──────────
+ *
+ * ── 它防的是什么失效（MEASURED：本轮加配额时当场发现，且是**假通过**）────────────
+ *
+ * 配额的代价是"分数变成抽样估计"。而 `scoreMutants` 拿这个估计**直接**与一个固定
+ * 阈值比较，没有任何样本量意识 ⇒ 一个 n=6 的样本只要运气好就能 ≥ 阈值：
+ *
+ *     杀掉 5 条、存活 1 条  ⇒ 0.833 ≥ 0.6 ⇒ **判据给 ok**
+ *
+ * 而同一个实现若不被截断（135 条里杀 5 条）⇒ 0.037 < 0.6 ⇒ blocked。
+ * ⇒ **同一个实现、同一个套件，只因我们自己把上限调小，结论就从"装饰性"翻成"测试很强"**
+ *   —— 而翻过去的方向是**放行**，那是最贵的方向。
+ *
+ * ── ★ 为什么只对【被截断】的跑批生效 ────────────────────────────────────────────
+ *
+ * "改动小 ⇒ 候选本来就少"是**这次改动的事实**，采到的样本就是总体，没有抽样误差；
+ * 对它设下限会把一次诚实的小改动判成"说不清"，那是我们凭空造出来的拒。
+ * 而"被我们裁过"是**这次测量的选择** —— 选择造成的弱样本，责任在我们，所以在这里拦。
+ *
+ * ⇒ 判据：`dropped > 0 && scored < MIN_SCORED_FOR_VERDICT` ⇒ `unmeasured`。
+ *   ★ 是 `unmeasured` 而**不是** `blocked`：这份跑批没能给出读数，
+ *     与"这个成员的测试是装饰性的"是两件不同的事（后者要人去补测试，
+ *     前者要人去调配额或缩小改动面）。
+ */
+export const MIN_SCORED_FOR_VERDICT = 20
+
+/**
+ * 把一份变异体清单**有界地**裁到最多 `max` 条，用**确定性等距**而不是取前 N。
+ *
+ * ★ 边界三条（每条都对应一种"看不出来"的坏法）：
+ *   · `max` 非有限或 ≤ 0 ⇒ 原样返回（**不**裁成空集：那是把"没有上限"读成
+ *     "一条都不测"，而两者在 `totals.considered === 0` 上同形）；
+ *   · `items.length <= max` ⇒ 原样返回（不动顺序）；
+ *   · 否则取等距 —— 步长 `length / max`，逐点 `floor(i * step)`。
+ *     起点必为 0、末点必 < length，且样本严格递增（step ≥ 1 时）。
+ */
+export function capMutants<T>(items: readonly T[], max: number): T[] {
+  if (!Number.isFinite(max) || max <= 0) return [...items]
+  if (items.length <= max) return [...items]
+  const step = items.length / max
+  const out: T[] = []
+  for (let index = 0; index < max; index += 1) {
+    const at = Math.floor(index * step)
+    const item = items[at]
+    if (item !== undefined) out.push(item)
+  }
+  return out
+}
+
+/**
  * L3 —— 项目契约变异体：违反契约 C，而不是改一个符号。
  *
  * ★ 定义由【项目】给（本仓库的契约清单见 `scripts/mutation-invariants.mjs`），
@@ -398,7 +479,13 @@ export function generateMutants(source: string, options: GenerateOptions): Mutan
     endLine,
     changedLines,
     operators = DEFAULT_OPERATORS,
-    maxPerOperator = 25,
+    /**
+     * ★ 2026-10-12：25 → {@link DEFAULT_MAX_PER_OPERATOR}（4）。
+     *   25 × 13 算子 = 325 条/文件，而每条要重跑一遍杀手套件 —— 那是 t34 事故里
+     *   2.2 小时/attempt 的算术来源。★ 这个缺省值只影响**没显式传**的调用方；
+     *   判据侧另有独立的总量上限（`DEFAULT_MAX_MUTANTS`）。
+     */
+    maxPerOperator = DEFAULT_MAX_PER_OPERATOR,
     file,
   } = options
 
@@ -920,7 +1007,30 @@ export function scoreMutants(input: ScoreInput): MutationReport {
   if (restoreVerified === false) unmeasuredReasons.push('变异体没能被还原：一次没有还原的测量不可信')
   if (probeProblem !== null) unmeasuredReasons.push(`探针射程：${probeProblem}`)
   if (unmeasuredRuns.length > 0) {
-    unmeasuredReasons.push(`${unmeasuredRuns.length} 条变异体的运行没有给出可解释的结果（${unmeasuredRuns.map((r) => r.mutant.id).join(', ')}）`)
+    /**
+     * ── ★★★ 原因必须被带出来（2026-10-12 修）────────────────────────────────────
+     *
+     * MEASURED（本轮加总预算时当场发现）：这一句此前只报**条数与 id** ——
+     *
+     *     `9 条变异体的运行没有给出可解释的结果（ge-to-gt@L4, gt-to-ge@L3, …）`
+     *
+     * 而每条运行自己的 `reason`（"套件挂起（硬超时）" / "BUDGET stop：…" /
+     * "解析不出测试汇总" / "exitCode 与 0 failing 矛盾"）**一个字都没进裁决**。
+     *
+     * ⇒ 读的人看到的是同一句话，而**补救动作完全相反**：
+     *   预算停止 ⇒ 去调预算 / 让链更快；套件挂起 ⇒ 去看那条命令为什么卡；
+     *   汇总解析不出来 ⇒ 去看套件怎么打印的。把它们合成一句，等于让一个
+     *   能立刻修的问题变成一次重新排查。
+     *
+     * ★ 去重后拼接（而不是逐条展开）：`unmeasured` 常常是**同一条原因**重复 N 次
+     *   （预算一跑光，后面每一条都立刻抛），逐条展开会把裁决淹掉；
+     *   而去重之后"有几种不同的说不出"这件事本身也是读数。
+     */
+    const why = [...new Set(unmeasuredRuns.map((result) => result.reason))]
+    unmeasuredReasons.push(
+      `${unmeasuredRuns.length} 条变异体的运行没有给出可解释的结果（${unmeasuredRuns.map((result) => result.mutant.id).join(', ')}）`
+      + `—— 原因：${why.join(' | ')}`,
+    )
   }
 
   if (unmeasuredReasons.length > 0) {
@@ -938,11 +1048,35 @@ export function scoreMutants(input: ScoreInput): MutationReport {
   }
 
   if (scored.length === 0) {
+    /**
+     * ── ★★★ 归因必须是真的（2026-10-12 修一句**无条件宣称**）────────────────────
+     *
+     * MEASURED（本轮加总预算时当场发现）：这一句此前**固定**说"全部落在
+     * 注释/字符串/无算子区域"。而"`scored === 0`"只说明**没有可计分的**变异体，
+     * 它至少有三种成因，且补救动作相反：
+     *
+     *   · 改动行里确实没有算子能命中 ⇒ 这次测量**无话可说**（改范围 / 接受）；
+     *   · 候选运行**全部以 error 结束**（执行器故障 / 预算跑光 / 套件挂起）
+     *     ⇒ 去看那条命令，与"改动行里没算子"毫无关系；
+     *   · 一条候选都没生成 ⇒ 与"生成了但落在注释里"也不同形（前者是范围问题，
+     *     后者是内容问题）。
+     *
+     * ★ 原句把三者**全都**归成第一种 ⇒ 一个"执行器炸了"的事故会被读成
+     *   "这次改动没东西可测" —— 而读的人会因此**不去看那条命令**。
+     *   这正是本仓最忌讳的那一类：一句**读起来完全合理、而事实是反的**话。
+     *
+     * ★ 现在按真实成因而分（仍然是一个 `unmeasured`，只是不再冒充别的成因）。
+     */
+    const cause = results.length === 0
+      ? '一条候选都没生成 —— 这些改动行里没有任何算子能命中'
+      : errored.length > 0
+        ? `${errored.length} of ${results.length} 条候选的运行以 error 结束，所以一条都没能计分 —— 原因（去重后）：${[...new Set(errored.map((result) => result.reason))].join(' | ')}`
+        : `${results.length} 条候选全部落在注释/字符串/无算子区域`
     return {
       disposition: 'unmeasured',
       unmeasured:
-        `改动行范围 ${target.file}:${target.startLine}-${target.endLine} 里没有一条可计分的变异体` +
-        `（${results.length} 条候选，全部落在注释/字符串/无算子区域）—— 这是"这次测量无话可说"，不是"完全覆盖"`,
+        `改动行范围 ${target.file}:${target.startLine}-${target.endLine} 里没有一条可计分变异体：`
+        + `${cause} —— 这是"这次测量无话可说"，不是"完全覆盖"`,
       mutationScore: null,
       totals,
       byLayer,
@@ -1034,7 +1168,8 @@ export async function runMutationEngine(input: MutationEngineInput): Promise<Mut
     mirrorContent,
     operators = DEFAULT_OPERATORS,
     redFilesInBaseline = [],
-    maxMutants = 200,
+    /** ★ 2026-10-12：200 → {@link DEFAULT_MAX_MUTANTS}（40）。理由见上面那条常量。 */
+    maxMutants = DEFAULT_MAX_MUTANTS,
   } = input
 
   const emptyCoverage = {
@@ -1108,7 +1243,13 @@ export async function runMutationEngine(input: MutationEngineInput): Promise<Mut
 
   if (all.length === 0) return refuse(noScorableMutants(target))
 
-  const selected = all.slice(0, maxMutants)
+  /**
+   * ★ 2026-10-12：`all.slice(0, maxMutants)` → `capMutants(all, maxMutants)`。
+   *   取前 N 会按**算子表的顺序**截断（表里靠前的算子全测、靠后的全丢），
+   *   而等距抽样跨算子铺开。两者在"跑了多少条"这个读数上同形
+   *   —— 差别只在"哪几条没跑"，而那正是这个上限最容易被误读的地方。
+   */
+  const selected = capMutants(all, maxMutants)
   const truncated = all.length - selected.length
 
   const results: MutantResult[] = []

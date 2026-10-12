@@ -126,7 +126,53 @@ export declare const VERIFY_COMMAND_TIMEOUT_MS = 120000;
  *   ⇒ 后三者会让判据降级成 `unmeasured` —— **绝不静默退化成"没有规则"**。
  */
 export declare function loadVerifyCommandRules(workspace: string): Promise<RulesLoad>;
-export declare function runVerifyCommand(workspace: string, command: string): Promise<number>;
+/**
+ * ── ★★★ 杀子进程：要杀【进程组】，不是杀那个 `sh`（2026-10-12）────────────────────
+ *
+ * MEASURED（本仓 t34 事故的现场取证）：`spawn('/bin/sh', ['-c', cmd])` 之后
+ * `child.kill('SIGKILL')` **只杀掉 `sh` 本身** —— `sh` 派出去的那棵树
+ * （`node --test`、`pnpm`、`tsc`…）不会被一起杀，于是它们变成 `ppid = 1` 的孤儿。
+ *
+ * 实测现场：4 个孤儿 node 进程，`cwd` 都是插件仓库、带 `--test-concurrency=0`、
+ * **CPU 0%**、存活 5.7–6.5 小时，**跨了两次宿主重启都没被清理**。
+ * ★ 它们的形态是最坏的一种：不报错、不占 CPU、只是**一直占着** ——
+ *   于是"有过一次超时"与"这台机器上有一批不死的东西"在日志里完全不同形。
+ *
+ * ── 修法：`detached: true` + 杀 `-pid` ────────────────────────────────────────
+ *
+ *   `detached: true` 让子进程成为**新进程组的组长**（pgid = 它的 pid），
+ *   于是 `process.kill(-pid, 'SIGKILL')` 杀的是**整组**。
+ *   ★ `-pid` 里的负号是「进程组」这个语义本身，不是笔误。
+ *
+ * ★ 四条边界（每条都对着一种会把读数弄坏的写法）：
+ *   · `detached` **不**去掉管道（`stdio: 'pipe'` 仍在），也**不** `unref` ——
+ *     调用方照样等 `close`，对外行为一字未变；
+ *   · 组已经不在了（`ESRCH`）⇒ 退回杀单个 pid；
+ *   · 两种都失败 ⇒ **不再纠缠**：在超时路径上抛错会把一次"超时"变成一次
+ *     "执行器抛错"，而那是**另一种读数**（判据对两者的措辞完全不同）；
+ *   · 只在**超时**路径上调它。正常收尾时组已经空了，多杀一次是无意义的系统调用。
+ */
+export declare function killShellTree(child: {
+    pid?: number | undefined;
+    kill: (signal?: NodeJS.Signals) => boolean;
+}, signal?: NodeJS.Signals): void;
+/**
+ * ── ★★★ t84：单条命令的超时可以【收窄】，但只许收窄（2026-10-12）─────────────────
+ *
+ * `VERIFY_COMMAND_TIMEOUT_MS` 管的是**一条命令**。整条 completion 链
+ * （verify-rerun + backtest + r5 + mutation 判据串行）此前**没有任何总预算** ——
+ * 实测长尾 53 分钟。⇒ 调用方需要把一个"剩余总预算"传下来。
+ *
+ * ★ 语义是**收窄不是放宽**：调用方传的是 `min(单命令上限, 剩余总预算)`，
+ *   于是"单条命令最多 120 s"这条既有纪律一个字没动，而"整条链有界"成为可能。
+ * ★ 非有限值 / 负数 ⇒ 退回缺省（**不**读成"立即超时"）：一个 0 会让每条命令
+ *   立刻返回 125，而 125 在判据里读作"超时"—— 那会把一次**参数写错**
+ *   伪装成"这些命令都超时了"。
+ */
+export interface VerifyCommandOptions {
+    timeoutMs?: number;
+}
+export declare function runVerifyCommand(workspace: string, command: string, options?: VerifyCommandOptions): Promise<number>;
 export declare const taskWorktreeBase: Map<string, string>;
 export declare function worktreeBaseOf(taskId: string): string | undefined;
 export type BaseRevisionResolution = {
@@ -146,19 +192,197 @@ export declare function runInDetachedRevision(options: {
     workspace: string;
     revision: string;
     command: string;
+    /**
+     * ★ 2026-10-12：把调用方的**剩余预算**传进来（只收窄）。
+     *   本函数内部有**三条**命令，若只包外层，一次调用最坏能跑 3 × 120 s
+     *   —— 于是"预算有界"只对一半，而那一半在日志里看不出来。
+     */
+    timeoutMs?: number;
 }): Promise<number | undefined>;
 export declare function deriveCoverageInput(options: {
     workspace: string;
     testFiles: readonly string[];
     knownTests: readonly string[];
 }): Promise<Record<string, unknown> | undefined>;
-export declare function runVerifyCommandCaptured(workspace: string, command: string): Promise<{
+export declare function runVerifyCommandCaptured(workspace: string, command: string, options?: VerifyCommandOptions): Promise<{
     exitCode: number;
     stdout: string;
     stderr: string;
 }>;
 export declare function readWorkspaceFileSync(workspace: string, relativePath: string): string;
 export declare function writeWorkspaceFileSync(workspace: string, relativePath: string, contents: string): void;
+/**
+ * ── 它防的是什么失效 ──────────────────────────────────────────────────────────
+ *
+ * `VERIFY_COMMAND_TIMEOUT_MS = 120_000` **只是单条命令**的上限。整条 completion 链
+ * （`verify-rerun` → `backtest`(full) → `r5` → `mutation`，判据**串行**求值）
+ * 此前**没有任何总预算** —— 实测 914 次 `update_task` 的 completed 分支
+ * p90 = 127.7 s、**max = 3215.6 s（53 分钟）**，而一次失败还会让 attempt 翻倍、
+ * 于是整条链**从头再跑一遍**（t34 已 attempt 5）。
+ *
+ * ⇒ ★ 单命令超时在读数上会**冒充**总预算：看到代码里有 timeout 的人很容易得出
+ *   "不可能挂"的结论，而那个 timeout 覆盖的只是一小段。
+ *
+ * ── 为什么预算是**调用方**的事实，而不是判据的 ────────────────────────────────
+ *
+ * 判据是纯数据变换（契约 §2 性质 1）：**它不读时钟**。所以"这一轮还剩多少时间"
+ * 只能由调用方持有，并通过**执行器的超时**落到地上 —— 见 {@link runWithinBudget}。
+ *
+ * ★ 缺省给得宽（20 分钟）：它要挡的是**病态长尾**（53 分钟那一档），而不是正常
+ *   路径（p90 才 2 分钟）。把缺省压到分钟级会让这条判据**常态性**报 unmeasured
+ *   —— 那是"判据被自己的预算关掉了"，比慢更坏，而且它与"测试不够"在报告里同形。
+ */
+export declare const COMPLETION_BUDGET_MS: number;
+/** 用环境变量覆盖总预算。非正数 / 非法值 ⇒ 退回缺省（**没有"无限"这个档位**）。 */
+export declare const COMPLETION_BUDGET_ENV = "AGENT_TEAMS_COMPLETION_BUDGET_MS";
+export interface CompletionBudget {
+    readonly totalMs: number;
+    readonly deadlineMs: number;
+    remainingMs: () => number;
+    elapsedMs: () => number;
+    /** 记一笔"有人被预算挡下"，并留下是谁。 */
+    noteExhausted: (label: string) => void;
+    /** 被预算挡下的调用标签（发生顺序，去重）。 */
+    exhaustedBy: () => readonly string[];
+    exhausted: () => boolean;
+    /** 受预算约束发出的调用条数。 */
+    calls: () => number;
+    noteCall: () => void;
+}
+export declare function createCompletionBudget(totalMs?: number): CompletionBudget;
+/**
+ * ── ★ 把一次执行器调用包进预算 ────────────────────────────────────────────────
+ *
+ * 两条纪律：
+ *
+ * ① **超预算 ⇒ 抛一条自述的错误**，不返回一个"看起来像命令失败"的退出码。
+ *    理由：判据对"执行器抛错"与"命令失败"的措辞**完全不同** —— 前者说
+ *    "我没能跑它"，后者说"它跑了并且失败"。返回 125 会让一次**预算停止**
+ *    被读成"这些命令都超时了"，也就是把基础设施的读数伪装成关于代码的读数。
+ *
+ * ② 传下去的超时是 `min(单命令上限, 剩余)` ⇒ **只收窄、不放宽**：单条命令最多
+ *    120 s 这条既有纪律一个字没动，而累加起来整条链有界。
+ */
+export declare function runWithinBudget<T>(budget: CompletionBudget, label: string, run: (timeoutMs: number) => Promise<T>): Promise<T>;
+/**
+ * mutation 会【就地】改生产文件、跑测试、再改回来：
+ *
+ *     writeFile(target, mutated)
+ *     try { runTests() } finally { writeFile(target, original) }
+ *
+ * `finally` 只覆盖**正常退出**。它不覆盖 SIGKILL / 宿主崩溃 / 关掉 App。
+ *
+ * MEASURED（本仓 2026-10-12，t34 事故**已兑现**的后果）：
+ *   主仓库 `src/worktree.ts:366` 被留在变异态 —— `failed: Array<{…}>` 后面多了
+ *   一个 `=`。它**不是手误**：没有任何人会自然写出 `}> =`，而 `gt-to-ge` 算子
+ *   （`find:'>'` → `replace:'>='`）在改动行范围内唯一命中的位置正是那里。
+ *   后果是 `pnpm build` **从此必失败**（2 s，exit 2），而 378 那行报错是**级联**。
+ *
+ * ★ 而 `src/mutation-guard.ts` 早就写好了"事后发现残留"的守卫
+ *   （`checkMutationGuard`，三态 + git 证据）—— 但**全仓没有一个调用方**。
+ *   于是"发现了"这件事本身也不存在。
+ *
+ * ── 本机制提供的是【恢复】，而不只是【发现】───────────────────────────────────
+ *
+ * 一个只报告残留的守卫能让人**知道**插件坏了；它不能让人**不必**手动修。而
+ * "插件自己的 `pnpm build` 挂了"这条症状，与"某处代码写错了"在日志里同形。
+ *
+ * ── 机制：写之前先记日志；恢复时按【内容】判定，冲突就不动 ─────────────────────
+ *
+ *   条目（每个文件一条，落在 `<workspace>/.agent-teams/mutation-journal/`）：
+ *
+ *       { file, original, mutated, at }
+ *         original —— 这一轮**第一次**写它之前的内容（`null` = 当时不存在）
+ *         mutated  —— **最后一次**被写进去的、与 original 不同的内容
+ *
+ *   恢复逐条判定（四态，互不同形）：
+ *
+ *     ① current === original            ⇒ 干净（正常收尾过）        ⇒ 删条目
+ *     ② current === mutated             ⇒ 残留确实是变异体写的      ⇒ **写回 original**
+ *     ③ 两者都不是                       ⇒ **冲突**：崩溃之后有人
+ *                                           动过这个文件 ⇒ **不动**，留条目报出来
+ *     ④ 读不到 / 条目坏                  ⇒ 未测量 ⇒ **不动**，报出来
+ *
+ * ★ ③ 是这套机制里最要紧的一态，也是它**不做**自动覆盖的理由：崩溃之后成员完全
+ *   可能合法地编辑过那个文件。把它写回"变异前的样子"会**丢掉一次真实的工作**，
+ *   而那种损失在日志里与"恢复成功"同形。⇒ 只在内容**逐字等于**我们写进去的
+ *   那一份时才回滚。
+ *
+ * ★ 顺序是【先记日志、再写文件】：于是"记完日志就崩"落在情形 ①（干净），
+ *   而不是留下一个半截的条目。
+ */
+export declare const MUTATION_JOURNAL_STATE_DIR = ".agent-teams";
+export interface MutationJournalEntry {
+    /** workspace 相对路径。 */
+    readonly file: string;
+    /** 这一轮第一次写它【之前】的内容；`null` = 当时它不存在。 */
+    readonly original: string | null;
+    /** 最后一次被写进去的、与 `original` 不同的内容。 */
+    readonly mutated?: string;
+    readonly at: string;
+}
+export declare function mutationJournalDir(workspace: string, stateDir?: string): string;
+/**
+ * 在一次【就地写】之前记账。
+ *
+ * ★ 由调用方在注入给判据的 `writeFile` 里调 —— 判据自己做不了这件事（它是纯的）。
+ * ★ 幂等：同一个文件重复写只更新 `mutated`，`original` **永远是第一次那一份**
+ *   （后面读到的都已经被污染了）。
+ */
+export declare function recordMutationWrite(workspace: string, relativePath: string, contents: string, stateDir?: string): void;
+export interface MutationRecoveryReport {
+    /** 被写回原文的文件（残留确实是我们写的）。 */
+    restored: string[];
+    /** 已经干净、只把条目删掉的文件。 */
+    clean: string[];
+    /** 需要人看一眼：内容既不是原文、也不是我们写进去的变异体。条目**保留**。 */
+    conflicts: Array<{
+        file: string;
+        reason: string;
+    }>;
+    /** 恢复过程本身失败。条目**保留**。 */
+    failed: Array<{
+        file: string;
+        reason: string;
+    }>;
+    /** 有没有真的动过盘（用于决定要不要打日志）。 */
+    touched: boolean;
+}
+/**
+ * 扫一遍某个 workspace 的变异日志并恢复。
+ *
+ * ★ 两种调用时机，各有各的必要：
+ *   · **插件启动时** —— 上一次崩溃留下的残留在这一步被修掉，而不是等下一次
+ *     `update_task` 顺手修（那可能永远不来）；
+ *   · **每条 completion 链的入口** —— 兜住"上一次没走完"的那一类。
+ * ★ 正常收尾也走它：那时每个条目的 `current === original` ⇒ 只删条目、不动文件。
+ *   所以它同时是"清理"，不需要另设一个 clear 函数（两个入口会分叉）。
+ */
+export declare function recoverMutationJournal(workspace: string, stateDir?: string): MutationRecoveryReport;
+/**
+ * ── ★★★ 启动时的收残留：扫【插件自己的树】以及它派出去的每一棵树 ─────────────────
+ *
+ * ★ 为什么"启动时"这一步不可省：`wireCompletion` 里那两次调用只在**下一次有人
+ *   报完成**时才会发生。而本条机制要修的那个事故恰恰是 ——
+ *   **插件自己的 `pnpm build` 从此必失败**（`src/worktree.ts:366` 的 `=`）。
+ *   从崩溃到"下一个人报完成"之间，插件的构建一直是坏的，而那条症状
+ *   （"某处代码写错了"）与真实的代码错误完全同形。
+ *   ⇒ 必须有一个**与成员行为无关**的时点去修它，那就是挂载。
+ *
+ * ★ 扫两处、不只扫根：
+ *   · `root` —— 队长的工作区**就是插件仓库**（实测：t34 的 `assignee` 是 captain，
+ *     而 `workspaceOf(caller)` 给出的是 `session.header.cwd`，即插件根）
+ *     ⇒ 事故就落在这里；
+ *   · `root/.agent-teams/worktrees/*` —— 成员被派到隔离树里干活，那里同样会跑
+ *     mutation（workspace = 那棵树）⇒ 同一类残留，只是位置不同。
+ *
+ * ★ 返回**逐棵树的读数**（而不是一个合并后的数组）："哪一棵树被修了"是这条读数
+ *   的全部价值 —— 合并之后，一棵树的冲突会淹没在另一棵树的干净里。
+ */
+export declare function recoverMutationJournalsUnder(root: string, stateDir?: string): Array<{
+    workspace: string;
+    report: MutationRecoveryReport;
+}>;
 export declare function deriveScanDirs(changedFiles: readonly string[]): string[] | undefined;
 export declare function changedLineNumbers(workspace: string, base: string | undefined): Promise<number[] | undefined>;
 export declare function mergeRerunIntoCommandsRun(claimed: readonly CommandResult[] | undefined, reruns: readonly CommandResult[]): CommandResult[];

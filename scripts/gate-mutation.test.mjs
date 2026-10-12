@@ -391,6 +391,30 @@ function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...
     },
     testCommand: `node --test *`,
     killerSuites: [{ id: suitePath, files: [suitePath] }],
+    /**
+     * ── ★★★ 配额必须被【钉住】，因为本条断言的不是配额（2026-10-12）─────────────
+     *
+     * MEASURED（本轮实跑，我自己踩的）：
+     *
+     *     配额缺省 25/200（改动前）⇒ considered 26、killed 24 ⇒ score 0.923 ⇒ 臂 1 绿
+     *     配额缺省  4/40（本次下调）⇒ considered 18、killed 16 ⇒ score 0.889 ⇒ 臂 1 红
+     *
+     * ★ 而【存活体是同两条】（`and-to-or@L9` / `and-to-or@L11`，两次都在）。
+     *   ⇒ 这次变红与"套件强不强"**毫无关系** —— 变的只是分母：配额一收窄，
+     *     同一批存活体在更小的分母上占更大比重。
+     *
+     * ★ 于是暴露出一件比这个测试更值钱的事：**带抽样的杀伤率，其判据的含义
+     *   随样本量漂移**。同一份实现，26 条时 0.923（过）、18 条时 0.889（不过）
+     *   —— 那正是"判据不可复现"，而门禁的全部价值就在可复现。
+     *   这条读数已写回技能（`deepseek-harness-tuning` §10.9）。
+     *
+     * ★ 本夹具的处置：这里问的是「判据会不会区分强套件与装饰套件」，配额与这个问题
+     *   **正交**。所以把配额钉在**不会触发**的位置，让断言只关于被测的那件事 ——
+     *   否则任何一次与配额无关的缺省调整都会把它打红（本轮就是这样）。
+     *   ★ 配额本身的有界性与读数，由 `scripts/gate-mutation-cap.test.mjs` 单独测。
+     */
+    maxMutants: 1000,
+    maxPerOperator: 1000,
     ...rest,
   }
 }
