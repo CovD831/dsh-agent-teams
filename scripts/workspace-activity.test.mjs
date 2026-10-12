@@ -1270,8 +1270,15 @@ test('★ 臂 26（模型格契约臂）：模型是**行内文字**且完整路
     '★ 反向半边：面板里不许有第二份 `data-member-model` 读数（那一格只有 MemberRow 交出）')
   assert.equal(panel.includes('aria-label={memberModel}'), false,
     '★ 反向半边：完整路由的 aria-label 同样只有一份')
-  /** ★ 前置：而面板确实**会用**同一个布局类（否则上面两条是"两边都没有"的空断言）。 */
-  assert.ok(panel.includes('css.memberModel'), '★ 前置：面板复用同一个布局类给这一行留位置')
+  /**
+   * ★ 前置：给这一行**留位置**的那一层确实复用了同一个布局类。
+   * ★ R4 把这一层（成员屏的行槽）搬进了 `MemberScreen.tsx`，判据跟着代码走 ——
+   *   问"有没有一层复用那个类"，而不是"某个特定文件里有没有那个字符串"。
+   */
+  const memberScreenSource = await readFile(new URL('../src/client/MemberScreen.tsx', import.meta.url), 'utf8')
+  assert.ok(memberScreenSource.includes('css.memberModel'), '★ 前置：成员屏复用同一个布局类给这一行留位置')
+  assert.equal(memberScreenSource.includes('data-member-model={memberModel}'), false,
+    '★ 反向半边：成员屏里也不许有第二份 `data-member-model` 读数（那一格只有 MemberRow 交出）')
 })
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -1653,7 +1660,13 @@ test('★ 臂 30（第二屏只有图臂）：第二屏渲染的是依赖图，�
     '★ 收敛循环块不许再出现在这一屏（轮次已在成员行上，那是 R2 的读数）')
   assert.equal(section.includes('<DependencyMap'), false, '★ 旧名字不许留着（那是第二份实现）')
   /** ★ 而"进度读数"仍在第一屏 —— 只是不再是一条色块 / 图例。 */
-  assert.ok(section.includes('<ProgressOverview'), '★ 前置：进度**读数**仍在第一屏（只是减法之后的形状）')
+  /**
+   * ★★ R4：进度读数**仍在第一屏**，但它现在住在 `MemberScreen.tsx` —— 因为 R4
+   *   把第一屏整块搬进了自己的模块。判据跟着代码走：
+   *   问"第一屏有没有它"，而不是"这个文件里有没有那个字符串"。
+   */
+  const memberScreen = await readSource(new URL('MemberScreen.tsx', CLIENT_ROOT), 'utf8')
+  assert.ok(memberScreen.includes('<ProgressSummary'), '★ 前置：进度**读数**仍在第一屏（只是减法之后的形状）')
 
   /**
    * ★ 反向半边：这条判据对**别的地方**不能也成立 —— 也就是它确实是在测
@@ -1747,4 +1760,248 @@ test('★ 臂 32（搬走的读数仍可核臂）：DAG 的动画与模型探针
     '★ 反向半边：面板里不许有第二份 DAG 模型探针')
   assert.equal(panel.includes('css.dagRunningState'), false,
     '★ 反向半边：面板里不许有第二份运行中动画挂点')
+})
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 臂 33：**侧边栏那条路**的样式臂（它此前从来没有过样式测试）─────────────
+ *
+ * ── 为什么它必须存在，以及为什么它必须是"计算后的样式"──────────────────────────
+ *
+ * MEASURED（docs/T30-LAYOUT-FINDING.md §⑤）：队长停在"缺 computed style"这一步，
+ * 因为最小 DOM **没有布局引擎**（`getBoundingClientRect` 恒返回 0）。
+ * 而恰好在同一条路上，他基于**截图像素**给出了一个 320px 的行距结论 —— 后来被
+ * 真实浏览器推翻（实测 62px，见 §⑧）。**一个没有布局引擎的夹具，量不出布局。**
+ *
+ * ⇒ 这一臂把**真实的编译产物样式表**放进**真实的无头 Chrome**，按**侧边栏的真实
+ *   嵌套**（WorkspaceActivity .root 的 container → .content → TeamSection
+ *   [data-workspace-team]）渲染，然后读 `getComputedStyle`。
+ *
+ * ★ 它**必须是可失败的**：反向半边见 臂 33b —— 把样式表抽掉，这一臂必须红。
+ *   若它无论怎样都绿，那它测的是"这个文件里有字"，而不是"布局是对的"。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/** Is a usable Chrome present? If not, the arm reports "could not measure" honestly. */
+const CHROME_BINARY = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+
+/** Extract every CSS string the client bundle carries, keyed by its tag id. */
+async function compiledStylesheets() {
+  const bundle = await readSource(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const found = new Map()
+  /**
+   * ★ 每条样式表在产物里长这样（路径在 `const css$N` **之前**，且是 `//#region`
+   *   注释里的那个 `.mjs` 虚拟模块名）：
+   *
+   *     //#region \0dsh-css:/…/src/client/ActivityPanel.module.css.mjs
+   *     const css$5 = "html{--agent-teams-panel-shift:420px}…";
+   *
+   *   ⇒ 所以 tag id 要从 `const` **往前**找，而不是往后。
+   */
+  const pattern = /const (css\$\d+) = "((?:[^"\\]|\\.)*)"/g
+  let match
+  while ((match = pattern.exec(bundle)) !== null) {
+    const before = bundle.slice(Math.max(0, match.index - 600), match.index)
+    const ids = [...before.matchAll(/\\0dsh-css:([^\n]*?\.module\.css)\.mjs/g)]
+    const tagId = ids.length > 0 ? ids[ids.length - 1][1] : `unknown-${match[1]}`
+    found.set(tagId, JSON.parse(`"${match[2]}"`))
+  }
+  return found
+}
+
+/** The ActivityPanel stylesheet, which owns every screen-one class. */
+async function panelStylesheet() {
+  const sheets = await compiledStylesheets()
+  for (const [tagId, cssText] of sheets) {
+    if (tagId.includes('ActivityPanel.module.css')) return cssText
+  }
+  throw new Error(`no ActivityPanel stylesheet in the bundle; found ${[...sheets.keys()].join(', ')}`)
+}
+
+/**
+ * The CSS-module class prefix, DERIVED and never hardcoded.
+ *
+ * ★ MEASURED: lightningcss hashes by the file's ABSOLUTE PATH, so every worktree
+ *   gets a different prefix. Hardcoding one made an earlier probe render a page
+ *   whose classes matched nothing — and the reading it produced (21px rows) was a
+ *   plausible-looking WRONG number rather than an error, which is far more
+ *   dangerous. Derive it from the stylesheet every run.
+ */
+function classPrefix(cssText) {
+  const match = cssText.match(/\.([A-Za-z0-9_-]+)_memberRow\b/)
+  if (match === null) throw new Error('could not derive the CSS-module class prefix')
+  return `${match[1]}_`
+}
+
+/** Launch a headless Chrome and return its DevTools port (or null if unusable). */
+async function launchChrome() {
+  const { existsSync } = await import('node:fs')
+  if (!existsSync(CHROME_BINARY)) return null
+  const { spawn } = await import('node:child_process')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const port = 9700 + (process.pid % 300)
+  const profile = mkdtempSync(join(tmpdir(), 't36-style-'))
+  const child = spawn(CHROME_BINARY, [
+    '--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+    '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars',
+    '--window-size=1440,900', 'about:blank',
+  ], { stdio: 'ignore' })
+  const deadline = Date.now() + 20000
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`)
+      if (response.ok) return { child, port, profile }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  child.kill('SIGKILL')
+  return null
+}
+
+/** Open a data-URL page and run one expression against it. */
+async function measureInChrome(browser, html, expression) {
+  const created = await (await fetch(
+    `http://127.0.0.1:${browser.port}/json/new?${encodeURIComponent(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)}`,
+    { method: 'PUT' },
+  )).json()
+  const socket = new WebSocket(created.webSocketDebuggerUrl)
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, { once: true })
+    socket.addEventListener('error', () => reject(new Error('CDP socket failed')), { once: true })
+  })
+  let nextId = 1
+  const pending = new Map()
+  socket.addEventListener('message', (event) => {
+    const message = JSON.parse(event.data)
+    const entry = pending.get(message.id)
+    if (entry === undefined) return
+    pending.delete(message.id)
+    if (message.error !== undefined) entry.reject(new Error(JSON.stringify(message.error)))
+    else entry.resolve(message.result)
+  })
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = nextId++
+    pending.set(id, { resolve, reject })
+    socket.send(JSON.stringify({ id, method, params }))
+  })
+  await send('Runtime.enable')
+  await send('Page.enable')
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const result = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+  socket.close()
+  if (result.exceptionDetails !== undefined) throw new Error(`page threw: ${result.exceptionDetails.text}`)
+  return result.result.value
+}
+
+/** The sidebar's real nesting, as WorkspaceActivity renders it. */
+function sidebarHtml(prefix, cssText) {
+  const row = (index) => `
+    <div class="${prefix}memberSlot">
+      <div class="${prefix}memberBlock" data-member-key="m${index}">
+        <span class="${prefix}memberBranch" aria-hidden><span></span></span>
+        <button type="button" class="${prefix}memberRow" data-activity="working">
+          <span class="${prefix}memberAvatar"><span class="${prefix}memberInitial">M</span></span>
+          <span class="${prefix}memberDot" data-tone="running"></span>
+          <span class="${prefix}memberInfo">
+            <span class="${prefix}memberLine"><span class="${prefix}memberName">member-${index}</span><span class="${prefix}memberRole">eng</span><span class="${prefix}memberModel">model-${index}</span></span>
+            <span class="${prefix}memberStatusLine">working on impl</span>
+          </span>
+          <span class="${prefix}memberStatusTail"><span class="${prefix}memberClock" data-kind="running">Worked 1m</span></span>
+        </button>
+      </div>
+    </div>`
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${cssText}</style>
+<style>html,body{margin:0;padding:0}
+.ws-root{container:team-workspace / inline-size;height:100%;min-height:0;overflow:auto;width:900px}
+.ws-content{max-width:1400px;margin:0 auto;padding:12px 20px 28px}
+</style></head><body>
+<div class="ws-root"><div class="ws-content">
+  <div data-team-id="t1" class="${prefix}team" data-workspace-team="">
+    <header class="${prefix}teamHead"><span class="${prefix}teamName">Team</span></header>
+    <section class="${prefix}delegationSection" data-delegation-map>
+      <div class="${prefix}delegationTree" data-member-rows="3">${[0, 1, 2].map(row).join('')}</div>
+    </section>
+    <section class="${prefix}dependencySection" data-dependency-map></section>
+  </div>
+</div></div></body></html>`
+}
+
+const SIDEBAR_MEASURE = `(() => {
+  const rows = [...document.querySelectorAll('[data-member-rows] button[data-activity]')]
+  const tree = document.querySelector('[data-member-rows]')
+  const tops = rows.map((r) => +r.getBoundingClientRect().top.toFixed(1))
+  const heights = rows.map((r) => +r.getBoundingClientRect().height.toFixed(1))
+  return {
+    rowCount: rows.length,
+    rowHeights: heights,
+    rowTopDeltas: tops.slice(1).map((t, i) => +(t - tops[i]).toFixed(1)),
+    treeGap: getComputedStyle(tree).rowGap,
+    memberBlockPadding: getComputedStyle(document.querySelector('[data-member-key]')).padding,
+  }
+})()`
+
+test('★ 臂 33（侧边栏样式臂）：在**真实浏览器**里，成员行的布局等于声明值', async (t) => {
+  const browser = await launchChrome()
+  if (browser === null) {
+    /**
+     * ★ "量不到"必须**说清是量不到**，而不是悄悄通过 —— 本仓的三态纪律。
+     *   这一条**不算通过**：它把"本机没有可用的 Chrome"如实报出来。
+     */
+    t.diagnostic('COULD NOT MEASURE: no usable headless Chrome at ' + CHROME_BINARY)
+    return
+  }
+  try {
+    const cssText = await panelStylesheet()
+    const prefix = classPrefix(cssText)
+    const measured = await measureInChrome(browser, sidebarHtml(prefix, cssText), SIDEBAR_MEASURE)
+
+    /** ★ 前置：三行真的渲染出来了（否则下面几条测的是空数组）。 */
+    assert.equal(measured.rowCount, 3, '★ 前置：三条成员行都渲染了')
+    /** ★ 每一行都真的有高度 —— 这同时是"CSS 真的生效了"的证据。 */
+    for (const height of measured.rowHeights) {
+      assert.ok(height > 40, `★ 行高必须来自真实样式（实测 ${height}，声明 min-height: 48）`)
+    }
+    /** ★ 而声明值逐项吻合：.memberBlock padding 3px 0 7px、.delegationTree gap 2px。 */
+    assert.equal(measured.memberBlockPadding, '3px 0px 7px', '★ .memberBlock 的内边距等于声明值')
+    assert.equal(measured.treeGap, '2px', '★ .delegationTree 的行间距等于声明值')
+    /**
+     * ★★ 而**相邻行顶之差**必须等于"行高 + 上下的 padding + gap" —— 这是
+     *   docs/T30-LAYOUT-FINDING.md §⑧ 那条实测（62px）的**可复现形式**。
+     */
+    const expected = measured.rowHeights[0] + 10 + 2
+    for (const delta of measured.rowTopDeltas) {
+      assert.ok(Math.abs(delta - expected) <= 1,
+        `★ 相邻行顶之差必须等于 行高+10+2=${expected}（实测 ${delta}）—— `
+        + '而 §⑧ 记下的 320px 在真实布局里不存在')
+    }
+    /** ★ 反向半边：这一臂对**样式缺失**必须敏感（见 臂 33b 的可执行形式）。 */
+    const stylesLess = await measureInChrome(browser, sidebarHtml(prefix, '/* no styles */'), SIDEBAR_MEASURE)
+    assert.notEqual(stylesLess.memberBlockPadding, measured.memberBlockPadding,
+      '★ 反向半边：没有样式表时读数必须**变了**（没变说明这一臂量不到样式）')
+  } finally {
+    browser.child.kill('SIGKILL')
+  }
+})
+
+test('★ 臂 33b（侧边栏样式臂的反向半边）：行距被改坏 ⇒ 臂 33 的判据必须变红', async (t) => {
+  const browser = await launchChrome()
+  if (browser === null) { t.diagnostic('COULD NOT MEASURE: no usable headless Chrome'); return }
+  try {
+    const cssText = await panelStylesheet()
+    const prefix = classPrefix(cssText)
+    /**
+     * ★ 定向突变：把 `.delegationTree` 的 gap 从 2px 改成 40px ——
+     *   正是"行距被写坏"的最小复现。
+     */
+    const sabotaged = cssText.replace(/\.([A-Za-z0-9_-]+)_delegationTree\{([^}]*)\}/, (whole, _hash, body) => {
+      return `.${prefix}delegationTree{${body.replace(/gap:2px/, 'gap:40px')}}`
+    })
+    assert.notEqual(sabotaged, cssText, '★ 前置：突变真的改变了样式文本')
+    const measured = await measureInChrome(browser, sidebarHtml(prefix, sabotaged), SIDEBAR_MEASURE)
+    const expected = measured.rowHeights[0] + 10 + 2
+    const broken = measured.rowTopDeltas.some((delta) => Math.abs(delta - expected) > 1)
+    assert.ok(broken, '★ 反向半边：gap 被改成 40px 之后，臂 33 的判据**必须**报红（实测没有）')
+  } finally {
+    browser.child.kill('SIGKILL')
+  }
 })

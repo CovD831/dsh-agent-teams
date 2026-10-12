@@ -51,35 +51,24 @@
   transform: translateY(0) scale(0.98);
 }
 
-.badge:focus-visible,
-.iconButton:focus-visible,
-.memberRow:focus-visible,
-.membersToggle:focus-visible,
-.sectionToggleTitle:focus-visible,
-.dagNode:focus-visible {
+.badge:focus-visible, .iconButton:focus-visible, .memberRow:focus-visible, .membersToggle:focus-visible, .sectionToggleTitle:focus-visible, .dagNode:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
 }
 
-.badgeDot,
-.panelDot {
+.badgeDot, .panelDot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--dsw-alias-label-tertiary);
 }
 
-.badgeDot[data-busy='true'],
-.panelDot[data-busy='true'] {
+.badgeDot[data-busy='true'], .panelDot[data-busy='true'] {
   background: var(--dsw-alias-state-business-primary);
   animation: agentTeamsPulse 1.25s ease-in-out infinite;
 }
 
-.badgeCount,
-.memberCount,
-.teamStats,
-.stageLabel,
-.taskId {
+.badgeCount, .memberCount, .teamStats {
   font-variant-numeric: tabular-nums;
 }
 
@@ -103,8 +92,7 @@
   will-change: transform;
 }
 
-.panel[data-dragging],
-.panel[data-resizing] {
+.panel[data-dragging], .panel[data-resizing] {
   user-select: none;
   box-shadow:
     0 16px 38px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent),
@@ -133,8 +121,7 @@
   touch-action: none;
 }
 
-.panelHead:active,
-.panel[data-dragging] .panelHead {
+.panelHead:active, .panel[data-dragging] .panelHead {
   cursor: grabbing;
 }
 
@@ -260,8 +247,7 @@
   transition: border-color 120ms ease, opacity 120ms ease;
 }
 
-.resizeHandle:hover::after,
-.panel[data-resizing] .resizeHandle::after {
+.resizeHandle:hover::after, .panel[data-resizing] .resizeHandle::after {
   background-color: var(--dsw-alias-state-business-primary);
   border-color: var(--dsw-alias-state-business-primary);
   opacity: 0.95;
@@ -427,16 +413,6 @@
   min-width: 0;
 }
 
-.sectionTitle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
 .sectionHint {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
@@ -464,8 +440,7 @@
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));
 }
 
-.captainAvatar,
-.memberAvatar {
+.captainAvatar, .memberAvatar {
   position: relative;
   display: inline-flex;
   flex: none;
@@ -478,8 +453,7 @@
   height: 46px;
 }
 
-.leadAvatar,
-.memberArt {
+.leadAvatar, .memberArt {
   border: 0;
   border-radius: 0;
   object-fit: contain;
@@ -497,8 +471,7 @@
   height: 40px;
 }
 
-.captainInfo,
-.memberInfo {
+.captainInfo, .memberInfo {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -508,16 +481,14 @@
   gap: 2px;
 }
 
-.captainLine,
-.memberLine {
+.captainLine, .memberLine {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 6px;
 }
 
-.captainName,
-.memberName {
+.captainName, .memberName {
   overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 12.5px;
@@ -527,8 +498,7 @@
   white-space: nowrap;
 }
 
-.captainRole,
-.memberRole {
+.captainRole, .memberRole {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 10px;
@@ -537,8 +507,7 @@
   white-space: nowrap;
 }
 
-.captainSummary,
-.memberStatusLine {
+.captainSummary, .memberStatusLine {
   overflow: hidden;
   color: var(--dsw-alias-label-secondary);
   font-size: 10.5px;
@@ -592,8 +561,7 @@
   transform: rotate(180deg);
 }
 
-.captainState,
-.memberState {
+.captainState {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -605,8 +573,7 @@
   white-space: nowrap;
 }
 
-.captainState[data-busy='true'],
-.memberState[data-activity='working'] {
+.captainState[data-busy='true'] {
   color: var(--dsw-alias-state-business-primary);
 }
 
@@ -621,129 +588,6 @@
 @keyframes agentTeamsDot {
   0%, 100% { opacity: 0.25; }
   50% { opacity: 1; }
-}
-
-.progressOverview {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.progressTitle {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
-.progressSegments {
-  display: flex;
-  gap: 3px;
-}
-
-.progressSegments > span,
-.progressEmpty {
-  flex: 1;
-  height: 5px;
-  border-radius: 2px;
-  background: var(--dsw-alias-border-l3);
-}
-
-.progressEmpty {
-  display: block;
-  width: 100%;
-}
-
-.progressSegments > span[data-state='running'] {
-  background: var(--dsw-alias-state-business-primary);
-}
-
-.progressSegments > span[data-state='blocked'] {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.progressSegments > span[data-state='completed'] {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.progressSegments > span[data-state='failed'] {
-  background: var(--dsw-alias-state-error-primary);
-}
-
-.progressSegments > span[data-state='cancelled'] {
-  opacity: 0.55;
-}
-
-.progressLegend {
-  display: flex;
-  gap: 10px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
-}
-
-.progressLegend > span[data-state='running'] {
-  color: var(--dsw-alias-state-business-primary);
-}
-
-.progressLegend > span[data-state='blocked'] {
-  color: var(--dsw-alias-state-warn-primary);
-}
-
-.progressLegend > span[data-state='completed'] {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.progressSummary {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 15px;
-}
-
-.progressSummary[data-state='warning'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
-}
-
-.progressSummary[data-state='completed'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, var(--dsw-alias-bg-layer-1));
-}
-
-.progressSummary[data-state='discarded'] {
-  background: var(--dsw-alias-button-ghost-active-fill);
-}
-
-.progressSummary > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.progressSummaryDot {
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-business-primary);
-}
-
-.progressSummary[data-state='warning'] .progressSummaryDot {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.progressSummary[data-state='completed'] .progressSummaryDot {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.progressSummary[data-state='discarded'] .progressSummaryDot {
-  background: var(--dsw-alias-label-tertiary);
 }
 
 .membersToggle {
@@ -855,8 +699,7 @@
   transition: background-color 120ms ease, transform 120ms ease;
 }
 
-.memberRow:hover,
-.memberRow[data-activity='working'] {
+.memberRow:hover, .memberRow[data-activity='working'] {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1));
 }
 
@@ -945,95 +788,10 @@
   50% { transform: rotate(7deg); }
 }
 
-.memberState {
-  margin-left: auto;
-}
-
 .memberCount {
   color: var(--dsw-alias-label-tertiary);
   font-size: 10.5px;
   line-height: 16px;
-}
-
-.assignmentLine {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  padding: 0 6px 0 60px;
-}
-
-.assignmentLabel {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
-}
-
-.assignmentTasks {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-
-.assignmentChip {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  min-height: 16px;
-  padding: 0 5px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-label-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.assignmentChip[data-state='running'] {
-  background: var(--dsw-alias-state-business-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='completed'] {
-  background: var(--dsw-alias-state-success-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='blocked'] {
-  background: var(--dsw-alias-state-warn-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='failed'] {
-  background: var(--dsw-alias-state-error-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='cancelled'] {
-  color: var(--dsw-alias-label-tertiary);
-  text-decoration: line-through;
-}
-
-.unreadPill {
-  flex: none;
-  color: var(--dsw-alias-state-business-primary);
-  font-size: 9.5px;
-  font-weight: 600;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
-.taskEmpty {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
 }
 
 /* compact dependency DAG */
@@ -1126,8 +884,7 @@
   transition: border-color 140ms ease, background-color 140ms ease, opacity 140ms ease;
 }
 
-.dagNode:hover,
-.dagNode[data-focused='true'] {
+.dagNode:hover, .dagNode[data-focused='true'] {
   border-color: var(--dsw-alias-state-business-primary);
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1));
 }
@@ -1285,8 +1042,7 @@
   color: var(--dsw-alias-label-primary-inverted);
 }
 
-.taskDetailLine,
-.taskDetailMeta {
+.taskDetailLine, .taskDetailMeta {
   color: var(--dsw-alias-label-secondary);
   font-size: 9.5px;
   line-height: 14px;
@@ -1416,8 +1172,7 @@
   background: var(--dsw-alias-bg-module-platform);
 }
 
-.planSectionToggle,
-.planCardHeader {
+.planSectionToggle, .planCardHeader {
   box-sizing: border-box;
   width: 100%;
   border: 0;
@@ -1436,8 +1191,7 @@
   padding: 7px 9px;
 }
 
-.planSectionToggle:hover,
-.planCardHeader:hover {
+.planSectionToggle:hover, .planCardHeader:hover {
   background: color-mix(in srgb, var(--dsw-alias-button-ghost-active-fill) 46%, transparent);
 }
 
@@ -1507,8 +1261,7 @@
   gap: 1px;
 }
 
-.planCardIdentity strong,
-.planTaskSummary {
+.planCardIdentity strong, .planTaskSummary {
   overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 10px;
@@ -1518,8 +1271,7 @@
   white-space: nowrap;
 }
 
-.planCardIdentity > span,
-.planCardMeta {
+.planCardIdentity > span, .planCardMeta {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 8.5px;
@@ -1579,8 +1331,7 @@
   border: 0;
 }
 
-.planCardBody label,
-.planNewTask label {
+.planCardBody label, .planNewTask label {
   display: flex;
   min-width: 0;
   flex: 1;
@@ -1596,10 +1347,7 @@
   line-height: 11px;
 }
 
-.planCard input,
-.planCard textarea,
-.planCard select,
-.planNewTask input {
+.planCard input, .planCard textarea, .planCard select, .planNewTask input {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
@@ -1614,9 +1362,7 @@
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
-.planCard input,
-.planCard select,
-.planNewTask input {
+.planCard input, .planCard select, .planNewTask input {
   min-height: 32px;
   padding: 6px 8px;
 }
@@ -1627,10 +1373,7 @@
   resize: vertical;
 }
 
-.planCard input:focus-visible,
-.planCard textarea:focus-visible,
-.planCard select:focus-visible,
-.planNewTask input:focus-visible {
+.planCard input:focus-visible, .planCard textarea:focus-visible, .planCard select:focus-visible, .planNewTask input:focus-visible {
   border-color: var(--dsw-alias-state-business-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
 }
@@ -1696,8 +1439,7 @@
   gap: 6px;
 }
 
-.planModelTriggerCopy strong,
-.planModelTriggerCopy span {
+.planModelTriggerCopy strong, .planModelTriggerCopy span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1799,12 +1541,7 @@
   font-weight: 650;
 }
 
-.planActions,
-.planApproveRow,
-.planNewTask,
-.planConfirm,
-.planApproveActions,
-.planSecondaryActions {
+.planActions, .planApproveRow, .planNewTask, .planConfirm, .planApproveActions, .planSecondaryActions {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1826,10 +1563,7 @@
   justify-content: flex-end;
 }
 
-.planActions button,
-.planNewTask button,
-.planApproveRow button,
-.planConfirm button {
+.planActions button, .planNewTask button, .planApproveRow button, .planConfirm button {
   flex: none;
   min-height: 30px;
   padding: 5px 10px;
@@ -1843,22 +1577,15 @@
   transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
 
-.planActions button:hover:not(:disabled),
-.planNewTask button:hover:not(:disabled),
-.planApproveRow button:hover:not(:disabled),
-.planConfirm button:hover:not(:disabled) {
+.planActions button:hover:not(:disabled), .planNewTask button:hover:not(:disabled), .planApproveRow button:hover:not(:disabled), .planConfirm button:hover:not(:disabled) {
   border-color: var(--dsw-alias-label-tertiary);
 }
 
-.planActions button:active:not(:disabled),
-.planNewTask button:active:not(:disabled),
-.planApproveRow button:active:not(:disabled),
-.planConfirm button:active:not(:disabled) {
+.planActions button:active:not(:disabled), .planNewTask button:active:not(:disabled), .planApproveRow button:active:not(:disabled), .planConfirm button:active:not(:disabled) {
   transform: scale(0.98);
 }
 
-.planActions button[data-danger],
-.planConfirm button[data-danger] {
+.planActions button[data-danger], .planConfirm button[data-danger] {
   color: var(--dsw-alias-state-error-primary);
 }
 
@@ -1992,31 +1719,22 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.planSecondaryActions > button,
-.planApproveActions > button[data-danger] {
+.planSecondaryActions > button, .planApproveActions > button[data-danger] {
   border-color: var(--dsw-alias-border-l2);
   background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-primary);
 }
 
-.planSecondaryActions > button[data-danger],
-.planApproveActions > button[data-danger] {
+.planSecondaryActions > button[data-danger], .planApproveActions > button[data-danger] {
   color: var(--dsw-alias-state-error-primary);
 }
 
-.planSectionToggle:focus-visible,
-.planCardHeader:focus-visible,
-.planActions button:focus-visible,
-.planNewTask button:focus-visible,
-.planApproveRow button:focus-visible,
-.planConfirm button:focus-visible {
+.planSectionToggle:focus-visible, .planCardHeader:focus-visible, .planActions button:focus-visible, .planNewTask button:focus-visible, .planApproveRow button:focus-visible, .planConfirm button:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: -2px;
 }
 
-.planActions button:disabled,
-.planNewTask button:disabled,
-.planApproveRow button:disabled {
+.planActions button:disabled, .planNewTask button:disabled, .planApproveRow button:disabled {
   cursor: default;
   opacity: 0.55;
 }
@@ -2264,58 +1982,6 @@
   padding: 8px 0 0;
 }
 
-.loopHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.loopToggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  cursor: pointer;
-}
-
-.loopToggle:focus-visible {
-  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.loopTitle {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
-.loopHint {
-  overflow: hidden;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 10px;
-  line-height: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.loopList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  margin: 0;
-  padding: 0 0 0 16px;
-  list-style: none;
-}
-
 /* ★ First-party run/phase row height: 32px. */
 .loopRound {
   display: flex;
@@ -2343,103 +2009,6 @@
   line-height: 1;
 }
 
-.loopRound[data-tone='converging'] .loopRoundMarker {
-  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 16%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-state-warn-primary);
-}
-
-.loopRound[data-tone='failed'] .loopRoundMarker {
-  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-state-error-primary);
-}
-
-.loopRound[data-tone='completed'] .loopRoundMarker {
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 16%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.loopRound[data-tone='running'] .loopRoundMarker {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-state-business-primary);
-}
-
-.loopRoundBody {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.loopRoundTone {
-  flex: none;
-  max-width: 42%;
-  overflow: hidden;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 10.5px;
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.loopRoundTone[data-tone='converging'] {
-  color: var(--dsw-alias-state-warn-primary);
-}
-
-.loopRoundTone[data-tone='failed'] {
-  color: var(--dsw-alias-state-error-primary);
-}
-
-.loopRoundTone[data-tone='completed'] {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.loopRoundTone[data-tone='running'] {
-  color: var(--dsw-alias-state-business-primary);
-}
-
-.loopRoundTasks {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-
-.loopTask {
-  padding: 0 5px;
-  overflow: hidden;
-  border: 0;
-  border-radius: 4px;
-  background: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-label-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 16px;
-  cursor: pointer;
-}
-
-.loopTask[data-tone='converging'] {
-  background: var(--dsw-alias-state-warn-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.loopTask[data-tone='failed'] {
-  background: var(--dsw-alias-state-error-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.loopTask[data-tone='unmeasured'] {
-  color: var(--dsw-alias-label-tertiary);
-  text-decoration: line-through;
-}
-
-.loopTask[data-tone='completed'] {
-  background: var(--dsw-alias-state-success-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
 /* ★ Fixed-width status column, right-aligned, so every round's tail aligns. */
 .loopStatusTail {
   display: inline-flex;
@@ -2456,40 +2025,6 @@
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.loopStatusTail[data-tone='converging'] {
-  color: var(--dsw-alias-state-warn-primary);
-}
-
-.loopStatusTail[data-tone='failed'] {
-  color: var(--dsw-alias-state-error-primary);
-}
-
-.loopStatusTail[data-tone='completed'] {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.loopStatusTail[data-tone='running'] {
-  color: var(--dsw-alias-state-business-primary);
-}
-
-/* ── Member elapsed clock (identity + status only; no logs or outputs) ───────── */
-
-.memberClock {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9.5px;
-  line-height: 16px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* ★ Stalled is qualitatively different from elapsed work: a dead session's open
- *   task keeps counting, and counting that as progress is the reading t4 removed. */
-.memberClock[data-kind='stale'] {
-  color: var(--dsw-alias-state-warn-primary);
 }
 
 /* ── Member row: 16px status dot + fixed-width status tail (t13) ─────────────── */
@@ -2566,24 +2101,6 @@
   background: var(--dsw-alias-label-tertiary);
 }
 
-.progressSegments > span[data-state='converging'] {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.progressSegments > span[data-state='unmeasured'] {
-  background: var(--dsw-alias-label-tertiary);
-}
-
-.assignmentChip[data-state='converging'] {
-  background: var(--dsw-alias-state-warn-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='unmeasured'] {
-  color: var(--dsw-alias-label-tertiary);
-  text-decoration: line-through;
-}
-
 .taskDetailBadge[data-state='converging'] {
   border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 42%, var(--dsw-alias-border-l2));
   background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
@@ -2648,8 +2165,7 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
-.memberRoundLine[data-tone='unmeasured'] .memberRoundTone,
-.memberRoundLine[data-tone='cancelled'] .memberRoundTone {
+.memberRoundLine[data-tone='unmeasured'] .memberRoundTone, .memberRoundLine[data-tone='cancelled'] .memberRoundTone {
   color: var(--dsw-alias-label-tertiary);
 }
 
@@ -2862,11 +2378,13 @@
  * ★ 而**读数**（`data-member-model` / `role="img"` / 完整路由的 `title`）
  *   仍然只有 `MemberRow` 那一份 —— 同一个事实不留两次读数。
  */
-.memberSlot[data-has-model='true'] {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/**
+ * ★★★ R4：这里原来有一条 `.memberSlot[data-has-model='true']` 规则 —— **删掉了**。
+ *
+ * `grep -rn "data-has-model" src/client/*.tsx` ⇒ **0 处**：那条属性从来没有任何
+ * 地方写过，所以这条规则**永远不可能匹配**。一条死的规则比没有规则更坏 ——
+ * 它把一个**没人做的事**说成了一件已经做完的事。
+ */
 
 /**
  * ★ 终态提示（"计划已放弃 / 团队已停止"）：一句**团队级**的话，不是药丸。

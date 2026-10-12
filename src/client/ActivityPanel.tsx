@@ -26,7 +26,9 @@ import {
   IconStopFill16, IconWarningOutline16,
 } from './icons.tsx'
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { Chevron, DependencyGraph, WorkGlyph } from './DependencyGraph.tsx'
+import { MemberScreen } from './MemberScreen.tsx'
+import { Chevron, DependencyGraph } from './DependencyGraph.tsx'
+import { ProgressSummary } from './ProgressSummary.tsx'
 import { currentSessionId } from './session-navigation.ts'
 import type { ModelDirectory, ModelDirectoryResolver } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -38,14 +40,8 @@ import {
   activityPanelShouldAutoExpand,
   formatTaskIds,
   memberRouteLabel,
-  memberRowExpanded,
-  memberRowKey,
-  orderDelegationMembers,
-  pruneMemberRows,
   taskModelLabel,
   teamIsActive,
-  toggleMemberRow,
-  type MemberExpansion,
 } from './activity-model.ts'
 import {
   ACTIVITY_HALT_URL,
@@ -155,85 +151,6 @@ function CollapsedBadge({ count, busy, onClick, t }: {
  */
 
 
-function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = false): string {
-  const completed = team.tasks.filter((task) => task.status === 'completed')
-  const cancelled = team.tasks.filter((task) => task.status === 'cancelled')
-  const running = team.tasks.filter((task) => task.state === 'running')
-  const blocked = team.tasks.filter((task) => task.state === 'blocked')
-  const ready = team.tasks.filter((task) => task.state === 'open' && task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled')
-  const failed = team.tasks.filter((task) => task.status === 'failed')
-  if (discarded) return t('task.summary.discarded', { count: team.tasks.length })
-  if (team.tasks.length === 0) return t('task.summary.waitingBreakdown')
-  if (team.phase === 'staged') return t('task.summary.staged', { count: team.tasks.length })
-  if (completed.length === team.tasks.length) return t('task.summary.allDelivered', { count: completed.length })
-  if (completed.length + cancelled.length + failed.length === team.tasks.length) {
-    return t('task.summary.ended', {
-      completed: completed.length,
-      cancelled: cancelled.length,
-      failed: failed.length,
-    })
-  }
-  if (failed.length > 0 && running.length === 0 && ready.length === 0 && blocked.length === 0) {
-    return t('task.summary.failedSettled', { count: failed.length })
-  }
-  if (blocked.length > 0 && running.length > 0) {
-    return t('task.summary.blockedAndRunning', {
-      tasks: formatTaskIds(blocked.slice(0, 3).map((task) => task.id), t),
-      more: blocked.length > 3 ? t('task.summary.more', { count: blocked.length - 3 }) : '',
-    })
-  }
-  if (running.length > 0) return t('task.summary.running', { tasks: formatTaskIds(running.map((task) => task.id), t) })
-  if (ready.length > 0) return t('task.summary.ready', { tasks: formatTaskIds(ready.map((task) => task.id), t) })
-  if (blocked.length > 0) return t('task.summary.blocked', { tasks: formatTaskIds(blocked.map((task) => task.id), t) })
-  return t('task.summary.waitingSchedule')
-}
-
-/**
- * ── ★★★ R2：秒表**不再**长在这里 ──────────────────────────────────────────────
- *
- * MEASURED：这里原来有一个 `useElapsedNow(active)` —— 它把 `now` 放进
- * `TeamSection` 的 state，于是**每秒**整棵面板树重渲染（契约原句：
- * "a tick must not re-render the 1586-line panel it sits inside"）。
- *
- * ★ 修法不是"少 tick 几次"，而是**搬家**：`now` 的 state 与 `setInterval`
- *   都搬进 `MemberClock.tsx`（一个只印一行时长的小组件）。本组件**不持有** `now`，
- *   所以它没有任何理由跟着 tick 重渲染。
- * ★ 而"只有真的在跑的成员才起表"由 `memberClockTicks` 判定（见 activity-model）。
- */
-
-/**
- * ── ★★★ R3：进度**读数**只留一句话，色块条与图例都去掉 ────────────────────────────
- *
- * MEASURED（用户原话）：「整个东西挺冗余的，比如它做一些 badge 之类的东西」。
- *
- * ★ 原来的三件套是**同一个事实的三次表述**：
- *   · `progressSegments` —— 一排色块，每块一个任务；而"完成了几项"在下面那行
- *     已经用数字说了，色块只是把同一件事画了一遍；
- *   · `progressLegend` —— `■ 进行中 N / ■ 等待依赖 N / ■ 已交付 N`；其中
- *     "已交付 N" 与团队头上的 `{completed}/{total} 完成` 是**同一个数**；
- *   · `progressSummary` —— 一句人话的总结，**这一件留下**，因为它说的
- *     "等待前置/正在执行/全部交付"是前两者都没说的。
- *
- * ⇒ 减法之后：一句总结 + 一个语气点。数字仍在（团队头的 completed/total、
- *   成员行自己的 done/total），所以**没有任何读数丢失**。
- */
-function ProgressOverview({ team, t, discarded = false }: { readonly team: ActivityTeam; readonly t: AgentTeamsTranslate; readonly discarded?: boolean }) {
-  const blocked = discarded ? 0 : team.tasks.filter((task) => task.state === 'blocked').length
-  const settled = !discarded && team.tasks.length > 0 && team.tasks.every((task) => (
-    task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
-  ))
-  const summaryTone = discarded ? 'discarded' : blocked > 0 || team.tasks.some(task => task.status === 'failed' || task.status === 'cancelled') ? 'warning' : settled ? 'completed' : 'running'
-  if (team.tasks.length === 0) return null
-  return (
-    <section className={css.progressOverview} aria-label={t('progress.aria')} data-progress-summary>
-      <span className={css.progressSummary} data-state={summaryTone}>
-        <span className={css.progressSummaryDot} />
-        <span>{taskSummary(team, t, discarded)}</span>
-      </span>
-    </section>
-  )
-}
-
 export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, onNavigate, t, historic = false, workspace = false }: {
   readonly team: ActivityTeam
   readonly modelDirectory?: ModelDirectory
@@ -247,26 +164,7 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
 }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const selectedAssignee = team.tasks.find(task => task.id === selectedTaskId)?.assignee
-  const [membersOpen, setMembersOpen] = useState(workspace)
   const [stopOpen, setStopOpen] = useState(false)
-  const [stopping, setStopping] = useState(false)
-  const [stopError, setStopError] = useState('')
-  /**
-   * ── ★★★ R2：成员的**展开**状态 ────────────────────────────────────────────────
-   *
-   * ★ 默认**收起**：`memberRowExpanded` 对"没有条目"返回 `false`，所以初值是一个
-   *   **值**，不是一条缺席分支 —— 一次新渲染不可能顺手把每一行都打开。
-   *
-   * ★ 用户的选择活得过重渲染：它存在这里（不是每次渲染重算的派生态），
-   *   所以下一轮轮询回来读到的仍然是用户按下的那个。
-   *
-   * ★ 按**成员 id** 存（未启动的成员退化成名字）：轮询会重排名册，
-   *   而按位置存会把一个成员的展开状态**交给另一个成员**。
-   */
-  const [expansion, setExpansion] = useState<MemberExpansion>(() => new Map())
-  const toggleMember = useCallback((key: string): void => {
-    setExpansion((current) => toggleMemberRow(current, key))
-  }, [])
   /**
    * ★ 打开一个会话（成员本身，或它底下的一个子代理）。两个都走同一条路：
    *   `navigateToSession` 会立刻收起浮动面板 —— 那是一次**明确的离开**。
@@ -275,15 +173,13 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
     if (childId === '') return
     onNavigate(team.captainSessionId as SessionId, childId as SessionId)
   }, [onNavigate, team.captainSessionId])
+  const [stopping, setStopping] = useState(false)
+  const [stopError, setStopError] = useState('')
   /**
    * ★ 剪掉不在册的展开条目。放在 effect 里而**不是**渲染期：渲染必须是纯的。
    *   store 只在用户真的按过某一行时才有条目，所以这里剪的永远是"被重生成
    *   替换掉的那一行"留下的残条。
    */
-  const rosterKey = team.members.map((member) => memberRowKey(member)).join('\u0000')
-  useEffect(() => {
-    setExpansion((current) => pruneMemberRows(current, rosterKey === '' ? [] : rosterKey.split('\u0000')))
-  }, [rosterKey])
   const discarded = historic && team.phase === 'staged'
   const stopped = !historic && team.halted === true
   const busyCount = team.members.filter((member) => member.activity === 'working').length
@@ -380,186 +276,25 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
           />
         )}
 
-      <section className={css.delegationSection} aria-label={t('delegation.aria')} data-delegation-map>
-        <div className={css.captainNode}>
-          <span className={css.captainAvatar}>
-            <img className={css.leadAvatar} src={LEAD_ART} alt="" aria-hidden />
-          </span>
-          <span className={css.captainInfo}>
-            <span className={css.captainLine}>
-              <span className={css.captainName}>{t('captain.name')}</span>
-              <span className={css.captainRole}>{t('captain.role')}</span>
-            </span>
-            <span className={css.captainSummary}>{discarded
-              ? t('captain.summary.discarded', { tasks: team.tasks.length, members: team.members.length })
-              : captainBusy
-                ? t('captain.summary.withTakeover', { tasks: assignedCount, captainTasks: captainTaskIds })
-              : team.phase === 'staged'
-                ? t(team.planReviewState === 'awaiting_feedback'
-                  ? 'captain.summary.awaitingFeedback'
-                  : 'captain.summary.staged', { tasks: team.tasks.length, members: team.members.length })
-                : t('captain.summary', { tasks: assignedCount, members: team.members.length })}</span>
-          </span>
-          <span className={css.captainState} data-busy={captainBusy || busyCount > 0}>
-            <WorkGlyph active={captainBusy || busyCount > 0} />
-            {discarded
-              ? t('captain.state.discarded')
-              : captainBusy
-                ? t('captain.state.takeover', { tasks: captainTaskIds })
-              : team.phase === 'staged'
-                ? t(team.planReviewState === 'awaiting_feedback'
-                  ? 'captain.state.awaitingFeedback'
-                  : 'captain.state.staged')
-              : busyCount > 0
-                ? t('captain.state.working', { count: busyCount })
-                : t(allCompleted
-                  ? 'captain.state.collected'
-                  : allSettled
-                    ? 'captain.state.settled'
-                    : 'captain.state.waiting')}
-          </span>
-        </div>
-
-        {/**
-          * ── ★★★ 终态口径（"放弃了/停止了"**不是**"待执行"）─────────────────────
-          *
-          * MEASURED：一个被放弃的计划**根本不会创建成员**，一个被停止的团队**不会再
-          * 往前走**。把它们读成"待执行"会让读者以为它们还在排队 —— 这是本仓反复
-          * 修的那一类"读数被读成了它不是的东西"。
-          *
-          * ★ 成员行自己也会印这两句（`MemberRow`）；这一行是**团队级**的那一份，
-          *   它先说话，于是下面每一行不必各自解释一次。
-          */}
-        {(discarded || stopped) && (
-          <p className={css.teamTerminalNote} data-team-terminal={discarded ? 'discarded' : 'stopped'}>
-            {discarded ? t('member.status.discarded') : t('member.status.stopped')}
-          </p>
-        )}
-
-        <ProgressOverview team={team} t={t} discarded={discarded} />
-
-        {(() => {
-          const orderedMembers = orderDelegationMembers(team.members, team.tasks)
-          /**
-           * ★★★ R2：第一屏是**成员中心**的（用户原话：the first screen should show
-           *   durable roles, and clicking one expands to show the subagents working
-           *   underneath it, together with round information）。
-           *
-           * ★ 而"谁在动"这条折叠口径保留（issue #192）：收起时只列**还在动**的成员，
-           *   展开时把已结束的也列出来并按结束时间倒序。原因没变 —— 一个不动的成员
-           *   占着行会让"整队在不在动"这个第一问读不出来。
-           */
-          const runningMembers = orderedMembers.filter((member) => (
-            member.activity === 'working' || member.status === 'working'
-            || team.tasks.some((task) => task.assignee === member.name
-              && (task.status === 'pending' || task.status === 'claimed' || task.status === 'in_progress'))
-          ))
-          const visibleMembers = membersOpen ? orderedMembers : runningMembers
-          const hiddenFinishedCount = orderedMembers.length - visibleMembers.length
-          const expandLabel = membersOpen
-            ? t('members.collapse')
-            : hiddenFinishedCount > 0
-              ? t('members.expandFinished', { count: hiddenFinishedCount })
-              : t('members.expand')
-          /**
-           * ★ 展开存活的键 = 当前名册定义的那些键。不在册的条目会被**剪掉** ——
-           *   否则这个 store 会随面板（一个跨会话存活的 shell-overlay 单例）
-           *   一直长下去，而没有任何一行再引用那些键。
-           */
-          const rosterKeys = orderedMembers.map((member) => memberRowKey(member))
-          return (
-            <>
-              <button type="button" className={css.membersToggle} onClick={() => { setMembersOpen((current) => !current) }} aria-expanded={membersOpen} data-members-toggle>
-                <span><Chevron open={membersOpen} />{t('members.toggle', { count: team.members.length })}</span>
-                <span>{expandLabel}</span>
-              </button>
-
-              {(membersOpen || visibleMembers.length > 0) && <div className={css.delegationTree} data-member-rows={visibleMembers.length}>
-                {team.members.length === 0 && <span className={css.emptyHint}>{t('members.empty')}</span>}
-                {visibleMembers.map((member) => {
-                  const key = memberRowKey(member)
-                  /**
-                   * ── ★★ 面板在这一行上**探出**两件事，而不是"把它们交给子组件就算完"──
-                   *
-                   * ① `activity`：收起的成员列表要一眼看出"这一行在不在动"，
-                   *    而 `data-activity` 是宿主语义色（business color）挂上去的那个钩子。
-                   * ② `memberModel`：这个成员跑在哪个路由上 —— 用户要的第一屏是
-                   *    "谁在做什么"，而"用哪个模型做"是这件事的一部分。
-                   *
-                   * ★ 两格都是**读**，不是第二份真相：`MemberRow` 用的是同一个
-                   *   `memberRouteLabel` / `member.activity`，判定口径只有一个。
-                   */
-                  const memberModel = memberRouteLabel(member)
-                  /**
-                   * ★ "这个成员正在做什么"，到**任务 + 模型**这一层。
-                   *   用户要的第一屏是 "who is doing what"，而"用哪个模型在做"
-                   *   是同一件事的一半 —— 所以它是同一行字，不是另一个标签。
-                   *   读不出当前任务时不编一个（`member.status.working` 兜底）。
-                   */
-                  const currentTask = team.tasks.find((task) => task.id === member.currentTask
-                    && task.assignee === member.name)
-                  const doingModel = currentTask === undefined ? '' : taskModelLabel(currentTask, [member])
-                  const doingText = currentTask === undefined
-                    ? t('member.status.working')
-                    : doingModel === ''
-                      ? t('member.status.executing', { taskId: currentTask.id })
-                      : t('member.status.executingModel', { taskId: currentTask.id, model: doingModel })
-                  return (
-                    /**
-                     * ★★ 面板在这一格上**读**两件事（它们是宿主的语义色与模型探针）：
-                     *   · `data-activity` —— 行在不在动（CSS 用宿主的 business color）
-                     *   · 模型路由 —— 那一格的**读数**由 `MemberRow` 交出（见下）。
-                     * ★ 判定口径只有一份：`memberRouteLabel` 与 `member.activity`。
-                     */
-                    <div
-                      key={key}
-                      /**
-                       * ★ 槽的类名跟着**有没有模型**走：`.memberModel` 是那一格的
-                       *   排版契约（就地省略号、不撑破面板），而"这一行有没有模型"
-                       *   是面板这一层知道的事。行本身不认识这个类。
-                       */
-                      /**
-                       * ★ 槽的**布局类**由面板给：这一行有没有模型，面板知道；
-                       *   而 `.memberModel` 是"就地省略号、不撑破面板"的排版口径。
-                       *   行负责**画**那一格，面板负责**给它留位置**。
-                       */
-                      className={memberModel === '' ? css.memberSlot : `${css.memberSlot} ${css.memberModel}`}
-                      data-activity={member.activity}
-                      data-member-doing={doingText}
-                      /**
-                       * ★ 模型那一格的**读数**只由 `MemberRow` 交出（`role="img"` 那一个）。
-                       *   这里**不再**挂第二份探针 —— 同一个事实的两次读数一定会漂移，
-                       *   而"归属错了"与"归属对了"在界面上同形。
-                       */
-                    >
-                      <MemberRow
-                        team={team}
-                        member={member}
-                        tasks={team.tasks}
-                        /**
-                         * ★ 面板算一次，行里只负责画：模型路由与"能不能改"，
-                         *   各只有一条判据（`memberRouteLabel` / `memberModelEditability`）。
-                         */
-                        memberModel={memberModel}
-                        memberModelEditable={memberModelEditability(member)}
-                        expanded={memberRowExpanded(expansion, key)}
-                        onToggle={toggleMember}
-                        onOpenSubagent={onNavigateMember}
-                        onSelectTask={setSelectedTaskId}
-                        modelDirectory={modelDirectory}
-                        t={t}
-                        historic={historic}
-                        discarded={discarded}
-                        stopped={stopped}
-                      />
-                    </div>
-                  )
-                })}
-                </div>}
-            </>
-          )
-        })()}
-      </section>
+      <MemberScreen
+        team={team}
+        modelDirectory={modelDirectory}
+        onNavigateMember={onNavigateMember}
+        onSelectTask={setSelectedTaskId}
+        t={t}
+        historic={historic}
+        workspace={workspace}
+        discarded={discarded}
+        stopped={stopped}
+        staged={team.phase === 'staged'}
+        awaitingFeedback={team.planReviewState === 'awaiting_feedback'}
+        captainBusy={captainBusy}
+        busyCount={busyCount}
+        allCompleted={allCompleted}
+        allSettled={allSettled}
+        assignedCount={assignedCount}
+        captainTaskIds={captainTaskIds}
+      />
 
       {/**
         * ── ★★★ R3：**第二屏只剩下依赖图**（用户原话）──────────────────────────

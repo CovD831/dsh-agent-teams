@@ -28,7 +28,7 @@ import {
   formatElapsed, memberClockTicks, type MemberClock as MemberClockReading, type MemberClockKind,
 } from './activity-model.ts'
 import type { AgentTeamsTranslate } from './locales.ts'
-import css from './ActivityPanel.module.css'
+import css from './MemberClock.module.css'
 
 /**
  * Per-second tick, in milliseconds.

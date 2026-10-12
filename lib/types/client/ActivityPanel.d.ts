@@ -24,6 +24,16 @@ import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/c
 import { type ActivityTeam } from './activity-monitor.ts';
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts';
 import type { AgentTeamsTranslate } from './locales.ts';
+/**
+ * ── ★★★ R2：这几段读数**搬进了 `MemberRow.tsx`** ────────────────────────────────
+ *
+ * `memberStateLabel` / `memberStatusText` / `memberDotTone` 原来长在这里，
+ * 而它们全部是**关于一行成员**的读数。R2 把成员行变成一个真正的组件
+ * （`src/client/MemberRow.tsx`）之后，它们跟着那一行走 —— 留在面板里就成了
+ * 第二份实现，而本仓对"第二份实现"的判据是：它一定会漂移。
+ *
+ * ★ 一行只应有一个"它在做什么"的口径，所以这里**不留**转发壳。
+ */
 export declare function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, onNavigate, t, historic, workspace }: {
     readonly team: ActivityTeam;
     readonly modelDirectory?: ModelDirectory;

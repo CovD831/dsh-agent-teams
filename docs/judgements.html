@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>判决台账 · 5 条</title>
+<title>判决台账 · 14 条</title>
 <style>
   :root { --fg:#1a1a1a; --dim:#666; --line:#e3e3e3; --bg:#fafafa; --acc:#0b5fff;
           --adopted:#2f855a; --refuted:#c0392b; --pending:#b7791f; }
@@ -44,7 +44,7 @@
 </style></head><body>
 
 <h1>判决台账</h1>
-<p class="lede">5 条判决 · 生成于 2026/10/7 23:17:33 · 机器读的是 <code>.agent-teams/judgements/*.json</code>（唯一真源）</p>
+<p class="lede">14 条判决 · 生成于 2026/10/11 12:42:01 · 机器读的是 <code>.agent-teams/judgements/*.json</code>（唯一真源）</p>
 
 <p class="lede">★ 这是【第二种记录】。它与<a href="frictions.html">卡点台账</a>是两条通路，<b>不合并呈现</b>：
   卡点说「我卡住了」（场景 / 观测 / 未知 / 处置）；
@@ -53,7 +53,7 @@
 
 
 
-<section><h2>已采纳 <span style="color:var(--dim);font-weight:400;font-size:.9rem">5 条</span></h2>
+<section><h2>已采纳 <span style="color:var(--dim);font-weight:400;font-size:.9rem">14 条</span></h2>
         <p class="why">它经得住目前的反例 —— 而那不等于它被证明了。</p>
         <div class="grid">
   <article class="jcard adopted">
@@ -154,6 +154,186 @@
       <dt>怎么复用</dt><dd>写任何跨模块突变的夹具时：先问「这个突变真的施加到被测模块实例上了吗？」验证方法是让探针同时读两个模块并比对。</dd>
       <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
       <dt>备注</dt><dd><ul><li>修法不是「再 bust 一层」（每加一层依赖就再失效一次），而是把针脚放在被测模块自己那一行上。</li><li>与 t53 同族：t53 是「静态 import JSON 被内联 ⇒ 改数据不生效」，t55 是「跨模块实例的常量 ⇒ 突变不生效」。</li><li>共同形态：我改的那个，与它测的那个，是不是同一个。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0006</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T23:25:00+08:00</span>
+    </header>
+    <h3 class="claim">一个只在【执行到那一行】时才炸的错，编译器、build、typecheck 全都不会告诉你 —— 所以&quot;它编过了&quot;不是&quot;它会跑&quot;</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 若那一行在【本次改动前就没人走到】，那它不会在本次显形（而那正是它潜伏的方式）。⇒ 判据是「这个改动所在的路径，有没有被【真的执行过】」。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t54（point-dev）<div class="why">src/tools/update-task.ts 的读表函数原本写 join(__dirname, ...) —— 而 __dirname 是 CJS 变量，ESM 里不存在 ⇒ ReferenceError。而它能编过、能 build、能 typecheck，只在【执行到那一行】时才炸。而那一行正好是&#39;读表&#39;路径 ⇒ 每一个走到完工门的任务都会失败。★ 它是【在夹具里当场撞到的】，不是读代码看出来的。</div></dd>
+      <dt>怎么复用</dt><dd>改任何【路径/加载/初始化】代码后：不要只跑 build 与 typecheck —— 必须【真的走到那一行】。而那些行，恰恰是夹具最容易覆盖不到的（它们在&#39;正常工作&#39;路径上）。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它纠正了本队一条既有的纪律边界：「link: 指向源码 ⇒ 必须 build」在这里【不够】—— 这个 bug 编得过、build 得过，只有跑到才现形。</li><li>★ 同类前例：t39 的 pluginRoot 层数（报 unknown 而那是诚实的读数）—— 两者都是&#39;编译器看不见的错&#39;。</li><li>★ 修法是复用已正确的那条：dirname(fileURLToPath(import.meta.url))（与 t53 的 loadVerifyCommandRules 同形）。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0007</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T23:40:00+08:00</span>
+    </header>
+    <h3 class="claim">一句描述机制行为的话，可以从未被兑现过 —— 而它读起来与兑现了的话完全一样</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>★ 若那句话里的数是真的算出来的（而不是 `?? 1` 兜底），那这条不适用。⇒ 判据是：那句话里的每个数字，能不能指出它由谁赋值？指不出 ⇒ 它可能是兜底值。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t56（absorb-dev 报，captain 核实）<div class="why">changed-paths.ts:255 的拒绝措辞写「not in any of the ${ctx?.observedWorkspaces ?? 1} workspace(s) that were checked (the main workspace and every member worktree under it)」。★ 而 observedWorkspaces 从来没有被任何地方赋过值 ⇒ 它恒为 undefined ⇒ `?? 1` 恒取 1。⇒ 那句「扫了 N 个」里的 N 是硬编码的缺省值，而括号里那句「主工作区 + 每一棵成员 worktree」是一句从未兑现的承诺。★ 而扫描本身是对的：workspaceAndWorktreeChangedPaths() 实测返回 131 条，含 t56 的文件。</div></dd>
+      <dt>怎么复用</dt><dd>写任何面向人的说明文本（拒绝消息、日志、状态行）时：逐个数字问「谁给它赋的值？」—— 而括号里的补充说明更要问，因为它最容易被写成一句善意的描述，而那句描述从未被检查。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它的形状比『硬编码』更隐蔽：硬编码是一个明显的常量，而 `?? 1` 是一个兜底值伪装成读数 —— 它读起来像『算出来是 1』。</li><li>★ 同族：t42 的 golden 快照（把那一刻的定义当永久）、t53 的静态内联（把构建时的数据当运行时的）、t54 的内置缺省表（两条来源）。</li><li>★ 共同形态仍是那条：一个写在某个时刻的事实，继续被当成本刻的事实 —— 而这次它写在一句说明文本里。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0008</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-07T23:55:00+08:00</span>
+    </header>
+    <h3 class="claim">纯搬运的安全性取决于搬的那份底本是不是当前分支上的那一份 —— 而一份快照的正确性，与它在搬运之后还在不在，是两件事</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若搬运的底本取自当前分支的 HEAD（而不是另一个 worktree 的 HEAD），那这条不适用。判据是：那份底本所基于的提交，是不是你要搬进去的那棵树的祖先？不是，则它可能缺了别人后来接的线。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t59（absorb-dev 自查，captain 独立核实）<div class="why">t41 造出 worktree-aware 扫描而没能接线（f-0023）；captain 用一行接上（a0f6504）。而 t39 拆 tools.ts 时，absorb-dev 从 /tmp/t39-tools-before.ts 按行区间切出工具体 —— 而那份底本取自 task-t30 worktree 的 HEAD，其基线早于 a0f6504。于是 t41 的接线被搬回旧版（9779c58）。核实：9779c58^ 仍是 workspaceAndWorktreeChangedPaths(workspace)，而 9779c58 之后变成 gitChangedPaths(workspace)。</div></dd>
+      <dt>怎么复用</dt><dd>做任何按快照逐块搬运的重构时：先确认底本来自当前分支的 HEAD；更根本的是，搬运之后要有东西验证接线还在，因为快照的覆盖面（这里等于工具定义的 5 个键）与搬运单元的边界不重合。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>三个各自都对的机制叠加出了这个缺口：t41 的接线对、t39 的搬运对、t39 的 golden 快照对（它真的证明了拆分没改工具定义）—— 而那一行丢了，没有任何机制会报。</li><li>接缝在时间维上：每个机制验证的是它自己那一刻的正确性，而那一行在搬运之后还在不在，没有人验。</li><li>形态与 j-0007 同族：一个断言的范围不等于它声称的范围 —— 而这次是快照的覆盖面（工具定义）不等于搬运的边界（工具体 + 之外的 ctx 构造）。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0009</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T00:25:00+08:00</span>
+    </header>
+    <h3 class="claim">当判据的输出格式本身被改动了，一条按旧格式给出的拒绝，就是新代码已生效的反证 —— 拒绝语成了一个读数</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若新格式与旧格式在某条输入上【输出相同】，那这条不成立 —— 那时拒绝语不再是可区分的读数。所以它依赖一个前提：新旧格式的输出【有可辨的差异】。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t59（absorb-dev 自证，captain 独立核实）<div class="why">t59 把 changed-paths 的拒绝措辞从 `${ctx?.observedWorkspaces ?? 1} workspace(s)` 改成【真实数字或不声称数字】。而它交终态时被拒，拒绝原文仍含「not in any of the 1 workspace(s) that were checked (the main workspace and every member worktree under it)」—— 那是【旧格式】。核实：它的 worktree 产物里有新措辞那支（grep 命中 1），而主树里仍是旧兜底值（命中 1）⇒ 宿主跑的是修复前的模块。</div></dd>
+      <dt>怎么复用</dt><dd>改一个判据的输出格式时：那条格式本身可以作为【新旧代码的判别依据】—— 比 [deployment] 那行更直接，因为它就是被改的那个东西。而反过来：若你改了措辞而拒绝语【没变】，那说明跑的还是旧代码（或改动没生效）。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而这与 f-0030（reload ≠ restart）互为补充：那条说『动作说它重载了而模块没换』，这条说『拒绝语可以直接证明模块没换』。</li><li>★ 而它是本队『读数的来源要能指出』那条的又一形态：这次那个来源是【判据自己的措辞】。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0010</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T01:12:00+08:00</span>
+    </header>
+    <h3 class="claim">「交不出终态」不是一件事 —— 它至少有三个成因，而三者在同一个症状上同形；把三者当成一个反复出现的卡点，会让修法找错对象</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若某次「交不出终态」的成因不在这三类里，那这条不适用（需要列第四类）。⇒ 判据是：读那行 [deployment]、那道门自己的理由、以及任务有没有 worktree —— 三者指向不同对象时不得合并。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t66 · t67 · t68（三个成员各自实测）+ 今晚 20+ 次同型卡点<div class="why">① 用户重启后宿主持【当前构建】，而 t66 的 update_task 仍被拦 —— 成因是 completion.backtest 要的那份【基线本身是红的】。② t67 被两道门各拒一次，而 backtest 的拒原文自己说「it exited 1 before any of this change existed … this red is not the change&#39;s fault」。③ t68 报：该任务【没有 worktree】⇒ r5 拿不到 parentRevision ⇒ 恒不可满足，而表里 implementation 要 r5。</div></dd>
+      <dt>怎么复用</dt><dd>遇到一个反复出现的卡点时：先问「它是同一个成因的第 N 次，还是不同成因长得一样」。今晚是后者，而三类各自的修法完全不同：① 重载宿主 ② 让基线可归因 ③ 让无 worktree 的 r5 有确定语义。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 三类：① 宿主持有旧模块（今晚 20+ 次）② 基线本身不绿（t66/t67）③ 无 worktree ⇒ r5 拿不到父版本（t68）。</li><li>★ 而它们各自的修法已各自立项：① 用户重启（已解决）② t69（基线修绿）③ t71（无 worktree 的设计决定）。</li><li>★ 与 j-0003 同族：两者都是「同一个症状，多个对象」。而 j-0003 是【代理读数】，这条是【同形拒绝】。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0011</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T01:35:00+08:00</span>
+    </header>
+    <h3 class="claim">搬运之前先建一条能重跑的核对，并【先证明它会红】—— 然后才动第一行</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若那段代码【没有可枚举的、形如 field: expr 的接线】（例如它全是命令式语句），那这条不适用 —— 那时需要另一种可重跑的检查，而不是硬套『逐行清点』。⇒ 判据是：这段代码里有没有一个【可枚举的结构】能让核对抓到『丢了哪一样』。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t70（point-dev）+ t39/t54 两次事故（absorb-dev 与 captain 各犯一次）<div class="why">tools.ts 与 update-task.ts 的两次重构都丢了同一条接线：t39 拆 tools.ts 时把 t41 的 `gitChangedPaths: workspaceAndWorktreeChangedPaths(workspace)` 搬回旧版；captain 并入 t54 时又把它覆盖回去一次。★ 两次都不是『不小心』，而是【没有一个能重跑的检查】。★ t70 的做法：先建 scripts/gate-update-task-injections.test.mjs（把 17 格注入的字段名 + 右侧表达式逐条抽出，三态 clear/missing/wrong-expr），然后【用两种真实事故形状证明它会红】，最后才动第一行。</div></dd>
+      <dt>怎么复用</dt><dd>做任何搬运/重构之前：先问「我搬完之后，什么东西能告诉我『漏了一样』？」—— 若答不出来，先把它建出来，并证明它会红。★ 而『证明它会红』这一步不能省：一条从未红过的核对，与没有核对在观测上完全相同。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它把那条纪律从『我记得』变成了『它自己会报』—— 而那正是本队那条：经验写成判决不会自动阻止重犯，判据会。</li><li>★ 三态的区分是关键：clear / missing（那一格没了）/ wrong-expr（格在而右侧是旧版）—— ★ 两次事故丢的都不是格名，而是格的右侧。</li><li>★ 而它建那条核对时【假报了三次】，三次同一形状：『按名字找，而那个名字在文件里有多个同名的东西』—— 而那正是那条核对要防的形态，出现在那条核对自己身上（与 t51 同族）。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0012</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T03:20:00+08:00</span>
+    </header>
+    <h3 class="claim">判据侧完成不等于它生效了 —— 而那条边界只能由【核实生产侧】来划</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若那条产出本来就不该有生产消费者（例如它是判据夹具、或它的用途就是被人跑），那这条不适用。判据是：问它该不该有生产消费者 —— 该 ⇒ 去接线；不该 ⇒ 记账并把理由写上。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t76 与 t80（integrator6 两次实测）+ t41/t62 的更早实例<div class="why">t76 把 backtest 改成按差异归因，而它的 pin 需要调用方注入 ctx.knownBaselineFailures —— 那在 src/tools/update-task.ts，是它的 outOfScope。于是它诚实地把缺口钉在盘上（臂 12 断言生产里此刻没有消费者）并写清翻转条件。t80 同样：读数已建，而生产消费者为零（臂 9）。而 integrator6 在开工 t83 前主动说：我会先核实这三条各自的接线状态，而不是假设它们已经生效 —— 否则 t83 会变成第三个没有调用方的修法。captain 核实的结果：t76 已接线、t80 未接线、t81/t82 是判据夹具（本就不需要生产接线）。</div></dd>
+      <dt>怎么复用</dt><dd>一条修法交付时，逐个问：它读的那个格，谁往里塞东西？那个塞东西的地方在这条改动的射程内吗？—— 不在 ⇒ 那条修法还没有调用方，而它与没有修法在观测上完全相同。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>它与本队那条既有纪律是同一件事的操作化：一个没有调用方的修法、与没有修法在观测上完全相同 —— 那条说会怎样，这条说怎么查。</li><li>而 t80 的 45/46 落后，解释了为什么这个形态今晚出现这么多次：成员在落后的 worktree 里干活 ⇒ 他们读到的缺口可能是已经修好的。</li><li>与 j-0011 同族：那条说搬运前先建能重跑的核对，这条说交付前先核实生产侧接上了没有 —— 两者都是把一次性的相信变成一次可重跑的检查。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0013</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T10:45:00+08:00</span>
+    </header>
+    <h3 class="claim">一个计数读数里，有【三格】没写清就会被当成同一件事：在哪个集合里数、算不算注释/字符串、以及阈值</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若某次改动的声明里已经写明集合与词法口径（例如 inScope 已声明、且口径写在判据里），那这条不适用——那时读数只有一种解释。⇒ 判据是：这个读数能不能被【两个都合理】的口径各自算出一个数。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t94（absorb-dev 复核 captain 给的验收样本时发现）<div class="why">captain 给了四条读数：parseKnownBaselineFailures 3→0 · baselineAbsent 2→0 · knownBaselineFailures 3→0 · skippedAll 16→0，并说『它们真的不在任何地方——我复核过』。absorb-dev 按 captain 自己的分栏口径复核，发现：(1) 那三个符号的【定义还在】backtest.ts（1/4/5 处），丢的是 tools 侧的引用——所以『哪里都没有』是错的；(2) skippedAll 的『16→0』是【单文件含注释】口径，而 tools 面纯代码口径是【24→8】，单文件纯代码又是另一个数——三个数字都『看起来对』，因为量的是不同的集合×不同的词法口径。</div></dd>
+      <dt>怎么复用</dt><dd>给出或读到任何一个计数时，问三句：在【哪个集合】里数的？算不算注释与字符串？以及它是计数、比例还是阈值？—— 三句里有一句答不出，那个数字就还不是读数。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它的危险在于：错的读数与对的读数【长得一样】（都是『某个符号从 N 变 0』），而两者都支持同一个结论。</li><li>★ 而正确形态（absorb-dev 的建议，captain 采纳）：把集合与词法口径做成判据的【显式输入】，而不是隐含假设。</li><li>★ 与 j-0003（代理读数在它所代理的东西没变时也会变）是同一族：那次是『读的量不对』，这次是『读的地方与口径没写』。</li></ul></dd>
+    </dl>
+  </article>
+  <article class="jcard adopted">
+    <header>
+      <span class="id">j-0014</span>
+      <span class="pill jstatus-adopted">已采纳</span>
+      <span class="pill">agent-teams-dev</span>
+      <span class="pill">2026-10-08T11:45:00+08:00</span>
+    </header>
+    <h3 class="claim">一条判据成功之后，它的语料会消失 —— 而『语料消失』与『判据坏了』在读数上同形</h3>
+    <div class="counter">
+      <b>★ 什么会证伪它</b>
+      <p>若那条判据的语料会【持续再生】（例如每次重构都会产生新的写死路径），那这条不适用 —— 那时语料不会消失。⇒ 判据是：这条判据抓到的东西，修好之后还会不会再出现？会 ⇒ 语料可再生；不会 ⇒ 它是一次性的。</p>
+      
+    </div>
+    <dl>
+      <dt>它从哪来</dt><dd>t93 与 t85（verifier6 实测）<div class="why">t85 建了『路径解析只在某一种深度下成立』的判据，而它当场抓到 worktree-baseline-freshness.test.mjs:364 的写死 ..×4。captain 把那处改成向上找 package.json 之后，t85 的臂 1/臂 5 红了 —— 因为它们断言『盘上存在那条写死的常量』。★ 而红的原因不是判据坏了，而是【它要抓的那条实例被修好了】。</div></dd>
+      <dt>怎么复用</dt><dd>写一条判据时，问：『它抓到的那条实例被修好之后，这条判据靠什么活着？』—— 若答不出，那把历史实例作为【合成输入】保住（而不是让它依赖盘上现存的缺陷）。★ 而夹具要显式标注每一格出自【盘上】还是【历史】。</dd>
+      <dt>状态含义</dt><dd class="why">它经得住目前的反例 —— 而那不等于它被证明了。</dd>
+      <dt>备注</dt><dd><ul><li>★ 而它自己的第一版 failure 消息里【预告过】这种情况：「若它已被改成向上查找，请把本臂改指新的等价实例，而不是删掉。」⇒ 而那条预告正是这条判决的来源。</li><li>★ 它与 j-0012（判据侧完成不等于它生效了）是一对：那条说『修法要有调用方』，这条说『判据要有语料，而语料会因它成功而消失』。</li><li>★ 而与 t86 的『清单把两类东西印成同一行』同族：两者都是【两种不同的状态在读数上同形】。</li></ul></dd>
     </dl>
   </article></div></section>
 

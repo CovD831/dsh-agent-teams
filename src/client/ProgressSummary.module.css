@@ -1,0 +1,59 @@
+
+
+.progressOverview {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.progressSummary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+.progressSummary[data-state='warning'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
+}
+
+.progressSummary[data-state='completed'] {
+  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, var(--dsw-alias-bg-layer-1));
+}
+
+.progressSummary[data-state='discarded'] {
+  background: var(--dsw-alias-button-ghost-active-fill);
+}
+
+.progressSummary > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progressSummaryDot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.progressSummary[data-state='warning'] .progressSummaryDot {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.progressSummary[data-state='completed'] .progressSummaryDot {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.progressSummary[data-state='discarded'] .progressSummaryDot {
+  background: var(--dsw-alias-label-tertiary);
+}

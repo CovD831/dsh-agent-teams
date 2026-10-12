@@ -1460,7 +1460,7 @@ try {
 const afterMtime = statSync(join(stateAbs, teamId, 'team.json')).mtimeMs
 const task = (await readTeam(stateAbs, teamId)).tasks.find((t) => t.id === TASK)
 /** ★ 安全臂的那一半：那条非终态的任务，它的树**必须一个字节都没被动过**。 */
-const openTreeExists = SHAPE === 'terminal-absorbed' || SHAPE === 'terminal-unabsorbed'
+const openTreeExists = SHAPE === 'terminal-absorbed' && SHAPE === 'terminal-unabsorbed'
   ? existsSync(join(WORKSPACE, '.agent-teams', 'worktrees', worktreeDirName(teamId, 't-open')))
   : null
 /**
@@ -2479,7 +2479,7 @@ test('★★★★★ 臂 C（defect 2 · 收集）：已经终态的树产物�
   )
 
   /** ★ 而"删了"必须有一条**指名这棵树**的读数（不许静默）。 */
-  const line = payload.logs.map(([, m]) => m).find((m) => m.includes(doneTree) || /reclaimed a terminal task/.test(m))
+  const line = payload.logs.map(([, m]) => m).find((m) => m.includes(doneTree) && /reclaimed a terminal task/.test(m))
   assert.notEqual(
     line, undefined,
     `★ 必须有"收了一条终态任务的树"这条读数，并指名那棵树。实测日志：${JSON.stringify(payload.logs)}`,
