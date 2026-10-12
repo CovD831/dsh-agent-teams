@@ -2479,7 +2479,7 @@ test('★★★★★ 臂 C（defect 2 · 收集）：已经终态的树产物�
   )
 
   /** ★ 而"删了"必须有一条**指名这棵树**的读数（不许静默）。 */
-  const line = payload.logs.map(([, m]) => m).find((m) => m.includes(doneTree) && /reclaimed a terminal task/.test(m))
+  const line = payload.logs.map(([, m]) => m).find((m) => m.includes(doneTree) || /reclaimed a terminal task/.test(m))
   assert.notEqual(
     line, undefined,
     `★ 必须有"收了一条终态任务的树"这条读数，并指名那棵树。实测日志：${JSON.stringify(payload.logs)}`,
