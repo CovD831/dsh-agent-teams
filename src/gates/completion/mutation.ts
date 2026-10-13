@@ -64,6 +64,7 @@ import {
   noScorableMutants,
   parseTestSummary,
   probeReach,
+  resolveMutationCoverage,
   scoreMutants,
   verifyAnchors,
   type InvariantDefinition,
@@ -347,7 +348,13 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
    *   的措辞落在判据层（调用的命令要能出现在报告里）。
    */
   const suiteFiles = unique(suites.flatMap((suite) => suite.files))
-  const command = commandTemplate.replace('*', suiteFiles.join(' '))
+  /**
+   * 基线要带上行覆盖，否则「改动行有没有被执行」指不出来。
+   * 已经带了这个开关、或者根本不是 `node --test` 的命令，原样返回。
+   * ★ 变异体若能收窄到逐测试，用的是同一条模板，只把 `*` 换成那一条测试。
+   */
+  const narrowedTemplate = requestLineCoverage(commandTemplate)
+  const command = narrowedTemplate.replace('*', suiteFiles.join(' '))
   let baseline: MutantRun
   try {
     baseline = await runTest(command)
@@ -481,25 +488,32 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     ? ''
     : `the mutant batch was truncated by its own total cap: ${selected.length} of ${plans.length} candidate(s) were run (even-stride sample), so ${dropped} mutant(s) were NOT measured — the kill rate below is over a sample, not over every changed line`
 
-  const results: MutantResult[] = []
-  for (const plan of selected) {
-    const mutatedText = plan.mutant.mutated ?? spliceOnce(plan.originalText, plan.mutant.find, plan.mutant.replace)
+  /**
+   * ★ 基线必须能指出改动行有没有被执行。
+   *   指不出 ⇒ 整批 unmeasured，并且【不再】对变异体调用 runTest。
+   *   不许把「没采到覆盖」读成「都存活」或「都没覆盖」。
+   *
+   * ★ 行指得出、但指不出【哪一条测试】碰到这一行 ⇒ 整份已覆盖套件照跑。
+   *   不许从 killerSuites 里猜一条。报告没提到的文件单独记 unmeasured，
+   *   不取消已经对上的文件。同名 basename 用目录前缀对上，对不上的那个文件
+   *   单独 unmeasured，不把整批当成 ambiguous。
+   */
+  const coverage = resolveMutationCoverage(baseline)
+  if ('unmeasured' in coverage) return unmeasured(coverage.unmeasured)
+
+  const earlyStop = { executed: 0, skipped: 0, stoppedEarly: 0 }
+  const coverageUnmeasuredFiles: string[] = []
+
+  /**
+   * 跑一条命令并分类。预算停止与执行器故障不同形，见下面那条注释。
+   */
+  const classifyCommand = async (
+    mutant: Mutant,
+    mutantCommand: string,
+  ): Promise<{ outcome: MutantOutcome; reason: string; killedBy: string[] }> => {
     try {
-      await writeFile(plan.file, mutatedText)
-    } catch (error) {
-      results.push({
-        mutant: plan.mutant,
-        outcome: 'error' as const,
-        reason: `applying the mutant raised: ${error instanceof Error ? error.message : String(error)}`,
-        killedBy: [],
-      })
-      continue
-    }
-    let observed: { outcome: MutantOutcome; reason: string; killedBy: string[] }
-    let restoreProblem: string | null = null
-    try {
-      const run = await runTest(command)
-      observed = classifyRun(run, plan.mutant)
+      const run = await runTest(mutantCommand)
+      return classifyRun(run, mutant)
     } catch (error) {
       /**
        * ── ★★★ 预算停止 ≠ 变异体出错（2026-10-12，修一个**假通过**）────────────────
@@ -528,7 +542,7 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
        *   后者要人去调预算或让链更快。把两者并进同一个 outcome 就是把
        *   两种相反补救动作合流（本仓的老账）。
        */
-      observed = isCompletionBudgetStop(error)
+      return isCompletionBudgetStop(error)
         ? {
             outcome: 'unmeasured',
             reason: `BUDGET stop（不是测试失败、也不是这条变异体的问题）：${error instanceof Error ? error.message : String(error)}`,
@@ -539,6 +553,99 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
             reason: `running the killer suite raised: ${error instanceof Error ? error.message : String(error)}`,
             killedBy: [],
           }
+    }
+  }
+
+  /**
+   * 只跑基线点名的测试。一条杀死 ⇒ 其余不跑，记进 `early-stop.skipped`。
+   * 预算停止不是杀死：剩下的测试不记成 skipped，整条变异体按没能测量交回去。
+   */
+  const runCoveringTests = async (
+    mutant: Mutant,
+    tests: readonly string[],
+  ): Promise<{ outcome: MutantOutcome; reason: string; killedBy: string[] }> => {
+    let killed: { outcome: MutantOutcome; reason: string; killedBy: string[] } | null = null
+    let problem: { outcome: MutantOutcome; reason: string; killedBy: string[] } | null = null
+    for (let index = 0; index < tests.length; index += 1) {
+      if (killed !== null) {
+        earlyStop.skipped += 1
+        continue
+      }
+      const test = tests[index]
+      if (test === undefined) continue
+      const observed = await classifyCommand(mutant, narrowedTemplate.replace('*', test))
+      earlyStop.executed += 1
+      if (observed.outcome === 'killed') {
+        killed = observed
+        continue
+      }
+      if (observed.outcome === 'unmeasured' && observed.reason.startsWith('BUDGET stop')) return observed
+      if (observed.outcome !== 'survived') problem = observed
+    }
+    if (killed !== null) {
+      earlyStop.stoppedEarly += 1
+      return killed
+    }
+    return problem ?? { outcome: 'survived', reason: 'covering tests stayed green', killedBy: [] }
+  }
+
+  const results: MutantResult[] = []
+  for (const plan of selected) {
+    const line = planLine(plan)
+    const reading = coverage.line(plan.file, line)
+    if (reading === 'unmeasured-file') {
+      if (!coverageUnmeasuredFiles.includes(plan.file)) coverageUnmeasuredFiles.push(plan.file)
+      continue
+    }
+    if (reading === 'uncovered') {
+      results.push({
+        mutant: plan.mutant,
+        outcome: 'uncovered',
+        reason: `baseline did not execute ${plan.file}:${line ?? '?'}, so this mutant was not run and is not survived`,
+        killedBy: [],
+      })
+      continue
+    }
+    /**
+     * `null` = 指不出逐测试，整份套件照跑。
+     * 空数组 = 基线指出没有测试碰到这一行，不跑，也不另猜一条。
+     * 非空 = 只跑这些测试；一条杀死则其余计入 early-stop.skipped。
+     */
+    const tests = coverage.testsFor(plan.file, line)
+    if (tests !== null && tests.length === 0) {
+      results.push({
+        mutant: plan.mutant,
+        outcome: 'uncovered',
+        reason: `baseline named no test that executes ${plan.file}:${line ?? '?'}, so this mutant was not run and is not survived`,
+        killedBy: [],
+      })
+      continue
+    }
+    const mutatedText = plan.mutant.mutated ?? spliceOnce(plan.originalText, plan.mutant.find, plan.mutant.replace)
+    try {
+      await writeFile(plan.file, mutatedText)
+    } catch (error) {
+      results.push({
+        mutant: plan.mutant,
+        outcome: 'error' as const,
+        reason: `applying the mutant raised: ${error instanceof Error ? error.message : String(error)}`,
+        killedBy: [],
+      })
+      continue
+    }
+    let observed: { outcome: MutantOutcome; reason: string; killedBy: string[] }
+    let restoreProblem: string | null = null
+    try {
+      if (tests !== null && tests.length > 0 && narrowedTemplate.includes('*')) {
+        observed = await runCoveringTests(plan.mutant, tests)
+      } else {
+        /**
+         * 指不出逐测试，或命令里没有 `*` 可以收窄 ⇒ 整份已覆盖套件照跑。
+         * ★ 这里不许改成「挑 killerSuites 的第一条」。那是猜测。
+         */
+        observed = await classifyCommand(plan.mutant, command)
+        earlyStop.executed += 1
+      }
     } finally {
       /** ★ 还原必须被【验证】：把原文写回去并读回来比对。一次没还原的测量不可信。 */
       try {
@@ -554,6 +661,12 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
       continue
     }
     results.push({ mutant: plan.mutant, outcome: observed.outcome, reason: observed.reason, killedBy: observed.killedBy })
+  }
+
+  if (results.length === 0 && coverageUnmeasuredFiles.length > 0) {
+    return unmeasured(
+      `the coverage report did not mention ${coverageUnmeasuredFiles.join(', ')}; those files are unmeasured, not survived and not uncovered, and no executed line remained to run — this is not "everything survived" and not "everything uncovered"`,
+    )
   }
 
   /**
@@ -574,7 +687,15 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
    *   "某个文件的变异体一条都没跑（被截断）"会被读成"它的探针够不到"
    *   ⇒ 一份关于**分片**的事实被报成一份关于**探针**的事实。
    */
-  for (const file of unique(selected.map((plan) => plan.file))) {
+  /**
+   * ★ 报告没点名的文件不在这里问射程。够不到是探针的事实，没被点名是覆盖报告的事实。
+   *   把后者送进 probeReach 会让整份报告 unmeasured，从而取消已经对上的文件。
+   */
+  const measuredFiles = unique(results.flatMap((result) => {
+    const file = result.mutant.file
+    return file === undefined || file === '' ? [] : [file]
+  }))
+  for (const file of measuredFiles) {
     const reach = probeReach({ file }, suites, readSuite)
     if (reach.files.length === 0) unreachable.push(`${file}: ${reach.reason}`)
   }
@@ -625,7 +746,22 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
      *   知道"这个分数是抽样出来的" —— 否则他会去修一个抽样噪声，而那与真正的
      *   覆盖缺口在报告里同形。
      */
-    (truncation === '' ? '' : `; ${truncation}`)
+    (truncation === '' ? '' : `; ${truncation}`) +
+    (report.totals.uncovered > 0
+      ? `; ${report.totals.uncovered} uncovered mutant(s) were not run and are not survivors, but stay in the denominator`
+      : '') +
+    (coverageUnmeasuredFiles.length > 0
+      ? `; ${coverageUnmeasuredFiles.length} file(s) absent from the coverage report are unmeasured (${coverageUnmeasuredFiles.join(', ')}), not survived and not uncovered`
+      : '') +
+    (earlyStop.skipped > 0
+      ? `; early-stop.skipped=${earlyStop.skipped}`
+      : '')
+
+  const earlyStopReadout = {
+    executed: earlyStop.executed,
+    skipped: earlyStop.skipped,
+    stoppedEarly: earlyStop.stoppedEarly,
+  }
 
   /**
    * ★ 装饰性测试 ⇒ blocked，且必须【报出存活数与覆盖范围】。
@@ -666,6 +802,10 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
       ...dropped === 0 ? {} : { truncated: dropped },
     },
     scope,
+    /** ★ 逐测试早停的读数。skipped 是「点了名、但因为前面已经杀死而没跑」的次数。 */
+    'early-stop': earlyStopReadout,
+    /** 报告没提到的文件。空数组 = 没有这种文件（不是「没采到覆盖」）。 */
+    coverageUnmeasured: [...coverageUnmeasuredFiles],
   }
 }
 
@@ -705,6 +845,24 @@ function spliceOnce(text: string, find: string, replace: string): string {
   const index = text.indexOf(find)
   if (index === -1) return text
   return text.slice(0, index) + replace + text.slice(index + find.length)
+}
+
+/**
+ * 基线命令带上 Node 的行覆盖。已经有这个开关、或不是 `node --test`，原样返回。
+ * ★ 变异之后若收窄到一条测试，用的是同一条模板。
+ */
+function requestLineCoverage(command: string): string {
+  if (command.includes('--experimental-test-coverage')) return command
+  if (!/(?:^|\s)node(?:\s|$)/.test(command) || !/(?:^|\s)--test(?:\s|$)/.test(command)) return command
+  return command.replace(/(?:^|\s)node(?=\s)/, (match) => `${match} --experimental-test-coverage`)
+}
+
+/** 变异体落在哪一行。对不上 ⇒ undefined，调用方照旧跑，不把「对不上」说成未覆盖。 */
+function planLine(plan: MutantPlan): number | undefined {
+  if (plan.mutant.line !== undefined) return plan.mutant.line
+  const index = plan.originalText.indexOf(plan.mutant.find)
+  if (index === -1) return undefined
+  return lineOfIn(plan.originalText, index)
 }
 
 function tryRead(readFile: (path: string) => string, path: string): string | undefined {
