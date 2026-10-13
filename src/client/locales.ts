@@ -252,6 +252,13 @@ export const zh = {
   'assignment.empty': '暂无任务',
   'archive.label': '已结束 · 历史归档',
   'archive.discardedLabel': '计划已放弃 · 历史归档',
+
+  /* ── 会话 ID 复制（会话头部工具区）──────────────────────────────────────────
+     ★ `copyTitle` 带 `{id}` 全量 ID：截断显示是为了**省宽度**，
+       而悬停/读屏必须拿到**完整**串 —— 否则用户复制不到、也念不出来。 */
+  'sessionId.copyTitle': '复制会话 ID：{id}',
+  'sessionId.copied': '已复制',
+  'sessionId.copyFailed': '复制失败',
 } satisfies Record<string, string>
 
 /** AgentTeams namespace key union. */
@@ -503,6 +510,11 @@ export const en = {
   'assignment.empty': 'No tasks',
   'archive.label': 'Ended · Archived history',
   'archive.discardedLabel': 'Plan discarded · Archived history',
+
+  /* ── Session-ID copy (conversation header utilities) ───────────────────────── */
+  'sessionId.copyTitle': 'Copy session ID: {id}',
+  'sessionId.copied': 'Copied',
+  'sessionId.copyFailed': 'Copy failed',
 } satisfies Record<AgentTeamsLocaleKey, string>
 
 /** Translation function consumed by pure view helpers. */

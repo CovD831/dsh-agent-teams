@@ -241,6 +241,9 @@ export declare const zh: {
     'assignment.empty': string;
     'archive.label': string;
     'archive.discardedLabel': string;
+    'sessionId.copyTitle': string;
+    'sessionId.copied': string;
+    'sessionId.copyFailed': string;
 };
 /** AgentTeams namespace key union. */
 export type AgentTeamsLocaleKey = keyof typeof zh;
@@ -484,6 +487,9 @@ export declare const en: {
     'assignment.empty': string;
     'archive.label': string;
     'archive.discardedLabel': string;
+    'sessionId.copyTitle': string;
+    'sessionId.copied': string;
+    'sessionId.copyFailed': string;
 };
 /** Translation function consumed by pure view helpers. */
 export type AgentTeamsTranslate = (key: AgentTeamsLocaleKey, params?: Record<string, unknown>) => string;

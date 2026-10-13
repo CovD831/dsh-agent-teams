@@ -23,6 +23,7 @@ import { ActivitySurface, WorkspaceActivity, createWorkspaceBridge, TEAM_TAB_ID,
 import { RosterSettingsSurface } from './roster-settings.tsx'
 import { getActivitySnapshotsSnapshot, subscribeActivitySnapshots } from './activity-monitor.ts'
 import { TeamChatEntry, TeamTurnCard } from './TeamChatEntry.tsx'
+import { SessionIdAction } from './SessionIdAction.tsx'
 import { createWorkspaceState } from './workspace-state.ts'
 import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { agentTeamsCardDefinition } from './agent-teams-card-definition.ts'
@@ -142,6 +143,28 @@ export function apply(ctx: ClientContext): void {
       inject: () => ({ snapshots: getActivitySnapshotsSnapshot, subscribe: subscribeActivitySnapshots }),
     }, RosterSettingsSurface))
   })
+
+  /**
+   * ── ★★★ 会话 ID 复制按钮（2026-10-12）────────────────────────────────────────
+   *
+   * ★ 它注册在**可选服务作用域之外**，而这不是风格问题：
+   *   上面那一块整体挂在 `ctx.inject(['sidebarRight', 'sidebarRightTabs'], …)` 里，
+   *   于是宿主一旦不提供侧边栏，**那一块里的每一格都会消失**。
+   *   而"复制会话 ID"与侧边栏**没有任何关系** —— 它只需要 `slots`（必选服务）
+   *   与框架按 `scope: 'session'` 注入的 `sessionId`。
+   *   ⇒ 放进那个作用域会让一个**与本功能无关**的宿主差异把它一起摘掉。
+   *
+   * ★ 用 `utilities` 而不是 `actions`：`actions` 是标题旁的会话动作
+   *   （"查看团队"在那里），`utilities` 是右对齐的工具区。
+   *   会话 ID 是**关于这个会话的元信息**，不是"这个会话里有什么"。
+   *
+   * ★ `order: 90` 让它排在团队入口（`order: 50`）**之后** ——
+   *   团队入口是内容，ID 是元信息；内容在前、元信息在后，扫读顺序才对。
+   */
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities', id: 'agent-teams-session-id', order: 90,
+    locale: AGENT_TEAMS_LOCALE_NAMESPACE,
+  }, SessionIdAction))
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',

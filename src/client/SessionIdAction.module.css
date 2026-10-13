@@ -1,0 +1,68 @@
+/* ── Session-ID chip (conversation header utilities) ────────────────────────────
+ *
+ * ★ 全部用宿主语义 token（`--dsw-alias-*`），**不重定义**宿主调色板 ——
+ *   与 `verify.mjs` 对另外两个 css 文件的判据同一条纪律
+ *   （"all client surfaces consume host semantic colors without redefining the
+ *     host palette"）。这里没有 `--dsw-*: value` 形式的声明。
+ *
+ * ★ 等宽字体 + `tabular-nums`：会话 ID 是十六进制串，而比例字体会让
+ *   `1`/`l`、`0`/`O` 的宽度漂移 —— 用户要**肉眼核对**这个串，
+ *   字形飘移会让"抄错一位"与"ID 变了"同形。
+ */
+
+.sessionId {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sessionId:hover {
+  background: var(--dsw-alias-bg-module-platform);
+}
+
+.sessionId:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+.sessionId svg {
+  flex: none;
+}
+
+/* ★ 只有 ID 本身等宽；`copied` / `failed` 两句话走正文字体，
+   否则中文提示会落进等宽字体而显得像乱码。 */
+.text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.sessionId[data-status='copied'] .text,
+.sessionId[data-status='failed'] .text {
+  font-family: inherit;
+  font-variant-numeric: normal;
+}
+
+/* ★ 失败与成功必须**不同形**：复制失败是用户要立刻采取行动的状态
+   （换浏览器 / 手动选中），而"已复制"只是确认。同一个颜色会让
+   "没复制上"读起来像"复制好了"。 */
+.sessionId[data-status='failed'] {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.sessionId[data-status='copied'] {
+  border-color: var(--dsw-alias-state-success-primary);
+  color: var(--dsw-alias-state-success-primary);
+}
