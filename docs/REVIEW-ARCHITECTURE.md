@@ -751,3 +751,311 @@ $ for p in admission contract dispatch completion delivery runtime; do
 **为什么这次可以给 pass**：前两轮我判 needs_revision，都是因为「同一个病还有残留」；本轮我**不再抽点，而是把全文所有可机器核对的口径一次性验完**（45 处），结论是**没有残留**。验收硬指标、抽样回源、回归三项也全过。**该放行了。**
 
 **一点流程观察（非 finding，供队长参考）**：F2→F8 这条链说明「口径类错误不会只出现在你查到的那一处」。第 2 轮我只点了 HTML 的 4 处，t14 修完后我又扩到全文扫描才发现 —— **若第 2 轮我就做全文审计，可以省掉一个来回**。建议把「口径类 finding 必须附全量扫描脚本」写成本队惯例。
+
+---
+---
+
+# 对抗性复核（**独立第四轮**）：同三份产出
+
+> **复核人**：test-triage（t11）。**与前几轮的关系**：t10 跑完三轮后判 `pass`；**本轮是另一次独立复核**
+> （任务书点名要求"一个面"：抽检回源、核判据集合、验图、核归因），**不与 t10 共享脚本或结论**。
+> **测量点**：HEAD = `b8f357e` ｜ `upstream/main` = `1094b84` ｜ merge-base = `98aac03`
+> **纪律**：本文**不修改**任何被审文件。每条 finding 附可复跑命令与读数。
+> **裁决**：**needs_revision**（0 blocker + 3 high + 2 medium）
+
+---
+
+## R4-0. 结论摘要
+
+| id | severity | 文件:行 | 一句话 |
+|---|---|---|---|
+| **F1** | **high** | `LAYER-INVENTORY.md:620` | ★ 把一条**仍然成立**的断言标成了「已过期」：`THREE-LINE-PLAN.md` 的「账本未接入生产完成路径」**至今仍真**；举证用的 `71de42a` 接的是**另一条线**（friction/experience），**不是账本** |
+| **F2** | **high** | `LAYER-INVENTORY.md:31,751` | `src/` 行数与文件数**口径与命令不自洽**：文档写 **47,310 行 / 95 文件**，但它**自己给的命令**输出 **47,283 / 86** |
+| **F3** | **high** | `LAYER-INVENTORY.md:621,666` | 「现状 **19 fail / 1415 pass**」在其**自己声明的测量点 `b8f357e`** 上不可复现：我**两次**测得 **20 fail / 1413 pass** |
+| **F4** | medium | `LAYER-INVENTORY.md:36` | `src/quality-gates.ts` 现状写 **2,520**，实测 **2,512** |
+| **F5** | medium | `LAYER-INVENTORY.md:620` | 引用行号错：该断言在 `THREE-LINE-PLAN.md:**11**`，文档写 **:6** |
+
+★ **复核通过且质量高的部分**：**判据集合 17/17 逐条相等** · **分组计数 3/3/3/4/2/2 完全正确** ·
+**SVG 9 处 `文件:行` 标注 9/9 命中** · **SVG 可被 XML 解析** · **HTML 零外网引用** ·
+**t10 的 blocker（4 文件归因）与 high（§8.1 口径）我独立复跑确认均已修好**。
+
+---
+
+## R4-1. 覆盖面（先给读数）
+
+### R4-1.1 抽检的清单断言（**10 条**，逐条回源）
+
+| # | 断言（文件:行） | 回源命令 | 读数 | 判定 |
+|---|---|---|---|---|
+| A1 | `src/` 18,793 → **47,310** 行（`:31`） | 见 F2 | **47,283** | ❌ F2 |
+| A2 | `src/` 文件 40 → **95**（`:751`） | `git ls-tree -r HEAD --name-only -- src/ \| wc -l` | **95**（但 `.ts/.tsx` 口径 = **86**） | ❌ F2 |
+| A3 | `quality-gates.ts` 2,109 → **2,520**（`:36`） | `git cat-file -p upstream/main:src/quality-gates.ts \| wc -l` / `wc -l < src/quality-gates.ts` | **2109** ✅ / **2512** | ❌ F4 |
+| A4 | `src/gates/` 上游**整个目录不存在** | `git ls-tree -r upstream/main --name-only -- src/gates \| wc -l` | **0** | ✅ |
+| A5 | 工具面 **15 / 4 / 11**（`:346`） | 读 `src/tool-names.ts` 三个常量 | **15 / 4 / 11** | ✅ |
+| A6 | `src/tool-names.ts` **+14 / -0**（`:334`） | `git diff --numstat upstream/main HEAD -- src/tool-names.ts` | **14 / 0** | ✅ |
+| A7 | 88 判据夹具 / 130 测试文件（`:596-599`） | `ls scripts/gate-*.test.mjs \| wc -l` / `ls scripts/*.test.mjs \| wc -l` | **88** / **130** | ✅ |
+| A8 | `kind-requirements.ts` 不是判据（`:162`） | `grep -c "export const id" src/gates/completion/kind-requirements.ts` | **0** | ✅ |
+| A9 | §8.1 `quality-gates.ts` two-dot = **+1369 / -958**（`:491`） | **在文档自己的测量点**：`git diff --numstat upstream/main b8f357e -- src/quality-gates.ts` | **1369 / 958** | ✅ 逐字命中 |
+| A10 | 大宗侵入点为 `src/tools.ts` 与 `src/quality-gates.ts`（`:519` 区） | `git diff --numstat upstream/main HEAD -- src/ \| sort -k1 -rn \| head` | 前二正是这两者 | ✅ |
+
+★ **A9 单独说明**：我**先在未冻结 HEAD 的主树上量得 1360/957**，与文档的 1369/958 不符；
+**回到文档声明的 `b8f357e` 复量 ⇒ 1369/958 逐字命中**。
+⇒ **不是文档的错，是 HEAD 漂移**（主树已推进到 `5cc8e40`）。**计为复核通过**，并留痕以免下一个人重蹈。
+
+### R4-1.2 抽检的图中标注（**9 处**，逐处回源）
+
+SVG 为每条判据标了 `文件:行 id`。**逐个 `sed -n` 核对该行确为 `export const id`**：
+
+| # | SVG 标注 | 回源 | 判定 |
+|---|---|---|---|
+| G1 | `backtest.ts:360 · :82 id` | `sed -n '82p' src/gates/completion/backtest.ts` | ✅ |
+| G2 | `changed-paths.ts:160 · :49 id` | `sed -n '49p' src/gates/dispatch/changed-paths.ts` | ✅ |
+| G3 | `plan-reviewed.ts:114 · :67 id` | `sed -n '67p' src/gates/dispatch/plan-reviewed.ts` | ✅ |
+| G4 | `r5.ts:118 · :95 id` | `sed -n '95p' src/gates/completion/r5.ts` | ✅ |
+| G5 | `coverage.ts:191 · :49 id` | `sed -n '49p' src/gates/delivery/coverage.ts` | ✅ |
+| G6 | `convergence.ts:181 · :73 id` | `sed -n '73p' src/gates/delivery/convergence.ts` | ✅ |
+| G7 | `verify-command.ts:586 · :63 id` | `sed -n '63p' src/gates/contract/verify-command.ts` | ✅ |
+| G8 | `stall.ts:127 · :60 id · :84` | `sed -n '60p' src/gates/runtime/stall.ts` | ✅ |
+| G9 | `worktree.ts:169 · :77 id` | `sed -n '77p' src/gates/dispatch/worktree.ts` | ✅ |
+
+**⇒ 9/9 命中。**
+
+### R4-1.3 判据集合与分组计数（**逐条相等**）
+
+```sh
+$ grep -rn "^export const id = '" src/gates/*/*.ts | sed "s/.*id = '//;s/'.*//" | sort
+admission.absorb · admission.checkpoint · admission.convene
+completion.backtest · completion.mutation · completion.r5 · completion.verify-rerun
+contract.build-artifact-scope · contract.task-atomicity · contract.verify-command
+delivery.convergence · delivery.coverage
+dispatch.changed-paths · dispatch.plan-reviewed · dispatch.worktree
+runtime.liveness · runtime.stall
+# ⇒ 17 条
+```
+**与 SVG / HTML 抽出的集合 `diff` ⇒ 两侧皆无差异（17/17 逐条相等）**：
+
+```sh
+$ grep -oE '(admission|contract|dispatch|completion|delivery|runtime)\.[a-z][a-z0-9-]*' docs/architecture-pipeline.svg \
+  | grep -vE '\.(ts|test|mjs|json)$' | sort -u | wc -l      # ⇒ 17
+$ ... 同法对 docs/architecture.html                          # ⇒ 17
+```
+★ **已排除 `kind-requirements.ts` 被误当判据**（`grep -c "export const id"` ⇒ **0**，与文档 `:162` 一致）。
+★ **陷阱留痕**：朴素正则会把**文件名**（`completion.ts` / `delivery.ts` / `dispatch.ts`）当作判据 id，
+并会把 `completion.r5` 截成 `completion.r` ⇒ **必须过滤 `\.(ts|test|mjs|json)$` 并让末段允许数字**。
+
+**分组计数**（源码实测 vs SVG 标签）：
+
+| 插入点 | 源码 | SVG 标签 |
+|---|---:|---|
+| admission | 3 | `>3 条 ｜ 判准入门，不判契约合法性<` ✅ |
+| contract | 3 | `>3 条 ｜ 契约【写】得对不对<` ✅ |
+| dispatch | 3 | `>3 条 ｜ 这次派发【做】得对不对<` ✅ |
+| completion | 4 | `>4 条 ｜ 顺序 = 先便宜后贵<` ✅ |
+| delivery | 2 | `>2 条 ｜ 先问有没有人做，再问收敛<` ✅ |
+| runtime | 2 | `>2 条 ｜ 记录，不拒绝<` ✅ |
+
+⇒ **3 / 3 / 3 / 4 / 2 / 2，与验收要求逐项相等。**
+
+### R4-1.4 文件能否打开
+
+```sh
+$ python3 -c "import xml.etree.ElementTree as ET; ET.parse('docs/architecture-pipeline.svg'); print('SVG parses OK')"
+SVG parses OK
+
+$ grep -oE '(href|src)="https?://[^"]*"' docs/architecture.html
+（无输出 ⇒ 零外部资源引用）
+
+$ grep -oE 'https?://[^"'"'"' >]*' docs/architecture.html | sort | uniq -c
+   1 http://www.w3.org/2000/svg        ← SVG XML 命名空间，不是网络请求
+```
+⇒ **SVG 可解析 ✅；HTML 零外网依赖 ✅。**
+
+---
+
+## R4-2. t10 的两条重点，我独立复跑后确认**已修好**
+
+**① 4 文件归因（t10 的 blocker）**
+```sh
+$ for f in src/artifacts.ts src/lineage.ts src/tool-policies.ts src/workspace-audit.ts; do
+    git cat-file -e 98aac03:$f 2>/dev/null && echo "PRESENT $f" || echo "ABSENT  $f"; done
+ABSENT ×4
+$ git diff --name-status 98aac03 upstream/main -- src/ | grep '^A'
+A	src/artifacts.ts · A	src/lineage.ts · A	src/tool-policies.ts · A	src/workspace-audit.ts
+$ git diff --name-status 98aac03 HEAD -- src/ | grep -c '^D'
+0
+```
+⇒ **裁定：是「上游新增」，不是「fork 删除」**（三条复现）。
+★ 文档现在（`:543`）**标题已改对**，且**风险方向也改对了**：
+「这 4 个可以**干净合并**……风险是『fork 尚未采纳』，**不是**『拿不到』」，
+并指出**最高风险是「不可合并」**（`src/tools.ts` / `src/quality-gates.ts` 那些双向大改的文件）。
+⇒ **本轮不重复计为 finding。**
+
+**② §8.1 口径（t10 的 high）**
+文档 `:486` 现用 **two-dot** 并**给出与 three-dot 的对照**；在文档测量点上 **1369/958 逐字命中**。
+⇒ **"误报 40~110 倍"那条已消除。本轮不重复计为 finding。**
+
+---
+
+## R4-3. Findings
+
+### F1 — **HIGH**：把一条**仍然成立**的断言标成了「已过期」
+
+- **文件:行**：`docs/LAYER-INVENTORY.md:620`
+- **文档原话**：
+  > `docs/THREE-LINE-PLAN.md:6`：「账本未接入生产完成路径」→ 现状有生产调用方（`71de42a`「the friction/experience line gets a production caller」）→ **已过期**
+
+- **问题**：`71de42a` 接的是 **friction/experience 那条线**（`readExperienceDispatch` → `scripts/friction-triage.mjs`），
+  **不是变异测试的"账本"**。**账本那条断言至今仍真**：
+
+```sh
+$ grep -rn ledger src/tools/update-task/          # 文档自己引的那个判据
+（无输出，exit=1）                                  # ⇒ 仍为空 ⇒ 断言【没】过期
+
+$ git grep -n "createMutationLedger" -- .
+docs/THREE-LINE-PLAN.md:79 · docs/THREE-LINE-PLAN.md:160     # 只有【该文档自己】，代码里零
+
+$ git grep -n "mutationLedger" -- .
+docs/THREE-LINE-PLAN.md:124 / :212 / :213                    # 同样只在文档里
+
+$ git show --stat 71de42a | head -8
+feat(t26): the friction/experience line gets a production caller; and t43 refutes its own premise
+# ⇒ 提交信息逐字说的是 friction/experience，不是 ledger
+```
+★ `grep -rni ledger src/` 的 4 处命中**全部无关**（`entities.ts:4136` 散文 · `amend-task.ts:24,27` *revisions ledger* · `index.ts:160` 工具描述文案）。
+
+- **影响**：不是措辞问题。`THREE-LINE-PLAN.md` §4「账本接入生产路径」是**一条尚未完成的接线**，
+  而复审表把它标成「已过期」⇒ 读者会**认为那条线已经做完** ⇒ **一条仍缺的接线被写成了历史**。
+  ★ 用本仓的定性：这是**「把『我没找到引用』读成『它已经不需要了』」** —— 与「把『读不到』读成『没有』」同族。
+- **必须怎么修**：
+  1. `:620` 的判定改「**仍成立**」，并附复跑命令（`grep -rn ledger src/tools/update-task/` ⇒ 空；
+     `git grep createMutationLedger` ⇒ 仅该文档自身）；
+  2. 若保留 `71de42a`，须**改述它接的是哪条线**，**不得**用它给账本那条断言作证；
+  3. 顺带修行号（见 F5）。
+
+### F2 — **HIGH**：`src/` 行数与文件数**口径与命令不自洽，且都不可复跑**
+
+- **文件:行**：`docs/LAYER-INVENTORY.md:31`（行数）· `:751`（行数与文件数）
+- **文档原话**：
+  > `:31` | `src/` 总行数 | 18,793 | **47,310** | `find src -name '*.ts' -o -name '*.tsx' \| xargs wc -l \| tail -1` |
+  > `:751` `src/` 从 18,793 行 → **47,310** 行；文件从 40 → **95**
+
+- **实测**：**它自己给出的命令输出不是它写的数**：
+```sh
+$ find src -name '*.ts' -o -name '*.tsx' | xargs wc -l | tail -1
+   47283 total                        # 文档写 47,310（差 27）
+$ find src \( -name '*.ts' -o -name '*.tsx' \) | while read f; do wc -l < "$f"; done | paste -sd+ - | bc
+47283                                # 独立算法一致
+
+$ find src -name '*.ts' -o -name '*.tsx' | wc -l
+86                                   # 该命令的文件数
+$ git ls-tree -r HEAD --name-only -- src/ | wc -l
+95                                   # ← 95 的来源：src/ 下【全部文件】
+$ git ls-tree -r HEAD --name-only -- src/ | sed 's/.*\.//' | sort | uniq -c
+  71 ts / 15 tsx / 7 css / 2 json
+```
+⇒ ★ **同一行里三个数互不匹配**：「47,310」出处未知、「95」是全文件口径、**给出的命令**是 `.ts/.tsx` 口径（86）。
+**这是本仓记过的"一个数字回答两个问题"的形态。**
+
+- **影响**：这两个数是清单的**"总账"行**（`:751`），会被当作规模事实引用。差值本身很小（0.06% / 10%），
+  但**口径不可复跑**⇒ 下一个人**无法验证任何一条**，而"总账"正是最该可核的一格。
+- **必须怎么修**：二选一并**让命令与数字对齐**：
+  - (a) 用 `.ts/.tsx` 口径 ⇒ 写成 **47,283 行 / 86 文件**；
+  - (b) 想统计全部文件 ⇒ 命令改 `git ls-tree -r HEAD --name-only -- src/ | wc -l`（**95**），
+    行数改对全部文件求和，并**写明是"全部文件"口径**。
+
+### F3 — **HIGH**：「现状 19 fail / 1415 pass」不可复现
+
+- **文件:行**：`docs/LAYER-INVENTORY.md:621`（同 `:666` 的读数块）
+- **文档原话**：
+  > 该文件描述的是一次**已完成**的消红；**现状**实测 `pnpm test:gates` ⇒ **19 fail / 1471 tests**（本文件写作时实测）
+
+- **实测**：**在它自己声明的测量点 `b8f357e` 上**，我**两次**测得 **20 fail / 1413 pass**：
+```sh
+$ pnpm test:gates
+ℹ tests 1471 · pass 1413 · fail 20 · skipped 38
+```
+★ 两次分别来自：① 我的改动**在**时；② 把改动 `git stash` 掉后（**纯 `b8f357e` 内容**）。
+两次**都是 20/1413**，且**失败文件集合逐行相同**（`diff` 无输出，两侧各 16 个文件）。
+⇒ **不是我的改动造成的，也不是偶发。**
+
+- **影响**：这是文档**对"现状"的唯一一次全量读数**，且被用来给 `BASELINE-RED.md` 定性。
+  方向（`BASELINE-RED` 确实过时）**是对的**，**但基准数不可复跑** ⇒ 下一个人无法做差分归因。
+  ★ 我**不主张**哪个数"对" —— 更可能差异是**环境性的**
+  （本仓 `docs/GATE-EFFICACY.md` §7 第 1 条已记过"同一提交的失败集合会抖"）。
+- **必须怎么修**：补**失败清单**（16 个文件名）或标「**写作时**实测，**未冻结**（见 `GATE-EFFICACY` §7）」；
+  **不要**用它作为 `BASELINE-RED` 定性的唯一依据。
+
+### F4 — **MEDIUM**：`src/quality-gates.ts` 现状行数写 2,520，实测 2,512
+
+- **文件:行**：`docs/LAYER-INVENTORY.md:36`
+- **实测**：
+```sh
+$ git cat-file -p upstream/main:src/quality-gates.ts | wc -l
+2109                    # ✅ 上游侧对
+$ wc -l < src/quality-gates.ts
+2512                    # ← 文档写 2,520（差 8）
+```
+★ **同一行的上游值是对的** ⇒ 不是口径混淆，是**一个数抄错或量于另一时刻**。
+- **必须怎么修**：改 **2,512**（注明测量点 `b8f357e`）。
+
+### F5 — **MEDIUM**：引用行号错（`:6` 应为 `:11`）
+
+- **文件:行**：`docs/LAYER-INVENTORY.md:620`
+- **实测**：
+```sh
+$ sed -n '6p' docs/THREE-LINE-PLAN.md
+（空行）
+$ grep -n "账本" docs/THREE-LINE-PLAN.md | head -1
+11:| 账本未接入生产完成路径 | `grep -rn ledger src/tools/update-task/` ⇒ 空 |
+```
+- **影响**：文档自己在 `:5` 声明"每条都附 `文件:行`"。行号错了 ⇒ 下一个人**在错的地方找不到它** ⇒
+  **正好会重演本轮的 F1**（找不到 ⇒ 误判为"已经不需要了"）。
+- **必须怎么修**：改 `docs/THREE-LINE-PLAN.md:11`。
+
+---
+
+## R4-4. 反向半边：有没有**漏掉**的过期断言
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| `START-HERE.md` 还有第二处「十一条」？ | `grep -rn "十一条\|11 条判据" docs/START-HERE.md` | **只有 `:53`** ⇒ 无遗漏 |
+| 「34 个导出」还有第二处？ | `grep -rn "34 个导出" docs/START-HERE.md` | **只有 `:17`** ⇒ 无遗漏 |
+| 文档 §9 的三处"过期"判定是否成立？ | `sed -n '53p;121p' docs/START-HERE.md` | `:53`「（十一条，★ 六个位置全部接满）」✅ · `:121`「六条判据**在真实运行中还没生效**」✅ · 清单缺 6 条 ✅ **三处全成立** |
+| `index.ts:527-541` 的「11 条」是否被误判为过期文档？ | 读文档 `:303`、`:649` | ✅ **主动标出**「那是历史记录，不是过期文档」—— **这一格做得好，是加分项** |
+
+★ **结论**：**除 F1 外，未发现被漏掉的过期断言**。
+
+---
+
+## R4-5. 汇总（含"必须怎么修"）
+
+| id | severity | 文件:行 | 问题 | 必须怎么修 |
+|---|---|---|---|---|
+| **F1** | **high** | `LAYER-INVENTORY.md:620` | 把**仍成立**的账本断言标成"已过期"；举证用 `71de42a`（friction/experience 线，**不是账本**） | 判定改「**仍成立**」+ 两条复跑命令；`71de42a` 若要引用须改述 |
+| **F2** | **high** | `LAYER-INVENTORY.md:31,751` | 47,310 / 95 与其自身命令（47,283 / 86）**互不匹配** | 二选一：**47,283 / 86**，或改全文件命令并写明口径 |
+| **F3** | **high** | `LAYER-INVENTORY.md:621,666` | "现状 19 fail / 1415 pass"在其测量点不可复现（两次测得 **20 / 1413**） | 补失败清单或标"某时刻、未冻结" |
+| **F4** | medium | `LAYER-INVENTORY.md:36` | `quality-gates.ts` 现状 **2,512**，写 **2,520** | 改 2,512 |
+| **F5** | medium | `LAYER-INVENTORY.md:620` | 引用 `:6`，实在 **:11** | 改 `:11` |
+| ✅ | — | `:543-580` | t10 的 blocker（4 文件归因） | **已修好**（R4-2 三条复跑成立） |
+| ✅ | — | `:486-495` | t10 的 high（§8.1 口径） | **已修好**（two-dot + 对照表，测量点逐字准确） |
+| ✅ | — | SVG / HTML | 集合 17/17 · 分组 3/3/3/4/2/2 · 9 处行标注 · 可解析 · 零外网 | **全部通过**（R4-1.2–R4-1.4） |
+
+---
+
+## R4-6. 裁决
+
+**verdict = `needs_revision`**（0 blocker + 3 high + 2 medium）
+
+- **不是 `pass`**：F1 把**仍在缺的接线**写成历史（读者会据此认为账本那条线已完成）；
+  F2/F3 让"总账"与"现状基准"两个数**不可复跑** —— 而这份清单的**全部价值**就是"可回源"。
+- **不是 `reject`**：主体质量高，**t10 的两条已确实修好且方向正确**，
+  判据集合 / 分组计数 / 图的正确性 / 图的完整性**四项全过**，缺陷集中在**少数数字与一处归因**上，**定点可修**。
+- **条件**：F1 必修（它是**归因**而非措辞）；F2/F3 必须给出可复跑口径；F4/F5 建议同批修。
+
+★ **一点方法论观察（非 finding）**：本轮 3 条新 finding 有**同一个形状** ——
+**「一个数被量于某时刻 / 某口径，然后被写成一个事实」**（F2 行数、F3 基准、F4 行数）。
+而文档**在别处**（`:303`/`:649`）**恰恰做对了这件事**（显式区分历史数字与现状）。
+⇒ 建议把那一格的纪律**推广到全表**：**每个"现状"数字都附测量点与命令**。
+这也解释了为什么 t10 三轮"抽点→修→再抽"没抓到这里：**它们的共同点不是位置，是类别**。
+
+*本节只追加到 `docs/REVIEW-ARCHITECTURE.md`，未修改任何被审文件、未改 `src/` 与 `scripts/`。*
