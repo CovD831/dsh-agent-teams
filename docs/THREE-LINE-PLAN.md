@@ -130,6 +130,41 @@ node --test scripts/gate-mutation-cap.test.mjs
 ★ 而 t7 那条的断言是**弱的**（`mutationScore < 1` 对「0 分裁决」这个坏结果不敏感）——
   所以 t17 的守门臂不是重复，是**补强**。移植时按内容改名（臂 10 / 臂 10e），不按编号去重。
 
+#### ★★ 裁定 A 的第二半目前**没有任何臂钉住**（t19 finding，队长已独立复现）
+
+t19 判 t17 pass，但报了一条 medium finding。**我复现了，它是真的。**
+
+臂 10 的注释（t13 树 `scripts/gate-mutation-cap.test.mjs:652`）宣称：
+> 若有人把 `scored` 改回 `killed | survived | uncovered`（**或把地板改读分母**），这里会红。
+
+后半句**是假的**。实测把门禁地板改读分母：
+```
+lib/gates/completion/mutation.js:498
+  report.totals.scored < MIN_SCORED_FOR_VERDICT
+  ⇒ (report.totals.scored + report.totals.uncovered) < MIN_SCORED_FOR_VERDICT
+```
+⇒ **tests 12 / pass 12 / fail 0**（恢复后 shasum `1525d736e84580fd`）。
+
+机制：臂 10 的输入里 `scored.length === 0` ⇒ `src/mutation.ts:1237` 由 `scoreMutants`
+**自己**返回 unmeasured，门禁在 `lib/gates/completion/mutation.js:478` 直接 return
+⇒ **根本走不到 `:498` 的地板**。
+
+⇒ 臂 10 钉的是 `scoreMutants` 的**过滤器**（裁定 A 第一半）；
+  **地板读哪个数**（第二半）**只由 diff 钉住**。
+
+★ 这是本队最忌的形态：读起来合理、而事实是反的，**还写在守门臂的注释里**。
+
+**I2-f（新增，必做）**：补一条臂钉住地板的输入，并更正那句注释。
+- 输入须满足：`dropped > 0` ∧ `scored < 20` ∧ `scored + uncovered ≥ 20` ∧ **`scored.length > 0`**
+  （最后一条是关键：否则又掉进 `:1237` 早返回，照样测不到地板）
+- 断言判据给 **unmeasured**（不是 blocked、不是 0 分裁决）
+- 会红性：地板改读 `scored + uncovered` ⇒ 红；地板整段删掉 ⇒ 红
+- 注释删掉那半句，或改成事实（「臂 10 钉的是 scoreMutants 的过滤器」）
+
+★ 该工作**只能在集成分支上做**：t13 工作树的成果不在基线里，契约闸实测
+  主树 `grep '臂 10' scripts/gate-mutation-cap.test.mjs` 命中 **0**，
+  所以针对 t13 工作树建的任务过不了闸（两次尝试都被拒，闸的判读是对的）。
+
 ## 4. 主线 S2：账本接入生产路径（不变）
 
 前置：I2-d 完成。事实来源 = t3 工作树。
