@@ -34,8 +34,14 @@
  * 无法被离线复现，也就无法被夹具钉住。
  */
 
-/** 一次变异能被执行器观察到的结果。★ 四态不是两态，见 scoreMutants。 */
-export type MutantOutcome = 'killed' | 'survived' | 'error' | 'unmeasured'
+/**
+ * 一次变异能被执行器观察到的结果。★ 不是两态，见 scoreMutants。
+ *
+ * `uncovered` 与 `survived` 不是一回事：基线没有执行到那一行 ⇒ 变异体不跑套件，
+ * 不进 survived。它仍留在分数的分母里 —— 剔出去会把杀伤率抬高。
+ * 报告没点名的文件不是这态：那是单独的 unmeasured，不得并进 uncovered。
+ */
+export type MutantOutcome = 'killed' | 'survived' | 'error' | 'unmeasured' | 'uncovered'
 
 /** 一条变异算子。`find` 在【改动行范围】内首次出现的位置被替换成 `replace`。 */
 export interface MutationOperator {
@@ -249,6 +255,28 @@ export interface MutantRun {
   readonly stdout?: string
   readonly stderr?: string
   readonly timedOut?: boolean
+  /**
+   * 基线实际执行到的行，按【被变异文件】的路径索引（1-based）。
+   *
+   * ★ 只在【基线】那一次有意义。三态不许并：
+   *   · 缺席 ⇒ 再看 stdout 里有没有覆盖报告；两处都指不出 ⇒ 整批 unmeasured。
+   *   · 在场（含空对象、含某文件的空数组）⇒ 采到了。
+   *     文件缺席，或行号不在列表里 ⇒ 那一行没被执行（未覆盖，不是存活）。
+   *   · 形状不对 ⇒ 同样是指不出，整批 unmeasured。
+   *     ★ 不许把「没采到」读成「都执行了」或「都没执行」。
+   */
+  readonly executedLines?: Readonly<Record<string, readonly number[]>>
+  /**
+   * 基线能指出的【逐测试】行覆盖。
+   *
+   * file → 行号（十进制字符串或数字键）→ 执行了那一行的测试，顺序就是早停顺序。
+   *
+   * ★ 缺席，或这一行没有名单 ⇒ 分不清，整份已覆盖套件照跑。
+   *   不许从 killerSuites 里猜一条，当成它盖住了这一行。
+   * ★ 这一行的名单是空数组 ⇒ 基线指出没有任何测试碰到它。不跑，也不另猜一条。
+   * ★ 名单非空 ⇒ 变异体只跑这些测试；其中一条杀死，其余不跑。
+   */
+  readonly testsByLine?: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>>
 }
 
 /** 一条变异体的裁决输入：观察 + 它变红了哪些文件。 */
@@ -833,6 +861,11 @@ export interface MutationTotals {
   /** ★ R2：被【标记】为可能等价，但【仍然计分】。 */
   equivalent: number
   unmeasured: number
+  /**
+   * 基线没执行到的行上的变异体。不进 `survived`，也不进 `killed`。
+   * ★ 仍留在分数的分母里 —— 把它们剔出分母会把杀伤率抬高。
+   */
+  uncovered: number
 }
 
 export interface LayerScore {
@@ -841,6 +874,8 @@ export interface LayerScore {
   survived: number
   errored: number
   unmeasured: number
+  /** 这一层里基线没执行到的变异体。不进 survived。 */
+  uncovered: number
   /** null = 这一层没有可计分的变异体（不是 0 分，也不是满分）。 */
   score: number | null
 }
@@ -903,6 +938,311 @@ function round(value: number): number {
   return Math.round(value * 1000) / 1000
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 行覆盖，以及（只有基线真的点了名时才有的）逐测试覆盖
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface CoverageFileReading {
+  /** 保留目录前缀的相对路径（posix）。basename 相同的两个文件靠它分开。 */
+  readonly file: string
+  /** 1-based。空 = 报告点了这个文件，且没有未执行行。 */
+  readonly uncoveredLines: readonly number[]
+}
+
+/**
+ * 把「指不出覆盖」说成未测量，并且把两种假读显式否定掉。
+ * ★ 缺了后半句，调用方可以把这句话再读成「都存活」或「都没覆盖」。
+ */
+export function coverageUnmeasured(detail: string): string {
+  return `${detail}, so this batch is unmeasured — this is not "everything survived" and not "everything uncovered"`
+}
+
+function normalizeCoveragePath(file: string): string {
+  return file.replace(/\\/g, '/').trim().replace(/^(?:\.\/)+/, '')
+}
+
+function stripCoverageReporterPrefix(line: string): string {
+  return line.replace(/^\s*(?:\u2139|ℹ|ℹ️|#)\s/, '')
+}
+
+function parseUncoveredSpec(spec: string): number[] | null {
+  const text = spec.trim()
+  if (text === '') return []
+  const lines: number[] = []
+  for (const token of text.split(/\s+/)) {
+    const match = /^(\d+)(?:-(\d+))?$/.exec(token)
+    if (match === null) return null
+    const start = Number(match[1])
+    const end = match[2] === undefined ? start : Number(match[2])
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || end - start > 100_000) return null
+    for (let line = start; line <= end; line += 1) lines.push(line)
+  }
+  return lines
+}
+
+/**
+ * Node `--experimental-test-coverage` 的 spec/TAP 表。
+ *
+ * 目录是单独一行、没有百分比；文件行按缩进挂在目录下面。两个同名 `mutation.js`
+ * 只靠缩进才分得开 —— 把前缀剥掉再按 basename 合并，就会被折成 ambiguous。
+ *
+ * `null` = 输出里根本没有这份报告（没采到，不是「空覆盖」）。
+ * `{ ok: false }` = 报告在，但有一行读不准 —— 整份作废，不许把读漏的行当成已覆盖。
+ */
+export function parseNodeCoverageReport(
+  output: string,
+): { ok: true; files: CoverageFileReading[] } | { ok: false; reason: string } | null {
+  const text = String(output ?? '')
+  const start = text.search(/start of coverage report/)
+  if (start === -1) return null
+  const endRel = text.slice(start).search(/end of coverage report/)
+  if (endRel === -1) return { ok: false, reason: 'the coverage report started but did not end' }
+  const body = text.slice(start, start + endRel)
+  const stack: string[] = []
+  const files: CoverageFileReading[] = []
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = stripCoverageReporterPrefix(rawLine)
+    if (!line.includes('|')) continue
+    const columns = line.split('|')
+    const nameCell = columns[0] ?? ''
+    const indent = nameCell.match(/^ */)?.[0].length ?? 0
+    const name = nameCell.trim()
+    if (name === '' || name === 'file' || name === 'all files' || /^-+$/.test(name)) continue
+    const linePct = (columns[1] ?? '').trim()
+    const uncoveredCell = (columns[4] ?? '').trim()
+    stack.length = Math.min(stack.length, indent)
+    if (linePct === '') {
+      stack.push(name)
+      continue
+    }
+    if (!/^\d+(?:\.\d+)?$/.test(linePct)) continue
+    const uncovered = parseUncoveredSpec(uncoveredCell)
+    if (uncovered === null) return { ok: false, reason: `the uncovered-line list for ${name} could not be read` }
+    files.push({
+      file: [...stack, name].join('/'),
+      uncoveredLines: uncovered,
+    })
+  }
+  return { ok: true, files }
+}
+
+/**
+ * 用相对路径对上唯一文件。basename 相同不算冲突：`lib/mutation.js` 与
+ * `src/gates/completion/mutation.js` 是两个文件。对不上、或目录前缀对上了
+ * 不止一个 ⇒ 这个文件 unmeasured，【不是】整批 ambiguous。
+ */
+export function matchCoverageFile(
+  files: readonly CoverageFileReading[],
+  file: string,
+): { status: 'measured'; uncoveredLines: readonly number[] } | { status: 'unmeasured' } {
+  const want = normalizeCoveragePath(file)
+  const exact = files.filter((entry) => normalizeCoveragePath(entry.file) === want)
+  if (exact.length >= 1) {
+    return {
+      status: 'measured',
+      uncoveredLines: [...new Set(exact.flatMap((entry) => entry.uncoveredLines))],
+    }
+  }
+  const byPrefix = files.filter((entry) => {
+    const got = normalizeCoveragePath(entry.file)
+    return got.endsWith(`/${want}`) || want.endsWith(`/${got}`)
+  })
+  if (byPrefix.length === 1) {
+    const only = byPrefix[0]
+    if (only === undefined) return { status: 'unmeasured' }
+    return { status: 'measured', uncoveredLines: only.uncoveredLines }
+  }
+  return { status: 'unmeasured' }
+}
+
+/**
+ * 读调用方交来的 `executedLines`。
+ *
+ * `absent` = 字段不在（还可以再看覆盖报告）。
+ * `malformed` = 在，但指不出一份行表。
+ * 对象 = 采到了（允许空）。
+ */
+export function readExplicitExecutedLines(
+  value: MutantRun['executedLines'] | null,
+): Readonly<Record<string, readonly number[]>> | 'absent' | 'malformed' {
+  if (value === undefined) return 'absent'
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'malformed'
+  const executed: Record<string, number[]> = {}
+  for (const [file, lines] of Object.entries(value)) {
+    if (!Array.isArray(lines)) return 'malformed'
+    const parsed: number[] = []
+    for (const line of lines) {
+      if (!Number.isSafeInteger(line) || line <= 0) return 'malformed'
+      parsed.push(line)
+    }
+    executed[normalizeCoveragePath(file)] = parsed
+  }
+  return executed
+}
+
+type TestLineMap = Readonly<Record<string, readonly string[]>>
+
+/**
+ * 读 `testsByLine`。`absent` / `malformed` 都是「指不出逐测试」——
+ * 调用方必须退回整份套件，不许把坏掉的名单当成一份覆盖。
+ */
+export function readExplicitTestsByLine(
+  value: MutantRun['testsByLine'] | null,
+): Readonly<Record<string, TestLineMap>> | 'absent' | 'malformed' {
+  if (value === undefined) return 'absent'
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'malformed'
+  const parsed: Record<string, Record<string, string[]>> = {}
+  for (const [file, lines] of Object.entries(value)) {
+    if (lines === null || typeof lines !== 'object' || Array.isArray(lines)) return 'malformed'
+    const byLine: Record<string, string[]> = {}
+    for (const [line, tests] of Object.entries(lines)) {
+      if (!/^[1-9]\d*$/.test(line)) return 'malformed'
+      if (!Array.isArray(tests)) return 'malformed'
+      const names: string[] = []
+      for (const test of tests) {
+        if (typeof test !== 'string' || test.trim() === '') return 'malformed'
+        names.push(test)
+      }
+      byLine[line] = names
+    }
+    parsed[normalizeCoveragePath(file)] = byLine
+  }
+  return parsed
+}
+
+/**
+ * stdout 里的逐测试块。没有这块 ⇒ `null`（不是空覆盖）。
+ * 开了头却读不准 ⇒ `malformed`，整块作废，不许用已经读到的那几行去猜。
+ *
+ *     start of per-test coverage
+ *     <file>:<line> <test> [<test>...]
+ *     end of per-test coverage
+ */
+export function parsePerTestCoverageBlock(
+  output: string,
+): Readonly<Record<string, TestLineMap>> | null | 'malformed' {
+  const text = String(output ?? '')
+  const start = text.indexOf('start of per-test coverage')
+  if (start === -1) return null
+  const end = text.indexOf('end of per-test coverage', start)
+  if (end === -1) return 'malformed'
+  const body = text.slice(start + 'start of per-test coverage'.length, end)
+  const parsed: Record<string, Record<string, string[]>> = {}
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = stripCoverageReporterPrefix(rawLine).trim()
+    if (line === '') continue
+    const match = /^(\S+):([1-9]\d*)\s+(\S.*)$/.exec(line)
+    if (match === null) return 'malformed'
+    const file = normalizeCoveragePath(match[1] ?? '')
+    const lineNo = match[2] ?? ''
+    const tests = (match[3] ?? '').split(/\s+/).filter((test) => test !== '')
+    if (file === '' || tests.length === 0) return 'malformed'
+    const bucket = parsed[file] ?? {}
+    parsed[file] = bucket
+    bucket[lineNo] = tests
+  }
+  return parsed
+}
+
+function uniquePathMatch<T>(
+  file: string,
+  entries: readonly (readonly [string, T])[],
+): T | 'ambiguous' | undefined {
+  const want = normalizeCoveragePath(file)
+  const exact = entries.filter(([key]) => normalizeCoveragePath(key) === want)
+  if (exact.length === 1) return exact[0]?.[1]
+  if (exact.length > 1) return 'ambiguous'
+  const byPrefix = entries.filter(([key]) => {
+    const got = normalizeCoveragePath(key)
+    return got.endsWith(`/${want}`) || want.endsWith(`/${got}`)
+  })
+  if (byPrefix.length === 1) return byPrefix[0]?.[1]
+  if (byPrefix.length > 1) return 'ambiguous'
+  return undefined
+}
+
+export type LineCoverageReading = 'run' | 'uncovered' | 'unmeasured-file'
+
+export interface MutationCoverage {
+  /**
+   * 这一行跑不跑。
+   * `run` = 基线执行到了（或行号对不上，照旧跑，不把「对不上」说成未覆盖）。
+   * `uncovered` = 点了名，且这一行没执行。
+   * `unmeasured-file` = 报告没提到这个文件，或目录前缀对上了不止一个。
+   *   ★ 只记这个文件，不取消别的文件。
+   */
+  line(file: string, line: number | undefined): LineCoverageReading
+  /**
+   * 碰到这一行的测试。
+   * `null` = 指不出（整份已覆盖套件照跑，不许猜）。
+   * 空数组 = 基线指出没有任何测试碰到它。
+   */
+  testsFor(file: string, line: number | undefined): readonly string[] | null
+}
+
+/**
+ * 基线跑完之后，改动行有没有被执行、以及（仅当点了名时）是哪些测试执行的。
+ *
+ * 指不出【行】⇒ `unmeasured`，整批不能计分。
+ * 行指得出、测试指不出 ⇒ 仍然成功：`testsFor` 返回 null，调用方跑整份套件。
+ *
+ * ★ 显式 `executedLines` / `testsByLine` 优先于文本。调用方已经对过账，就不要再猜。
+ */
+export function resolveMutationCoverage(
+  run: Pick<MutantRun, 'stdout' | 'stderr' | 'executedLines' | 'testsByLine'>,
+): MutationCoverage | { readonly unmeasured: string } {
+  const output = `${run.stdout ?? ''}\n${run.stderr ?? ''}`
+  const explicitTests = readExplicitTestsByLine(run.testsByLine)
+  const blockTests = explicitTests === 'absent' ? parsePerTestCoverageBlock(output) : null
+  const perTest: Readonly<Record<string, TestLineMap>> | null =
+    explicitTests !== 'absent' && explicitTests !== 'malformed'
+      ? explicitTests
+      : blockTests !== null && blockTests !== 'malformed'
+        ? blockTests
+        : null
+
+  const testsFor = (file: string, line: number | undefined): readonly string[] | null => {
+    if (perTest === null || line === undefined) return null
+    const matched = uniquePathMatch(file, Object.entries(perTest))
+    if (matched === undefined || matched === 'ambiguous') return null
+    const listed = matched[String(line)]
+    if (listed === undefined) return null
+    return listed
+  }
+
+  const explicitLines = readExplicitExecutedLines(run.executedLines)
+  if (explicitLines === 'malformed') {
+    return { unmeasured: coverageUnmeasured('the baseline executedLines value could not be read') }
+  }
+  if (explicitLines !== 'absent') {
+    return {
+      line(file, line) {
+        if (line === undefined) return 'run'
+        const matched = uniquePathMatch(file, Object.entries(explicitLines))
+        if (matched === 'ambiguous') return 'unmeasured-file'
+        if (matched === undefined) return 'uncovered'
+        return matched.includes(line) ? 'run' : 'uncovered'
+      },
+      testsFor,
+    }
+  }
+
+  const parsed = parseNodeCoverageReport(output)
+  if (parsed === null) {
+    return { unmeasured: coverageUnmeasured('the baseline run did not report which changed lines it executed') }
+  }
+  if (parsed.ok === false) return { unmeasured: coverageUnmeasured(parsed.reason) }
+  return {
+    line(file, line) {
+      const match = matchCoverageFile(parsed.files, file)
+      if (match.status === 'unmeasured') return 'unmeasured-file'
+      if (line !== undefined && match.uncoveredLines.includes(line)) return 'uncovered'
+      return 'run'
+    },
+    testsFor,
+  }
+}
+
 /**
  * 把逐条观察汇成报告。**这是本模块唯一的裁决点。**
  *
@@ -911,11 +1251,12 @@ function round(value: number): number {
  *   ① 基线红 / 还原失败 / 探针够不到 —— 任何一条在场 ⇒ 整体 unmeasured。
  *      放在最前面，是因为它们污染【其余全部数字】：一份在污染下标出来的分数，
  *      精确到小数点后三位也是废的。
- *   ② 一条可计分变异体都没有（范围内没有算子，全是注释/声明）⇒ unmeasured，
+ *   ② 一条可计分变异体都没有（范围内没有算子，全是注释/声明，或全是 error）⇒ unmeasured，
  *      **不是 1.0**。实测形态：一次全是文档的改动会读成"代码被完全覆盖"。
- *   ③ 有可计分变异体 ⇒ measured，分数 = killed / scored。
+ *   ③ 有可计分变异体 ⇒ measured，分数 = killed / (killed + survived + uncovered)。
  *
  * ★ 等价体【进分母】（R2）。把 `!r.equivalent` 过滤掉就是自我粉饰。
+ * ★ `uncovered` 不进 survived，但留在分母里。只拿跑过的做分母会把「没执行到」拿掉，分数被抬高。
  */
 export function scoreMutants(input: ScoreInput): MutationReport {
   const { target, results } = input
@@ -926,6 +1267,11 @@ export function scoreMutants(input: ScoreInput): MutationReport {
   const scored = results.filter((result) => result.outcome === 'killed' || result.outcome === 'survived')
   const errored = results.filter((result) => result.outcome === 'error')
   const unmeasuredRuns = results.filter((result) => result.outcome === 'unmeasured')
+  /**
+   * ★ 未覆盖不进 scored。把它算进 killed 会抬高分数；把它算进 survived 会把
+   *   「测试没执行到」说成「执行了但没杀掉」。分母仍然算上它，见下面的 score。
+   */
+  const uncovered = results.filter((result) => result.outcome === 'uncovered')
   const killed = scored.filter((result) => result.outcome === 'killed')
   const survived = scored.filter((result) => result.outcome === 'survived')
   const equivalent = results.filter((result) => result.equivalent === true)
@@ -936,13 +1282,16 @@ export function scoreMutants(input: ScoreInput): MutationReport {
     const layerKilled = inLayer.filter((result) => result.outcome === 'killed')
     const layerErrored = errored.filter((result) => result.mutant.layer === layer)
     const layerUnmeasured = unmeasuredRuns.filter((result) => result.mutant.layer === layer)
+    const layerUncovered = uncovered.filter((result) => result.mutant.layer === layer)
+    const layerDenom = inLayer.length + layerUncovered.length
     byLayer[layer] = {
       total: inLayer.length,
       killed: layerKilled.length,
       survived: inLayer.length - layerKilled.length,
       errored: layerErrored.length,
       unmeasured: layerUnmeasured.length,
-      score: inLayer.length === 0 ? null : round(layerKilled.length / inLayer.length),
+      uncovered: layerUncovered.length,
+      score: layerDenom === 0 ? null : round(layerKilled.length / layerDenom),
     }
   }
 
@@ -980,6 +1329,7 @@ export function scoreMutants(input: ScoreInput): MutationReport {
     errored: errored.length,
     equivalent: equivalent.length,
     unmeasured: unmeasuredRuns.length,
+    uncovered: uncovered.length,
   }
 
   const coverage = {
@@ -1047,7 +1397,12 @@ export function scoreMutants(input: ScoreInput): MutationReport {
     }
   }
 
-  if (scored.length === 0) {
+  /**
+   * ★ 分母 = 跑过的（killed + survived）+ 没执行到的（uncovered）。
+   *   未覆盖不进分子。只拿跑过的做分母会把「没执行到」从分母里拿掉，分数被抬高。
+   */
+  const denominator = scored.length + uncovered.length
+  if (denominator === 0) {
     /**
      * ── ★★★ 归因必须是真的（2026-10-12 修一句**无条件宣称**）────────────────────
      *
@@ -1089,7 +1444,7 @@ export function scoreMutants(input: ScoreInput): MutationReport {
 
   return {
     disposition: 'measured',
-    mutationScore: round(killed.length / scored.length),
+    mutationScore: round(killed.length / denominator),
     totals,
     byLayer,
     survivingMutants,
@@ -1185,11 +1540,11 @@ export async function runMutationEngine(input: MutationEngineInput): Promise<Mut
     disposition: 'unmeasured',
     unmeasured: reason,
     mutationScore: null,
-    totals: { considered: 0, scored: 0, killed: 0, survived: 0, errored: 0, equivalent: 0, unmeasured: 0 },
+    totals: { considered: 0, scored: 0, killed: 0, survived: 0, errored: 0, equivalent: 0, unmeasured: 0, uncovered: 0 },
     byLayer: {
-      L1: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, score: null },
-      L2: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, score: null },
-      L3: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, score: null },
+      L1: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, uncovered: 0, score: null },
+      L2: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, uncovered: 0, score: null },
+      L3: { total: 0, killed: 0, survived: 0, errored: 0, unmeasured: 0, uncovered: 0, score: null },
     },
     survivingMutants: [],
     expectRedViolations: [],

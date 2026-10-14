@@ -100,12 +100,26 @@ const MUTANT_RED = {
   stderr: '',
 }
 
-/** 首跑绿、其后按 `killCount` 红的替身。★ 每个 context 一份新的计数器。 */
-function makeRunTest(killCount = Number.POSITIVE_INFINITY) {
+/**
+ * 首跑绿、其后按 `killCount` 红的替身。★ 每个 context 一份新的计数器。
+ *
+ * ★ 基线默认交回「每一行都执行了」。缺这份覆盖时整批是 unmeasured，
+ *   而本文件前面的臂测的是配额，不是覆盖。`executedLines === null` 表示
+ *   调用方明确不交覆盖（未测量臂用）。
+ * ★ 这里不交 `testsByLine`：配额臂必须仍跑整份套件，不许被收窄成某一条测试。
+ */
+function makeRunTest(killCount = Number.POSITIVE_INFINITY, executedLines) {
   let calls = 0
+  const coverage = executedLines === undefined
+    ? { [SUT_FILE]: SUT_LINES.map((_, index) => index + 1) }
+    : executedLines
   return async () => {
     calls += 1
-    if (calls === 1) return { ...BASELINE_GREEN }
+    if (calls === 1) {
+      const baseline = { ...BASELINE_GREEN }
+      if (coverage !== null) baseline.executedLines = coverage
+      return baseline
+    }
     return calls - 1 <= killCount ? { ...MUTANT_RED } : { ...BASELINE_GREEN }
   }
 }
@@ -398,4 +412,253 @@ test('臂 7 ★ 注册面臂：`completion.mutation` 的 id 与位置不变', ()
   assert.equal(id, 'completion.mutation')
   assert.equal(point, 'completion')
   assert.equal(typeof appliesTo, 'function')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 8 ★ 行覆盖（t5）+ 逐测试收窄（只在基线点了名时）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const NARROW_FILE = 'narrow-sut.mjs'
+const NARROW_SOURCE = 'export function probe(x) {\n  return x > 0\n  return x > 1\n}\n'
+const HIT_TEST = 'hit.test.mjs'
+const MISS_TEST = 'miss.test.mjs'
+const FIRST_TEST = 'first.test.mjs'
+const SECOND_TEST = 'second.test.mjs'
+
+function narrowHarness(baseline, options = {}) {
+  const disk = new Map([[NARROW_FILE, NARROW_SOURCE]])
+  const commands = []
+  let calls = 0
+  const suites = options.suites ?? [
+    { id: HIT_TEST, files: [HIT_TEST] },
+    { id: MISS_TEST, files: [MISS_TEST] },
+  ]
+  const ctx = {
+    loadKindRequirements: () => TABLE,
+    task: { id: 't-narrow', kind: 'implementation' },
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    changedFiles: [NARROW_FILE],
+    changedLines: options.changedLines ?? [2, 3],
+    readFile: (path) => {
+      const text = disk.get(path)
+      if (text === undefined) throw new Error(`no such file in the fixture sandbox: ${path}`)
+      return text
+    },
+    readSuite: () => `import './${NARROW_FILE}'\n`,
+    writeFile: (path, contents) => { disk.set(path, contents) },
+    runTest: async (command) => {
+      calls += 1
+      commands.push(command)
+      if (calls === 1) return baseline
+      if (options.onMutant !== undefined) return options.onMutant(command, calls)
+      return { ...MUTANT_RED }
+    },
+    testCommand: 'node --test *',
+    killerSuites: suites,
+    maxMutants: 10_000,
+    maxPerOperator: 100,
+    minKillRate: options.minKillRate ?? 0,
+  }
+  return { ctx, commands, calls: () => calls }
+}
+
+test('臂 8 ★ 有逐测试覆盖时，没碰到该行的测试不被调用', async () => {
+  const harness = narrowHarness({
+    ...BASELINE_GREEN,
+    executedLines: { [NARROW_FILE]: [1, 2, 3] },
+    testsByLine: { [NARROW_FILE]: { 2: [HIT_TEST], 3: [HIT_TEST] } },
+  })
+  const verdict = expectOk(await gate(harness.ctx))
+  const mutantCommands = harness.commands.slice(1)
+
+  assert.ok(mutantCommands.length > 0, '★ 执行到的行必须真的跑了变异体')
+  assert.ok(
+    harness.commands[0].includes(HIT_TEST) && harness.commands[0].includes(MISS_TEST),
+    `★ 基线仍是整份套件，实际 ${harness.commands[0]}`,
+  )
+  for (const command of mutantCommands) {
+    assert.ok(command.includes(HIT_TEST), `★ 碰到该行的测试必须被调用：${command}`)
+    assert.equal(command.includes(MISS_TEST), false, `★ 没碰到该行的测试不许被调用：${command}`)
+  }
+  assert.equal(verdict.mutationReport.totals.killed, mutantCommands.length)
+})
+
+test('臂 9 ★ 有逐测试覆盖且中途被杀时，early-stop.skipped 大于 0', async () => {
+  const harness = narrowHarness(
+    {
+      ...BASELINE_GREEN,
+      executedLines: { [NARROW_FILE]: [1, 2, 3] },
+      testsByLine: { [NARROW_FILE]: { 2: [FIRST_TEST, SECOND_TEST], 3: [FIRST_TEST, SECOND_TEST] } },
+    },
+    {
+      suites: [
+        { id: FIRST_TEST, files: [FIRST_TEST] },
+        { id: SECOND_TEST, files: [SECOND_TEST] },
+      ],
+      onMutant: (command) => {
+        if (command.includes(SECOND_TEST)) throw new Error(`second test ran after a kill: ${command}`)
+        return { ...MUTANT_RED }
+      },
+    },
+  )
+  const verdict = expectOk(await gate(harness.ctx))
+  const mutantCommands = harness.commands.slice(1)
+
+  assert.ok(mutantCommands.length > 0)
+  assert.ok(mutantCommands.every((command) => command.includes(FIRST_TEST)))
+  assert.equal(
+    mutantCommands.some((command) => command.includes(SECOND_TEST)),
+    false,
+    `★ 第一条已经杀死，第二条不许再跑：${mutantCommands.join(' | ')}`,
+  )
+  assert.ok(
+    verdict['early-stop'].skipped > 0,
+    `★ early-stop.skipped 必须大于 0，实际 ${JSON.stringify(verdict['early-stop'])}`,
+  )
+  assert.equal(verdict['early-stop'].skipped, mutantCommands.length, '★ 每个被杀的变异体都省下了后面那一条')
+})
+
+test('臂 10 ★ 没有逐测试覆盖时保持 t5：整份套件照跑，不猜一条测试；没执行到的行 runTest 为 0', async () => {
+  const harness = narrowHarness({
+    ...BASELINE_GREEN,
+    executedLines: { [NARROW_FILE]: [1, 2] },
+  }, {
+    suites: [
+      { id: 'a.test.mjs', files: ['a.test.mjs'] },
+      { id: 'b.test.mjs', files: ['b.test.mjs'] },
+    ],
+  })
+  const verdict = expectOk(await gate(harness.ctx))
+  const mutantCommands = harness.commands.slice(1)
+
+  assert.equal(mutantCommands.length, 1, `★ 只有执行到的那一行跑套件；实际 ${mutantCommands.length} 次（${mutantCommands.join(' | ')}）`)
+  assert.ok(mutantCommands[0].includes('a.test.mjs'), `★ 整份套件必须含 a：${mutantCommands[0]}`)
+  assert.ok(mutantCommands[0].includes('b.test.mjs'), `★ 整份套件必须含 b，不许猜成只有 a：${mutantCommands[0]}`)
+  assert.equal(verdict.mutationReport.totals.uncovered, 1, '★ 没执行到的那条计为未覆盖')
+  assert.equal(verdict.mutationReport.totals.survived, 0, '★ 未覆盖不进 survived')
+  assert.equal(verdict['early-stop'].skipped, 0, '★ 没点名逐测试时不许假装早停')
+  assert.ok(
+    verdict.mutationScore < 1,
+    `★ 把未覆盖剔出分母会得到 1：${verdict.mutationScore}`,
+  )
+})
+
+test('臂 10b ★ 采不到覆盖 ⇒ 整批 unmeasured，不假装全存活或全未覆盖', async () => {
+  const harness = narrowHarness({ ...BASELINE_GREEN })
+  const verdict = await gate(harness.ctx)
+
+  assert.equal(harness.calls(), 1, `★ 指不出覆盖时不许再跑变异套件；实际 ${harness.calls()}`)
+  assert.equal(typeof verdict.unmeasured, 'string', `★ 必须是 unmeasured，实际 ${JSON.stringify(verdict).slice(0, 300)}`)
+  assert.match(verdict.unmeasured, /not "everything survived"/)
+  assert.match(verdict.unmeasured, /not "everything uncovered"/)
+})
+
+test('臂 10c ★ 报告对得上的文件照跑；没提到的文件单独 unmeasured，不取消已对上文件的 runTest', async () => {
+  const missed = 'lib/missed.js'
+  const executed = 'lib/ran.js'
+  const source = 'export function probe(x) {\n  return x > 0\n}\n'
+  const report = [
+    'ℹ tests 1',
+    'ℹ pass 1',
+    'ℹ fail 0',
+    'ℹ start of coverage report',
+    'ℹ file | line % | branch % | funcs % | uncovered lines',
+    `ℹ lib | | | | `,
+    'ℹ  ran.js | 100.00 | 100.00 | 100.00 | ',
+    'ℹ all files | 100.00 | 100.00 | 100.00 | ',
+    'ℹ end of coverage report',
+    '',
+  ].join('\n')
+  const disk = new Map([[missed, source], [executed, source]])
+  const commands = []
+  let calls = 0
+  const verdict = expectOk(await gate({
+    loadKindRequirements: () => TABLE,
+    task: { id: 't-partial', kind: 'implementation' },
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    /** ★ missed 放在前面：见到「报告没提到」就整批返回的话，已对上的文件不会再 runTest。 */
+    changedFiles: [missed, executed],
+    changedLines: [2],
+    readFile: (path) => {
+      const text = disk.get(path)
+      if (text === undefined) throw new Error(`no such file in the fixture sandbox: ${path}`)
+      return text
+    },
+    readSuite: () => `import './${executed}'\n`,
+    writeFile: (path, contents) => { disk.set(path, contents) },
+    runTest: async (command) => {
+      calls += 1
+      commands.push(command)
+      if (calls === 1) return { exitCode: 0, stdout: report, stderr: '' }
+      return { ...MUTANT_RED }
+    },
+    testCommand: 'node --test *',
+    killerSuites: [{ id: HIT_TEST, files: [HIT_TEST] }],
+    maxMutants: 10_000,
+    maxPerOperator: 100,
+    minKillRate: 0,
+  }))
+
+  assert.ok(calls > 1, `★ 已对上的文件必须继续 runTest；实际 ${calls}`)
+  assert.deepEqual(verdict.coverageUnmeasured, [missed], '★ 报告没提到的文件单独记 unmeasured')
+  assert.equal(verdict.mutationReport.totals.uncovered, 0, '★ 漏掉的文件不得记成 uncovered')
+  assert.equal(verdict.survived, 0, '★ 也不得记成 survived')
+  assert.ok(verdict.killed > 0, '★ 已对上的文件照常计入杀死')
+})
+
+test('臂 10d ★ 同名 basename 用目录前缀匹配，不把整批当成 ambiguous', async () => {
+  const executed = 'lib/mutation.js'
+  const other = 'src/gates/completion/mutation.js'
+  const source = 'export function probe(x) {\n  return x > 0\n}\n'
+  const report = [
+    'ℹ tests 1',
+    'ℹ pass 1',
+    'ℹ fail 0',
+    'ℹ start of coverage report',
+    'ℹ file | line % | branch % | funcs % | uncovered lines',
+    'ℹ lib | | | | ',
+    'ℹ  mutation.js | 100.00 | 100.00 | 100.00 | ',
+    'ℹ src | | | | ',
+    'ℹ  gates | | | | ',
+    'ℹ   completion | | | | ',
+    'ℹ    mutation.js | 50.00 | 100.00 | 100.00 | 2',
+    'ℹ all files | 75.00 | 100.00 | 100.00 | ',
+    'ℹ end of coverage report',
+    '',
+  ].join('\n')
+  const disk = new Map([[other, source], [executed, source]])
+  let calls = 0
+  const verdict = expectOk(await gate({
+    loadKindRequirements: () => TABLE,
+    task: { id: 't-basename', kind: 'implementation' },
+    wantsCompleted: true,
+    taskNotTerminal: true,
+    changedFiles: [other, executed],
+    changedLines: [2],
+    readFile: (path) => {
+      const text = disk.get(path)
+      if (text === undefined) throw new Error(`no such file in the fixture sandbox: ${path}`)
+      return text
+    },
+    readSuite: () => `import './${executed}'\nimport './${other}'\n`,
+    writeFile: (path, contents) => { disk.set(path, contents) },
+    runTest: async () => {
+      calls += 1
+      if (calls === 1) return { exitCode: 0, stdout: report, stderr: '' }
+      return { ...MUTANT_RED }
+    },
+    testCommand: 'node --test *',
+    killerSuites: [{ id: HIT_TEST, files: [HIT_TEST] }],
+    maxMutants: 10_000,
+    maxPerOperator: 100,
+    minKillRate: 0,
+  }))
+
+  assert.ok(calls > 1, `★ 目录前缀对上的 lib/mutation.js 必须跑；整批 ambiguous 时这里会停在基线。实际 ${calls}`)
+  assert.equal(verdict.coverageUnmeasured.length, 0, `★ 两个文件都被点了名：${verdict.coverageUnmeasured.join(', ')}`)
+  assert.ok(verdict.killed > 0, '★ 执行到的那个 mutation.js 被杀掉')
+  assert.ok(verdict.mutationReport.totals.uncovered > 0, '★ 另一个 mutation.js 的未覆盖行不跑，留在 uncovered')
+  assert.equal(verdict.mutationReport.totals.survived, 0)
 })
