@@ -215,6 +215,21 @@ const SUT = [
 ].join('\n')
 const BASELINE_GREEN = { exitCode: 0, stdout: 'ℹ tests 1\nℹ pass 1\nℹ fail 0\n', stderr: '' }
 
+/**
+ * ★ 基线必须同时交回**行覆盖**（2026-10-14）。
+ *
+ * MEASURED（t7 归因回退那次）：本文件两条洞 A 臂此前只交回 `BASELINE_GREEN`
+ * —— 一份**没有行覆盖**的基线。判据在变异循环之前先解析覆盖，指不出覆盖就整批
+ * `unmeasured` ⇒ 于是两条臂测的其实是"基线没交覆盖"，**根本没跑到它们要测的东西**：
+ *   ① 预算停止与"测试失败"分不分得开；
+ *   ② 执行器故障与预算停止是不是不同形。
+ * 两条臂因此变红，而红的理由与洞 A 无关 —— 那正是"我造的输入不完整"。
+ *
+ * ★ 这里补上的是**输入**：套件真的跑过了 SUT 的每一行。测试与断言一字未动。
+ */
+const EXECUTED_ALL_LINES = { [SUT_FILE]: SUT.split('\n').map((_, index) => index + 1) }
+const BASELINE_GREEN_WITH_COVERAGE = { ...BASELINE_GREEN, executedLines: EXECUTED_ALL_LINES }
+
 function mutationContext(runTest) {
   const disk = new Map([[SUT_FILE, SUT]])
   return {
@@ -249,7 +264,7 @@ test('洞 A 臂 ★★★ 预算停止 ⇒ unmeasured，不许被读成"变异�
   let calls = 0
   const verdict = await gate(mutationContext(async () => {
     calls += 1
-    if (calls === 1) return { ...BASELINE_GREEN }
+    if (calls === 1) return { ...BASELINE_GREEN_WITH_COVERAGE }
     throw new CompletionBudgetExceeded('the completion chain exhausted its 1200s wall-clock budget before "mutation suite" could run')
   }))
 
@@ -275,7 +290,7 @@ test('洞 A 反向臂 ★★★ 执行器故障与预算停止必须**不同形*
   let calls = 0
   const verdict = await gate(mutationContext(async () => {
     calls += 1
-    if (calls === 1) return { ...BASELINE_GREEN }
+    if (calls === 1) return { ...BASELINE_GREEN_WITH_COVERAGE }
     throw new Error('the executor exploded')
   }))
 

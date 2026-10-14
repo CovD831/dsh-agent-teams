@@ -385,11 +385,25 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
    *   的假 run 会被判 unmeasured（"没报告可读摘要"）—— 那是我造的输入不完整，
    *   不是判据的缺陷。这里给出真实形状的 node:test spec 输出。
    */
+  /**
+   * ★ 基线必须同时交回**行覆盖**（2026-10-14）。
+   *
+   * MEASURED（t7 归因回退那次）：本臂的三个替身此前只交回 `exitCode` + `stdout`，
+   * 一份**没有行覆盖**的基线。判据在变异循环之前先解析覆盖，指不出覆盖就整批
+   * `unmeasured` ⇒ 于是这条臂测的其实是"基线没交覆盖"，三个形状全都塌成
+   * 同一个 `unmeasured`：对照臂读不到 ok、伪造臂读不到 blocked。
+   *
+   * ★ 真实的 `node --test` 基线（判据自己会加 `--experimental-test-coverage`）
+   *   是**带**覆盖报告的；这里补上的是**输入**，让它与真实形状一致。
+   *   测试与三处断言一字未动。
+   */
+  const executedLines = { 'src/a.ts': [1, 2, 3, 4] }
   const runWith = (failed, failingFile) => async () => ({
     exitCode: failed > 0 ? 1 : 0,
     stdout: failed > 0
       ? `\n✖ ${failingFile} (1.2ms)\nℹ tests 1\nℹ pass 0\nℹ fail ${failed}\n`
       : `\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n`,
+    ...(failed > 0 ? {} : { executedLines }),
   })
 
   // 对照臂：模拟的"套件"在源码被改动后失败（读到 mutated 文本 ⇒ 报红），
@@ -404,7 +418,7 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
     },
     // 源码被注入变异体（≠ 原始文本）⇒ 测试失败 ⇒ 杀死。
     runTest: async () => (lastWritten === null
-      ? { exitCode: 0, stdout: '\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n' }
+      ? { exitCode: 0, stdout: '\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n', executedLines }
       : { exitCode: 1, stdout: '\n✖ src/a.ts (1.2ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1\n' }),
   })
 

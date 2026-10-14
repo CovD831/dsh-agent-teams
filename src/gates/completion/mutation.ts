@@ -663,12 +663,6 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     results.push({ mutant: plan.mutant, outcome: observed.outcome, reason: observed.reason, killedBy: observed.killedBy })
   }
 
-  if (results.length === 0 && coverageUnmeasuredFiles.length > 0) {
-    return unmeasured(
-      `the coverage report did not mention ${coverageUnmeasuredFiles.join(', ')}; those files are unmeasured, not survived and not uncovered, and no executed line remained to run — this is not "everything survived" and not "everything uncovered"`,
-    )
-  }
-
   /**
    * ★ 探针射程：逐文件问一次"声明的套件够不够得到它"。
    *   够不到 ⇒ 那份文件的每一个存活体都是【必然】的 ⇒ 整份报告 unmeasured。
@@ -695,9 +689,46 @@ export async function gate(ctx: MutationContext): Promise<GateVerdict> {
     const file = result.mutant.file
     return file === undefined || file === '' ? [] : [file]
   }))
-  for (const file of measuredFiles) {
+  /**
+   * ── ★★★ 归因回退的修复（2026-10-14）：报告一份都没对上时，先问探针 ──────────────
+   *
+   * MEASURED（t7 把这条回退引入，3 条消费夹具当场变红）：
+   *
+   *   下面那格 `results.length === 0` 的早退**只看覆盖报告**，于是它把
+   *   「覆盖报告真的没提到这个文件」（去修覆盖）与
+   *   「杀手套件够不到被变异文件」（去改套件声明）**并成了同一句话**。
+   *   而这两件事的补救动作相反 —— 正是本仓最忌的那一类合流。
+   *
+   *   实测形态：一个套件**根本没 import 被变异文件**时，Node 的覆盖报告里
+   *   自然不会有那个文件 ⇒ 走到这里时 `results` 是空的 ⇒ 报"报告没提到"。
+   *   读的人于是去查覆盖，而真正的问题是**套件声明**。
+   *
+   * ★ 修法：这一格只在**探针够得到**时才是"报告的事实"。够不到时，报告的沉默
+   *   正是**探针**造成的后果，那份事实更具体、更接近根因，所以由它先说话
+   *   （`probeProblem` 走 scorer 的常规通道，与其它够不到的场景逐字同形）。
+   *
+   * ★ 为什么不干脆把这一格删掉：报告点名的文件里**确实**可能没有我们关心的那个
+   *   （工具只列它加载过的文件），那时"报告没提到"就是正确且唯一可说的成因。
+   *   两种成因都要留着，只是不许并成一句。
+   *
+   * ★ 这里**不**把 `measuredFiles` 扩成"全部改动文件"：报告点名的文件与没点名的
+   *   文件混在一批时（有的跑得了、有的跑不了），把没点名的送进 `probeReach` 会把
+   *   整批打成 unmeasured，从而取消**已经对上**的那些文件的测量 —— 那是 t13 修掉的
+   *   另一个方向。所以只在**这一批一条都没跑成**时才补问探针。
+   */
+  const probeFiles = unique([
+    ...measuredFiles,
+    ...(results.length === 0 ? coverageUnmeasuredFiles : []),
+  ])
+  for (const file of probeFiles) {
     const reach = probeReach({ file }, suites, readSuite)
     if (reach.files.length === 0) unreachable.push(`${file}: ${reach.reason}`)
+  }
+
+  if (results.length === 0 && coverageUnmeasuredFiles.length > 0 && unreachable.length === 0) {
+    return unmeasured(
+      `the coverage report did not mention ${coverageUnmeasuredFiles.join(', ')}; those files are unmeasured, not survived and not uncovered, and no executed line remained to run — this is not "everything survived" and not "everything uncovered"`,
+    )
   }
 
   const report: MutationReport = scoreMutants({
