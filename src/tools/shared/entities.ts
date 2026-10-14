@@ -2919,20 +2919,79 @@ export interface FrictionAutoOrigin {
   /**
    * ★ 拒绝原文里的**判据 id**（`completion.backtest` 那一类），读得出来时才写。
    *   读不出来 ⇒ 缺席（**不猜**：编一个 id 会让"这条是谁拒的"变成一条假事实）。
+   *
+   * ★★ **这一格是【第一个】判据 id，不是全部** —— 见下面的 `gates`。
+   *   保留它是因为**已在盘上的 384 条记录都只有这一格**（改形状会让旧记录读不出来），
+   *   且它的语义与修 t30 之前**逐字相同**（`gateIdFromMessage` 一个字没动）。
    */
   gate?: string
+  /**
+   * ── ★★★ t30：拒绝原文里的**全部**判据 id（去重、保持出现次序）───────────────
+   *
+   * MEASURED（t30 实测，缺陷：`gateIdFromMessage` 只 `.exec()` 第一个 ⇒ 落盘时丢数据）：
+   *
+   *     384 条 friction 里 **18 条**的标题含 **>1 个不同的**判据 id，
+   *     而它们的 `auto.gate` **全部只存了第一个**（实测 9 条有 `auto.gate` 的多值记录，
+   *     `stored === first` **无一例外**；另 9 条当时连 `auto.gate` 都没有）。
+   *
+   * ⇒ 于是 t17/t19 量到「12 条多值记录 / `f-0286` 命中 3 个 id」却**解释不了那些多值从哪来**：
+   *   **读的时候用全局正则（读得到多个），写的时候只存一个。**
+   *
+   * ★ 为什么**不去改** `gate` 那一格：它已经在盘上 384 条里，
+   *   而且它的读者（`gate-friction-capture.test.mjs` 臂）断言的是**单值**。
+   *   ⇒ 新增一格，旧格不动 —— 旧读者不受影响，新读者拿得到全量。
+   * ★ 为什么只在**读得出来**时才写这一格（与 `gate` 同一条纪律）：读不出来 ⇒ 缺席，**不猜**。
+   */
+  gates?: readonly string[]
 }
 
 /**
- * ── ★ 从拒绝原文里读出【是哪条判据】拒的 ────────────────────────────────────────
+ * ── ★ 从拒绝原文里读出【是哪条判据】拒的（**单值，第一个**）──────────────────────
  *
  * 拒绝原文里判据 id 的形态是 `[… ]`（实测：`update_task rejected: [dispatch.changed-paths] "…"`）。
  * ★ 读不出来 ⇒ `undefined`（**不猜**）—— 编一个 id 会让"这条是谁拒的"变成一条**假事实**，
  *   而假的归因比没有归因坏：读的人会照着它去查那条判据。
+ *
+ * ── ★★★ t30：这个函数**只回答"第一个是谁"** —— 而那是**有意保留**的语义 ────────────
+ *
+ * MEASURED（t30 查明）：`.exec()` 只匹配第一个 ⇒ 一条含多个判据 id 的消息，
+ *   第二个起**全部丢弃**。而这个函数的调用点里，**至少有一个在语义上就只要一个**：
+ *
+ *     `noteStall(task, point, gateIdFromMessage(msg), now)`   （update-task.ts:1494）
+ *       ⇒ `noteStall` 把 `gate` 存成**标量**（`task.stall.gate`），
+ *         而 `observeStall` 靠 `previous.gate === gate`（**标量相等**）判"同一个判据又拒了一次"。
+ *       ⇒ ★ 若这里改成一个数组，那个相等判断**静默失效**（数组 !== 数组）
+ *         ⇒ 跨调用计数恒为 1 ⇒ **没有任何拒绝会被判成卡点**（C1 的判据整个失效）。
+ *
+ * ⇒ 所以**不偷偷改这个函数的语义**。要全量的调用点走 `gateIdsFromMessage`。
+ * ★ 一般形式：**同一个量有两类读者时，扩语义与保语义应当分成两个名字**，而不是让一个名字
+ *   在无人察觉的情况下换形状（本仓反复记账的形态）。
  */
 export function gateIdFromMessage(message: string): string | undefined {
   const match = /\[([\w][\w.-]*)\]/u.exec(message)
   return match?.[1]
+}
+
+/**
+ * ── ★★★ t30：从拒绝原文里读出【全部】判据 id（去重，保持出现次序）─────────────────
+ *
+ * 与 {@link gateIdFromMessage} 是**同一个正则**、同一份形态判据 —— 区别只有 `g` 旗标与去重。
+ * ★ 而**去重是刻意的**：实测标题里同一个 id 会重复出现很多次
+ *   （`f-0051` 的 `[dispatch.changed-paths]` 出现 **30 次** —— 那是判据逐条列举它拒绝了哪些路径）。
+ *   ⇒ 去重之后"这条记录被哪些判据拒过"才是一个**集合**，而不是一份抱怨的重复计数。
+ *
+ * ★ 读不出来 ⇒ `[]`（**不是** `undefined`）—— 与单值版的 `undefined` 分工不同：
+ *   单值版的 `undefined` 表示"**第一个读不出来**"（`observeStall` 拿它当第三态用）；
+ *   而这一版要回答的是"**一共有哪些**"，"一个都没有"的天然形状就是空集。
+ *   ★ 两个不同的问题各自有各自的"没有"，**不许合流**。
+ */
+export function gateIdsFromMessage(message: string): readonly string[] {
+  const found: string[] = []
+  for (const match of message.matchAll(/\[([\w][\w.-]*)\]/gu)) {
+    const id = match[1]
+    if (id !== undefined && !found.includes(id)) found.push(id)
+  }
+  return found
 }
 export function toReplayableSnapshot(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null) return null
@@ -3435,6 +3494,21 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
           tool: capture.auto.tool,
           point: capture.auto.point,
           ...capture.auto.gate === undefined ? {} : { gate: capture.auto.gate },
+          /**
+           * ── ★★★ t30：全部判据 id（`gates`），与单值的 `gate` **并存**────────────
+           *
+           * ★ 为什么两格都写：`gate` 是**已在盘上的形状**（384 条旧记录都是它），
+           *   读取端（`gate-friction-capture.test.mjs` 那条臂、以及 HTML 报告）
+           *   现在读的就是它 ⇒ **不许为了"更整齐"把它撤掉**，那会让旧记录与新记录不同形。
+           * ★ 而这一格回答的是**另一个问题**：这条记录**一共**被哪些判据拒过。
+           *   ⇒ 只有一格时，18 条多值记录里非首位的判据在落盘端**永久消失**（t30 的缺陷）。
+           * ★ 单值 = `gates[0]`（实测：9 条有 `auto.gate` 的多值记录，`stored === first` 无一例外）
+           *   ⇒ 两格**冗余但一致**，而这正是"改形状要能与旧数据共处"的代价，值得付。
+           */
+          ...(() => {
+            const gates = gateIdsFromMessage(capture.message)
+            return gates.length === 0 ? {} : { gates }
+          })(),
         },
       },
       /**
@@ -3764,6 +3838,17 @@ export async function rejectOnContractGates(
         tool: what,
         point: 'contract',
         ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
+        /**
+         * ── ★★★ t30：同一个 `contract` 位置上**同样丢掉过非首位判据** ──────────────
+         * ★ 这一段与 `recordFriction` 里那一格**是两处独立的写入点**（同一份数据写两遍），
+         *   所以修复也必须是**两处** —— 只改一处会让"两个出口不同形"，而那正是本仓记账的形态。
+         * ★ `gateIdsFromMessage(frictionMessage)` 与上面单值那一行**同源**（同一个字符串），
+         *   故 `gates[0] === gate`（当 `gate` 在场时）—— 冗余但不分叉。
+         */
+        ...(() => {
+          const gates = gateIdsFromMessage(frictionMessage)
+          return gates.length === 0 ? {} : { gates }
+        })(),
       },
       /**
        * ★★★ t5：`couldNotObserve` 在**拒绝**这一支上**必须**带（第一版把它挪去了放行支，
