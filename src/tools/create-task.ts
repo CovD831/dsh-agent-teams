@@ -7,7 +7,7 @@
 import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, memberOpenTask, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
+import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TERMINAL_TASK_STATUSES, TaskKind, TeamTask } from '../types.ts'
 import { registry } from '../gates/index.ts'
@@ -853,6 +853,15 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             registry: registry as unknown as DispatchWiringInput['registry'],
           })
           const dispatchGates = dispatchWiring.gates
+          /**
+           * ── ★★★ t24：判据读到的那一份 ctx —— **必须由接线交出**，不在这里重造 ──────────
+           *
+           * `wireDispatch` 返回的 `context` 就是它拿去核对与求值的那一份（构造一次、用两次）。
+           * ★ 在调用点重写一份字面量会让"记进台账的 ctx"与"判据当时读到的 ctx"
+           *   在下一次改动之后**分叉**，而分叉后那条记录重放出来的是另一个时刻的输入
+           *   （台账的全部意义是"当时那一份"，见 f-0014）。
+           */
+          const dispatchContext = dispatchWiring.context
           const dispatchSurface = dispatchWiring.inputSurface as
             { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
           /**
@@ -890,8 +899,67 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              *   `throw new Error`）—— 那对"契约校验"那类拒绝够用（它们没有"输入面结论"），
              *   但对**判据产生的拒绝**不够，因为判据的结论要交出去。
              */
+            /**
+             * ── ★★★ t24：卡点发生时【当场记账】—— 与 `throwWithSurface` 在同一条路径上 ──
+             *
+             * MEASURED（2026-10-14 队长复核）：`dispatch` 点上一共 67 条记录，
+             *   **最后一条在 2026-10-09**；根因是一个可定位的提交 ——
+             *   `d231f74 fix(t39): move the dispatch evaluation to where dispatch actually happens`
+             *   把求值搬到这里，而**记账没有跟着搬**：
+             *     删除的 `recordFriction` 调用 **2 处**（`point: 'dispatch'`），新增 **0 处**。
+             *   ⇒ 全仓一度只剩 completion（`update-task.ts`）与 contract（`entities.ts`）两处。
+             *
+             * ★★★ 而它的形状是本队记账里最贵的那一条（与 t39 拆 `tools.ts` 时把 t41 的
+             *   接线搬回旧版**同族**）：
+             * > **一次纯搬运，少搬了"改动的可见面"，而没有任何东西报错。**
+             *   ⇒ 判据照常拒绝、日志照常有、`throwWithSurface` 照常带结论 ——
+             *     唯一消失的是**台账那一格**，而它是"事后补不上"的那一份材料
+             *     （f-0014：记录必须在卡点发生时做，事后补是补不上的）。
+             *   ★ 而它**没有任何一条臂**要求「拒绝 ⇒ 台账 +1」（completion / contract
+             *     两处各自有臂，`dispatch` 这一格没有）⇒ 于是它静默了 5 天。
+             *   ⇒ 本任务配的守门臂（`scripts/gate-friction-capture.test.mjs` 的臂 9）
+             *     钉的就是这一格：把下面这段注释掉，那条臂**必须**红。
+             *
+             * ★★ 形状**逐字照抄** `src/tools/update-task.ts:1513` 那处（不另发明字段）：
+             *   同一份 `frictionMessage`、同一个 `stateRoot`（**本团队自己的**，
+             *   不许用进程级单值 —— 见 `recordFriction` 里那段实测）、同一组
+             *   `context` / `mechanismState` / `session` / `taskId` / `teamId` / `tool` / `auto`。
+             *
+             * ★ 它是**【旁路】动作**：`void … .then(warn)`，写盘失败只写一条 warn
+             *   —— **不改裁决**，下面的拒绝措辞与抛出方式一个字不变。
+             *   （理由与 `rejectOnContractGates` 那处相同：拒绝路径必须立刻抛出去，
+             *   不许因为"写台账慢"而把一次判据拒绝变成一次等待。）
+             */
+            const frictionMessage = `create_task rejected: ${dispatchGates.blockers.join('; ')}`
+            void recordFriction({
+              stateRoot,
+              point: 'dispatch',
+              message: frictionMessage,
+              context: dispatchContext,
+              mechanismState: { inputSurface: dispatchSurface, gates: dispatchGates },
+              session: captain.session,
+              taskId: task.id,
+              teamId: team.id,
+              tool: 'create_task',
+              /**
+               * ★★★ t91：这条是**自动记录**的 —— 本分支就是拒绝路径
+               *   （判据拒绝的那一下没有人做过决定 ⇒ 它没有 `resolution.state` 是设计如此）。
+               *   ⇒ 声明出来，分诊器才不会把它算进「台账待回填」。
+               *
+               * ★★ 工具名与**契约位那条**同源（`rejectOnContractGates` 的 `what` = `create_task`）：
+               *   同一个工具在两个插入点上必须用**同一个名字**，否则分诊器会把同一件事
+               *   读成两件事（而"两处各拼一遍"正是本仓反复记账的分叉形态）。
+               */
+              auto: {
+                tool: 'create_task',
+                point: 'dispatch',
+                ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
+              },
+            }).then((id) => {
+              if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the dispatch gate (${frictionMessage})`)
+            })
             throwWithSurface(
-              `create_task rejected: ${dispatchGates.blockers.join('; ')}`,
+              frictionMessage,
               dispatchSurface,
               'dispatch_input_surface',
             )

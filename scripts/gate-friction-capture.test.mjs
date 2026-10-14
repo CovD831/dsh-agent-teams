@@ -99,7 +99,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -124,6 +124,11 @@ import { createTeamDir } from '../lib/state.js'
  *   与迁移前 `gate-mutation` / `gate-t1` / `worktree-reclaim` 已经在删的集合一致。
  */
 import { nestedTestEnv, recursionFreeEnv } from './fixtures/nested-test-env.mjs'
+/**
+ * ★ 臂 9 要造一个**审过了**的计划（放行半边）—— 那份戳的形状由判据层的
+ *   `REVIEW_QUESTION_IDS` 决定，本文件不自己拼一遍（拼两遍就会在"五问改名"那天分叉）。
+ */
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 
 /** 一次 git 调用的统一包装（夹具的临时工作区）。 */
 function gitIn(workspace) {
@@ -1511,6 +1516,456 @@ test('★★★ 臂 5（判别臂 · 对照对）：不清递归标记 ⇒ 内�
       clean.code, nested.code,
       '★★★ 而**退出码这一格两者相同**（都是 0）—— 这正是本臂存在的理由：'
       + '只看退出码时，那个被跳过的运行与真正通过的那一次**完全分不开**。',
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 9 / 臂 10（t24）：`dispatch` 点的卡点记账 —— 「拒绝 ⇒ 台账 +1」的守门臂
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 它防的是什么（MEASURED，2026-10-14 队长复核）──────────────────────────────
+ *
+ * 台账 `.agent-teams/frictions/` 按**捕获点**拆开：
+ *
+ *     `dispatch`    67 条 · 最后一次 **2026-10-09**
+ *     `completion`  53 条 · 最后一次 2026-10-10
+ *     `contract`     9 条 · 2026-10-14（唯一还活着）
+ *
+ * 而根因是一个**可定位的提交**：
+ *
+ *     d231f74 fix(t39): move the dispatch evaluation to where dispatch actually happens
+ *
+ * 它把 dispatch 的求值从 `update_task` 搬到 `create_task`（★ 搬动本身是**对的** ——
+ * `update_task` 的四个状态里没有一个是"派发"）。而它**没有把记账一起搬走**：
+ *
+ *     删除的 `recordFriction` 调用：**2 处**（`point: 'dispatch'`）
+ *     新增的 `recordFriction` 调用：**0 处**
+ *
+ * ★★ 而它**没有任何东西报错**：判据照常拒绝、日志照常有、`throwWithSurface`
+ *   照常带结论 —— 唯一消失的是**台账那一格**，而它是"事后补不上"的那一份材料
+ *   （f-0014：记录必须在卡点发生时做）。⇒ 形态与 t39 拆 `tools.ts` 时把 t41 的
+ *   接线搬回旧版**同族**：**一次纯搬运，少搬了「改动的可见面」。**
+ *
+ * ── 为什么必须配一条【真的会红】的臂 ────────────────────────────────────────────
+ *
+ * `completion` / `contract` 两处**各自有臂**（臂 1/2/4 与臂 3），而 `dispatch` 这一格
+ * **没有** —— 全仓没有任何一条断言要求「**拒绝 ⇒ 台账 +1**」。
+ * ⇒ 于是同一件事可以第三次发生。三条臂各钉一半：
+ *
+ *     臂 9  —— 「dispatch 判据拒绝 ⇒ 台账 +1」（**守门臂**，本段的核心）
+ *     臂 10 —— 它的**反向实测**（去掉新加的记账 ⇒ 臂 9 必须红）
+ *     臂 11 —— best-effort 那半边（写盘失败 ⇒ 拒绝一字不变，且"记不下"要出声）
+ *
+ * ── ★★ 本段三条臂**读的是可达的那一半**，而不可达的那一半如实写在这里 ──────────────
+ *
+ * 契约要求"四类不许被记"。实测（臂 9 第 ④ 节自己的断言给出读数）在 `create_task`
+ * 这一条路径上：
+ *
+ *   ① `dispatchNotChecked` 放行支  ⇒ ★ **不可达**。两个成因各自被挡住：
+ *        · `skippedAll`（一条判据都没跑）：dispatch 位注册的三条里，`changed-paths`
+ *          与 `worktree` 的 `appliesTo` 都要 `update.changedPaths` 非空，而
+ *          `create_task` 传的是 `changedPaths: undefined`（见 `wireDispatch` 调用点）
+ *          ⇒ 它们**恒** skipped；而 `plan-reviewed` 对新任务恒 `appliesTo`
+ *          （`createdAt` 由工具自己写、恒晚于那道门上线时刻）⇒ 不可能"一条都没跑"。
+ *        · `unmeasured`（跑了而测不成）：`plan-reviewed` 唯一的 unmeasured 支是
+ *          "戳在场而形状坏"，而**输入 schema 先把那些形状挡掉了**
+ *          （臂 9 第 ④ 节逐条实测：空 `id` / 空 `verdict` 都在 schema 边界就被拒）。
+ *   ② `inputSurface.incomplete > 0` 告警支 ⇒ ★ 在本路径上与**真拒绝同时发生**
+ *      （`plan-reviewed` 只声明 `task.reviewed` 一格：它缺 ⇒ 既 incomplete、又 blocked）。
+ *      ⇒ 臂 9 钉住的是它**能**钉的那一半：那一次调用**只多一条**记录
+ *      （若有人把记录搬进告警支，就会多出第二条 ⇒ 当场红）。
+ *
+ * ★ 所以本段的措辞是"**这两类在本路径上不可达 / 不可分**"，而不是"本臂覆盖了它们"。
+ *   把不可达说成已覆盖，正是本队记账里最贵的那个形状（把"没测到"读成"测过了"）。
+ */
+
+/**
+ * 建一个团队（走**真工具**），返回一个 `call(name, args)`。
+ *
+ * ★ 落点在这个夹具**自己的** `stateRoot` 里 —— 与臂 1 同一条纪律（不许用进程级单值）。
+ */
+async function dispatchTeam(f) {
+  const captain = {
+    id: 'cap', status: 'working', steer() {},
+    session: {
+      header: { cwd: f.workspace, id: 'sess-cap' },
+      events: [],
+      ownEvents() { return [] },
+      requestHeader() { return { config: { provider: 'p', model: 'm' } } },
+    },
+  }
+  const call = (name, args) => f.tools.get(name).execute(args, { agent: captain, signal: new AbortController().signal })
+  await call('agent_teams_create', { name: 'team', description: 'dispatch friction fixture', approval: 'automatic' })
+  await call('agent_teams_add_member', { name: 'worker', role: 'engineer' })
+  return call
+}
+
+/** 这个夹具的团队 id（**从盘上读**，不猜工具怎么生成它）。 */
+function teamIdOf(stateRoot) {
+  const dir = readdirSync(stateRoot).find((name) => existsSync(join(stateRoot, name, 'team.json')))
+  return JSON.parse(readFileSync(join(stateRoot, dir, 'team.json'), 'utf8')).id
+}
+
+/** 一次 `create_task`：返回错误原文，或被放行时返回 `undefined`。 */
+function createTaskVia(call, args) {
+  return call('agent_teams_create_task', args).then(
+    () => undefined,
+    (error) => String(error.message),
+  )
+}
+
+test('★★★ 臂 9（★ 守门臂）：dispatch 判据拒绝 ⇒ 台账 +1；放行 / 契约拒绝 / 其它异常一律不记', async () => {
+  const f = fixture()
+  const call = await dispatchTeam(f)
+  const teamId = teamIdOf(f.stateRoot)
+  /** 本臂的触发：一条**没审过**的计划（`plan-reviewed` 真的拒绝它）。 */
+  const base = {
+    description: 'a task whose plan has not been reviewed',
+    kind: 'work',
+    assignee: 'worker',
+    objective: 'o',
+    acceptance: ['x'],
+    verify: ['node --test scripts/suite.test.mjs'],
+  }
+  const ledger = () => frictionRecords(f.stateRoot)
+  /** 主树那份**真台账**的条数 —— 本臂的反向半边（污染检查）。 */
+  const mainLedger = join(process.cwd(), '.agent-teams', 'frictions')
+  const mainCount = () => existsSync(mainLedger)
+    ? readdirSync(mainLedger).filter((name) => /^f-\d+\.json$/.test(name)).length
+    : 0
+  const mainBefore = mainCount()
+
+  /**
+   * ── ① 放行半边（对照）：**审过了**的计划 ⇒ 建得出来，且台账**一条都不多** ──────────
+   *
+   * ★ 这一半与下面那一半**缺一不可**：只喂"该被拒"的输入的臂**测不出**
+   *   "一律记一条"（`PENDING-FRICTION-REFORM.md` §6 经验 B）。
+   */
+  const passed = await createTaskVia(call, { ...base, subject: 'passed', reviewed: reviewedStamp() })
+  assert.equal(
+    passed, undefined,
+    `★ 前置：审过了的计划必须真的被放行（否则本臂的对照半边测的是别的东西）。实测：${String(passed).slice(0, 200)}`,
+  )
+  await settle()
+  assert.equal(
+    ledger().length, 0,
+    '★ 放行 ⇒ 一条都不记 —— "没有卡点"与"记不下"必须不同形（否则台账里全是噪音，'
+    + `而噪音会教人忽略它）。实测：${JSON.stringify(ledger().map((r) => r.auto))}`,
+  )
+
+  /**
+   * ── ② 拒绝半边（**本臂的靶子**）：dispatch 判据真的拒绝 ⇒ 台账 +1 ─────────────────
+   */
+  const rejected = await createTaskVia(call, { ...base, subject: 'blocked' })
+  assert.match(
+    String(rejected), /^create_task rejected: /,
+    `★ 前置：这条调用必须是一条**真拒绝**。实测：${String(rejected).slice(0, 200)}`,
+  )
+  assert.match(
+    String(rejected), /\[dispatch\.plan-reviewed\]/,
+    `★ 而拒绝它的必须是 dispatch 位那条判据（本臂的触发就是它）。实测：${String(rejected).slice(0, 200)}`,
+  )
+  await settle()
+
+  const afterReject = ledger()
+  assert.equal(
+    afterReject.length, 1,
+    '★★★ 本臂的靶子：**dispatch 判据拒绝 ⇒ 台账 +1**。'
+    + ' 这一条此前【全仓没有任何断言】（completion / contract 两处各自有臂，dispatch 这一格没有）'
+    + ' ⇒ 于是 d231f74「搬走求值没搬走记账」静默了 5 天。'
+    + ` 实测条数：${afterReject.length}`,
+  )
+  const [record] = afterReject
+
+  /** ── ③ 记录的**身份**：`auto.point` / `auto.tool` / 判据 id / 团队 ──────────────── */
+  assert.equal(
+    record.auto?.point, 'dispatch',
+    `★★ 契约要求：台账记录的 auto.point 必须是 'dispatch'。实测：${JSON.stringify(record.auto)}`,
+  )
+  assert.equal(
+    record.auto?.tool, 'create_task',
+    `★★ 契约要求：auto.tool 必须是 'create_task'（与契约位那条**同一个工具名**）。实测：${JSON.stringify(record.auto)}`,
+  )
+  assert.equal(
+    record.auto?.gate, 'dispatch.plan-reviewed',
+    `★ 判据 id 必须读得出来（它是"这条是谁拒的"的唯一可机读归因）。实测：${JSON.stringify(record.auto)}`,
+  )
+  assert.equal(
+    record.index?.component, 'dispatch',
+    `★ 记录自报的捕获点也必须是 dispatch。实测：${JSON.stringify(record.index)}`,
+  )
+  assert.equal(
+    record.scene?.team, teamId,
+    `★ 记录必须属于**这个夹具自己的**团队（本臂的 stateRoot 在临时目录里）。实测：${record.scene?.team}`,
+  )
+  assert.ok(
+    String(record.title).includes('create_task rejected: '),
+    `★ 标题必须是那条拒绝的原文（带 [rejection — not a blocker] 前缀）—— 台账与人读的那一份同源。实测：${String(record.title).slice(0, 160)}`,
+  )
+  assert.notEqual(
+    record.observed?.mechanismState, null,
+    '★ 判据当时的完整裁决必须随记录落地（否则事后读这条拒绝只能看到"被拒了"）。',
+  )
+
+  /**
+   * ── ④ 四类**不许被记**（本路径上可达的那几类，逐条实测）─────────────────────────
+   *
+   * 不可达的两类（`dispatchNotChecked` 放行支 / `incomplete > 0` 单独出现）写在段头，
+   * 这里钉住**能**钉的：
+   */
+  /** (a) 契约校验类拒绝：它走 `rejectOnContractGates`，**已经**记 contract 点。 */
+  const contractRejected = await createTaskVia(call, {
+    ...base,
+    subject: 'contract',
+    verify: ['grep -qx 7 <(wc -l < a.ts)'],
+  })
+  assert.match(
+    String(contractRejected), /^create_task rejected: \[contract\.verify-command\]/,
+    `★ 前置：本节的触发必须是**契约位**那条拒绝。实测：${String(contractRejected).slice(0, 200)}`,
+  )
+  await settle()
+
+  /** (b) 工具抛的其他异常：schema 边界 / 契约校验 / 找不到成员 —— 一条都不许记。 */
+  const toolErrors = [
+    ['schema：缺 subject', { ...base, subject: undefined }],
+    ['schema：acceptance 不是数组', { ...base, subject: 'e2', acceptance: 'x' }],
+    ['schema：reviewed.checks[0].id 是空串', { ...base, subject: 'e3', reviewed: { at: 1, by: 'x', checks: [{ id: '', verdict: 'pass' }] } }],
+    ['schema：reviewed.checks[0].verdict 是空串', { ...base, subject: 'e4', reviewed: { at: 1, by: 'x', checks: [{ id: 'scope', verdict: '' }] } }],
+    ['契约校验：implementation 缺 inScope', { ...base, subject: 'e5', kind: 'implementation' }],
+    ['找不到成员', { ...base, subject: 'e6', assignee: 'nobody' }],
+  ]
+  const thrown = []
+  for (const [label, args] of toolErrors) {
+    const message = await createTaskVia(call, args)
+    assert.notEqual(message, undefined, `★ 前置：「${label}」必须真的抛出来（否则它测的是一次成功调用）`)
+    thrown.push(`${label} ⇒ ${String(message).slice(0, 90)}`)
+  }
+  await settle()
+
+  const afterExclusions = ledger()
+  const dispatchRecords = afterExclusions.filter((item) => item.auto?.point === 'dispatch')
+  const contractRecords = afterExclusions.filter((item) => item.auto?.point === 'contract')
+  assert.equal(
+    dispatchRecords.length, 1,
+    '★★★ 四类**不许被记**：契约校验类拒绝（已记 `contract` 点）与工具抛的其他异常都不许再记一条 dispatch。'
+    + ` 实测：dispatch 点 ${dispatchRecords.length} 条 · contract 点 ${contractRecords.length} 条。`
+    + `\n  逐条抛出来的原文：\n  · ${thrown.join('\n  · ')}`,
+  )
+  assert.equal(
+    contractRecords.length, 1,
+    '★ 而契约位那条**照旧**记它自己的点（本任务没有动 completion / contract 两处的记账）——'
+    + ` 实测 ${contractRecords.length} 条。`,
+  )
+
+  /**
+   * ── ⑥ 反向半边：主树那份**真台账**不许因这次夹具而多东西 ─────────────────────────
+   *
+   * ★ 与臂 1 同一条纪律（`entities.ts` 记着上一版把夹具假卡点写进真台账的事故）。
+   */
+  assert.equal(
+    mainCount(), mainBefore,
+    '★ 夹具调用不得往【主树那份团队真台账】里加东西 —— 那是不可重算的记录，'
+    + `污染之后与真卡点同形。实测 ${mainBefore} ⇒ ${mainCount()}`,
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 11（★ best-effort 臂）：台账写不下去 ⇒ 拒绝**一字不变**，而"记不下"要出声
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★ 臂 11（best-effort 臂）：台账写盘失败不许改变拒绝本身（措辞一字不变），且要留下一条 warn', async () => {
+  /**
+   * ── 契约原话（第二个半边）──────────────────────────────────────────────────────
+   *
+   * 「`recordFriction` 是 best-effort：**写盘失败不许改变拒绝本身**（拒绝措辞一字不变）」
+   *
+   * ★ 做法：把 `frictions` 从**目录**换成一个**文件** ⇒ `recordFriction` 里那句
+   *   `mkdir(frictionDir, { recursive: true })` 必然失败（`EEXIST` / `ENOTDIR`）
+   *   ⇒ 它 catch 住、返回 `undefined`（**记不下 ≠ 没有卡点**）。
+   *
+   * ── ★★ 为什么这条臂必须【两样都读】────────────────────────────────────────────
+   *
+   *   ① 拒绝措辞与"台账正常时"**逐字相同** —— 这一条证明记录**不改裁决**；
+   *   ② 那句 "could not record the friction at the dispatch gate" 的 warn **真的出现**
+   *      —— 缺 ② 的话，「写盘没失败」与「失败了而没人说」在读数上**同形**
+   *      （本队记账里最久的那条：**"没有"与"没能读出来"必须不同形**）。
+   *
+   * ★ 而"措辞一字不变"这条断言必须有**对照读数**（两次调用的原文），不能只断言
+   *   "它 throw 了" —— 一个"写台账失败就换一句话拒绝"的实现也满足后者。
+   */
+  const f = fixture()
+  const call = await dispatchTeam(f)
+  const base = {
+    description: 'a task whose plan has not been reviewed',
+    kind: 'work',
+    assignee: 'worker',
+    objective: 'o',
+    acceptance: ['x'],
+    verify: ['node --test scripts/suite.test.mjs'],
+  }
+
+  /** ① 台账**正常**时的拒绝原文 —— 这是下面要比对的对照读数。 */
+  const healthy = await createTaskVia(call, { ...base, subject: 'healthy' })
+  assert.match(
+    String(healthy), /^create_task rejected: \[dispatch\.plan-reviewed\]/,
+    `★ 前置：对照那一次必须是一条**真拒绝**（否则比的是两次别的什么）。实测：${String(healthy).slice(0, 200)}`,
+  )
+  await settle()
+  assert.equal(
+    frictionRecords(f.stateRoot).length, 1,
+    '★ 前置：台账正常时，这条拒绝必须真的记下了一条（否则下面那半测的是"它从来就不记"）。',
+  )
+
+  /** ② 把台账落点弄坏：`frictions` 从目录换成文件。 */
+  rmSync(join(f.stateRoot, 'frictions'), { recursive: true, force: true })
+  writeFileSync(join(f.stateRoot, 'frictions'), 'not a directory\n')
+  const warningsBefore = f.warnings.length
+
+  const broken = await createTaskVia(call, { ...base, subject: 'broken' })
+  await settle()
+
+  assert.equal(
+    broken, healthy,
+    '★★ best-effort：台账写不下去时，拒绝措辞必须**一字不变** —— 记录是旁路动作，'
+    + ' 它不许把一次判据拒绝变成另一次拒绝（也不许把它变成成功）。'
+    + `\n  台账正常时：${String(healthy).slice(0, 400)}\n  台账坏掉时：${String(broken).slice(0, 400)}`,
+  )
+  assert.ok(
+    f.warnings.slice(warningsBefore).some((line) => line.includes('could not record the friction at the dispatch gate')),
+    '★ 而"记不下"必须**说出来**（一条 warn）—— 否则「写盘没失败」与「失败了而没人说」同形。'
+    + ` 实测新增的 warn：${JSON.stringify(f.warnings.slice(warningsBefore))}`,
+  )
+  assert.equal(
+    readFileSync(join(f.stateRoot, 'frictions'), 'utf8'), 'not a directory\n',
+    '★ 而它确实没有写成功（那个占位的文件还在，没被换成目录）。',
+  )
+  assert.equal(
+    statSync(join(f.stateRoot, 'frictions')).isDirectory(), false,
+    '★ 台账落点仍然**不是**一个目录 ⇒ 这一轮一条都没落盘（"记不下"与"没有卡点"'
+    + ' 在文件系统上同形 —— 这正是为什么它必须留一条 warn 才能分辨）。',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 10（★★★ 定向突变臂）：把新加的记账去掉 ⇒ 臂 9 必须红
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 10（★ 定向突变臂）：去掉新加的那处记账 ⇒ 那条守门臂必须红（逐条实测）', async () => {
+  /**
+   * ── 为什么要有这一条（契约的第二个验收）─────────────────────────────────────────
+   *
+   * 「★ 新臂真的会红：把新加的 `recordFriction` 注释掉，这条臂必须失败（反向实测）」
+   *
+   * ★ 而"我声称它会长红"是一个**关于动作的猜想**（`PENDING-FRICTION-REFORM.md` §6 经验 F：
+   *   「动作发生了」与「事实建立了」不同形，只有后者可测）。
+   * ⇒ 所以这里不猜：**当场施加突变、当场跑、当场读回**臂 9 的裁决。
+   *
+   * ── 它怎么做（不碰 `src/`，也不碰盘上的 `lib/`）────────────────────────────────
+   *
+   * 与臂 8 同一套做法：在**临时目录**里造一份 `lib/` 的真副本，只改 `create_task`
+   * 的产物那一格，然后**在子进程里**跑臂 9。
+   *
+   * ★★ 突变的形态：把 `void recordFriction({ … })` 的**被调函数**换成一个空实现
+   *   （`(async () => undefined)`）—— 这与"把那一句注释掉"**行为等价**
+   *   （调用点在、而不记账），且它让这个突变体仍然是**一棵可加载的树**
+   *   （注释掉整段多行表达式需要自己配对括号，那会让突变本身变成一个手写解析器）。
+   */
+  const libRoot = fileURLToPath(new URL('../lib', import.meta.url))
+  const target = join(libRoot, 'tools', 'create-task.js')
+  const source = readFileSync(target, 'utf8')
+  const callExpr = 'void recordFriction({'
+  assert.ok(
+    source.includes(callExpr),
+    '★ 突变臂前置：要在**产物**里找到新加的那处记账（找不到就不能声称"施加了突变"）',
+  )
+  assert.equal(
+    source.split(callExpr).length - 1, 1,
+    '★ 突变臂前置：`create_task` 的产物里这条记账必须**只有一处**（多一处说明定位不准，'
+    + '那样"臂红了"就不能归因于那一处）',
+  )
+  const mutated = source.replace(callExpr, 'void (async () => undefined)({')
+  assert.notEqual(mutated, source, '★ 突变臂前置：突变体必须与原文不同')
+
+  const dir = mkdtempSync(join(tmpdir(), 'friction-dispatch-mutant-'))
+  try {
+    const mutantLib = join(dir, 'lib')
+    cpSync(libRoot, mutantLib, { recursive: true })
+    const mutantScripts = join(dir, 'scripts')
+    mkdirSync(join(mutantScripts, 'fixtures'), { recursive: true })
+    writeFileSync(
+      join(mutantScripts, 'gate-friction-capture.test.mjs'),
+      readFileSync(new URL('gate-friction-capture.test.mjs', import.meta.url), 'utf8'),
+      'utf8',
+    )
+    cpSync(
+      join(fileURLToPath(new URL('../scripts', import.meta.url)), 'fixtures'),
+      join(mutantScripts, 'fixtures'),
+      { recursive: true },
+    )
+    /** ★ `src/` 里的 JSON 表是夹具相对仓库根读的（与臂 8 同一个理由）。 */
+    cpSync(fileURLToPath(new URL('../src', import.meta.url)), join(dir, 'src'), { recursive: true })
+    /**
+     * ★ `node_modules` 只放**一条软链**：副本树在系统临时目录里，Node 逐级向上
+     *   永远走不到本仓的 `node_modules` ⇒ 不加它，子进程根本起不来。
+     *   （为什么软链这一格是安全的、而软链 `lib/` 里的每个文件**不**安全，
+     *     见臂 8 那段实测：`lib/` 必须是**真文件**，否则被加载的不是被突变的那一份。）
+     */
+    symlinkSync(fileURLToPath(new URL('../node_modules', import.meta.url)), join(dir, 'node_modules'))
+
+    /**
+     * ★ 只跑**臂 9**（`--test-name-pattern`）：本臂要读的是**那一条**的裁决，
+     *   不是整份文件的（整份里别的臂是绿的，那会盖住这个读数）。
+     *   ★ 模式里带上"守门臂"三个字，是为了不误伤本臂自己的名字（它提到"那条守门臂"）。
+     */
+    const run = () => {
+      const result = spawnSync(
+        'node',
+        ['--test', '--test-reporter=tap', '--test-name-pattern=臂 9（★ 守门臂）', 'scripts/gate-friction-capture.test.mjs'],
+        { cwd: dir, encoding: 'utf8', env: recursionFreeEnv(process.env), maxBuffer: 32 * 1024 * 1024 },
+      )
+      return {
+        code: typeof result.status === 'number' ? result.status : -1,
+        out: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
+      }
+    }
+
+    /** ── 读数 ①（对照）：**未突变**的副本树上，臂 9 必须是绿的 ──────────────────── */
+    writeFileSync(join(mutantLib, 'tools', 'create-task.js'), source, 'utf8')
+    const control = run()
+    assert.match(
+      control.out, /臂 9（★ 守门臂）/,
+      '★ 突变臂前置：子进程必须**真的跑到**臂 9（模式没匹配上会让"没跑"与"跑绿了"同形）。'
+      + ` 实测输出尾部：\n${control.out.slice(-1200)}`,
+    )
+    assert.equal(
+      control.code, 0,
+      '★ 突变臂前置：**未突变**的副本树上臂 9 必须是绿的 —— 否则本臂分不清"突变造成的红"'
+      + ` 与"副本树本来就是坏的"。实测输出尾部：\n${control.out.slice(-2000)}`,
+    )
+
+    /** ── 读数 ②（交付读数）：施加突变 ⇒ 臂 9 **必须**红 ─────────────────────────── */
+    writeFileSync(join(mutantLib, 'tools', 'create-task.js'), mutated, 'utf8')
+    const mutant = run()
+    assert.notEqual(
+      mutant.code, 0,
+      '★★★ 交付读数：把新加的那处记账去掉之后，臂 9 **必须失败** —— 若它照样绿，'
+      + ' 说明臂 9 对"记账没了"这件事**没有分辨力**（那正是 d231f74 能静默 5 天的原因）。'
+      + ` 实测 exit=${mutant.code}\n${mutant.out.slice(-2000)}`,
+    )
+    assert.match(
+      mutant.out, /台账|dispatch 判据拒绝/,
+      '★★ 而突变造成的红必须落在**关于台账的那些断言**上，而不是一个加载期崩溃'
+      + ' （后者也会让 exit≠0 ⇒ 两者在退出码上同形）。'
+      + ` 实测输出尾部：\n${mutant.out.slice(-2000)}`,
+    )
+    assert.doesNotMatch(
+      mutant.out, /ERR_MODULE_NOT_FOUND|SyntaxError|Cannot find package/,
+      '★★ 反向半边：这个红**不许**是副本树自身的坏法（加载失败 / 找不到包）——'
+      + ` 那与"突变被逮住"不同形。实测输出尾部：\n${mutant.out.slice(-1500)}`,
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
