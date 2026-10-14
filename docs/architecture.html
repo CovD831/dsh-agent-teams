@@ -1,0 +1,1225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dsh-agent-teams fork · 逐层模块清单与判据管线</title>
+<style>
+/* ── 全部样式内联，无外网依赖（无 http(s):// 的 css/js 引用，无网络字体）── */
+:root{
+  --bg:#f7f8fa; --panel:#ffffff; --ink:#0f172a; --ink2:#475569; --ink3:#64748b;
+  --line:#d8dee9; --line2:#eef1f6;
+  --blue:#1d4ed8; --blue-bg:#e8efff; --blue-br:#b9caf7;
+  --green:#15803d; --green-bg:#e7f6ec;
+  --red:#b91c1c; --red-bg:#fdeaea;
+  --amber:#b45309; --amber-bg:#fef4e2;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.72 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+}
+.wrap{max-width:1240px;margin:0 auto;padding:32px 22px 80px}
+header.top{border-bottom:2px solid var(--ink);padding-bottom:18px;margin-bottom:8px}
+h1{font-size:29px;line-height:1.3;margin:0 0 10px;letter-spacing:-.01em}
+.subtitle{color:var(--ink2);font-size:14.5px}
+.subtitle code{font-size:13px}
+h2{font-size:21px;margin:44px 0 6px;padding-top:16px;border-top:1px solid var(--line)}
+h3{font-size:16.5px;margin:26px 0 6px}
+h4{font-size:14.5px;margin:18px 0 4px;color:var(--ink2)}
+p{margin:9px 0}
+code{font-family:var(--mono);font-size:12.8px;background:var(--line2);padding:1.5px 5px;border-radius:4px;color:#1e293b}
+pre{font-family:var(--mono);font-size:12.6px;line-height:1.62;background:#0f172a;color:#e2e8f0;
+    padding:14px 16px;border-radius:8px;overflow-x:auto;margin:12px 0}
+pre code{background:none;padding:0;color:inherit;font-size:inherit}
+table{border-collapse:collapse;width:100%;margin:13px 0;font-size:13.4px;background:var(--panel)}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:#eef2f8;font-weight:700;font-size:12.9px}
+td code{font-size:11.9px;background:#f3f5f9}
+tbody tr:nth-child(even){background:#fbfcfe}
+.num{text-align:right;font-family:var(--mono);font-size:12.6px}
+.tag{display:inline-block;font-size:11.4px;font-weight:700;padding:1px 7px;border-radius:99px;vertical-align:1px;white-space:nowrap}
+.t-zero{background:var(--green-bg);color:var(--green);border:1px solid #b7e0c4}
+.t-mod{background:var(--amber-bg);color:var(--amber);border:1px solid #eccb93}
+.t-big{background:var(--red-bg);color:var(--red);border:1px solid #efb5b5}
+.t-blue{background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-br)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px 18px;margin:14px 0}
+.callout{border-left:4px solid var(--blue);background:var(--blue-bg);padding:11px 15px;border-radius:0 7px 7px 0;margin:14px 0;font-size:13.8px}
+.warn{border-left:4px solid var(--red);background:var(--red-bg);padding:11px 15px;border-radius:0 7px 7px 0;margin:14px 0;font-size:13.8px}
+.amber{border-left:4px solid var(--amber);background:var(--amber-bg);padding:11px 15px;border-radius:0 7px 7px 0;margin:14px 0;font-size:13.8px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+.svgbox{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px;margin:14px 0;overflow-x:auto}
+.svgbox svg{display:block;max-width:100%;height:auto}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;margin:8px 0 2px;color:var(--ink2)}
+.legend i{display:inline-block;width:14px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+ul,ol{margin:8px 0;padding-left:23px}
+li{margin:4px 0}
+.toc{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 18px;margin:16px 0;font-size:13.6px;columns:2}
+@media(max-width:700px){.toc{columns:1}}
+.toc a{color:var(--blue);text-decoration:none;display:block;padding:2px 0}
+.toc a:hover{text-decoration:underline}
+.stale{background:#fff4f4;border:1px solid #efb5b5;border-radius:6px;padding:2px 7px;font-size:12.4px;color:var(--red);font-weight:700}
+footer{margin-top:52px;padding-top:18px;border-top:1px solid var(--line);color:var(--ink3);font-size:12.7px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>dsh-agent-teams fork · 逐层模块清单与判据管线</h1>
+  <p class="subtitle">
+    仓库 <code>/Users/abab/Desktop/agent-teams-dev</code> ｜ HEAD <code>b8f357e</code> ｜
+    上游 <code>NanmiCoder/dsh-agent-teams</code>（<code>upstream/main</code> <code>1094b84</code>）｜
+    merge-base <code>98aac03</code><br>
+    <strong>判据来源</strong>：本页每条「加了什么」「判据何时开火」都指到 <code>文件:行</code> 或 commit，可用 <code>git show</code> / 读源码回源核对。
+    配套文件：<code>docs/LAYER-INVENTORY.md</code>（逐层清单全文）、<code>docs/architecture-pipeline.svg</code>（管线图矢量原件）。
+  </p>
+  <div class="callout">
+    <strong>一句话</strong>：上游负责「跑」，这个 fork 负责「判」。上游把全部判据摊在一个 <strong>1233 行</strong>的文件里
+    （<code>src/quality-gates.ts</code>，fork 基线 <code>54eddb4</code> 实测 1233 行 / <strong>52</strong> 个 <code>export</code>），
+    加一条判据就要改它 ⇒ 每次同步上游必冲突。fork 的解法：<strong>把判据挪出来，变成「注册表 + 六个插入点」</strong>，
+    编排层只认插入点、不认识判据的名字与语义。
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#s1">1 · 模块规模读数表（上游 vs fork）</a>
+  <a href="#s2">2 · 逐层清单（L0–L14）</a>
+  <a href="#s3">3 · 判据管线图</a>
+  <a href="#s4">4 · 17 条判据与它们的闸门</a>
+  <a href="#s5">5 · 数据流说明</a>
+  <a href="#s6">6 · 对上游的侵入点全景</a>
+  <a href="#s7">7 · 文档核对：哪些已过期</a>
+  <a href="#s8">8 · 现状读数与复现命令</a>
+</nav>
+
+<!-- ═══════════ 1 ═══════════ -->
+<h2 id="s1">1 · 模块规模读数表（上游 vs fork）</h2>
+
+<p>全部为实跑读数，命令写在第 8 节。</p>
+
+<table>
+<thead><tr><th>读数</th><th class="num">上游 <code>upstream/main</code></th><th class="num">fork <code>HEAD</code></th><th>命令</th></tr></thead>
+<tbody>
+<tr><td><code>src/</code> 总行数</td><td class="num">18,793</td><td class="num"><strong>47,310</strong></td><td><code>find src -name '*.ts' -o -name '*.tsx' | xargs wc -l | tail -1</code></td></tr>
+<tr><td><code>src/</code> 文件数</td><td class="num">40</td><td class="num"><strong>95</strong></td><td><code>git ls-tree -r --name-only &lt;ref&gt; -- src/ | wc -l</code></td></tr>
+<tr><td><code>src/gates/</code></td><td class="num">不存在</td><td class="num"><strong>11,964</strong></td><td><code>find src/gates -type f | xargs wc -l | tail -1</code></td></tr>
+<tr><td><code>src/tools/</code></td><td class="num">不存在</td><td class="num"><strong>11,325</strong></td><td>同上（上游工具全在 <code>src/tools.ts</code>）</td></tr>
+<tr><td><code>src/client/</code></td><td class="num">6,810</td><td class="num"><strong>9,666</strong></td><td>同上（<strong>含 CSS</strong>；★ 口径对称：仅 .ts/.tsx 则 上游 <strong>4,381</strong> / fork <strong>6,735</strong>）</td></tr>
+<tr><td><code>src/quality-gates.ts</code></td><td class="num">2,109</td><td class="num">2,520</td><td><code>wc -l</code></td></tr>
+<tr><td>判据数量</td><td class="num">0</td><td class="num"><strong>17</strong></td><td><code>grep -rn "^export const id = '" src/gates/*/*.ts | wc -l</code></td></tr>
+<tr><td>判据夹具</td><td class="num">0</td><td class="num">88</td><td><code>ls scripts/gate-*.test.mjs | wc -l</code></td></tr>
+<tr><td>commit 数（merge-base 之后）</td><td class="num">—</td><td class="num">258</td><td><code>git log --oneline upstream/main..HEAD | wc -l</code></td></tr>
+</tbody>
+</table>
+
+<div class="amber">
+  <strong>★ 一个反直觉的读数</strong>：<code>src/quality-gates.ts</code> <strong>至今仍在</strong>，而且<strong>变大了</strong>（2,109 → 2,520）。
+  它没有被删掉 —— 它从「判据的所在地」变成了「<strong>纯谓词与校验器的所在地</strong>」，判据自身搬到了 <code>src/gates/</code>。
+  证据：<code>src/gates/delivery/coverage.ts:39</code> 逐字写着「不 import 任何 I/O（连 <code>quality-gates.ts</code> 也不 import）」，
+  而 <code>src/gates/dispatch/changed-paths.ts:46</code> 只从它 import 一个纯函数 <code>normalizeWorkspacePath</code>。
+  <br>⇒ 这是<strong>「抽出来」不是「重写」</strong>：概念（<code>inScopeOverlap</code>、<code>classifyChangedPath</code> 等）留在原处，<strong>裁决权</strong>搬走了。
+</div>
+
+<h3>模块规模明细（fork HEAD）</h3>
+<table>
+<thead><tr><th>模块</th><th class="num">行数</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td><code>src/gates/</code> 合计</td><td class="num">11,964</td><td>= <strong>24</strong> 个文件：17 条判据 + <code>registry.ts</code>(1012) + <code>requires.ts</code>(859) + <code>index.ts</code>(554) + <code>budget-stop.ts</code> + <code>kind-requirements.{ts,json}</code> + <code>verify-command-rules.json</code>（= 24）。<br>口径：<code>find src/gates -type f | wc -l</code> ⇒ 24（含非 .ts 资源；仅 .ts 则 22，另有 2 个 .json）</td></tr>
+<tr><td><code>src/tools/</code> 合计</td><td class="num">11,325</td><td>18 个文件，最大 <code>shared/entities.ts</code> 4,691、<code>update-task.ts</code> 2,066</td></tr>
+<tr><td><code>src/client/</code> 合计</td><td class="num">9,666</td><td>含 13 个 fork 新增文件（1,988 行）。<br>口径：<code>find src/client -type f | xargs wc -l | tail -1</code> ⇒ 9,666（<strong>含 CSS</strong>）；仅 .ts/.tsx 则 <strong>6,735</strong>（<code>find src/client -type f \( -name '*.ts' -o -name '*.tsx' \) | xargs wc -l | tail -1</code>）。文件数：<code>find src/client -type f | wc -l</code> ⇒ 31</td></tr>
+<tr><td><code>src/</code> 根目录 <code>*.ts</code></td><td class="num">17,385</td><td>含 <code>tools.ts</code>(2,227)、<code>quality-gates.ts</code>(2,520)、<code>mutation.ts</code>(1,705)、<code>worktree.ts</code>(1,296)、<code>scheduler.ts</code> 等</td></tr>
+</tbody>
+</table>
+
+<!-- ═══════════ 2 ═══════════ -->
+<h2 id="s2">2 · 逐层清单（L0–L14）</h2>
+
+<p>
+  <strong>分层方法</strong>：判据是「<strong>达成什么能力</strong>」，不是「在哪个目录」。
+  同一条能力经常横跨 <code>src/</code> 根目录 + <code>src/gates/</code> + <code>src/tools/</code>。
+  定层用 <code>git log --first-parent --reverse</code> 的时间顺序，加上「某个能力第一次出现时改了什么」。
+</p>
+
+<table>
+<thead><tr><th>层</th><th>加了什么模块</th><th>达成了什么功能</th><th>上游侵入点</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><strong>L0</strong><br>基线</td>
+  <td>—</td>
+  <td>fork 建立，版本 0.1.23、README 同步、lib 重建</td>
+  <td>—</td>
+  <td><code>54eddb4</code><br><span class="tag t-blue">10-05</span></td>
+</tr>
+<tr>
+  <td><strong>L1</strong><br>判据注册表化</td>
+  <td><code>src/gates/registry.ts</code>（1,012 行）<br><code>src/gates/index.ts</code>（554 行）</td>
+  <td>判据从「一个 1233 行文件里的平铺导出」变成「插入点 + 注册表」；编排层只调 <code>evaluate(point, ctx)</code>，不认识任何判据的名字或语义。<strong>这是本 fork 的由来。</strong></td>
+  <td><span class="tag t-zero">零</span> 新目录，上游不存在</td>
+  <td><code>d38de30</code><br><code>70c8c96</code><br><code>3b4f0a8</code></td>
+</tr>
+<tr>
+  <td><strong>L2</strong><br>判据本体</td>
+  <td>17 条判据（一条一个文件，见第 4 节）</td>
+  <td>把「成员的自报」换成「机械可证的观察」，分布到 6 个插入点</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>626c59d</code> <code>0657f65</code> <code>ebbacce</code><br><code>c396e71</code> <code>27e9613</code> <code>2370145</code><br><code>0b01104</code> <code>621e152</code> <code>ad7a3ed</code><br><code>485ec9e</code> <code>5520399</code> <code>5bc5b45</code></td>
+</tr>
+<tr>
+  <td><strong>L3</strong><br>输入面声明</td>
+  <td><code>src/gates/requires.ts</code>（859 行）</td>
+  <td>判据自己声明「我无条件读哪几格」；注册表按声明核对真实 ctx ⇒ 逼出「声明了但没接线」这类静默失效</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>f7bbf65</code> <code>a5d3dce</code><br><code>add7444</code> <code>2065e21</code></td>
+</tr>
+<tr>
+  <td><strong>L4</strong><br>补齐六个位置</td>
+  <td><code>gates/admission/{absorb,checkpoint,convene}.ts</code><br><code>gates/runtime/{liveness,stall}.ts</code><br><code>gates/contract/task-atomicity.ts</code><br><code>gates/dispatch/plan-reviewed.ts</code></td>
+  <td>六个位置<strong>全部接满</strong>；补上「成团之前」（admission）这个位置；runtime 用<strong>类型</strong>保证不拒绝任务</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>621e152</code> <code>ad7a3ed</code><br><code>485ec9e</code> <code>5520399</code><br><code>5bc5b45</code></td>
+</tr>
+<tr>
+  <td><strong>L5</strong><br>接线纪律</td>
+  <td>注册表的 <code>skippedAll</code> 分支<br>（<code>registry.ts:841</code> / <code>:898</code> / <code>:205</code>）</td>
+  <td><strong>「全跳过 ≠ 都通过」</strong>：三态（空位置 / 全跳过 / unmeasured）在返回值里可分</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>cd52b09</code> <code>6345750</code></td>
+</tr>
+<tr>
+  <td><strong>L6</strong><br>kind 需求表</td>
+  <td><code>gates/completion/kind-requirements.json</code><br><code>gates/completion/kind-requirements.ts</code></td>
+  <td>「哪些 kind 要哪几道完工门」从硬编码两个 kind 变成<strong>可审计的数据</strong>；改表不需重载插件</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>f8fc671</code> <span class="tag t-blue">10-08</span></td>
+</tr>
+<tr>
+  <td><strong>L7</strong><br>worktree 隔离</td>
+  <td><code>src/worktree.ts</code>（1,296 行，新增）</td>
+  <td>每任务一个 <strong>detached 检出</strong>；隔离是<strong>机制</strong>而非提示 —— 建不出就拒，降级要如实记录</td>
+  <td><span class="tag t-zero">零新增</span><br>但 <code>src/scheduler.ts</code> <strong>+738 / -46</strong>（two-dot）去调它</td>
+  <td><code>68ee2c8</code> <code>0657f65</code><br><code>5441b81</code> <code>ae6aa94</code></td>
+</tr>
+<tr>
+  <td><strong>L8</strong><br>变异测试</td>
+  <td><code>src/mutation.ts</code>（1,705 行）<br><code>src/mutation-guard.ts</code>（419 行）</td>
+  <td>L1/L2 机械变异 + L3 项目契约：测的是「<strong>测试有没有鉴别力</strong>」，不是「代码对不对」</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>c396e71</code> <span class="tag t-blue">10-05</span></td>
+</tr>
+<tr>
+  <td><strong>L9</strong><br>backtest 归因</td>
+  <td><code>gates/completion/backtest.ts</code>（869 行）</td>
+  <td>「基准必须先绿，否则无法归因」—— 一条关于代码的结论，不许由一次基础设施工况伪装出来</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>27e9613</code> <code>25e8f94</code><br><code>d334c0d</code></td>
+</tr>
+<tr>
+  <td><strong>L10</strong><br>工具面拆分</td>
+  <td><code>src/tools/*.ts</code>（16 个新文件）<br><code>src/tools/shared/entities.ts</code>（4,691）<br><code>src/tools/update-task/*.ts</code></td>
+  <td>16 个工具停止共用一个文件 ⇒ 判据的调用点落在<strong>正确的位置文件</strong>里（这是为了接线，不是洁癖）</td>
+  <td><span class="tag t-big">大宗</span><br><code>src/tools.ts</code> <strong>+1685 / -2335</strong>（two-dot）</td>
+  <td><code>9779c58</code> <span class="tag t-blue">10-07</span></td>
+</tr>
+<tr>
+  <td><strong>L11</strong><br>故障隔离</td>
+  <td><code>src/web-routes.ts</code>（+200/-0）</td>
+  <td>插件自己的缺陷<strong>只让自己降级</strong>，且「降级」<strong>可查询</strong>（三态 <code>healthy/degraded/not-mounted</code>）</td>
+  <td><span class="tag t-mod">+200/-0</span><br>上游此文件 98 行 → 200 行</td>
+  <td><code>64389b0</code> <code>f3924c0</code></td>
+</tr>
+<tr>
+  <td><strong>L12</strong><br>计划编排</td>
+  <td><code>src/tools/edit-plan.ts</code>（346 行）<br><code>gates/dispatch/plan-reviewed.ts</code><br><code>client/StagingPlanEditor.tsx</code></td>
+  <td>分段批准的计划编辑；<code>dispatch.plan-reviewed</code> 是「带 reviewed ⇒ 放行；不带 ⇒ 必须先审」这条路由在判据层的落点</td>
+  <td><span class="tag t-mod">+153/-1</span><br><code>StagingPlanEditor.tsx</code></td>
+  <td><code>2fe95cc</code> <code>5520399</code><br><code>ee6ed6d</code> <code>c3ca7ac</code></td>
+</tr>
+<tr>
+  <td><strong>L13</strong><br>UI 重构</td>
+  <td><code>src/client/</code> 13 个新文件（1,988 行）<br>含 <code>MemberRow</code> <code>MemberScreen</code> <code>MemberClock</code> <code>DependencyGraph</code> <code>ProgressSummary</code> <code>CaptainNode</code> <code>roster-settings</code> <code>SessionIdAction</code> <code>session-id-chip</code></td>
+  <td>成员屏 / 依赖图 / 名册与模型设置 / 会话 id 芯片 / 进度汇总 / 成员时钟</td>
+  <td><span class="tag t-mod">拆分</span><br><code>ActivityPanel.tsx</code> <strong>+94 / -530</strong>（two-dot，<strong>变小了</strong>）<br><code>ActivityPanel.module.css</code> <strong>+564 / -356</strong>（two-dot）</td>
+  <td><code>2386323</code> <code>fa023f6</code> <code>3ce3e76</code><br><code>b331ab7</code> <code>12d822b</code> <code>08db8dc</code></td>
+</tr>
+<tr>
+  <td><strong>L14</strong><br>硬化与计量</td>
+  <td><code>gates/budget-stop.ts</code><br><code>src/hmr-trace.ts</code>（292 行）<br><code>scripts/worktree-reclaim.mjs</code><br><code>scripts/restart-watchdog.sh</code></td>
+  <td>完工链墙钟预算（并接上一条<strong>此前是死的</strong>配额）、HMR 重载痕迹、worktree 自动回收、重启看门狗</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>887d98a</code> <code>f224b91</code><br><code>5441b81</code> <code>ae6aa94</code><br><code>46eb6bc</code></td>
+</tr>
+</tbody>
+</table>
+
+<div class="callout">
+  <strong>层序说明</strong>：L7/L8/L9 在<strong>日期上早于</strong> L3/L4/L5/L6 —— 前者是 10-05 那条冲刺线，后者是 10-06 之后补齐的。
+  上表按<strong>能力依赖</strong>排列（注册表先有，判据才挂得上），每层的真实引入日期在最后一列标出。
+</div>
+
+<!-- ═══════════ 3 ═══════════ -->
+<h2 id="s3">3 · 判据管线图</h2>
+
+<p>矢量原件在 <code>docs/architecture-pipeline.svg</code>（可直接用浏览器打开）。下图为其内联副本，内容一致：</p>
+
+<div class="legend">
+  <span><i style="background:#1d4ed8"></i>插入点（时间顺序）</span>
+  <span><i style="background:#e2e8f0;border:1px solid #94a3b8"></i>判据卡片</span>
+  <span><i style="background:#b45309"></i>runtime（横跨全过程，只记录不拒绝）</span>
+  <span><i style="background:#15803d"></i>ok</span>
+  <span><i style="background:#b91c1c"></i>blocked</span>
+  <span><i style="background:#b45309"></i>unmeasured</span>
+</div>
+
+<div class="svgbox">
+<!-- ═══ 内联 SVG（与 docs/architecture-pipeline.svg 同内容）═══ -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1680 1560" width="1680" height="1560"
+     font-family="'PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif">
+  <title>dsh-agent-teams fork：判据管线（六个插入点 · 17 条判据 · 三态裁决）</title>
+  <defs>
+    <marker id="harw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      .ttl{font-size:26px;font-weight:700;fill:#0f172a}
+      .sub{font-size:14px;fill:#475569}
+      .sec{font-size:17px;font-weight:700;fill:#0f172a}
+      .pt{font-size:16px;font-weight:700;fill:#ffffff}
+      .ptsub{font-size:11px;fill:#e2e8f0}
+      .gid{font-size:13px;font-weight:700;fill:#0f172a;font-family:ui-monospace,Menlo,monospace}
+      .gat{font-size:11px;fill:#334155;font-family:ui-monospace,Menlo,monospace}
+      .src{font-size:10px;fill:#64748b;font-family:ui-monospace,Menlo,monospace}
+      .box{font-size:12px;fill:#0f172a}
+      .cap{font-size:11px;fill:#475569}
+      .lg{font-size:12px;fill:#1e293b}
+    </style>
+  </defs>
+  <rect width="1680" height="1560" fill="#ffffff"/>
+  <text class="ttl" x="32" y="44">dsh-agent-teams fork · 判据管线全图</text>
+  <text class="sub" x="32" y="68">HEAD b8f357e ｜ 上游 NanmiCoder/dsh-agent-teams（upstream/main 1094b84）｜ 17 条判据 · 6 个插入点 ｜ 全部读数可用文中 文件:行 回源核对</text>
+  <line x1="32" y1="82" x2="1648" y2="82" stroke="#cbd5e1" stroke-width="1"/>
+
+  <rect x="32" y="94" width="1616" height="86" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text class="sec" x="48" y="118">图例</text>
+  <rect x="48" y="130" width="22" height="16" rx="3" fill="#1d4ed8"/>
+  <text class="lg" x="78" y="143">插入点（INSERTION_POINTS，时间顺序）</text>
+  <rect x="300" y="130" width="22" height="16" rx="3" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="lg" x="330" y="143">判据卡片（id + appliesTo 闸门 + 文件:行）</text>
+  <path d="M 660 138 L 700 138" stroke="#b45309" stroke-width="2.5" stroke-dasharray="7 4" marker-end="url(#harw)"/>
+  <text class="lg" x="710" y="143">runtime：横跨①②③④全过程（只记录，不拒绝）</text>
+  <path d="M 1030 138 L 1070 138" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+  <text class="lg" x="1080" y="143">控制流顺序（先求值，后决定）</text>
+  <rect x="48" y="154" width="22" height="16" rx="3" fill="#15803d"/>
+  <text class="lg" x="78" y="167">ok 通过</text>
+  <rect x="220" y="154" width="22" height="16" rx="3" fill="#b91c1c"/>
+  <text class="lg" x="250" y="167">blocked 发现问题（拒绝）</text>
+  <rect x="470" y="154" width="22" height="16" rx="3" fill="#b45309"/>
+  <text class="lg" x="500" y="167">unmeasured 没能测量（不同形，绝不并进 ok）</text>
+  <text class="lg" x="900" y="167">计数口径：grep -rn "^export const id = '" src/gates/*/*.ts  ⇒ 17（kind-requirements.ts 不是判据，已排除）</text>
+
+  <text class="sec" x="32" y="216">① 六个插入点的【时间顺序】— src/gates/registry.ts:288 INSERTION_POINTS（Object.freeze）</text>
+  <text class="cap" x="32" y="236">★ 位置数组的顺序是给控制台与普查读的（list() 的键序、gateRoutes() 的遍历序），不是流程顺序的判据 —— 流程顺序由调用方决定，注册表不认识它（registry.ts:285 逐字）。下图流程箭头即实测的调用顺序。</text>
+
+  <line x1="80" y1="300" x2="1600" y2="300" stroke="#cbd5e1" stroke-width="3"/>
+
+  <rect x="80" y="266" width="200" height="68" rx="8" fill="#1d4ed8"/>
+  <text class="pt" x="96" y="292">⓪ admission</text>
+  <text class="ptsub" x="96" y="310">成团之前：够不够格进场</text>
+  <text class="ptsub" x="96" y="326">3 条判据</text>
+  <circle cx="180" cy="300" r="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="3"/>
+
+  <rect x="330" y="266" width="200" height="68" rx="8" fill="#1d4ed8"/>
+  <text class="pt" x="346" y="292">① contract</text>
+  <text class="ptsub" x="346" y="310">建任务 / 改契约那一刻</text>
+  <text class="ptsub" x="346" y="326">3 条判据</text>
+  <circle cx="430" cy="300" r="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="3"/>
+
+  <rect x="580" y="266" width="200" height="68" rx="8" fill="#1d4ed8"/>
+  <text class="pt" x="596" y="292">② dispatch</text>
+  <text class="ptsub" x="596" y="310">派发前：成员开工之前</text>
+  <text class="ptsub" x="596" y="326">3 条判据</text>
+  <circle cx="680" cy="300" r="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="3"/>
+
+  <rect x="830" y="266" width="200" height="68" rx="8" fill="#1d4ed8"/>
+  <text class="pt" x="846" y="292">③ completion</text>
+  <text class="ptsub" x="846" y="310">成员汇报完成</text>
+  <text class="ptsub" x="846" y="326">4 条判据</text>
+  <circle cx="930" cy="300" r="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="3"/>
+
+  <rect x="1080" y="266" width="200" height="68" rx="8" fill="#1d4ed8"/>
+  <text class="pt" x="1096" y="292">④ delivery</text>
+  <text class="ptsub" x="1096" y="310">团队宣布交付</text>
+  <text class="ptsub" x="1096" y="326">2 条判据</text>
+  <circle cx="1180" cy="300" r="6" fill="#ffffff" stroke="#1d4ed8" stroke-width="3"/>
+
+  <path d="M 282 300 L 326 300" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+  <path d="M 532 300 L 576 300" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+  <path d="M 782 300 L 826 300" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+  <path d="M 1032 300 L 1076 300" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+
+  <rect x="80" y="368" width="1200" height="54" rx="8" fill="none" stroke="#b45309" stroke-width="2.5" stroke-dasharray="8 5"/>
+  <text class="lg" x="100" y="392" fill="#b45309" font-weight="700">⑤ runtime — 横跨 ⓪①②③④ 全过程</text>
+  <text class="lg" x="100" y="411">2 条判据（liveness / stall）｜★ 契约 §5 硬要求：runtime 位置的裁决【只被记录】，不进任何控制流 ⇒ 它拒绝不了任务</text>
+
+  <text class="sec" x="32" y="462">② 判据在【哪里】被求值 — registry.evaluate(point, ctx) 的全部调用点（实测，共 6 处）</text>
+  <rect x="32" y="476" width="1616" height="112" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text class="gat" x="48" y="500">① contract    src/tools/shared/entities.ts:3661   await registry.evaluate('contract', …)          ← rejectOnContractGates()</text>
+  <text class="gat" x="48" y="521">② dispatch    src/tools/update-task/dispatch.ts:117  await input.registry.evaluate('dispatch', …)</text>
+  <text class="gat" x="48" y="542">③ completion  src/tools/update-task/completion.ts:672 await registry.evaluate('completion', …)       ← 源码里唯一一处调用（另有 5 处注释提及该串）</text>
+  <text class="gat" x="48" y="563">④ delivery    src/tools/delivery.ts:84（宣告） · src/tools/status.ts:659（报告）  ← 「报告」与「宣告」两个入口都必须读得出输入面</text>
+  <text class="gat" x="48" y="584">⑤ runtime     src/tools/shared/entities.ts:3554   await registry.evaluate('runtime', { …event })   ← 六个事件调用点共用这一个构造点</text>
+
+  <text class="sec" x="32" y="632">③ 每个插入点挂着哪些判据（17 条，逐条给出 appliesTo 闸门实测条件 + 文件:行）</text>
+
+  <rect x="32" y="650" width="320" height="52" rx="6" fill="#1d4ed8"/>
+  <text class="pt" x="46" y="672">⓪ admission</text>
+  <text class="ptsub" x="46" y="691">3 条 ｜ 判准入门，不判契约合法性</text>
+
+  <rect x="32" y="712" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="44" y="732">admission.absorb</text>
+  <text class="gat" x="44" y="752">闸门：claims ∈ {'absorbed','nothing'}</text>
+  <text class="src" x="44" y="769">absorb.ts:268 appliesTo · :71 id</text>
+  <text class="gat" x="44" y="789">产物必须真的变了，或明确记下「无需改」</text>
+  <text class="gat" x="44" y="805">只声称却一行未动 ⇒ 拒绝</text>
+
+  <rect x="32" y="826" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="44" y="846">admission.checkpoint</text>
+  <text class="gat" x="44" y="866">闸门：Array.isArray(ctx.documents)</text>
+  <text class="src" x="44" y="883">checkpoint.ts:238 appliesTo · :88 id</text>
+  <text class="gat" x="44" y="903">产物现在的 git 版本 vs 上次审查时的版本</text>
+  <text class="gat" x="44" y="919">有未审改动 ⇒ 触发对抗审查（告警）</text>
+
+  <rect x="32" y="940" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="44" y="960">admission.convene</text>
+  <text class="gat" x="44" y="980">闸门：恒真（appliesTo ⇒ true）</text>
+  <text class="src" x="44" y="997">convene.ts:449 appliesTo · :123 id</text>
+  <text class="gat" x="44" y="1017">自动成团四条件：产物非空 + 无未审改动</text>
+  <text class="gat" x="44" y="1033">+ 无待确认问题 + 吸收成立</text>
+
+  <rect x="364" y="650" width="320" height="52" rx="6" fill="#1d4ed8"/>
+  <text class="pt" x="378" y="672">① contract</text>
+  <text class="ptsub" x="378" y="691">3 条 ｜ 契约【写】得对不对</text>
+
+  <rect x="364" y="712" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="378" y="732">contract.build-artifact-scope</text>
+  <text class="gat" x="378" y="752">闸门：ctx.task !== undefined</text>
+  <text class="src" x="378" y="769">build-artifact-scope.ts:236 · :42 id</text>
+  <text class="gat" x="378" y="789">inScope 声明了 src/ 却漏了对应 lib/ 产物</text>
+  <text class="gat" x="378" y="805">⇒ 提示（本仓强制 lib/ 与 src/ 同步）</text>
+
+  <rect x="364" y="826" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="378" y="846">contract.verify-command</text>
+  <text class="gat" x="378" y="866">闸门：ctx.task !== undefined</text>
+  <text class="src" x="378" y="883">verify-command.ts:586 · :63 id</text>
+  <text class="gat" x="378" y="903">verify 必须可判：既能为做对的工作变绿</text>
+  <text class="gat" x="378" y="919">也要能为做错的工作变红</text>
+
+  <rect x="364" y="940" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="378" y="960">contract.task-atomicity</text>
+  <text class="gat" x="378" y="980">闸门：QUALITY_KINDS.has(kind ?? 'work')</text>
+  <text class="src" x="378" y="997">task-atomicity.ts:650 · :126 id · :216</text>
+  <text class="gat" x="378" y="1017">判【声明面的形状】，不是「原子性」</text>
+  <text class="gat" x="378" y="1033">'src/' 与 'src' 是同一个键 ⇒ 同裁</text>
+
+  <rect x="696" y="650" width="320" height="52" rx="6" fill="#1d4ed8"/>
+  <text class="pt" x="710" y="672">② dispatch</text>
+  <text class="ptsub" x="710" y="691">3 条 ｜ 这次派发【做】得对不对</text>
+
+  <rect x="696" y="712" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="710" y="732">dispatch.changed-paths</text>
+  <text class="gat" x="710" y="752">闸门：kind ∈ {implementation, repair}</text>
+  <text class="gat" x="710" y="768">     且 changedPaths.length &gt; 0</text>
+  <text class="src" x="710" y="785">changed-paths.ts:160 · :49 id</text>
+  <text class="gat" x="710" y="805">自报的 changedPaths vs 会话里观察到的真实写入</text>
+  <text class="gat" x="710" y="821">虚报或隐瞒 ⇒ 拒绝</text>
+
+  <rect x="696" y="826" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="710" y="846">dispatch.worktree</text>
+  <text class="gat" x="710" y="866">闸门：kind ∈ {implementation, repair}</text>
+  <text class="gat" x="710" y="882">     且 changedPaths.length &gt; 0</text>
+  <text class="src" x="710" y="899">worktree.ts:169 · :77 id</text>
+  <text class="gat" x="710" y="919">工作真的落在隔离 worktree 里吗</text>
+  <text class="gat" x="710" y="935">读不到 ⇒ 未测量（防隔离退化成提示）</text>
+
+  <rect x="696" y="940" width="320" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="710" y="960">dispatch.plan-reviewed</text>
+  <text class="gat" x="710" y="980">闸门：有 task 且 !predatesThisGate(task)</text>
+  <text class="src" x="710" y="997">plan-reviewed.ts:114 · :67 id</text>
+  <text class="gat" x="710" y="1017">带 reviewed 且五问无 fail/unmeasured ⇒ 放行</text>
+  <text class="gat" x="710" y="1033">★ 存量任务不适用 ⇒ appliesTo=false（非 unmeasured）</text>
+
+  <rect x="1028" y="650" width="310" height="52" rx="6" fill="#1d4ed8"/>
+  <text class="pt" x="1042" y="672">③ completion</text>
+  <text class="ptsub" x="1042" y="691">4 条 ｜ 顺序 = 先便宜后贵</text>
+
+  <rect x="1028" y="712" width="310" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1042" y="732">completion.verify-rerun</text>
+  <text class="gat" x="1042" y="752">闸门：wantsCompleted &amp;&amp; taskNotTerminal</text>
+  <text class="gat" x="1042" y="768">     且 task.verify.length &gt; 0</text>
+  <text class="src" x="1042" y="785">verify-rerun.ts:85 · :32 id</text>
+  <text class="gat" x="1042" y="805">重跑 verify 命令，与成员自报 exitCode 比对</text>
+  <text class="gat" x="1042" y="821">不一致 ⇒ 拒绝（防伪造 passed）</text>
+
+  <rect x="1028" y="826" width="310" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1042" y="846">completion.r5</text>
+  <text class="gat" x="1042" y="866">闸门：kind 需求表 status==='required'</text>
+  <text class="gat" x="1042" y="882">     且 update.newTestFiles 是数组</text>
+  <text class="src" x="1042" y="899">r5.ts:118 · :95 id</text>
+  <text class="gat" x="1042" y="919">新测试在【父版本】上必须先红</text>
+  <text class="gat" x="1042" y="935">父版本拿不到 ⇒ unmeasured，不是 ok</text>
+
+  <rect x="1028" y="940" width="310" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1042" y="960">completion.mutation</text>
+  <text class="gat" x="1042" y="980">闸门：kind 需求表 required</text>
+  <text class="gat" x="1042" y="996">     且 wantsCompleted &amp;&amp; taskNotTerminal</text>
+  <text class="src" x="1042" y="1013">mutation.ts:238 · :80 id</text>
+  <text class="gat" x="1042" y="1033">L1/L2/L3 变异体存活即拒绝；套件够不到 ⇒ unmeasured</text>
+
+  <rect x="1028" y="1054" width="310" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1042" y="1074">completion.backtest</text>
+  <text class="gat" x="1042" y="1094">闸门：kind 需求表 required</text>
+  <text class="gat" x="1042" y="1110">     且声明了改动文件</text>
+  <text class="src" x="1042" y="1127">backtest.ts:360 · :82 id</text>
+  <text class="gat" x="1042" y="1147">基准必须先绿，否则无法归因 ⇒ 不放行</text>
+
+  <rect x="1350" y="650" width="298" height="52" rx="6" fill="#1d4ed8"/>
+  <text class="pt" x="1364" y="672">④ delivery</text>
+  <text class="ptsub" x="1364" y="691">2 条 ｜ 先问有没有人做，再问收敛</text>
+
+  <rect x="1350" y="712" width="298" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1364" y="732">delivery.coverage</text>
+  <text class="gat" x="1364" y="752">闸门：ctx.team !== undefined</text>
+  <text class="src" x="1364" y="769">coverage.ts:191 · :49 id</text>
+  <text class="gat" x="1364" y="789">用户目标的每个条目都必须有任务声称覆盖</text>
+  <text class="gat" x="1364" y="805">有目标无人认领 ⇒ 交付时拒绝</text>
+
+  <rect x="1350" y="826" width="298" height="104" rx="6" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="gid" x="1364" y="846">delivery.convergence</text>
+  <text class="gat" x="1364" y="866">闸门：ctx.team !== undefined</text>
+  <text class="src" x="1364" y="883">convergence.ts:181 · :73 id</text>
+  <text class="gat" x="1364" y="903">每个成员都必须处在收敛态</text>
+  <text class="gat" x="1364" y="919">idle ≠ converged，空回复不是收敛</text>
+
+  <rect x="1350" y="940" width="298" height="52" rx="6" fill="#b45309"/>
+  <text class="pt" x="1364" y="962">⑤ runtime（横跨）</text>
+  <text class="ptsub" x="1364" y="981">2 条 ｜ 记录，不拒绝</text>
+
+  <rect x="1350" y="1002" width="298" height="78" rx="6" fill="#fef3c7" stroke="#b45309"/>
+  <text class="gid" x="1364" y="1022">runtime.liveness</text>
+  <text class="gat" x="1364" y="1042">闸门：event ∈ ['task-status',</text>
+  <text class="gat" x="1364" y="1057">                  'runtime-liveness']</text>
+  <text class="src" x="1364" y="1072">liveness.ts:163 · :64 id · :161</text>
+
+  <rect x="1350" y="1088" width="298" height="78" rx="6" fill="#fef3c7" stroke="#b45309"/>
+  <text class="gid" x="1364" y="1108">runtime.stall</text>
+  <text class="gat" x="1364" y="1128">闸门：event ∈ STALL_EVENTS =</text>
+  <text class="gat" x="1364" y="1143">  ['task-status','task-update-settled','delivery-declared']</text>
+  <text class="src" x="1364" y="1158">stall.ts:127 · :60 id · :84</text>
+
+  <rect x="32" y="1054" width="1294" height="112" rx="6" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text class="box" x="48" y="1078" font-weight="700">判据总数核对（必须等于 17）：</text>
+  <text class="gat" x="48" y="1100">admission 3（absorb·checkpoint·convene）+ contract 3（build-artifact-scope·task-atomicity·verify-command）</text>
+  <text class="gat" x="48" y="1120">+ dispatch 3（changed-paths·plan-reviewed·worktree）+ completion 4（backtest·mutation·r5·verify-rerun）</text>
+  <text class="gat" x="48" y="1140">+ delivery 2（coverage·convergence）+ runtime 2（liveness·stall）  =  3+3+3+4+2+2  =  17</text>
+  <text class="src" x="48" y="1158">★ src/gates/completion/kind-requirements.ts 是数据/解析模块，没有 'export const id' —— 不是判据，不计入 17。实测：grep -c "export const id" ⇒ 0。</text>
+
+  <text class="sec" x="32" y="1210">④ 三态裁决 与 「全跳过 ≠ 都通过」不变量</text>
+
+  <rect x="32" y="1226" width="500" height="180" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text class="box" x="48" y="1250" font-weight="700">GateVerdict — src/gates/registry.ts:44（三态，不是两态）</text>
+  <rect x="48" y="1262" width="468" height="40" rx="5" fill="#15803d"/>
+  <text class="lg" x="60" y="1282" fill="#ffffff" font-weight="700">{ ok: true }</text>
+  <text class="lg" x="60" y="1297" fill="#dcfce7">测了，没问题（可按 id 收集 outputs）</text>
+  <rect x="48" y="1308" width="468" height="40" rx="5" fill="#b91c1c"/>
+  <text class="lg" x="60" y="1328" fill="#ffffff" font-weight="700">{ ok: false, blockers: [...] }</text>
+  <text class="lg" x="60" y="1343" fill="#fee2e2">测了，发现问题（必须说清为什么）</text>
+  <rect x="48" y="1354" width="468" height="42" rx="5" fill="#b45309"/>
+  <text class="lg" x="60" y="1374" fill="#ffffff" font-weight="700">{ ok: false, unmeasured: string }</text>
+  <text class="lg" x="60" y="1389" fill="#ffedd5">★ 没能测量 —— 与「通过」不同形，绝不并入 ok</text>
+
+  <rect x="556" y="1226" width="1092" height="180" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text class="box" x="574" y="1250" font-weight="700">不变量：三种「没测到」务必三者不同形 — src/gates/registry.ts:890</text>
+  <text class="gat" x="574" y="1276">┌ 空位置（registered === 0）          ok:true  · skippedAll 缺席   ← 正常情形</text>
+  <text class="gat" x="574" y="1298">├ 全跳过（registered&gt;0, eval===0）    ok:false · skippedAll 在场   ← 就是本不变量要修的那个</text>
+  <text class="gat" x="574" y="1320">└ 判据报 unmeasured（eval &gt;= 1）      ok:false · unmeasured 在场   ← 判据层的结论</text>
+  <rect x="574" y="1332" width="1056" height="60" rx="5" fill="#fee2e2" stroke="#b91c1c"/>
+  <text class="lg" x="588" y="1354" fill="#7f1d1d" font-weight="700">★ 「有判据但全被跳过」不再与「判据都通过」同形 —— 调用方只要读 ok，就不会把「这一步没被检查」当成「通过了」。</text>
+  <text class="src" x="588" y="1376">实现：registry.ts:841 const allSkipped = registered &gt; 0 &amp;&amp; evaluated === 0 ｜ :898 allSkippedVerdict ｜ :205 skippedAll?: string</text>
+
+  <text class="sec" x="32" y="1440">⑤ 注入面：谁调 registry（装配 → 单例 → 求值）</text>
+
+  <rect x="32" y="1456" width="360" height="80" rx="8" fill="#e2e8f0" stroke="#94a3b8"/>
+  <text class="box" x="46" y="1478" font-weight="700">装配点 src/gates/index.ts</text>
+  <text class="gat" x="46" y="1498">ALL_GATES（:305，module-local，非导出）→ buildRegistry()（:459）</text>
+  <text class="gat" x="46" y="1516">asRegistration()（:419）做形状校验：缺导出即抛</text>
+
+  <path d="M 396 1496 L 452 1496" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+
+  <rect x="458" y="1456" width="330" height="80" rx="8" fill="#1d4ed8"/>
+  <text class="lg" x="472" y="1478" fill="#ffffff" font-weight="700">进程级单例 registry</text>
+  <text class="lg" x="472" y="1498" fill="#e2e8f0">index.ts:468 export const registry = buildRegistry()</text>
+  <text class="lg" x="472" y="1516" fill="#e2e8f0">编排层只调 evaluate(point, ctx)，不认识判据名字</text>
+
+  <path d="M 792 1496 L 848 1496" stroke="#334155" stroke-width="2.5" marker-end="url(#harw)"/>
+
+  <rect x="854" y="1456" width="794" height="80" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text class="box" x="868" y="1478" font-weight="700">6 个求值调用点（见上方 ② 段）</text>
+  <text class="gat" x="868" y="1498">contract: entities.ts:3661 ｜ dispatch: update-task/dispatch.ts:117 ｜ completion: update-task/completion.ts:672</text>
+  <text class="gat" x="868" y="1516">delivery: delivery.ts:84 + status.ts:659 ｜ runtime: shared/entities.ts:3554 ｜ 全部走 import { registry } from '../gates/index.ts'</text>
+</svg>
+</div>
+
+<!-- ═══════════ 4 ═══════════ -->
+<h2 id="s4">4 · 17 条判据与它们的闸门</h2>
+
+<p>计数命令（实测 ⇒ 17）：<code>grep -rn "^export const id = '" src/gates/*/*.ts | wc -l</code></p>
+
+<div class="warn">
+  <strong>★ <code>src/gates/completion/kind-requirements.ts</code> 不是判据。</strong>
+  它是数据/解析模块，<code>grep -c "export const id"</code> ⇒ <strong>0</strong>。
+  它自己的文件头（<code>kind-requirements.ts:6</code>）逐字写着「<strong>它不是一条判据</strong>」，理由是三条完工门都要读这张表，而判据之间<strong>不许互相 import</strong>，所以表必须住在「不是判据」的地方。
+  同类的还有 <code>src/gates/requires.ts</code>（859 行，输入面核对）与 <code>src/gates/budget-stop.ts</code>（墙钟预算）。<strong>画图时不要把 kind-requirements 数进去。</strong>
+</div>
+
+<h3>⓪ admission（3 条）— 成团之前</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门（appliesTo 实测）</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>admission.absorb</code></td>
+  <td><code>gates/admission/absorb.ts</code></td>
+  <td><code>id:71</code> <code>point:72</code> <code>appliesTo:268</code></td>
+  <td>把主会话自报的「已吸收审查意见」与真实痕迹比对：产物必须真的变了，或明确记下「无需改」；只声称却一行未动即拒绝</td>
+  <td><code>claims ∈ {CLAIMED_ABSORBED, CLAIMED_NOTHING}</code><br><span style="font-size:12px;color:var(--ink3)">即「这一轮有没有人声称吸收了」</span></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>621e152</code><br><span style="font-size:12px">10-06</span></td>
+</tr>
+<tr>
+  <td><code>admission.checkpoint</code></td>
+  <td><code>gates/admission/checkpoint.ts</code></td>
+  <td><code>id:88</code> <code>point:89</code> <code>appliesTo:238</code></td>
+  <td>产物<strong>现在</strong>的 git 版本 vs <strong>上次审查时</strong>的版本：有未审改动 ⇒ 触发对抗性审查（告警，不拒流程）</td>
+  <td><code>Array.isArray(ctx?.documents)</code><br><span style="font-size:12px;color:var(--ink3)">★ 刻意用 Array.isArray 而非 !== undefined：让「形状错」读作「这一轮没说话」（:241-247）</span></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>621e152</code></td>
+</tr>
+<tr>
+  <td><code>admission.convene</code></td>
+  <td><code>gates/admission/convene.ts</code></td>
+  <td><code>id:123</code> <code>point:124</code> <code>appliesTo:449</code></td>
+  <td>自动成团四条件：产物非空 + 无未审改动（读 checkpoint 结论）+ 无待确认问题 + 吸收成立（读 absorb 结论）</td>
+  <td><code>return true</code>（<strong>恒适用</strong>）</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>ad7a3ed</code></td>
+</tr>
+</tbody>
+</table>
+
+<div class="callout">
+  ★ <strong>admission 位置是后加的</strong>：<code>index.ts:71</code> 逐字记着「本任务（t5）<strong>只加位置，一条判据都不加</strong>，所以这个位置现在是空的」，
+  <code>index.ts:74</code> 又写「任何夹具都不许把' admission 现在没有判据'写成断言：接上第一条判据的那一刻它就会按设计变红」。
+  ⇒ 那三条判据是 <code>621e152</code> / <code>ad7a3ed</code> 后来挂上去的。
+  <strong>这条「不许把空位置写成断言」的纪律，正是为了防「空位置」被误读成「都通过」。</strong>
+</div>
+
+<h3>① contract（3 条）— 建任务 / 改契约那一刻</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>contract.build-artifact-scope</code></td>
+  <td><code>gates/contract/build-artifact-scope.ts</code></td>
+  <td><code>id:42</code> <code>appliesTo:236</code></td>
+  <td><code>inScope</code> 声明了 <code>src/</code> 下的文件却漏了对应 <code>lib/</code> 构建产物 ⇒ 提示（本仓强制 lib/ 与 src/ 同步）</td>
+  <td><code>ctx?.task !== undefined</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>2370145</code><br><span style="font-size:12px">10-06</span></td>
+</tr>
+<tr>
+  <td><code>contract.verify-command</code></td>
+  <td><code>gates/contract/verify-command.ts</code></td>
+  <td><code>id:63</code> <code>appliesTo:586</code><br><code>VERIFY_COMMAND_GATE_ID:76</code></td>
+  <td>verify 命令必须<strong>可判</strong>：既能为做对的工作变绿、也能为做错的工作变红。空命令、写死真/假、拿 <code>-x</code> 比命令输出都会被说清</td>
+  <td><code>ctx?.task !== undefined</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>2370145</code></td>
+</tr>
+<tr>
+  <td><code>contract.task-atomicity</code></td>
+  <td><code>gates/contract/task-atomicity.ts</code></td>
+  <td><code>id:126</code> <code>appliesTo:650</code><br><code>QUALITY_KINDS:216</code></td>
+  <td>判<strong>声明面的形状</strong>（不是「够不够原子」）：一个目录前缀是否被文件路径覆盖</td>
+  <td><code>QUALITY_KINDS.has(task.kind ?? 'work')</code><br><span style="font-size:12px;color:var(--ink3)">QUALITY_KINDS = {requirements, implementation, verification, review, repair, integration}（:216-218）</span></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>485ec9e</code><br><span style="font-size:12px">10-07</span></td>
+</tr>
+</tbody>
+</table>
+
+<div class="amber">
+  ★ <code>task-atomicity</code> 有一段值得单独记的实测（<code>task-atomicity.ts:129-141</code>）：它一度<strong>实际只做 <code>path.trim().endsWith('/')</code></strong> ——「判的是字符串最后一个字符」。
+  t43 用<strong>同一件工作</strong>证伪：<code>['src/registry.ts','src/index.ts']</code>（ok）与它加上一个 <code>'src/'</code>（blocked），<strong>两边工作完全相同而裁决相反</strong>。
+  修法是「归一化之后的目录前缀 + 集合覆盖」（<code>uncoveredDirectoryPrefixes</code>），现在 <code>'src/'</code> 与 <code>'src'</code> 是<strong>同一个键</strong> ⇒ 同裁。
+  <br><strong>这是「一个判据判错了东西」的最佳样本：它一直在跑、一直在说话，只是说的不是它声称在说的事。</strong>
+</div>
+
+<h3>② dispatch（3 条）— 派发前</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>dispatch.changed-paths</code></td>
+  <td><code>gates/dispatch/changed-paths.ts</code></td>
+  <td><code>id:49</code> <code>appliesTo:160</code></td>
+  <td>把成员自报的 <code>changedPaths</code> 与<strong>它会话里观察到的真实写入</strong>比对；虚报或隐瞒即拒绝</td>
+  <td rowspan="2"><code>kind ∈ {implementation, repair}</code> 且 <code>changedPaths.length &gt; 0</code><br><span style="font-size:12px;color:var(--ink3)">两条<strong>刻意逐字相同</strong>（changed-paths.ts:160-163 / worktree.ts:169-172），便于普查臂用同一条口径核对</span></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>626c59d</code><br><span style="font-size:12px">10-05</span></td>
+</tr>
+<tr>
+  <td><code>dispatch.worktree</code></td>
+  <td><code>gates/dispatch/worktree.ts</code></td>
+  <td><code>id:77</code> <code>appliesTo:169</code></td>
+  <td>核对声明的工作是否真的落在隔离 worktree 里、且没落到主检出；读不到 worktree 即「未测量」</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>0657f65</code></td>
+</tr>
+<tr>
+  <td><code>dispatch.plan-reviewed</code></td>
+  <td><code>gates/dispatch/plan-reviewed.ts</code></td>
+  <td><code>id:67</code> <code>appliesTo:114</code> <code>requires:82</code></td>
+  <td>这份计划<strong>审过了吗</strong>：带 <code>reviewed</code> 且五问无 fail/unmeasured ⇒ 放行</td>
+  <td>有 <code>task</code> 且 <code>!predatesThisGate(task)</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>5520399</code><br><span style="font-size:12px">10-09</span></td>
+</tr>
+</tbody>
+</table>
+
+<div class="warn">
+  ★ <code>plan-reviewed</code> 的闸门有一段<strong>极重要</strong>的实测记录（<code>plan-reviewed.ts:114</code> 上方长注释）：
+  <br>「MEASURED：本队 <strong>39 条任务里 0 条</strong>带 <code>reviewed</code> 戳，而<strong>全部建于</strong>这道门之前 ⇒ 这道门对它们一律开口 ⇒ <strong>每一次状态转换都被拒</strong> ⇒ 全队停摆。」
+  <br>第一版把存量落成 <code>unmeasured</code> —— 那<strong>违反了一条跨层规则</strong>（<code>docs/GATE-REGISTRY.md</code> 规则一）：「<strong>可判定的事实</strong>」不得写成「<strong>没能测量</strong>」；正确的表达：<strong>不适用 ⇒ ok</strong>（并要与「测过了」不同形，带跳过之类的标记）。
+  <br>因为「这条任务早于闸门」是<strong>完全可判定</strong>的（<code>createdAt</code> 是个数、上线时刻是常量），所以它的正确落点是 <strong><code>appliesTo</code> 返回 false</strong>，而不是在 <code>gate</code> 里造一个假的三态 —— <strong>只有前者能让注册表如实报 <code>skipped</code></strong>，而「跳过了」与「跑了而结论是通过」是不同形的两件事。
+  <br>相关 commit：<code>eb72d3b</code>、<code>a6216f4</code>（"a gate that postdates a task does not apply to it -- not unmeasured"）。
+</div>
+
+<h3>③ completion（4 条）— 成员汇报完成</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>completion.verify-rerun</code></td>
+  <td><code>gates/completion/verify-rerun.ts</code></td>
+  <td><code>id:32</code> <code>appliesTo:85</code></td>
+  <td>重跑任务声明的 verify 命令，与成员自报的 <code>exitCode</code> 比对；不一致即拒绝（防伪造 passed）</td>
+  <td><code>wantsCompleted &amp;&amp; taskNotTerminal &amp;&amp; task.verify.length &gt; 0</code><br><span style="font-size:12px;color:var(--ink3)">★ 硬编码，<strong>不问表</strong></span></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>70c8c96</code><br><span style="font-size:12px">10-05</span></td>
+</tr>
+<tr>
+  <td><code>completion.r5</code></td>
+  <td><code>gates/completion/r5.ts</code></td>
+  <td><code>id:95</code> <code>appliesTo:118</code></td>
+  <td>把新测试在<strong>父版本</strong>（worktree 的 base）上跑一遍：<strong>必须先红</strong>；再到修复版本上必须绿</td>
+  <td>kind 需求表 <code>status==='required'</code> 且 <code>wantsCompleted &amp;&amp; taskNotTerminal</code> 且 <code>update.newTestFiles</code> 是数组</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>ebbacce</code></td>
+</tr>
+<tr>
+  <td><code>completion.mutation</code></td>
+  <td><code>gates/completion/mutation.ts</code></td>
+  <td><code>id:80</code> <code>appliesTo:238</code></td>
+  <td>对<strong>改动行范围</strong>注入 L1/L2/L3 变异体并重跑杀手套件：变异体存活即拒绝；套件够不到被变异文件 ⇒ unmeasured</td>
+  <td>kind 需求表 <code>required</code> 且 <code>wantsCompleted &amp;&amp; taskNotTerminal</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>c396e71</code></td>
+</tr>
+<tr>
+  <td><code>completion.backtest</code></td>
+  <td><code>gates/completion/backtest.ts</code></td>
+  <td><code>id:82</code> <code>appliesTo:360</code></td>
+  <td>按依赖图选测并跑全量，证明改动没把别处改坏；基准不绿或选测来源不明即拒绝/未测量</td>
+  <td>kind 需求表 <code>required</code> 且「声明了改动文件」</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>27e9613</code></td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>位置内顺序 = 求值顺序</strong>（注册表按注册顺序跑，<code>index.ts:300-303</code> 逐字）：</p>
+<pre><code>verify-rerun → changedPaths → worktree → r5 → mutation → backtest → …
+设计意图：先跑便宜的机械判据，后跑要起进程的（index.ts:42-43）</code></pre>
+
+<h3>④ delivery（2 条）— 团队宣布交付</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>delivery.coverage</code></td>
+  <td><code>gates/delivery/coverage.ts</code></td>
+  <td><code>id:49</code> <code>appliesTo:191</code></td>
+  <td>用户目标的<strong>每个条目</strong>都必须有任务声称覆盖它；有目标无人认领 ⇒ 交付时拒绝</td>
+  <td rowspan="2"><code>ctx?.team !== undefined</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>2370145</code><br><span style="font-size:12px">10-06</span></td>
+</tr>
+<tr>
+  <td><code>delivery.convergence</code></td>
+  <td><code>gates/delivery/convergence.ts</code></td>
+  <td><code>id:73</code> <code>appliesTo:181</code></td>
+  <td>交付时每个成员都必须处在<strong>收敛态</strong>；<code>working</code>/<code>unknown</code>/空白回复都不是收敛 ⇒ 拒绝</td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>2370145</code></td>
+</tr>
+</tbody>
+</table>
+
+<p><strong>位置内顺序</strong>：<code>coverage → convergence</code>（<code>index.ts:113-114</code> 逐字：「先问'有没有人做'，再问'做的人收敛了没有' —— 一个没人认领的目标谈不上'那个人的收敛'」）。</p>
+
+<div class="callout">
+  ★ 两条都<strong>故意不在 <code>requires</code> 里声明</strong>它们读的那一格（<code>coverage.ts:55-65</code>、<code>convergence.ts:79-88</code>）：
+  <code>coverage</code> 矩阵缺席<strong>恰好就是</strong> <code>unmeasured</code> 那一行的输入 —— 把它写进 <code>requires</code>，「核对层会在同一个事实上报第二遍」。
+  反之，<code>convergence.ts:87</code> 逐字：把 <code>members</code> 写进 <code>requires</code>，核对层会在同一个事实上报第二遍，而硬化之后会把<strong>唯一正确的未测量臂</strong>当成接线缺陷。
+</div>
+
+<h3>⑤ runtime（2 条）— 横跨全过程</h3>
+<table>
+<thead><tr><th>id</th><th>入口文件</th><th>关键符号</th><th>达成的功能</th><th>闸门</th><th>上游侵入</th><th>引入 commit</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>runtime.liveness</code></td>
+  <td><code>gates/runtime/liveness.ts</code></td>
+  <td><code>id:64</code> <code>appliesTo:163</code><br><code>LIVENESS_EVENTS:161</code></td>
+  <td>周期性探活：两次探活之间最后活动时刻没变 ⇒ 告警「卡死了」；还在活动 ⇒ 只报「还在跑，已 N 分钟」</td>
+  <td><code>event ∈ ['task-status', 'runtime-liveness']</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>0b01104</code><br><span style="font-size:12px">10-06</span></td>
+</tr>
+<tr>
+  <td><code>runtime.stall</code></td>
+  <td><code>gates/runtime/stall.ts</code></td>
+  <td><code>id:60</code> <code>appliesTo:127</code><br><code>STALL_EVENTS:84</code></td>
+  <td>判「这个任务是不是停下来了」：同一个 (task, gate) 被拒次数 ≥ N，或任务在 in_progress 上超过 N 轮</td>
+  <td><code>event ∈ ['task-status', 'task-update-settled', 'delivery-declared']</code></td>
+  <td><span class="tag t-zero">零</span></td>
+  <td><code>5bc5b45</code><br><span style="font-size:12px">10-11 合并</span></td>
+</tr>
+</tbody>
+</table>
+
+<div class="callout">
+  ★ <strong>runtime 位置的结构性纪律</strong>（<code>index.ts:344-351</code> 逐字）：
+  「契约 §5 硬要求 runtime <strong>不得拒绝任务</strong> —— 六处调用点拿到的裁决只用于 <code>judgeRuntimeGates(...)</code> 记录（<code>src/tools.ts</code>），<strong>不进任何控制流</strong>。」
+  <br><code>stall</code> 把这条从<strong>约定</strong>升级为<strong>编译期事实</strong>：它的返回类型收窄到 <code>GateVerdict</code> 里<strong>不拒绝的那一半</strong>（<code>StallVerdict</code>）—— 写 <code>return blocked([...])</code> 当场 TS2322（<code>stall.ts:70-75</code>）。
+  <code>liveness</code> 则靠「约定 + 调用方」：<code>onDispatched</code> 返回 <code>void</code>，回调在 <code>if (accepted)</code> 之内。
+  <br>★ <code>liveness</code> 是<strong>本插件第一条带状态的判据</strong>（比较这次探活与上次探活），但状态由<strong>调用方</strong>持有，判据本身仍是纯函数（<code>index.ts:130-131</code>）。
+</div>
+
+<!-- ═══════════ 5 ═══════════ -->
+<h2 id="s5">5 · 数据流说明</h2>
+
+<h3>5.1 一条任务的完整判据路径</h3>
+<pre><code>① 建任务 / 改契约
+   调用方 → rejectOnContractGates(ctx, context, what, stateRoot, inject)
+              （src/tools/shared/entities.ts:3641）
+   内部：inputSurfaceOf('contract', ctx)      ← 旁路核对，先软后硬
+         registry.evaluate('contract', ctx)  ← entities.ts:3661
+   判据序：build-artifact-scope → verify-command → task-atomicity
+                               （index.ts:320/327/383 的书写顺序 = 求值顺序）
+
+② 派发前
+   src/tools/update-task/dispatch.ts:117  registry.evaluate('dispatch', dispatchContext)
+   判据序：changed-paths → worktree → plan-reviewed
+
+③ 成员汇报完成
+   src/tools/update-task/completion.ts:672  registry.evaluate('completion', completionContext)
+   ★ 全仓唯一一处（src/tools/update-task.ts:13 逐字：「唯一的求值点」）
+   判据序：verify-rerun → r5 → mutation → backtest
+
+④ 宣布交付
+   宣告：src/tools/delivery.ts:84    registry.evaluate('delivery', deliveryContext)
+   报告：src/tools/status.ts:659     registry.evaluate('delivery', deliveryContext)
+   判据序：coverage → convergence
+   ★ status.ts:655-657 逐字：「「报告」与「宣告」这两个入口必须都读得出输入面缺没缺
+     （只在一个入口核对，另一个入口的缺失就成了只能靠日志碰运气看见的东西）」
+
+⑤ 全程（runtime）
+   src/tools/shared/entities.ts:3554  registry.evaluate('runtime', { …event })
+   ★ 六个事件调用点共用这一个构造点
+   ★ 裁决只被记录，不进控制流</code></pre>
+
+<h3>5.2 一次 evaluate() 内部发生什么</h3>
+<pre><code>registry.evaluate(point, context)                     ← src/gates/registry.ts:646
+  │
+  ├─ 位置合法性：!INSERTION_POINTS.includes(point) ⇒ 立即抛错（:647-649）
+  │
+  ├─ for (const reg of byId.values())                 ← 遍历【全部】判据，:676
+  │    ├─ reg.point !== point ⇒ continue
+  │    ├─ registered += 1
+  │    ├─ appliesTo(context) !== true ⇒ skipped += 1; ran.push({verdict:'skipped'})
+  │    │                                 ★ 不适用 ⇒ 不核对、不报缺失（:679-687）
+  │    └─ 否则求值 → 按三态分别归入 blockers / unmeasuredReasons / outputs
+  │
+  ├─ requires 核对（旁路数据，不参与裁决）            ← :672 requiresChecks
+  ├─ 观察模式分流：observed.blockers / observed.unmeasured
+  │
+  └─ 裁决合成（顺序有意义）：
+       ├─ unmeasuredReasons.length > 0 ⇒ { ok:false, unmeasured, blockers, … }  ← :958
+       ├─ blockers.length > 0          ⇒ { ok:false, blockers, … }              ← :964
+       ├─ allSkippedVerdict            ⇒ { ok:false, blockers:[], skippedAll }   ← :898
+       └─ 否则                          ⇒ { ok:true, … }
+
+★ 不短路：遍历走完全部判据（契约 §3），所以「一次求值」= 该位置全部判据的裁决集合。</code></pre>
+
+<h3>5.3 装配 → 单例 → 求值（注入面）</h3>
+<pre><code>src/gates/index.ts:305   const ALL_GATES = [verifyRerun, changedPaths, worktree, r5, mutation,
+                                            backtest, buildArtifactScope, contractVerifyCommand,
+                                            deliveryCoverage, deliveryConvergence,
+                                            runtimeLiveness, runtimeStall,
+                                            contractTaskAtomicity, dispatchPlanReviewed]
+                         ★ 顺序 = 同位置内的求值顺序
+
+src/gates/index.ts:419   asRegistration(module)   ← 形状校验：缺 id/point/description/gate ⇒ 抛
+                                                 ★ 显式校验 appliesTo 非函数（会被 register 静默丢掉）
+                                                 ★ 显式转发 requires（曾漏掉 ⇒ hasRequires 恒 false）
+src/gates/index.ts:459   buildRegistry()          ← 遍历 ALL_GATES，逐个 register(asRegistration(mod))
+src/gates/index.ts:468   export const registry = buildRegistry()   ← 进程级单例
+
+调用方（6 处）全部走：
+   import { registry } from '../gates/index.ts'
+   · src/tools/update-task.ts:118     · src/tools/status.ts:7        · src/tools/create-task.ts:13
+   · src/tools/delivery.ts:8          · src/tools/shared/entities.ts:35
+   · src/tools.ts:61 (import { gateModuleViews, registry })</code></pre>
+
+<div class="callout">
+  ★ <strong>「判据的 id 还能被调用方按需查询」</strong>：<code>contract/verify-command.ts:69-75</code> 逐字解释了为什么把判据 id 导出成 <code>VERIFY_COMMAND_GATE_ID</code>：
+  <code>tools.ts</code> 的注入口径是「缺什么就不注入什么（而不是注入一个空值）」—— 要在 <code>create_task</code> / <code>amend_task</code> 上按需注入，调用方必须能问出「contract 位置有没有一条判据需要跑命令」，
+  而<strong>注册表不认识判据的名字与语义</strong>（契约 §8），所以能回答这个问题的只有判据自己。
+</div>
+
+<!-- ═══════════ 6 ═══════════ -->
+<h2 id="s6">6 · 对上游的侵入点全景</h2>
+
+<p>用户 fork 的动机是「上游同步会冲突」，所以这一节是重点。</p>
+<div class="amber">
+<strong>★ 口径（与本文上一版不同）</strong>：本节用 <strong>two-dot</strong> <code>git diff --numstat upstream/main HEAD -- &lt;f&gt;</code>。<br>
+上一版用 three-dot <code>upstream/main...HEAD</code>，它比较的是 <strong>merge-base（<code>98aac03</code>）对 HEAD 的差</strong>，
+<strong>看不见上游自己在 fork 之后做的改动</strong> —— 于是「上游删了 958 行、fork 又写了别的」这种双向改动
+只显示 fork 那一侧的净增，读起来像「只增不删」。<br>
+⇒ 本表列的是「<strong>fork 相对上游 HEAD 的改动量</strong>」，是同步冲突面的<strong>上界近似</strong>，
+<strong>不等于「上游冲突面」本身</strong>（真正的冲突面取决于上游之后怎么改，那件事任何 diff 都测不出来）。
+</div>
+
+<h3>6.1 被修改的上游文件（two-dot，按改动量排序）</h3>
+
+<h3>6.1 被修改的上游文件（按改动量排序）</h3>
+<table>
+<thead><tr><th>上游文件</th><th class="num">改动（two-dot）</th><th>改动性质</th><th>同步冲突风险</th></tr></thead>
+<tbody>
+<tr><td><code>src/tools.ts</code></td><td class="num">+1685 / -2335</td><td>★★★ 大宗改动：工具拆出去了（双向）</td><td><span class="tag t-big">高</span></td></tr>
+<tr><td><code>src/quality-gates.ts</code></td><td class="num">+1369 / -958</td><td>★★ <strong>双向</strong>：判据搬出去，同时上游改动被覆盖（three-dot 旧值 +1295/-8 是误导，见 §6.1 口径说明）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/scheduler.ts</code></td><td class="num">+738 / -46</td><td>★★ worktree 派发、队列、停滞检测</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/members.ts</code></td><td class="num">+713 / -342</td><td>★ 成员模型、进程探针（双向）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/types.ts</code></td><td class="num">+647 / -94</td><td>★ 新增类型（<code>TASK_KINDS</code> 扩展、证据、执行历史）（双向）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/harness-compat.ts</code></td><td class="num">+489 / -80</td><td>★ <code>observeWorkspaces</code> 等观察面（双向；旧值 +466/-0 的「只增」是 three-dot 假象）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/state.ts</code></td><td class="num">+448 / -229</td><td>★ 持久化形状（双向）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/client/ActivityPanel.module.css</code></td><td class="num">+564 / -356</td><td>样式大改（双向）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/client/activity-model.ts</code></td><td class="num">+721 / -0</td><td>投影逻辑（真·只增）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/web-routes.ts</code></td><td class="num">+200 / -0</td><td>★ 故障隔离外壳（真·只增；两种口径相同）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/client/activity-monitor.ts</code></td><td class="num">+200 / -6</td><td>观察器（旧值 +202/-0 的「只增」是 three-dot 假象）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/index.ts</code></td><td class="num">+191 / -54</td><td>注册新路由与外壳（双向）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/snapshot.ts</code></td><td class="num">+184 / -39</td><td>快照（双向）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/client/StagingPlanEditor.tsx</code></td><td class="num">+153 / -1</td><td>计划编辑器</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/client/ActivityPanel.tsx</code></td><td class="num">+94 / -530</td><td>拆分后<strong>变小</strong>（双向）</td><td><span class="tag t-mod">中</span></td></tr>
+<tr><td><code>src/profiles.ts</code></td><td class="num">+89 / -11</td><td>成员模型钉死（<code>bee6a57</code>）（双向）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/client/locales.ts</code></td><td class="num">+81 / -0</td><td>文案（真·只增）</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/client/index.tsx</code></td><td class="num">+55 / -0</td><td>挂载新面板</td><td><span class="tag t-zero">低</span></td></tr>
+<tr><td><code>src/tool-names.ts</code></td><td class="num">+14 / -0</td><td>★ 加两个工具名</td><td><span class="tag t-mod">低但必碰</span></td></tr>
+<tr><td><code>src/client/icons.tsx</code></td><td class="num">+6 / -0</td><td>图标</td><td><span class="tag t-zero">极低</span></td></tr>
+<tr><td><code>src/client/agent-teams-card-definition.ts</code></td><td class="num">+6 / -119</td><td>卡片定义缩小</td><td><span class="tag t-zero">极低</span></td></tr>
+<tr><td><code>src/capabilities.ts</code></td><td class="num">+4 / -6</td><td>—</td><td><span class="tag t-zero">极低</span></td></tr>
+<tr><td><code>src/mailbox.ts</code></td><td class="num">+3 / -9</td><td>—</td><td><span class="tag t-zero">极低</span></td></tr>
+<tr><td><code>src/command.ts</code></td><td class="num">+2 / -3</td><td>—</td><td><span class="tag t-zero">极低</span></td></tr>
+<tr><td><code>src/client/WorkspaceActivity.tsx</code></td><td class="num">+1 / -1</td><td>一行</td><td><span class="tag t-zero">极低</span></td></tr>
+</tbody>
+</table>
+
+<h4>★ <code>src/tool-names.ts</code> 的两个新增工具名（唯一「必碰上游」的两行）</h4>
+<table>
+<thead><tr><th>工具名</th><th>引入 commit</th><th>达成的功能</th></tr></thead>
+<tbody>
+<tr><td><code>agent_teams_declare_delivery</code></td><td>（t18/B2）</td><td>交付的<strong>宣告点</strong>：读取（status）只报告，宣告才被拒绝</td></tr>
+<tr><td><code>agent_teams_restart</code></td><td><code>46eb6bc</code> (10-14)</td><td>captain-only 的<strong>重载</strong>：必须登记，否则「captain-only」只在运行时成立、在<strong>可见性</strong>上不成立</td></tr>
+</tbody>
+</table>
+<p><code>tool-names.ts:14-15</code> 逐字：「deny 列表由 <code>TEAM_TOOL_NAMES</code> 减去 <code>MEMBER_TOOL_NAMES</code> 算出，所以<strong>没进这张表 = 没进 deny 列表 = 成员看得见</strong>」。
+⇒ 这是改动上游文件内容的地方，但只有 <strong>14 行新增、0 行删除</strong>，冲突面极小。
+工具面计数：<code>TEAM_TOOL_NAMES</code> = 15（<code>:2-22</code>）、<code>MEMBER_TOOL_NAMES</code> = 4（<code>:24-26</code>）、<code>CAPTAIN_TOOL_NAMES</code> = 差集 = 11。</p>
+
+<h3>6.2 上游有、fork 未采纳的文件（4 个：上游自 fork 后新增）</h3>
+<pre><code>src/artifacts.ts        src/lineage.ts        src/tool-policies.ts        src/workspace-audit.ts</code></pre>
+<p>★ <strong>这 4 个不是「被 fork 删除」，而是「上游在分叉点之后自己新增的、fork 尚未采纳」。</strong>三条实测：</p>
+<pre><code># ① 它们在分叉点 98aac03 上【不存在】
+for f in src/artifacts.ts src/lineage.ts src/tool-policies.ts src/workspace-audit.ts; do
+  git cat-file -e 98aac03:$f 2&gt;/dev/null &amp;&amp; echo "PRESENT $f" || echo "ABSENT  $f"
+done
+# ⇒ 四行全 ABSENT
+
+# ② 是上游自己新增的（98aac03 → upstream/main 显示 4 个 A）
+git diff --name-status 98aac03 upstream/main -- src/ | grep '^A'
+# ⇒ A  src/artifacts.ts  A  src/lineage.ts  A  src/tool-policies.ts  A  src/workspace-audit.ts
+
+# ③ fork 侧删除数 = 0（fork 从分叉点起没删过任何文件）
+git diff --name-status 98aac03 HEAD -- src/ | grep -c '^D'
+# ⇒ 0</code></pre>
+<p><strong>结论与定级</strong>：这 4 个可以<strong>干净合并</strong>（fork 侧没有删除，所以 <code>git merge upstream/main</code> 不会产生删/改冲突）；
+风险是「<strong>fork 尚未采纳</strong>」，<strong>不是</strong>「拿不到」。</p>
+<p>因此它们<strong>不是</strong>最高风险项。<strong>最高风险是「不可合并」—— 即 §6.1 里被双向大改的文件</strong>
+（<code>src/tools.ts</code>、<code>src/quality-gates.ts</code>、<code>src/members.ts</code>、<code>src/types.ts</code> 等），那些才是真正会在同步时撞车的地方。</p>
+<p>★ 点名：上游由 <code>648fd9a</code>、<code>f21f37c</code>、<code>38a84b9</code> 带来的那部分能力，在当前 fork 里<strong>缺席</strong>。</p>
+<p>★ 本页上一版把这一节写成「被<strong>删除</strong>的上游文件（4 个，最高风险）」——<strong>那是错的</strong>，
+错误来源是把 <code>comm -23</code>（集合差）读成了「fork 删除」。实测 <code>git diff --name-status 98aac03 HEAD -- src/ | grep -c '^D'</code> ⇒ <strong>0</strong>，fork 一个文件都没删。</p>
+
+<h3>6.3 纯新增（零冲突面）</h3>
+<pre><code>src/gates/                        24 个文件，11,964 行   ← 整个目录上游不存在
+                                  （含非 .ts 资源：find src/gates -type f | wc -l ⇒ 24；
+                                    仅 .ts 则 22 个；另有 2 个 .json 数据文件）
+src/tools/**.ts                       18 个文件（除 tools.ts）11,325 行
+src/tools/update-task/*.ts             2 个文件
+src/mutation.ts + mutation-guard.ts    2,124 行
+src/worktree.ts                        1,296 行
+src/hmr-trace.ts                         292 行
+src/client/（13 个新文件）             1,988 行
+scripts/gate-*.test.mjs                88 个判据夹具</code></pre>
+
+<h3>6.4 侵入点小结（回答「为什么 fork 有效」）</h3>
+<pre><code>判据本体的冲突面         = 0        ← 全在 src/gates/，上游不存在这个目录
+接线点的冲突面           = 6 处     ← 6 个 registry.evaluate() 调用点（源码调用，不含注释）
+装配清单的冲突面         = 2 行/判据 ← src/gates/index.ts：新增一行 import + 在 ALL_GATES 里加一行
+                                        （index.ts:305，module-local，非导出）
+工具面的冲突面           = 2 行     ← src/tool-names.ts（+14/-0）
+────────────────────────────────────
+真正的大宗冲突面（不可合并风险）只有
+                           src/tools.ts（+1685/-2335）与 src/quality-gates.ts（+1369/-958）</code></pre>
+
+<div class="amber">
+  ⇒ <strong>「加一条判据不需要碰上游文件」这个目标达成了</strong> ——
+  装配清单的改动只有<strong>两行</strong>（一行 import、一行 <code>ALL_GATES</code> 条目），且落在 fork 自己持有的 <code>src/gates/index.ts</code> 里。<br>
+  但<strong>「同步上游不冲突」没有完全达成</strong> —— <code>src/tools.ts</code> 与 <code>src/quality-gates.ts</code> 是双向大改，同步时必然撞车。
+  这是本清单要如实说清的一点，不掩饰。
+</div>
+
+<!-- ═══════════ 7 ═══════════ -->
+<h2 id="s7">7 · 文档核对：哪些已过期</h2>
+
+<p><code>docs/START-HERE.md</code>、<code>docs/THREE-LINE-PLAN.md</code>、<code>docs/BASELINE-RED.md</code> 是<strong>二手材料</strong>：可引用，但每条回源码核对过。发现不一致时<strong>以代码为准</strong>。</p>
+
+<table>
+<thead><tr><th>文档与原文</th><th>源码/git 实测</th><th>判定</th></tr></thead>
+<tbody>
+<tr>
+  <td><code>START-HERE.md:17</code>：「上游把全部判据放在一个 <strong>1233 行</strong>的文件里（<strong>34 个导出</strong>平铺）」</td>
+  <td><code>git show 54eddb4:src/quality-gates.ts | wc -l</code> ⇒ <strong>1233</strong> ✅<br><code>grep -c "^export "</code> ⇒ <strong>52</strong>，不是 34（上游现在是 80）</td>
+  <td><span class="stale">行数对，导出数过期</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:53</code>：「<strong>判据层现状（十一条</strong>，★ 六个位置全部接满）」</td>
+  <td><code>grep -rn "^export const id = '" src/gates/*/*.ts | wc -l</code> ⇒ <strong>17</strong></td>
+  <td><span class="stale">已过期，实测 17 条</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:55-62</code>：列出的「十一条」清单</td>
+  <td>该清单<strong>缺</strong> admission 三连、<code>contract.task-atomicity</code>、<code>dispatch.plan-reviewed</code>、<code>runtime.stall</code></td>
+  <td><span class="stale">已过期（少了 6 条）</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:121</code>：「<strong>六条</strong>判据在真实运行中还没生效」</td>
+  <td>现状 17 条，且 <code>docs/SELF-ITERATION.md</code> 的切换已完成</td>
+  <td><span class="stale">已过期</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:18-19</code>：「注册表把判据挪出来，编排层只认插入点」</td>
+  <td><code>index.ts:5</code> 逐字一致</td>
+  <td><span class="tag t-zero">✅ 有效</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:79-92</code>：liveness 的三个坑</td>
+  <td><code>src/gates/runtime/liveness.ts</code> 回源核对<strong>一致</strong></td>
+  <td><span class="tag t-zero">✅ 有效</span></td>
+</tr>
+<tr>
+  <td><code>START-HERE.md:95-99</code>：注册表两条新能力</td>
+  <td><code>registry.ts:898</code>、<code>:205</code>、<code>:457</code> 逐字一致</td>
+  <td><span class="tag t-zero">✅ 有效</span></td>
+</tr>
+<tr>
+  <td><code>THREE-LINE-PLAN.md:24-32</code>：裁定 A（<code>uncovered</code> 不进 <code>scored</code>）</td>
+  <td><code>src/mutation.ts</code> 回源核对<strong>一致</strong>（<code>scored = killed|survived</code>，地板只读 <code>scored</code>）</td>
+  <td><span class="tag t-zero">✅ 有效</span></td>
+</tr>
+<tr>
+  <td><code>THREE-LINE-PLAN.md:6</code>：「账本未接入生产完成路径」</td>
+  <td>现状有生产调用方（<code>71de42a</code>）</td>
+  <td><span class="stale">已过期</span></td>
+</tr>
+<tr>
+  <td><code>BASELINE-RED.md:1,17-18</code>：24 条红 ⇒ 5 条</td>
+  <td>该文件描述的是一次<strong>已完成</strong>的消红；<strong>现状</strong>实测 <code>pnpm test:gates</code> ⇒ <strong>19 fail / 1471 tests</strong></td>
+  <td><span class="stale">对当时有效，对现状不适用</span>（现状 19 条）</td>
+</tr>
+<tr>
+  <td><code>BASELINE-RED.md:7</code>：「基线上有 24 条红 ⇒ 它拒判<strong>每一个</strong>任务」</td>
+  <td>与 <code>completion.backtest</code> 的「基准必须先绿」一致</td>
+  <td><span class="tag t-zero">✅ 逻辑有效</span></td>
+</tr>
+</tbody>
+</table>
+
+<h3>★ 关于「11 条」这个数字的完整溯源</h3>
+<p>「十一条」不是笔误，它<strong>确实曾经是十一</strong>：</p>
+<pre><code>a5d3dce  gate: all eleven gates declare their input surface
+         commit message 逐字：Five owners wired the declarations in parallel, one position each:
+                            contract 2, dispatch 2, completion 4, delivery 2, runtime 1.
+         实测：git ls-tree -r a5d3dce -- src/gates/ | grep -v index/registry/requires | wc -l  ⇒  11  ✅</code></pre>
+
+<p>后来加上的 6 条（全部实测）：</p>
+<table>
+<thead><tr><th>判据</th><th>引入 commit</th><th>日期</th></tr></thead>
+<tbody>
+<tr><td><code>contract.task-atomicity</code></td><td><code>485ec9e</code></td><td>10-07</td></tr>
+<tr><td><code>dispatch.plan-reviewed</code></td><td><code>5520399</code></td><td>10-09</td></tr>
+<tr><td><code>admission.absorb</code></td><td><code>621e152</code></td><td>10-06</td></tr>
+<tr><td><code>admission.checkpoint</code></td><td><code>621e152</code></td><td>10-06</td></tr>
+<tr><td><code>admission.convene</code></td><td><code>ad7a3ed</code></td><td>10-06</td></tr>
+<tr><td><code>runtime.stall</code></td><td><code>5bc5b45</code></td><td>10-11</td></tr>
+</tbody>
+</table>
+<p><strong>⇒ 11 + 6 = 17。</strong> <code>docs/START-HERE.md</code> 停在 <code>a5d3dce</code> 那个时刻，之后再没更新过判据清单。<strong>以代码为准：现状是 17 条。</strong></p>
+
+<div class="callout">
+  ★ <code>src/gates/index.ts:527-541</code> 里也有一处「<strong>11 条</strong>」，那<strong>不是</strong>过期文档 —— 它是「写那段注释时的实测」的历史记录，读者需要能分辨。本页在此显式标出以免混淆。
+</div>
+
+<!-- ═══════════ 8 ═══════════ -->
+<h2 id="s8">8 · 现状读数与复现命令</h2>
+
+<pre><code>$ grep -rn "^export const id = '" src/gates/*/*.ts | wc -l
+17
+$ grep -c "export const id" src/gates/completion/kind-requirements.ts
+0                                          # ⇒ 不是判据
+$ ls scripts/gate-*.test.mjs | wc -l
+88                                         # ⇒ 判据夹具
+$ ls scripts/*.test.mjs | wc -l
+130                                        # ⇒ 全部测试文件
+$ pnpm test:gates
+ℹ tests 1471
+ℹ pass  1415
+ℹ fail  19                                 # ⇒ ★ 19 条未 pin 的失败</code></pre>
+
+<h4>19 条失败的分布（15 个文件，逐行实测；合计 = 19 显式成立）</h4>
+<table>
+<thead><tr><th>文件</th><th class="num">失败数</th></tr></thead>
+<tbody>
+<tr><td><code>scripts/verify-runtime-integration.test.mjs</code></td><td class="num">4</td></tr>
+<tr><td><code>scripts/verify-input-requires.test.mjs</code></td><td class="num">2</td></tr>
+<tr><td><code>scripts/gate-baseline-known-failures.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-contract-build-artifacts.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-falsification-pairs.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-input-wiring.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-producer-consumer.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-repair-completion.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-reviewed-passthrough.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-source-reading-convention.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-stale-module.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-t1-completion-probe.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/gate-worktree-arrival.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/verify-admission.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><code>scripts/verify-unified-pipeline.test.mjs</code></td><td class="num">1</td></tr>
+<tr><td><strong>合计</strong></td><td class="num"><strong>19</strong></td></tr>
+</tbody>
+</table>
+<p>一句话版：<strong><code>verify-runtime-integration</code> 4 · <code>verify-input-requires</code> 2 · 其余 13 个文件各 1</strong>（4 + 2 + 13 = <strong>19</strong>）。</p>
+<p>★ 本页上一版这张表<strong>是错的</strong>：它写成 <code>8 / 4 / 2 / 2 / 其余各 2</code>，合计会读成 34，与 <code>fail 19</code> <strong>不自洽</strong>。成因是把「<code>✖</code> 出现次数」当成了「测试数」—— <code>✖</code> 同时出现在<strong>子测试</strong>与 <code>✖ failing tests:</code> 汇总块里，会重复计数。<strong>正确口径是按 <code>test at &lt;file&gt;:&lt;line&gt;</code> 配对计数。</strong></p>
+
+<p>典型失败样例（摘 <code>pnpm test:gates</code> 原文）：</p>
+<pre><code>✖ ★ 臂 1（P4 · 注册）：注册表逐位置枚举，并与基线逐条比对
+  AssertionError: ★ 净增必须恰好 2 条（实测 11 → 14）。多出来 ⇒ 有别的接线没被记账；少了 ⇒ 有判据掉了
+  3 !== 2
+
+✖ 臂 0 ★ 读数：admission 现在是什么，如实说出来（空位置 ≠ 三条判据都通过）
+✖ ★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是零（逐位置实测，不是读源码）</code></pre>
+
+<div class="callout">
+  ★ <strong>这些失败本身就是这套设计的证据</strong>：夹具里硬编码的<strong>历史基线数字</strong>（「11 → 14」）在判据继续增加之后<strong>按设计变红</strong>。
+  这类红是「夹具过期」，不是「新缺陷」—— 分类与处置归另一条工作流（见 <code>docs/BASELINE-RED.md</code> 的既有方法：<strong>真实缺陷 / 夹具过期 / 环境</strong> 三分法）。
+  本页只如实报出读数，不做处置。
+</div>
+
+<h3>完整复现命令</h3>
+<pre><code>cd /Users/abab/Desktop/agent-teams-dev
+
+# ① 版本锚点
+git rev-parse HEAD upstream/main
+git merge-base HEAD upstream/main
+
+# ② 相对上游改了什么
+git diff --stat upstream/main...HEAD
+git log --oneline --first-parent --reverse upstream/main..HEAD
+
+# ③ 判据计数（必须 17）
+grep -rn "^export const id = '" src/gates/*/*.ts | wc -l
+
+# ④ 每个插入点几条
+for p in admission contract dispatch completion delivery runtime; do
+  echo -n "$p: "; grep -l "export const id" src/gates/$p/*.ts 2>/dev/null | wc -l
+done
+
+# ⑤ 各判据的 appliesTo 实测条件
+for f in src/gates/*/*.ts; do
+  case "$f" in *index.ts|*registry.ts|*requires.ts|*budget-stop.ts|*kind-requirements.ts) continue;; esac
+  echo "### $f"; sed -n '/^export function appliesTo/,/^}/p' "$f"
+done
+
+# ⑥ 规模读数
+find src -name '*.ts' -o -name '*.tsx' | xargs wc -l | tail -1
+for d in gates tools client; do echo -n "src/$d: "; find src/$d -type f | xargs wc -l | tail -1; done
+
+# ⑦ 上游侵入点
+git diff --numstat upstream/main HEAD -- src/      # ★ two-dot：fork 相对上游 HEAD 的改动量
+
+# 上游新增、fork 未采纳的文件（不是 fork 删除！）
+for f in src/artifacts.ts src/lineage.ts src/tool-policies.ts src/workspace-audit.ts; do
+  git cat-file -e 98aac03:$f 2&gt;/dev/null &amp;&amp; echo "PRESENT $f" || echo "ABSENT  $f"
+done
+git diff --name-status 98aac03 upstream/main -- src/ | grep '^A'   # ⇒ 4 个 A
+git diff --name-status 98aac03 HEAD -- src/ | grep -c '^D'        # ⇒ 0（fork 未删任何文件）
+
+# 目录文件数口径（含非 .ts 资源）
+find src/gates -type f | wc -l      # ⇒ 24
+
+# ⑧ 6 个求值调用点
+grep -rn "registry.evaluate(" src/ --include=*.ts
+
+# ⑨ SVG 自检
+python3 -c "import xml.etree.ElementTree as ET; ET.parse('docs/architecture-pipeline.svg')"</code></pre>
+
+<footer>
+  <p>
+    <strong>本页的每一条读数都可用上方命令复现。</strong>
+    图上随机抽 5 处回源，应全部命中 <code>文件:行</code>。
+  </p>
+  <p>
+    文件：<code>docs/architecture.html</code>（本页，自包含，无外网依赖）｜
+    <code>docs/architecture-pipeline.svg</code>（管线图矢量原件）｜
+    <code>docs/LAYER-INVENTORY.md</code>（逐层清单全文）
+    <br>生成于 HEAD <code>b8f357e</code>。所有「加了什么」均可指到 commit 或 <code>文件:行</code>。
+  </p>
+</footer>
+
+</div>
+</body>
+</html>
