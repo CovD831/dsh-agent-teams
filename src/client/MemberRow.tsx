@@ -385,6 +385,15 @@ export function MemberRow({
       {expanded && (
         <div className={css.memberSubagents} data-member-subagents={key}>
           {/**
+            * ★ 窄面板把角色和模型从成员行上拿掉，完整值在这里换行显示。
+            *   收起时被省略的"正在做什么"也在展开层里给全文，不靠 title 才能读完。
+            */}
+          <div className={css.memberExpandedFacts}>
+            {member.role !== '' && <span className={css.memberExpandedRole}>{member.role}</span>}
+            {memberModel !== '' && <span className={css.memberExpandedModel}>{memberModel}</span>}
+            <span className={css.memberExpandedDoing}>{doing}</span>
+          </div>
+          {/**
             * ★★★ 三态：`observed` + 空 ⇒ "**读了**，真的没有"；
             *   `could-not-measure` ⇒ "**没读成**"。后者必须带上成因，
             *   否则它与前者在读者眼里同形。

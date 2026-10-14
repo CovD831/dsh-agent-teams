@@ -178,6 +178,19 @@ test('★ 臂 6（成员时钟）：时长读自任务持久 updatedAt，绝不�
   assert.equal(idle.kind, 'idle', '★ 没有在飞任务 ⇒ idle（明确的中性读数），不是空白')
   assert.equal(idle.ms, 0, '★ 空闲不带时长 —— 不许编一个"0 秒"的假时长出来')
 
+  /**
+   * ★ 任务还是 pending ⇒ 还没开始。updatedAt 是创建时间，拿它走表会在开工前
+   *   就显示"已工作 / 已等待"（用户 2026-10-13）。认领之后才允许计时，见上面的 stale。
+   */
+  const notStarted = memberClock(
+    member,
+    [{ id: 'impl', assignee: 'ui-eng', status: 'pending', updatedAt: 1_000 }],
+    NOW,
+  )
+  assert.equal(notStarted.kind, 'idle', '★ pending 还没开始 ⇒ 不显示时长')
+  assert.equal(notStarted.ms, 0, '★ 未开始不带时长')
+  assert.equal(notStarted.stamp, undefined, '★ 未开始没有可走的表')
+
   /** ★ 没有持久戳 ⇒ 是"读不到"，不是"刚开工"，**也不是"它没事做"**。 */
   const noStamp = memberClock(member, [{ id: 'impl', assignee: 'ui-eng', status: 'in_progress' }], NOW)
   assert.equal(noStamp.kind, 'unknown', '★ 读不到戳 ⇒ could-not-measure，不许并进 idle')
@@ -1903,7 +1916,7 @@ function sidebarHtml(prefix, cssText) {
           <span class="${prefix}memberAvatar"><span class="${prefix}memberInitial">M</span></span>
           <span class="${prefix}memberDot" data-tone="running"></span>
           <span class="${prefix}memberInfo">
-            <span class="${prefix}memberLine"><span class="${prefix}memberName">member-${index}</span><span class="${prefix}memberRole">eng</span><span class="${prefix}memberModel">model-${index}</span></span>
+            <span class="${prefix}memberLine"><span class="${prefix}memberName">friction-eng</span><span class="${prefix}memberRole">implementation engineer for the activity panel</span><span class="${prefix}memberModel">deepseek-v4-flash</span></span>
             <span class="${prefix}memberStatusLine">working on impl</span>
           </span>
           <span class="${prefix}memberStatusTail"><span class="${prefix}memberClock" data-kind="running">Worked 1m</span></span>
@@ -1921,7 +1934,15 @@ function sidebarHtml(prefix, cssText) {
     <section class="${prefix}delegationSection" data-delegation-map>
       <div class="${prefix}delegationTree" data-member-rows="3">${[0, 1, 2].map(row).join('')}</div>
     </section>
-    <section class="${prefix}dependencySection" data-dependency-map></section>
+    <section class="${prefix}dependencySection" data-dependency-map>
+      <section class="${prefix}taskDetail" data-task-detail="t1">
+        <span class="${prefix}taskDetailHead">
+          <span class="${prefix}taskDetailId">t1</span>
+          <span class="${prefix}taskDetailSubject">把成员姓名、未开始任务的时长和点开之后的全文都显示完整，不要再省略成看不清的碎片</span>
+          <span class="${prefix}taskDetailBadge">待领取</span>
+        </span>
+      </section>
+    </section>
   </div>
 </div></div></body></html>`
 }
@@ -1931,12 +1952,23 @@ const SIDEBAR_MEASURE = `(() => {
   const tree = document.querySelector('[data-member-rows]')
   const tops = rows.map((r) => +r.getBoundingClientRect().top.toFixed(1))
   const heights = rows.map((r) => +r.getBoundingClientRect().height.toFixed(1))
+  const clipped = (el) => !el || el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1
+  const name = rows[0] ? rows[0].querySelector('[class*="memberName"]') : null
+  const subject = document.querySelector('[class*="taskDetailSubject"]')
+  const rowBox = rows[0] ? rows[0].getBoundingClientRect() : null
+  const subjectBox = subject ? subject.getBoundingClientRect() : null
   return {
     rowCount: rows.length,
     rowHeights: heights,
     rowTopDeltas: tops.slice(1).map((t, i) => +(t - tops[i]).toFixed(1)),
     treeGap: getComputedStyle(tree).rowGap,
     memberBlockPadding: getComputedStyle(document.querySelector('[data-member-key]')).padding,
+    nameClipped: clipped(name),
+    subjectClipped: clipped(subject),
+    nameText: name ? name.textContent : '',
+    rowWidth: rowBox ? +rowBox.width.toFixed(1) : 0,
+    subjectWidth: subjectBox ? +subjectBox.width.toFixed(1) : 0,
+    subjectHeight: subjectBox ? +subjectBox.height.toFixed(1) : 0,
   }
 })()`
 
@@ -2001,6 +2033,147 @@ test('★ 臂 33b（侧边栏样式臂的反向半边）：行距被改坏 ⇒ �
     const expected = measured.rowHeights[0] + 10 + 2
     const broken = measured.rowTopDeltas.some((delta) => Math.abs(delta - expected) > 1)
     assert.ok(broken, '★ 反向半边：gap 被改成 40px 之后，臂 33 的判据**必须**报红（实测没有）')
+  } finally {
+    browser.child.kill('SIGKILL')
+  }
+})
+
+/* ── ★★★ 臂 33c：成员行在【面板自己的宽度】上也要成立（MEASURED，2026-10-13）─────
+ *
+ * ── 为什么臂 33 不够 ───────────────────────────────────────────────────────────
+ *
+ * 臂 33 在 **900px** 容器里量成员行，而面板 docked 时的宽度区间是
+ * **320–388px**（`PANEL_MIN_WIDTH` / `PANEL_DEFAULT_WIDTH`，见
+ * `src/client/panel-geometry.ts`）。⇒ 臂 33 量的宽度，**面板从来不会处于**。
+ *
+ * MEASURED（真实 headless Chrome，前缀从样式表推导、900px 处用臂 33 的已知读数
+ * 校准过 —— 50px / 3px 0px 7px / 62px 逐字复现，同一把尺子量出已知正确的值）：
+ *
+ *     容器宽度   行高      相邻行顶差   内容溢出
+ *      900px    50px       62px        无      ← 臂 33 量的是这里
+ *      388px    66.2px     78.2px      无      ← 面板默认宽度
+ *      320px    105.4px    117.4px     无      ← 面板最小宽度，用户截图里的实际状态
+ *
+ * ⇒ 没有溢出、没有裁切；坏的是**行高爆掉**。三行吃掉 350px，配上大片暗色空隙，
+ *   读起来就是"显示有问题"，而臂 33 一路全绿。
+ *
+ * ── ★★ 根因有两条，而第二条是"判据看不见的那条" ────────────────────────────────
+ *
+ * ① `.memberLine { flex-wrap: wrap }` 被放在无条件层（它属于宽侧边栏那组样式）；
+ * ② `.memberStatusLine { white-space: normal }` 让状态行折成 3 行（实测高 38.4px）。
+ *
+ * ⇒ ① 让 388px 就已经是 66px；② 让 320px 下状态行单独把行顶到 64px。
+ *    两条都不是溢出，都是**换行** —— 而"换行"这种失效，
+ *    一条只断言"没有溢出"的判据是看不见的。
+ *
+ * ── ★★ 而我在修它时踩到的第三个坑，也钉在这里 ──────────────────────────────────
+ *
+ * 我第一版把修复写进 `@container agent-team (max-width: 360px)`，重建后量出来
+ * **一行没变**（64.4px 原样）。根因：workspace 队的容器被显式关掉了 ——
+ * `.team[data-workspace-team]{container-type:normal;container-name:none}`
+ * （理由见该行注释：workspace 容器由外层 `.ws-root` 持有）。
+ * 实测 `getComputedStyle(team).containerName === 'none'` ⇒ 写在那里的规则**永不匹配**。
+ *
+ * ⇒ 所以这一臂同时钉住：**修复必须在没有容器查询的前提下也生效**，
+ *   否则下一次"看起来修好了、量出来没变"还会再发生。 */
+
+test('★ 臂 33c（面板宽度臂）：成员行在 320/388px 上【行高不变、不溢出】', async (t) => {
+  const browser = await launchChrome()
+  if (browser === null) {
+    t.diagnostic('COULD NOT MEASURE: no usable headless Chrome at ' + CHROME_BINARY)
+    return
+  }
+  try {
+    const cssText = await panelStylesheet()
+    const prefix = classPrefix(cssText)
+    const page = (width) => sidebarHtml(prefix, cssText).replace('width:900px', `width:${width}px`)
+
+    /**
+     * ★ 逐宽度量，而**期望值来自臂 33 已经钉住的那个 900px 读数** ——
+     *   不是新拍一个数字。⇒ 面板变窄不该改变行高，这件事本身就是判据。
+     */
+    const reference = await measureInChrome(browser, page(900), SIDEBAR_MEASURE)
+    assert.equal(reference.rowCount, 3, '★ 前置：三条成员行都渲染了')
+
+    for (const width of [388, 320]) {
+      const measured = await measureInChrome(browser, page(width), SIDEBAR_MEASURE)
+      const label = `宽度 ${width}px`
+      assert.equal(measured.rowCount, 3, `★ 前置（${label}）：三条成员行都渲染了`)
+      /** ★★ 行高必须与 900px 时【相同】—— 换行正是让这里变大的那个失效。 */
+      assert.deepEqual(
+        measured.rowHeights,
+        reference.rowHeights,
+        `★ ${label}：行高必须与宽容器一致（宽 ${reference.rowHeights[0]} · 实测 ${measured.rowHeights[0]}）`
+      )
+      assert.deepEqual(
+        measured.rowTopDeltas,
+        reference.rowTopDeltas,
+        `★ ${label}：相邻行顶差也必须一致（实测 ${measured.rowTopDeltas.join(',')}）`
+      )
+      assert.equal(measured.memberBlockPadding, reference.memberBlockPadding, `★ ${label}：内边距不得漂移`)
+      assert.equal(measured.treeGap, reference.treeGap, `★ ${label}：行间距不得漂移`)
+      assert.equal(measured.nameText, 'friction-eng', `★ 前置（${label}）：量的是真实姓名`)
+      assert.equal(measured.nameClipped, false, `★ ${label}：姓名必须完整，不能再被省略（实测被裁）`)
+      assert.equal(measured.subjectClipped, false, `★ ${label}：点开的任务标题必须完整，不能再被省略`)
+    }
+
+    /**
+     * ★ 宽面板不得再拆成「左边一条、右边空白」。成员行要占满内容区，
+     *   任务标题要横着换行，不许收成一个字宽然后竖着排。
+     */
+    const wide = await measureInChrome(browser, page(1100), SIDEBAR_MEASURE)
+    assert.ok(wide.rowWidth > 700, `★ 1100px：成员行必须铺满，不能再缩在左列（实测 ${wide.rowWidth}px）`)
+    assert.ok(wide.subjectWidth > 400, `★ 1100px：任务标题必须横排（实测宽 ${wide.subjectWidth}px）`)
+    assert.ok(wide.subjectHeight < 160, `★ 1100px：任务标题不得竖排成一列（实测高 ${wide.subjectHeight}px）`)
+  } finally {
+    browser.child.kill('SIGKILL')
+  }
+})
+
+/**
+ * ★★ 臂 33c 的反向半边：把 `memberLine` 的 nowrap 改回 wrap，这一臂必须红。
+ *
+ * ★ 它防的是"这一臂其实量不到换行"—— 一条对样式缺失不敏感的断言，
+ *   会在样式表整个丢失时照样全绿，而那与"样式是对的"在读数上同形。
+ */
+test('★ 臂 33d（面板宽度臂的反向半边）：行高对【换行】必须敏感', async (t) => {
+  const browser = await launchChrome()
+  if (browser === null) {
+    t.diagnostic('COULD NOT MEASURE: no usable headless Chrome at ' + CHROME_BINARY)
+    return
+  }
+  try {
+    const cssText = await panelStylesheet()
+    const prefix = classPrefix(cssText)
+    /**
+     * ★ 破坏方式：把 `.memberLine` 的 nowrap 改回 wrap（= 用户报告的那个失效），
+     *   并**同时**把容器查询那一路留着不管 —— 因为死代码里的"修复"量不出变化，
+     *   而这一臂要证明的是：**真的**那一处被改坏时，33c 会红。
+     */
+    let broken = cssText.replace(/\.\w+_memberLine\{[^}]*flex-wrap:nowrap[^}]*\}/u, `.${prefix}memberLine{flex-wrap:wrap}`)
+    /**
+     * ★ 窄面板把角色和模型 `display:none` 了。只把 wrap 改回去，行里已经没有
+     *   第二段文字，行高不会变，这一臂会放过一个把名字重新挤掉的实现。
+     *   ⇒ 反向半边同时把这两格放回来，长角色才会再次把行撑高。
+     */
+    const unhidden = broken.replace(
+      new RegExp(`(${prefix}member(?:Role|Model)\\{)display:none`, 'gu'),
+      '$1display:inline',
+    )
+    assert.notEqual(unhidden, broken, '★ 没能把角色/模型从 display:none 放回来 —— 这一臂会是空的')
+    broken = unhidden
+    assert.notEqual(broken, cssText, '★ 没能把 memberLine 的 nowrap 改回 wrap —— 这一臂会是空的')
+    /**
+     * ★ 对照必须是**同一宽度、同一份 DOM、只差这一处样式**：
+     *   第一版我拿 `page(320)` 量了两次（两次都是坏样式），于是两个读数恒等，
+     *   这一臂当场判红了一个**正确**的实现。⇒ 一边坏、一边好，才叫反向半边。
+     */
+    const wrapped = await measureInChrome(browser, sidebarHtml(prefix, broken).replace('width:900px', 'width:320px'), SIDEBAR_MEASURE)
+    const intact = await measureInChrome(browser, sidebarHtml(prefix, cssText).replace('width:900px', 'width:320px'), SIDEBAR_MEASURE)
+    assert.ok(
+      wrapped.rowHeights[0] > intact.rowHeights[0],
+      `★ 反向半边：改回 wrap 之后行高必须变大（坏 ${wrapped.rowHeights[0]} · 好 ${intact.rowHeights[0]}）`,
+    )
   } finally {
     browser.child.kill('SIGKILL')
   }
