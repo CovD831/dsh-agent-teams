@@ -3,7 +3,7 @@
  * coverage, and resume. Tools and persistence call these; they do not I/O.
  * @module dsh-agent-teams/quality-gates
  */
-import { type AcceptanceResult, type CommandResult, type FindingSeverity, type ReviewFinding, type ReviewPolicy, type ReviewedStamp, type ReviewVerdict, type TaskKind, type TaskEvidence, type TaskRevision, type TaskStatus, type TeamState, type TeamTask } from './types.ts';
+import { type AcceptanceResult, type CommandResult, type ReviewFinding, type ReviewPolicy, type ReviewedStamp, type ReviewVerdict, type TaskKind, type TaskEvidence, type TaskRevision, type TaskStatus, type TeamState, type TeamTask } from './types.ts';
 declare const QUALITY_KINDS: readonly TaskKind[];
 declare const WRITE_KINDS: readonly TaskKind[];
 declare const DEFAULT_REVIEW_POLICY: Required<Pick<ReviewPolicy, 'requirementsMinRounds' | 'requirementsMaxRounds' | 'codeMaxRounds' | 'maxRepairAttempts'>>;
@@ -567,7 +567,6 @@ export declare function isTaskRevision(value: unknown): value is TaskRevision;
  */
 export declare function normalizeBlankOptionalTaskFields<T extends object>(task: T): T;
 export declare function hasValidQualityTaskFields(value: Record<string, unknown>): boolean;
-export declare function isTaskKind(value: unknown): value is TaskKind;
 export declare function isReviewVerdict(value: unknown): value is ReviewVerdict;
 /**
  * ── ★★★ 逐条 check 的三态 —— 而它与 `REVIEW_VERDICTS` **是不同的东西** ──────────────
@@ -590,7 +589,6 @@ export declare function isReviewVerdict(value: unknown): value is ReviewVerdict;
 export declare const REVIEWED_CHECK_VERDICTS: readonly ["pass", "fail", "unmeasured"];
 /** `ReviewedCheck.verdict` 的取值判定。★ 不是 `isReviewVerdict` —— 见上面那一格。 */
 export declare function isReviewedCheckVerdict(value: unknown): boolean;
-export declare function isFindingSeverity(value: unknown): value is FindingSeverity;
 export declare function looksLikeGateTestContract(value: string | undefined): boolean;
 export declare function sanitizeReviewObjective(value: string | undefined, fallback?: string): string;
 export declare function sanitizeReviewAcceptance(values: readonly string[] | undefined): string[];

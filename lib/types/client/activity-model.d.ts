@@ -258,8 +258,6 @@ export declare function loopFacts<T extends LoopTask>(loop: ReviewLoop<T>, disca
 export declare function nextLoopDisclosure(current: LoopDisclosure | undefined, facts: LoopFacts): LoopDisclosure;
 /** Apply one explicit user toggle; the result is a user choice from then on. */
 export declare function toggleLoopDisclosure(current: LoopDisclosure): LoopDisclosure;
-/** Whether a review/repair loop exists: ≥2 rounds, the shape a single run never has. */
-export declare function hasReviewLoop<T extends LoopTask>(tasks: readonly T[]): boolean;
 /**
  * Project the review/repair loop as ordered rounds with round markers.
  *

@@ -61,8 +61,6 @@ export type MutationLayer = 'L1' | 'L2' | 'L3';
 export declare const L1_OPERATORS: readonly MutationOperator[];
 /** L2 —— 语言算子（本仓库是 TypeScript/JavaScript）。 */
 export declare const L2_OPERATORS: readonly MutationOperator[];
-export declare const L1_LAYER: readonly MutationOperator[];
-export declare const L2_LAYER: readonly MutationOperator[];
 export declare const DEFAULT_OPERATORS: readonly MutationOperator[];
 /**
  * 这些算子的变异体在【部分上下文里】与原文语义相同。
@@ -255,13 +253,6 @@ export interface MutationTarget {
 }
 /** 1-based, inclusive. 行号按 `\n` 数，与 git diff 的语义一致。 */
 export declare function lineOf(text: string, index: number): number;
-/**
- * 把 `--lines` 的语义变成一个行谓词。
- *
- * ★ 范围【必须在源文本里】，不能靠调用方自觉：一份 500 行的文件只改了一行时，
- *   全体变异的分数是关于那 500 行的，而不是关于那次改动的。两者在报告里同形。
- */
-export declare function inRange(line: number, range: LineRange): boolean;
 /** 某一行是否在【改动行】集合里。改动的定义来自调用方（git 证据，不是猜的）。 */
 export declare function isChangedLine(line: number, changedLines: readonly number[] | undefined): boolean;
 /**

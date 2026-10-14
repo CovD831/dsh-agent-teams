@@ -428,11 +428,6 @@ export function toggleLoopDisclosure(current: LoopDisclosure): LoopDisclosure {
   return { ...current, open: !current.open, userSet: true }
 }
 
-/** Whether a review/repair loop exists: ≥2 rounds, the shape a single run never has. */
-export function hasReviewLoop<T extends LoopTask>(tasks: readonly T[]): boolean {
-  return reviewLoop(tasks).rounds.length >= 2
-}
-
 /**
  * Project the review/repair loop as ordered rounds with round markers.
  *

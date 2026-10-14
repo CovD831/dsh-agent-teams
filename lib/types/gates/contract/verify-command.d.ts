@@ -62,14 +62,13 @@ export declare const id = "contract.verify-command";
 export declare const point = "contract";
 export declare const description = "\u5951\u7EA6\u91CC\u58F0\u660E\u7684 verify \u547D\u4EE4\u5FC5\u987B\u53EF\u5224\uFF08\u65E2\u80FD\u4E3A\u505A\u5BF9\u7684\u5DE5\u4F5C\u53D8\u7EFF\u3001\u4E5F\u80FD\u4E3A\u505A\u9519\u7684\u5DE5\u4F5C\u53D8\u7EA2\uFF09\uFF1A\u7A7A\u547D\u4EE4\u3001\u5199\u6B7B\u7684\u771F/\u5047\u3001\u4EE5\u53CA\u62FF -x \u53BB\u6BD4\"\u547D\u4EE4\u8F93\u51FA\"\uFF08\u5982 grep -qx N <(wc -l \u2026)\uFF0C\u524D\u5BFC\u7A7A\u683C\u8BA9\u6574\u884C\u5339\u914D\u6C38\u8FDC\u4E0D\u6210\u7ACB\uFF09\u90FD\u4F1A\u5728\u3010\u5EFA\u4EFB\u52A1\u90A3\u4E00\u523B\u3011\u88AB\u8BF4\u6E05\u695A";
 /**
- * 这个 id 的另一半用途：**调用方可以按它决定要不要注入执行器**。
- *
- * ★ 为什么把一个判据的 id 导出在这里：`tools.ts` 的注入口径是"缺什么就不注入什么
- *   （而不是注入一个空值）"—— 见 tools.ts 的注入口径一节。要在 create_task /
- *   amend_task 上按需注入，调用方必须能问出"contract 位置有没有一条判据需要跑命令"，
- *   而**注册表不认识判据的名字与语义**（契约 §8），所以能回答这个问题的只有判据自己。
+ * ★ 曾经的 `VERIFY_COMMAND_GATE_ID` 导出已删（2026-10-15，孤岛普查 t33）。
+ *   它承诺"调用方可以按它决定要不要注入执行器"，但那条路由**从未实现**：
+ *   `src/tools.ts`（注释里说要用它的地方）自己都不引用它，
+ *   `create-task.ts` / `amend-task.ts` 两处**无条件注入**。
+ *   ⇒ 机制已被更简单的做法取代，留着一个"读起来像在管事"的导出比删掉更坏。
+ *   若日后恢复"按需注入"，重新导出即可 —— 它是三行能重写的东西。
  */
-export declare const VERIFY_COMMAND_GATE_ID = "contract.verify-command";
 /**
  * ── ★ 输入面声明（B 层，编译期）────────────────────────────────────────────────
  *

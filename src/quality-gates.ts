@@ -2301,10 +2301,6 @@ function describeTypeOf(value: unknown): string {
   return `a ${typeof value}${value === undefined ? ' (the key is absent)' : ` (${String(value)})`}`
 }
 
-export function isTaskKind(value: unknown): value is TaskKind {
-  return typeof value === 'string' && (TASK_KINDS as readonly string[]).includes(value)
-}
-
 export function isReviewVerdict(value: unknown): value is ReviewVerdict {
   return typeof value === 'string' && (REVIEW_VERDICTS as readonly string[]).includes(value)
 }
@@ -2332,10 +2328,6 @@ export const REVIEWED_CHECK_VERDICTS = ['pass', 'fail', 'unmeasured'] as const
 /** `ReviewedCheck.verdict` 的取值判定。★ 不是 `isReviewVerdict` —— 见上面那一格。 */
 export function isReviewedCheckVerdict(value: unknown): boolean {
   return typeof value === 'string' && (REVIEWED_CHECK_VERDICTS as readonly string[]).includes(value)
-}
-
-export function isFindingSeverity(value: unknown): value is FindingSeverity {
-  return typeof value === 'string' && (FINDING_SEVERITIES as readonly string[]).includes(value)
 }
 
 export function looksLikeGateTestContract(value: string | undefined): boolean {
