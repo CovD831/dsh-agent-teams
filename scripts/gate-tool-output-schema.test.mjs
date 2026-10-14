@@ -719,9 +719,27 @@ async function statusFixture() {
   git(['add', '-A'])
   git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'])
   /**
-   * ★ 关键：`members` 非空是刻意的 —— `delivery.convergence` 在**没有成员观察**时
-   *   必报 unmeasured，于是这一格可以被真实地诱导出来（不是构造的）。
+   * ★ 关键：`members` 非空是刻意的 —— `delivery.convergence` 在没有成员观察时
+   * 必报 unmeasured，于是这一格可以被真实地诱导出来（不是构造的）。
+   *
+   * ── ★★ t46 修订：诱导方式从「驱动不在」改成「驱动在场但会话日志读不出来」 ────
+   *
+   * MEASURED（2026-10-14）：这里原来是 `agents: { get: () => undefined }` + 一个
+   * 有会话 id 的成员 ⇒ 注入层整份弃权 ⇒ convergence 报 unmeasured。
+   * 而那正是**被修掉的缺陷**：一个做完了的成员被宿主卸掉驱动
+   * （`drainContinuableChildren` → `dispose`，这条路不发任何事件）之后，
+   * 一支做完了全部工作的队伍永远交不了货。
+   *
+   * ⇒ 驱动不在 ⇒ 该成员这一维不可用 ⇒ 留名进旁路，其余成员照常判定（t46 臂 C1）。
+   *   仍会报 unmeasured 的是**另一种**事实：驱动在场，而它最后说了什么读不出来 ——
+   *   那是一次真正的读取失败，与"驱动被正常卸掉"不同形。
+   *   ★ 两者都拒绝交付，但成因与下一步动作相反，所以不许互相顶替。
    */
+  const unreadableSession = {
+    header: { cwd: ws, events: [] },
+    events: [],
+    ownEvents() { throw new Error('session log unreadable') },
+  }
   await createTeamDir(join(ws, '.agent-teams'), {
     phase: 'running', id: 'team', name: 'T', captainSessionId: 'cap', createdAt: 1, taskSeq: 0,
     members: [{ id: 'm1', name: 'w', status: 'working', joinedAt: 1 }], tasks: [],
@@ -735,7 +753,7 @@ async function statusFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { get: () => ({ id: 'm1', status: 'idle', session: unreadableSession, steer() {} }) },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })

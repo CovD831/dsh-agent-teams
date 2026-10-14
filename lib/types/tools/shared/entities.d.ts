@@ -1495,8 +1495,33 @@ export type MemberConvergenceObservation = {
     state: 'idle' | 'reported' | 'working' | 'failed' | 'never-spawned' | 'unknown';
     spoke?: boolean;
 };
+/**
+ * ── 观察面之外的旁路：被略过的成员（t46）──────────────────────────────────────
+ *
+ * ★ 为什么需要它：驱动不在场时，那个成员**不可观察** —— 它可能做完了、也可能
+ *   崩在半路，而这两件事在没有它自己那句发言记录时**无从分辨**。
+ *   此前的写法是 `return undefined`（把整份观察面扔掉），于是：
+ *     · 一个做完了的成员让**整队**失去观察 ⇒ 交付位置恒 unmeasured ⇒ 恒拒绝；
+ *     · 而 `status` 的渲染只印 blockers ⇒ 用户看到的是 `Delivery: blocked ()`
+ *       （空括号）—— 一句看不出成因的拒绝。
+ *
+ * ★ 正确的分界（本文件反复那条纪律）：**可判定的事实不得写成「没能测量」**。
+ *   `id === ''`（从未起来）是**可判定的事实** ⇒ 它仍然进观察面，由判据 blocked。
+ *   驱动不在 ≠ 从未起来：它是"这一维这次不可用" ⇒ 该成员不进入观察面，
+ *   **但必须留名**，否则"略过一个不可观察的成员"与"这个队没有成员"同形。
+ */
+export interface MemberConvergenceBypass {
+    readonly name: string;
+    /** 为什么它被略过。 */
+    readonly reason: 'driver-absent';
+}
+/** `observeMemberConvergence` 的完整返回：观察面 + 被略过的成员。 */
+export interface MemberConvergenceReading {
+    readonly observed: readonly MemberConvergenceObservation[];
+    readonly bypassed: readonly MemberConvergenceBypass[];
+}
 export declare function observedSpoke(session: unknown): boolean | undefined;
-export declare function observeMemberConvergence(ctx: Context, team: TeamState): MemberConvergenceObservation[] | undefined;
+export declare function observeMemberConvergence(ctx: Context, team: TeamState): MemberConvergenceReading;
 export declare function initializeProfileTeam(input: {
     ctx: Context;
     config: ToolsConfig;

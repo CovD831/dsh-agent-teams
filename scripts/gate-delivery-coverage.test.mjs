@@ -562,3 +562,151 @@ test('★ 臂 6e（t15 接线）：真实路径上，一个依赖未满足的成
    */
   assert.doesNotMatch(verdict.blockers.join(' '), /could not measure|not observed/)
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── ★★★ t46：注入层（`observeMemberConvergence`）—— 判据的【输入】是这里造的 ────
+//
+// 为什么单独一层：上面 24 条臂全部直接调 `convergenceGate.gate({team, members})`，
+// 那是**判据契约**。而真实交付路径上，`members` 是调用方
+// （`src/tools/delivery.ts` / `src/tools/status.ts`）经 `observeMemberConvergence`
+// 注入的 —— 那一次注入出了错，判据再对也读不到事实。
+//
+// MEASURED（2026-10-14，一次真实交付）：`ledger` 做完全部任务、`agent/status`
+// 已把它写回 idle，随后宿主卸掉了它的驱动。注入层在 `entities.ts:4111`
+// `return undefined` ⇒ 整个交付位置 unmeasured ⇒ `declare_delivery` 被拒，
+// 而 status 只印 `Delivery: blocked ()`（空括号）。
+//
+// ⇒ 本层钉的就是那一次注入：驱动不在场时**不许**把整份观察面扔掉。
+//
+// ★ 假 `ctx` 的范式来自 `scripts/lifecycle-verify.mjs:231`
+//   （`agents: { get(id) { return liveAgents.get(id) } }`）—— 不是为这里新编的。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const { observeMemberConvergence } = await import('../lib/tools/shared/entities.js')
+
+/** 一个最小团队状态：只有 members 与 tasks 两格被注入层读到。 */
+function teamOf(members, tasks = []) {
+  return { id: 'team', name: 'T46', captainSessionId: 'captain-session', createdAt: 1, taskSeq: tasks.length, members, tasks }
+}
+
+/** 一个假 `ctx`：只有 `agents.get` 被用到（与 `lifecycle-verify.mjs` 同形）。 */
+function ctxOf(liveAgents) {
+  return { agents: { get(id) { return liveAgents.get(id) } } }
+}
+
+/** 一个在场的驱动：`status` 两态 + 一段会话事件（`observedSpoke` 读的就是它）。 */
+function liveAgent(status, events) {
+  return { id: 's', status, session: { header: { cwd: '/tmp' }, events } }
+}
+
+const SPOKE_EVENT = { type: 'assistant/message', message: { content: [{ type: 'text', text: 'done' }] } }
+
+test('臂 B1 ★ 驱动在场 + 说过话 ⇒ 照常进观察面（现状不被破坏）', () => {
+  const reading = observeMemberConvergence(
+    ctxOf(new Map([['s', liveAgent('idle', [SPOKE_EVENT])]])),
+    teamOf([{ id: 's', name: 'worker', status: 'idle', joinedAt: 1 }]),
+  )
+  assert.deepEqual(reading.observed, [{ name: 'worker', state: 'idle', spoke: true }])
+  assert.deepEqual(reading.bypassed, [])
+})
+
+test('臂 B2 ★ 驱动在场 + 末句读不出 ⇒ 只这个成员 spoke 缺席，其余照常（t46 第三步）', () => {
+  /**
+   * ★ 判据那头 `convergence.ts:273` 的 `unmeasuredSpokes` 会**指名这个成员**报
+   *   unmeasured。所以注入层的正确行为是"把这一格空着交上去"，而不是把整份丢掉。
+   */
+  const reading = observeMemberConvergence(
+    ctxOf(new Map([['s', liveAgent('idle', [{ type: 'tool/result', meta: {} }])]])),
+    teamOf([
+      { id: 's', name: 'mute', status: 'idle', joinedAt: 1 },
+      { id: 't', name: 'loud', status: 'idle', joinedAt: 1 },
+    ], ),
+  )
+  // 只有一个成员在场 ⇒ 另一个驱动不在 ⇒ 走旁路
+  assert.deepEqual(reading.observed, [{ name: 'mute', state: 'idle' }])
+  assert.deepEqual(reading.bypassed, [{ name: 'loud', reason: 'driver-absent' }])
+  // ★ 而判据确实会指名那个 spoke 缺席的成员（判据契约未被破坏）
+  const verdict = convergenceGate.gate({ team: { id: 'team' }, members: reading.observed })
+  assert.equal(verdict.ok, false)
+  assert.match(String(verdict.unmeasured), /mute/)
+})
+
+test('臂 B3 ★★ 驱动不在场 ⇒ 不再整份弃权；该成员留名进旁路（t46 核心）', () => {
+  /**
+   * ★ 这是整个修复的目的：一个做完了的成员不再让**整队**失去观察。
+   *   MEASURED：旧写法在这里 `return undefined` ⇒ status 印 `Delivery: blocked ()`。
+   */
+  const reading = observeMemberConvergence(
+    ctxOf(new Map()),
+    teamOf([{ id: 's', name: 'ledger', status: 'idle', joinedAt: 1 }]),
+  )
+  assert.deepEqual(reading.observed, [], '★ 驱动不在 ⇒ 该成员不可观察，不进观察面')
+  assert.deepEqual(reading.bypassed, [{ name: 'ledger', reason: 'driver-absent' }], '★ 但必须留名')
+})
+
+test('臂 B4 ★ 空 id 仍然是【可判定的事实】⇒ never-spawned，不是旁路、不是弃权', () => {
+  /**
+   * ★ t15 钉下的分界：从未起来（可判定 ⇒ 判据 blocked）与会话读不出来
+   *   （没能测量）必须不同形。本臂保证 t46 没有把这条分界抹平。
+   */
+  const reading = observeMemberConvergence(
+    ctxOf(new Map()),
+    teamOf([
+      { id: '', name: 'unborn', status: 'idle', joinedAt: 1 },
+      { id: 's', name: 'gone', status: 'idle', joinedAt: 1 },
+    ]),
+  )
+  assert.deepEqual(reading.observed, [{ name: 'unborn', state: 'never-spawned' }])
+  assert.deepEqual(reading.bypassed, [{ name: 'gone', reason: 'driver-absent' }])
+})
+
+test('臂 B5 ★ 一个驱动不在的成员不再让其他成员的观察消失（反向半边）', () => {
+  /**
+   * ★ 旧写法的代价是**连坐**：一个成员驱动不在 ⇒ 整份观察面缺席 ⇒
+   *   连那个明明在場、明明说过话的成员也一起失去观察。
+   */
+  const reading = observeMemberConvergence(
+    ctxOf(new Map([['s', liveAgent('idle', [SPOKE_EVENT])]])),
+    teamOf([
+      { id: 's', name: 'present', status: 'idle', joinedAt: 1 },
+      { id: 'gone', name: 'absent', status: 'idle', joinedAt: 1 },
+    ]),
+  )
+  assert.deepEqual(reading.observed, [{ name: 'present', state: 'idle', spoke: true }])
+  assert.deepEqual(reading.bypassed, [{ name: 'absent', reason: 'driver-absent' }])
+  // ★ 于是判据能对"在场的那个"给出 ok（这正是做完的队伍该得到的结论）
+  const verdict = convergenceGate.gate({ team: { id: 'team' }, members: reading.observed })
+  assert.equal(verdict.ok, true, '★ 只剩可观察的成员时，交付位置不再恒 unmeasured')
+})
+
+test('臂 B6 ★ 定向突变：把「驱动不在」改回整份弃权 ⇒ 臂 B3/B5 必须红', () => {
+  /**
+   * ★ 这一臂防的是"上面几条绿只是因为分支写成了恒真"。
+   *   做法：用**同一个**输入，对照"修复后的形状"与"旧写法的形状"，
+   *   断言两者不同形 —— 于是把 `entities.ts` 那一行改回 `return undefined`
+   *   会让本文件当场红，而不是安静地继续绿。
+   */
+  const input = {
+    ctx: ctxOf(new Map()),
+    team: teamOf([{ id: 's', name: 'ledger', status: 'idle', joinedAt: 1 }]),
+  }
+  const fixed = observeMemberConvergence(input.ctx, input.team)
+  /** 旧写法的形状（逐字复刻被改掉的那一支）。 */
+  const legacy = (() => {
+    const out = []
+    for (const member of input.team.members) {
+      if (member.status === 'removed') continue
+      if (member.id === '') { out.push({ name: member.name, state: 'never-spawned' }); continue }
+      const live = input.ctx.agents.get(member.id)
+      if (live === undefined) return undefined
+    }
+    return out
+  })()
+  assert.notEqual(fixed, undefined, '★ 修复后必须交得出观察面')
+  assert.equal(legacy, undefined, '★ 旧写法在同一输入上整份弃权 —— 两者必须不同形')
+  assert.notDeepEqual(
+    { observed: fixed.observed, bypassed: fixed.bypassed },
+    { observed: undefined, bypassed: undefined },
+    '★ 修复前后的形状必须可区分，否则本层没有测到任何东西',
+  )
+})

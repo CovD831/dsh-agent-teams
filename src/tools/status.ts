@@ -641,7 +641,8 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           team,
           gate: deliveryCheck,
           coverage,
-          ...memberConvergence === undefined ? {} : { members: memberConvergence },
+          members: memberConvergence.observed,
+          ...memberConvergence.bypassed.length === 0 ? {} : { member_convergence_bypassed: memberConvergence.bypassed },
         }
         /**
          * ★ 只报告：这里**不**抛错。`delivery` 字段要把【两边的结论】都交出去 ——

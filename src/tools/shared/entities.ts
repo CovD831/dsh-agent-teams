@@ -4045,6 +4045,31 @@ export type MemberConvergenceObservation = {
   state: 'idle' | 'reported' | 'working' | 'failed' | 'never-spawned' | 'unknown'
   spoke?: boolean
 }
+/**
+ * ── 观察面之外的旁路：被略过的成员（t46）──────────────────────────────────────
+ *
+ * ★ 为什么需要它：驱动不在场时，那个成员**不可观察** —— 它可能做完了、也可能
+ *   崩在半路，而这两件事在没有它自己那句发言记录时**无从分辨**。
+ *   此前的写法是 `return undefined`（把整份观察面扔掉），于是：
+ *     · 一个做完了的成员让**整队**失去观察 ⇒ 交付位置恒 unmeasured ⇒ 恒拒绝；
+ *     · 而 `status` 的渲染只印 blockers ⇒ 用户看到的是 `Delivery: blocked ()`
+ *       （空括号）—— 一句看不出成因的拒绝。
+ *
+ * ★ 正确的分界（本文件反复那条纪律）：**可判定的事实不得写成「没能测量」**。
+ *   `id === ''`（从未起来）是**可判定的事实** ⇒ 它仍然进观察面，由判据 blocked。
+ *   驱动不在 ≠ 从未起来：它是"这一维这次不可用" ⇒ 该成员不进入观察面，
+ *   **但必须留名**，否则"略过一个不可观察的成员"与"这个队没有成员"同形。
+ */
+export interface MemberConvergenceBypass {
+  readonly name: string
+  /** 为什么它被略过。 */
+  readonly reason: 'driver-absent'
+}
+/** `observeMemberConvergence` 的完整返回：观察面 + 被略过的成员。 */
+export interface MemberConvergenceReading {
+  readonly observed: readonly MemberConvergenceObservation[]
+  readonly bypassed: readonly MemberConvergenceBypass[]
+}
 export function observedSpoke(session: unknown): boolean | undefined {
   if (session === null || typeof session !== 'object') return undefined
   let events: readonly unknown[]
@@ -4071,8 +4096,9 @@ export function observedSpoke(session: unknown): boolean | undefined {
 export function observeMemberConvergence(
   ctx: Context,
   team: TeamState,
-): MemberConvergenceObservation[] | undefined {
+): MemberConvergenceReading {
   const out: MemberConvergenceObservation[] = []
+  const bypassed: MemberConvergenceBypass[] = []
   for (const member of team.members) {
     if (member.status === 'removed') continue
     /**
@@ -4105,12 +4131,33 @@ export function observeMemberConvergence(
     }
     const live = ctx.agents.get(member.id as SessionId)
     /**
-     * ★ 这一支**才是**真的没能观察：成员有会话 id，而 live Agent 拿不到 ——
-     *   它可能起来了、也可能已经释放，无从分辨 ⇒ 整份观察面缺席 ⇒ unmeasured。
+     * ── ★★ 驱动不在场：不再把整份观察面扔掉（t46）──────────────────────────────
+     *
+     * MEASURED（2026-10-14，一次真实交付）：`ledger` 做完全部任务、`agent/status`
+     * 已把它写回 `idle`，随后宿主卸掉了它的驱动（`drainContinuableChildren` →
+     * `dispose`，这条路**不发任何事件**）。于是：
+     *   · 旧写法在这里 `return undefined` ⇒ 整个交付位置 unmeasured ⇒ 恒拒绝；
+     *   · 而用户看到的拒绝语是 `Delivery: blocked ()`（空括号，见渲染那段）。
+     *
+     * ★ 为什么不能读 `member.status` 补这一格：`src/members.ts:944` 记着
+     *   「`member.status` 是持久记录，它会在成员死掉之后仍然写着 `working`」，
+     *   而 `:990` 又补一句「在飞要用【任务】判，不能用 `member.status`」。
+     *   拿一个自己会残留的字段当自变量，等于拿被质疑的当证据。
+     *
+     * ★ 为什么不能改判据让它放过：判据的白名单（`['idle','reported']`）与
+     *   `spoke` 缺席 ⇒ unmeasured 是**契约**，由 `scripts/gate-delivery-coverage.test.mjs`
+     *   的 24 条臂钉住。动它就是把"没测到"放行成"测过了"。
+     *
+     * ⇒ 此处只做一件事：该成员**不可观察** ⇒ 不进观察面，但记进旁路留名。
+     *   「略过一个不可观察的成员」与「这个队没有成员」因此不同形。
+     *   「会话死了但活还在」这一维这次确实不可用 —— 那是设计约束
+     *   （`waitRecords` 是进程内 Map、冷启动即空），不是待修的 bug。
      */
-    if (live === undefined) return undefined
+    if (live === undefined) {
+      bypassed.push({ name: member.name, reason: 'driver-absent' })
+      continue
+    }
     const spoke = observedSpoke(live.session)
-    if (spoke === undefined) return undefined
     out.push({
       name: member.name,
       /**
@@ -4120,10 +4167,16 @@ export function observeMemberConvergence(
        * 于是"记录里写着 idle、而它其实没交回任何东西"这件事，由 `spoke: false` 抓住。
        */
       state: live.status === 'running' ? 'working' : live.status === 'idle' ? 'idle' : 'unknown',
-      spoke,
+      /**
+       * ★ `spoke` 读不出 ⇒ 缺席（不是 `false`）：判据那头
+       *   `convergence.ts:273` 的 `unmeasuredSpokes` 会**指名这个成员**报
+       *   unmeasured，而其他成员的观察照常参与判定。
+       *   ★ 这正是 t46 的第三步，而它**不需要改判据** —— 判据早已逐成员处理。
+       */
+      ...spoke === undefined ? {} : { spoke },
     })
   }
-  return out
+  return { observed: out, bypassed }
 }
 export async function initializeProfileTeam(input: {
   ctx: Context
@@ -4375,7 +4428,7 @@ export function renderStatus(value: JsonValue): string {
     loop_summary?: string
     deliverable?: boolean
     coverage?: { goal_item: string; status: string; task_ids: string[] }[]
-    delivery?: { ok: boolean; blockers: string[] }
+    delivery?: { ok: boolean; blockers: string[]; unmeasured?: string }
     /**
      * ★ 部署状态（t34 的格）。**必须渲染出来** —— 见下面那段 MEASURED。
      */
@@ -4418,7 +4471,34 @@ export function renderStatus(value: JsonValue): string {
       ...team.coverage.map((row) => `  - ${row.goal_item}: ${row.status} (${row.task_ids.join(',') || 'none'})`),
     ],
     ...team.delivery === undefined ? [] : [
-      `Delivery: ${team.delivery.ok ? 'ok' : `blocked (${team.delivery.blockers.join('; ')})`}`,
+      /**
+       * ── ★★ 三态在渲染层就分形（t46）──────────────────────────────────────────────
+       *
+       * MEASURED（2026-10-14，一次真实交付）：`declare_delivery` 被拒，原话是
+       * 「the members' convergence state was not observed」；而 status 的渲染里
+       * 只有一行 `Delivery: blocked ()` —— **括号是空的**。
+       *
+       * 两层叠加造成那个空括号：
+       *   ① `blockers` 是空的（没能测量不写进 blockers，那是 t35/f-0017 的正确分法）；
+       *   ② `unmeasured` 被渲染层丢掉了（这一行的类型里根本没有那一格）。
+       *
+       * ⇒ 于是「查出了问题」与「没测到」在读者眼里**同形**，而它们的下一步动作相反：
+       *    前者去修产物，后者去接线。把 unmeasured 印出来，不是多加一行字，
+       *    是让那个空括号不再骗人。
+       *
+       * ★ 三条形状互不相同，且 `ok` 优先：都齐时只说 ok，不啰嗦。
+       */
+      (() => {
+        const delivery = team.delivery
+        if (delivery.ok) return 'Delivery: ok'
+        const measured = delivery.blockers.join('; ')
+        if (measured !== '') return `Delivery: blocked (${measured})`
+        if (typeof delivery.unmeasured === 'string' && delivery.unmeasured.trim() !== '') {
+          return `Delivery: unmeasured (${delivery.unmeasured})`
+        }
+        /** 既没有查出的问题、也没能说出原因 —— 那是调用点自己的缺陷，不能印成 ok。 */
+        return 'Delivery: blocked (no reason given)'
+      })(),
     ],
     /**
      * ── ★ 部署状态必须【渲染出来】（2026-10-07，一次代价很大的实测）─────────────

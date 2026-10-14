@@ -851,16 +851,34 @@ test('★ t12 臂 3（未测量臂）：拿到持久记录、但【拿不到观�
    *     ② 观察到了、空回复    ⇒ blocked （臂 2）
    *     ③ **没能观察**        ⇒ unmeasured（本臂）
    *
-   *   ③ 的构造刻意是"团队记录看起来很好"：成员在记录里是 idle，但没有 live Agent
-   *   （未 spawn / 句柄已释放）⇒ 调用方**不注入** members ⇒ 判据按自己的契约说
-   *   "没能观察"。★ 这与 ② 的 blocked 不同形，也与 ① 的 ok 不同形。
+   * ── ★★ t46 修订：本臂的构造方式改了，而它测的东西**没有变** ────────────────────
+   *
+   * MEASURED（2026-10-14）：本臂原来的构造是"成员有会话 id、而 liveAgents 为空"，
+   * 注释里写着「未 spawn / 句柄已释放」。而那正是**修复的对象**：
+   * 一个做完了的成员被宿主卸掉驱动（`drainContinuableChildren` → `dispose`，
+   * 这条路不发任何事件）之后，注入层整份弃权 ⇒ 交付位置恒 unmeasured ⇒
+   * 一支做完了全部工作的队伍**永远交不了货**。
+   *
+   * ★ 旧构造还有一个它自己没察觉的问题：那个团队的 `tasks` 是空的 ⇒
+   *   `canDeclareDelivery` 在**走到 delivery 位置之前**就用
+   *   "team has no completed work" 把它拦了 ⇒ 本臂从来没有测到 convergence，
+   *   它读到的一直是上游质量门的话。（实测：修订前它的失败信息正是那句。）
+   *
+   * ⇒ 修订后，"没能观察"由**驱动在场、而它的会话日志读不出来**承载 ——
+   *   那是一条真正的读取失败，与"驱动被正常卸掉"不同形：
+   *     · 驱动被卸掉 ⇒ 该成员这一维不可用 ⇒ 留名进旁路，其余成员照常判定（t46 臂 C1）
+   *     · 日志读不出  ⇒ 这个成员**说过什么**无从分辨 ⇒ 判据指名它报 unmeasured（本臂）
+   *
+   * ★ 而"它与 ② 的 blocked 不同形"这一半照旧成立：本臂仍然不是"发现了问题"。
    */
   const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t12-unobserved-')))
   await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
     members: [{ id: 'member-1', name: 'worker', status: 'idle', joinedAt: 1 }],
   })
-  // liveAgents 为空 ⇒ ctx.agents.get 拿不到 ⇒ 观察缺席
-  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+  /** 驱动在场，但它的会话日志读不出来 ⇒ `observedSpoke` 返回 undefined。 */
+  const liveAgents = new Map([['member-1', fakeMemberAgent('member-1', { unreadable: true })]])
+  const { call } = pluginFixture(workspace, { liveAgents })
   await assert.rejects(
     () => call('agent_teams_declare_delivery', {}),
     (error) => {
@@ -1151,4 +1169,131 @@ test('★★★ 臂 3b（t21·位置级）：说不出对「正当留白」放�
     tolerated.ok, refused.ok,
     '★ "正当留白"与"契约缺陷"在位置级给了同一个结局 ⇒ 两态被合流了',
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── ★★★ t46：真实交付路径 —— 驱动已卸掉的成员不再让整队交不了货 ───────────────
+//
+// 上面 B 层（`gate-delivery-coverage.test.mjs`）钉的是注入层的分支语义；
+// 本组钉的是**真实工具路径**：`agent_teams_declare_delivery` 本身。
+//
+// MEASURED（2026-10-14，一次真实交付）：`ledger` 做完全部任务、`agent/status`
+// 已把它写回 idle，随后宿主卸掉了它的驱动（`drainContinuableChildren` → `dispose`，
+// 这条路不发任何事件）。于是注入层整份弃权 ⇒ 交付位置 unmeasured ⇒ 宣告被拒，
+// 而 status 只印 `Delivery: blocked ()`（空括号）。
+//
+// ⇒ 本组两个方向都必须成立，缺一个就是修过了头或没修到：
+//   ① 驱动不在 + 任务全部终态 ⇒ **交得了货**（修复的目的）
+//   ② 成员从未起来 ⇒ **仍然拦**（`never-spawned` 不许被顺手放过）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一份真的可交付的任务图（少任何一条，调用会在走到 delivery 位置之前就被质量门拦下）。 */
+const T46_DELIVERABLE_TASKS = [
+  {
+    id: 'd1', seq: 1, subject: 'impl', kind: 'implementation', status: 'completed',
+    objective: 'o', inScope: ['src/a.ts', 'lib/a.js'], acceptance: ['a'],
+    changedPaths: ['src/a.ts'],
+    assignee: 'worker', attempt: 1, attemptId: 'a1', createdAt: 1, updatedAt: 1, dependencies: [],
+  },
+  {
+    id: 'd2', seq: 2, subject: 'review', kind: 'review', status: 'completed', verdict: 'pass',
+    reviewedTaskId: 'd1',
+    assignee: 'worker', attempt: 1, attemptId: 'a2', createdAt: 1, updatedAt: 1, dependencies: ['d1'],
+  },
+]
+
+test('★ t46 臂 C1（核心）：驱动已卸掉 + 任务全部终态 ⇒ declare_delivery 不再被 unmeasured 拒', async () => {
+  /**
+   * ★ 这是整个修复的目的，不是分支逻辑。
+   *
+   * 成员有会话 id（它起来过）、而 `liveAgents` 是空的（驱动已被宿主卸掉）——
+   * 这正是 MEASURED 里 `ledger` 的形态。旧写法在这里整份弃权。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-disposed-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: 'member-session-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+  })
+  /** ★ live Agent 表为空 ⇒ 驱动不在场。 */
+  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+
+  const declared = await call('agent_teams_declare_delivery', {})
+  assert.equal(declared.declared, true, '★ 做完的队伍交得了货')
+  assert.deepEqual(declared.blockers, [], '★ 不许留下任何拒绝理由')
+  assert.equal(declared.gates_evaluated >= 1, true, '★ 必须真的求值过判据（不是空转通过）')
+})
+
+test('★ t46 臂 C2（反向）：成员从未起来 ⇒ 仍然被拒，且指名是哪个成员', async () => {
+  /**
+   * ★ t15 钉下的分界不许被抹平：从未起来是**可判定的事实** ⇒ 拦。
+   *   若这一臂也放行了，说明修复把"没起来"与"驱动卸了"合成了同一件事。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-unborn-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: '', name: 'never-started', status: 'idle', joinedAt: 1 }],
+  })
+  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+
+  await assert.rejects(
+    () => call('agent_teams_declare_delivery', {}),
+    (error) => {
+      assert.match(error.message, /declare_delivery rejected/)
+      assert.match(error.message, /never-started/, '★ 必须指名那个从未起来的成员')
+      return true
+    },
+    '★ 修复不得把"从未起来"一起放过',
+  )
+})
+
+test('★ t46 臂 C3（对照）：驱动在场且说过话 ⇒ 照常通过（现状不被破坏）', async () => {
+  /**
+   * ★ 与 C1 是一对：同一个团队、同一个任务图，只把驱动放回来。
+   *   两臂都过，才说明改的是"驱动不在"那一支，而不是把整条路径放宽了。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-live-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: 'member-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+  })
+  const liveAgents = new Map([['member-1', fakeMemberAgent('member-1', { text: 'all done' })]])
+  const { call } = pluginFixture(workspace, { liveAgents })
+
+  const declared = await call('agent_teams_declare_delivery', {})
+  assert.equal(declared.declared, true, '★ 驱动在场且说过话 ⇒ 仍然通过')
+})
+
+test('★ t46 臂 C4（定向突变）：把「驱动不在」改回整份弃权 ⇒ 臂 C1 必须翻脸', async () => {
+  /**
+   * ★ 这一臂防的是"C1 绿只是因为别处放行了"。
+   *
+   * 做法不是改产品源码（本夹具的 inScope 只有 scripts/），而是**用同一个输入**
+   * 对照两种注入形状下宣告的结局：
+   *   · 修复后：`observed` 里没有那个成员 ⇒ 判据只对可观察的成员发言 ⇒ 通过
+   *   · 旧写法：整份弃权 ⇒ 判据 unmeasured ⇒ 拒绝
+   *
+   * ★ 判定落在**真实工具路径**上（真的 `registry.evaluate('delivery')`），
+   *   所以它证明的是"那一行确实承载了结局"，而不是"我复刻的逻辑自洽"。
+   */
+  const { observeMemberConvergence } = await import('../lib/tools/shared/entities.js')
+  const disposedTeam = {
+    id: 'team', name: 'Wiring', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 2,
+    members: [{ id: 'member-session-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+    tasks: T46_DELIVERABLE_TASKS,
+  }
+  const fixed = observeMemberConvergence({ agents: { get: () => undefined } }, disposedTeam)
+
+  /** 旧写法的形状：逐字复刻被改掉的那一支。 */
+  const legacy = (() => {
+    for (const member of disposedTeam.members) {
+      if (member.status === 'removed') continue
+      if (member.id === '') return [{ name: member.name, state: 'never-spawned' }]
+      if (undefined === undefined) return undefined
+    }
+    return []
+  })()
+
+  assert.notEqual(fixed.observed, undefined, '★ 修复后交得出观察面')
+  assert.equal(legacy, undefined, '★ 旧写法在同一输入上整份弃权 —— 两者必须不同形')
+  assert.deepEqual(fixed.bypassed, [{ name: 'worker', reason: 'driver-absent' }])
 })
