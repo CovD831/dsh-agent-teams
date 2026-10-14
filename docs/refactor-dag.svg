@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1720 1480" width="1720" height="1480" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1720 1700" width="1720" height="1700" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
@@ -28,7 +28,7 @@
     </style>
   </defs>
 
-  <rect width="1720" height="1480" fill="#ffffff"/>
+  <rect width="1720" height="1700" fill="#ffffff"/>
   <text x="40" y="46" class="title">AgentTeams 重构总览 DAG · v3</text>
   <text x="40" y="70" class="sub">8 条一等线 · 依据 24 条对抗性审查 finding 修正 · HEAD b8f357e</text>
   <text x="40" y="90" class="sub">用户裁定：① C 线要做 ② 所有孤岛必须接线或删掉 ③ tools.ts 拆分接受</text>
@@ -55,42 +55,71 @@
   <rect x="30" y="742" width="1660" height="220" class="band"/>
   <text x="46" y="764" class="bandt">批次 3 · 依赖批次 2 定稿</text>
 
+
+  <!-- ============ v4 新增：通用底座 / 救援上报 / 无人值守 ============ -->
+  <rect x="30" y="1180" width="1660" height="130" class="band" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="46" y="1202" class="bandt" fill="#166534">v4 新增 · 用户诉求补齐（此前 DAG 遗漏）</text>
+
+  <rect x="60" y="1214" width="390" height="82" class="node" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="78" y="1240" class="nt" fill="#166534">U · 通用底座分层（裁定：乙）</text>
+  <text x="78" y="1258" class="ns" fill="#15803d">只分层不抽取 · 判据层已干净（3/17 提项目名）</text>
+  <text x="78" y="1274" class="ns" fill="#15803d">U3 基线层通用化 —— 不做则插件在陌生项目不可用</text>
+  <text x="78" y="1290" class="lblsm">★ 现在抽取会把 34 个夹具的耦合带进底座</text>
+
+  <rect x="470" y="1214" width="390" height="82" class="node" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="488" y="1240" class="nt" fill="#166534">R · 救援与上报路径</text>
+  <text x="488" y="1258" class="ns" fill="#15803d">R1 救援机制 · R2 三类识别规则（不同形）</text>
+  <text x="488" y="1274" class="ns" fill="#15803d">R3 智能上报（self 378 / escalate 6）</text>
+  <text x="488" y="1290" class="ns" fill="#15803d">R4 上报自进化 · R5 沉淀为机械判据（非 prompt）</text>
+
+  <rect x="880" y="1214" width="390" height="82" class="node" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="898" y="1240" class="nt" fill="#166534">V · 无人值守 × 迭代速度</text>
+  <text x="898" y="1258" class="ns" fill="#15803d">V1 无人值守（首要目标）· V2 快速迭代</text>
+  <text x="898" y="1274" class="ns" fill="#15803d">V3 ★ 漂移防护 ↔ 速度 是显式权衡</text>
+  <text x="898" y="1290" class="ns" fill="#15803d">V4 最小 MVP —— 每条新增须过「不做会怎样」</text>
+
+  <rect x="1290" y="1214" width="370" height="82" class="node" fill="#fffbeb" stroke="#d97706"/>
+  <text x="1308" y="1240" class="nt" fill="#92400e">元判据（队长自查）</text>
+  <text x="1308" y="1258" class="ns" fill="#b45309">任何「更严格」的建议必须同时给出</text>
+  <text x="1308" y="1274" class="ns" fill="#b45309">它的速度代价 —— 否则是半个建议</text>
+  <text x="1308" y="1290" class="lblsm" fill="#dc2626">★ 我本会话犯过此偏差</text>
+
   <!-- ============ 工装与效率（新增） ============ -->
   <rect x="30" y="742" width="1660" height="0" class="band" opacity="0"/>
-  <rect x="30" y="984" width="1660" height="316" class="band"/>
-  <text x="46" y="1006" class="bandt">工装缺陷 3 条（用户裁定：后续任务必修） ＋ P 线 · 效率（用户裁定：丙）</text>
+  <rect x="30" y="1324" width="1660" height="316" class="band"/>
+  <text x="46" y="1346" class="bandt">工装缺陷 3 条（用户裁定：后续任务必修） ＋ P 线 · 效率（用户裁定：丙）</text>
 
   <!-- T1 sourceTaskId 挂错 -->
-  <rect x="60" y="1024" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
-  <text x="78" y="1050" class="nt" fill="#991b1b">T1 · sourceTaskId 挂错</text>
-  <text x="78" y="1070" class="ns" fill="#b91c1c">finding 被挂到被审对象上</text>
-  <text x="78" y="1086" class="ns" fill="#b91c1c">后果：t28 被【重复派发】跑了两遍</text>
-  <text x="78" y="1102" class="ns" fill="#b91c1c">t28.sourceTaskId=t24（实出自 t25）</text>
-  <text x="78" y="1122" class="lblsm" fill="#dc2626">★ 损害：正确性 + 效率</text>
+  <rect x="60" y="1364" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="78" y="1390" class="nt" fill="#991b1b">T1 · sourceTaskId 挂错</text>
+  <text x="78" y="1410" class="ns" fill="#b91c1c">finding 被挂到被审对象上</text>
+  <text x="78" y="1426" class="ns" fill="#b91c1c">后果：t28 被【重复派发】跑了两遍</text>
+  <text x="78" y="1442" class="ns" fill="#b91c1c">t28.sourceTaskId=t24（实出自 t25）</text>
+  <text x="78" y="1462" class="lblsm" fill="#dc2626">★ 损害：正确性 + 效率</text>
 
   <!-- T2 输入不过桥 -->
-  <rect x="390" y="1024" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
-  <text x="408" y="1050" class="nt" fill="#991b1b">T2 · 输入不过桥</text>
-  <text x="408" y="1070" class="ns" fill="#b91c1c">worktree 是干净检出，未提交的</text>
-  <text x="408" y="1086" class="ns" fill="#b91c1c">输入文件它【拿不到】</text>
-  <text x="408" y="1102" class="ns" fill="#b91c1c">20/27 契约引用 docs/ ⇒ 全受影响</text>
-  <text x="408" y="1122" class="lblsm" fill="#16a34a">已应急修：提交 25e7e2b（根因未修）</text>
+  <rect x="390" y="1364" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="408" y="1390" class="nt" fill="#991b1b">T2 · 输入不过桥</text>
+  <text x="408" y="1410" class="ns" fill="#b91c1c">worktree 是干净检出，未提交的</text>
+  <text x="408" y="1426" class="ns" fill="#b91c1c">输入文件它【拿不到】</text>
+  <text x="408" y="1442" class="ns" fill="#b91c1c">20/27 契约引用 docs/ ⇒ 全受影响</text>
+  <text x="408" y="1462" class="lblsm" fill="#16a34a">已应急修：提交 25e7e2b（根因未修）</text>
 
   <!-- T3 契约行号 -->
-  <rect x="720" y="1024" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
-  <text x="738" y="1050" class="nt" fill="#991b1b">T3 · 契约用行号锚定</text>
-  <text x="738" y="1070" class="ns" fill="#b91c1c">文件一改，行号全部错位</text>
-  <text x="738" y="1086" class="ns" fill="#b91c1c">已连续三次发生（t28/t34/…）</text>
-  <text x="738" y="1102" class="ns" fill="#b91c1c">成员被迫按语义核对</text>
-  <text x="738" y="1122" class="lblsm" fill="#dc2626">修法：改引【锚点文本】</text>
+  <rect x="720" y="1364" width="300" height="112" class="node" fill="#fee2e2" stroke="#dc2626"/>
+  <text x="738" y="1390" class="nt" fill="#991b1b">T3 · 契约用行号锚定</text>
+  <text x="738" y="1410" class="ns" fill="#b91c1c">文件一改，行号全部错位</text>
+  <text x="738" y="1426" class="ns" fill="#b91c1c">已连续三次发生（t28/t34/…）</text>
+  <text x="738" y="1442" class="ns" fill="#b91c1c">成员被迫按语义核对</text>
+  <text x="738" y="1462" class="lblsm" fill="#dc2626">修法：改引【锚点文本】</text>
 
   <!-- P 线 效率 -->
-  <rect x="1050" y="1024" width="610" height="112" class="node" fill="#fef3c7" stroke="#d97706"/>
-  <text x="1068" y="1050" class="nt" fill="#92400e">P · 效率（★ 用户裁定：丙 = 快环 + 全环）</text>
-  <text x="1068" y="1070" class="ns" fill="#b45309">实测：verify:gates 39.8s，其余 21 步全亚秒级；最贵 3 夹具占 55.3s</text>
-  <text x="1068" y="1086" class="ns" fill="#b45309">15 个夹具【扫全仓】⇒ 成本 O(仓库规模)（这是"越加越慢"的结构性根因）</text>
-  <text x="1068" y="1102" class="ns" fill="#b45309">P1 分快环/全环 · P2 按 inScope 选夹具 · P4 判据成本可见 · P5 全仓夹具读取缓存</text>
-  <text x="1068" y="1122" class="lblsm" fill="#dc2626">★ P3 存量红分流 —— 唯一需用户拍板（与 backtest「基线先绿」冲突）</text>
+  <rect x="1050" y="1364" width="610" height="112" class="node" fill="#fef3c7" stroke="#d97706"/>
+  <text x="1068" y="1390" class="nt" fill="#92400e">P · 效率（★ 用户裁定：丙 = 快环 + 全环）</text>
+  <text x="1068" y="1410" class="ns" fill="#b45309">实测：verify:gates 39.8s，其余 21 步全亚秒级；最贵 3 夹具占 55.3s</text>
+  <text x="1068" y="1426" class="ns" fill="#b45309">15 个夹具【扫全仓】⇒ 成本 O(仓库规模)（这是"越加越慢"的结构性根因）</text>
+  <text x="1068" y="1442" class="ns" fill="#b45309">P1 分快环/全环 · P2 按 inScope 选夹具 · P4 判据成本可见 · P5 全仓夹具读取缓存</text>
+  <text x="1068" y="1462" class="lblsm" fill="#dc2626">★ P3 存量红分流 —— 唯一需用户拍板（与 backtest「基线先绿」冲突）</text>
 
   <!-- 横切关注点（下移） -->
   <rect x="30" y="1310" width="1660" height="0" class="band" opacity="0"/>
@@ -215,27 +244,27 @@
 
   <!-- ================= 横切 ================= -->
   <rect x="60" y="1340" width="300" height="96" class="node" fill="#ffffff" stroke="#0ea5e9"/>
-  <text x="78" y="1366" class="nt" fill="#0369a1">审查臂 · 每条线独立复核</text>
-  <text x="78" y="1386" class="ns" fill="#0284c7">不复用实现者脚本</text>
-  <text x="78" y="1402" class="ns" fill="#0284c7">已抓出：1 个 blocker（计划）</text>
-  <text x="78" y="1420" class="lblsm">+ 2 个产品缺陷</text>
+  <text x="78" y="1586" class="nt" fill="#0369a1">审查臂 · 每条线独立复核</text>
+  <text x="78" y="1606" class="ns" fill="#0284c7">不复用实现者脚本</text>
+  <text x="78" y="1622" class="ns" fill="#0284c7">已抓出：1 个 blocker（计划）</text>
+  <text x="78" y="1640" class="lblsm">+ 2 个产品缺陷</text>
 
   <rect x="390" y="1340" width="300" height="96" class="node" fill="#ffffff" stroke="#0ea5e9"/>
-  <text x="408" y="1366" class="nt" fill="#0369a1">三态纪律</text>
-  <text x="408" y="1386" class="ns" fill="#0284c7">skipped ≠ ok（不许合流）</text>
-  <text x="408" y="1402" class="ns" fill="#0284c7">折叠必须留痕（未检查）</text>
-  <text x="408" y="1420" class="lblsm">空转的验收 = 通过的验收（同形）</text>
+  <text x="408" y="1586" class="nt" fill="#0369a1">三态纪律</text>
+  <text x="408" y="1606" class="ns" fill="#0284c7">skipped ≠ ok（不许合流）</text>
+  <text x="408" y="1622" class="ns" fill="#0284c7">折叠必须留痕（未检查）</text>
+  <text x="408" y="1640" class="lblsm">空转的验收 = 通过的验收（同形）</text>
 
   <rect x="720" y="1340" width="300" height="96" class="node" fill="#ffffff" stroke="#0ea5e9"/>
-  <text x="738" y="1366" class="nt" fill="#0369a1">交付回流</text>
-  <text x="738" y="1386" class="ns" fill="#0284c7">worktree 提交须回流队长工作区</text>
-  <text x="738" y="1402" class="ns" fill="#0284c7">实测缺失 2 次，尚无判据</text>
-  <text x="738" y="1420" class="lblsm">G 线</text>
+  <text x="738" y="1586" class="nt" fill="#0369a1">交付回流</text>
+  <text x="738" y="1606" class="ns" fill="#0284c7">worktree 提交须回流队长工作区</text>
+  <text x="738" y="1622" class="ns" fill="#0284c7">实测缺失 2 次，尚无判据</text>
+  <text x="738" y="1640" class="lblsm">G 线</text>
 
   <rect x="1050" y="1340" width="300" height="96" class="node" fill="#ffffff" stroke="#0ea5e9"/>
-  <text x="1068" y="1366" class="nt" fill="#0369a1">判据效能读数</text>
-  <text x="1068" y="1386" class="ns" fill="#0284c7">384 条真实卡点 · 187 可归因（48.7%）</text>
-  <text x="1068" y="1402" class="ns" fill="#0284c7">self 378 / escalate 6（98.4% 自消化）</text>
-  <text x="1068" y="1420" class="lblsm">D 线的输入</text>
+  <text x="1068" y="1586" class="nt" fill="#0369a1">判据效能读数</text>
+  <text x="1068" y="1606" class="ns" fill="#0284c7">384 条真实卡点 · 187 可归因（48.7%）</text>
+  <text x="1068" y="1622" class="ns" fill="#0284c7">self 378 / escalate 6（98.4% 自消化）</text>
+  <text x="1068" y="1640" class="lblsm">D 线的输入</text>
 
 </svg>
