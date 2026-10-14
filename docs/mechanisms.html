@@ -71,7 +71,7 @@
 </div>
 
 <div class="stats">
-  <div class="stat"><b>13</b><span>已接线判据</span></div>
+  <div class="stat"><b>14</b><span>已接线判据</span></div>
   <div class="stat"><b style="color:var(--unwired)">3</b><span>写了但没接线</span></div>
   <div class="stat"><b>16</b><span>工具（12 captain-only）</span></div>
   <div class="stat"><b>10</b><span>prompt 规则</span></div>
@@ -92,10 +92,10 @@
 <span class="arrow">→</span><div class="step"><b>派发 <span class="pill">3 条</span></b><i>成员开工前</i><br><i>这次派发做得对不对、该不该派</i></div>
 <span class="arrow">→</span><div class="step"><b>收口 <span class="pill">4 条</span></b><i>成员汇报完成</i><br><i>这一步的产出经不经得起重跑</i></div>
 <span class="arrow">→</span><div class="step"><b>交付 <span class="pill">2 条</span></b><i>宣布交付那一刻</i><br><i>整件事齐不齐、人收没收敛</i></div>
-<span class="arrow">→</span><div class="step"><b>运行中 <span class="pill">1 条</span></b><i>全程</i><br><i>过程健不健康（只告警，不拦任务）</i></div>
+<span class="arrow">→</span><div class="step"><b>运行中 <span class="pill">2 条</span></b><i>全程</i><br><i>过程健不健康（只告警，不拦任务）</i></div>
 </div>
 
-<h2 id="gates">② 机械判据：会真的开火的那 13 条</h2>
+<h2 id="gates">② 机械判据：会真的开火的那 14 条</h2>
 <p class="sub">
   每条判据都必须三态裁决（<code>ok</code> / <code>blocked</code> / <code>unmeasured</code>），
   并自带三臂夹具（伪造臂 / 未测量臂 / 对照臂）。
@@ -128,7 +128,7 @@
     <span class="pill">按 kind 适用</span>
     
   </div>
-  <p class="desc">★ 它判的是【契约声明面的形状】，不是「原子性」本身 —— 三条可机械读出的信号：verify 的条数与覆盖面、inScope 是否跨了概念上独立的目录组、objective 是否列了多个并列交付。★ 而&quot;形状看起来不原子&quot;只是&quot;失败可能不可归因&quot;的一个【征兆】，不是它的判据（t43 已用&quot;只差一个尾斜杠的同一件工作&quot;证伪过那个更强的声称）。判不了时报 unmeasured（绝不当成原子）。★ 本判据【不接生产】（t38：接线会让没有 verify 的任务全部建不出来）</p>
+  <p class="desc">★ 它判的是【契约声明面的形状】，不是「原子性」本身 —— 三条可机械读出的信号：verify 的条数与覆盖面、inScope 是否跨了概念上独立的目录组、objective 是否列了多个并列交付。★ 判定信号是【inScope 里有没有&quot;没被更具体声明覆盖的目录前缀&quot;】（归一化之后的集合覆盖，`src/` 与 `src` 是同一个键）—— 那是一个**语法层面**的结构读数：它**不读盘**，所以它判不了&quot;这个目录是不是新建的&quot;。★ 而&quot;形状看起来不原子&quot;只是&quot;失败可能不可归因&quot;的一个【征兆】，不是它的判据（t43 已用&quot;只差一个尾斜杠的同一件工作&quot;证伪过那个更强的声称）。判不了时报 unmeasured（绝不当成原子）。★ 本判据【不接生产】（t38：接线会让没有 verify 的任务全部建不出来）</p>
   <div class="why">输入面：<code>task</code></div>
 </div>
 <h3>派发 <span class="id">dispatch</span> · 3 条</h3>
@@ -215,7 +215,7 @@
   <p class="desc">交付时每个成员都必须处在收敛态；working / unknown / 空白回复都不是收敛 ⇒ 拒绝（idle ≠ converged，空回复不是收敛）</p>
   <div class="why">输入面：<code>team</code></div>
 </div>
-<h3>运行中 <span class="id">runtime</span> · 1 条</h3>
+<h3>运行中 <span class="id">runtime</span> · 2 条</h3>
 <div class="card">
   <div class="rowhead"><span class="id">runtime.liveness</span>
     <span class="pill">2 个输入</span>
@@ -224,6 +224,15 @@
   </div>
   <p class="desc">周期性探活：两次探活之间最后活动时刻没变 ⇒ 告警「卡死了」；还在活动 ⇒ 只报「还在跑，已 N 分钟」。永不因为等太久而说话（它是探活，不是硬超时），也不拒绝任务（契约 §5）</p>
   <div class="why">输入面：<code>event</code> <code>waits</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">runtime.stall</span>
+    <span class="pill">2 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">★ 它判的是【这个任务是不是停下来了】—— 依据是任务记录上**已经被数出来**的事实：同一个 (task, gate) 被拒的次数 ≥ N，或任务在 in_progress 上超过了 N 轮。★ 它**不读成员的自报**（一个卡住的成员恰恰最不可能如实说&quot;我卡住了&quot;）。★ 它【记录，不拒绝】：runtime 位置的裁决不得阻止流程。★ 而&quot;说不出&quot;（任务面整个没接上）是**第三态**，绝不当成&quot;没人停住&quot;。</p>
+  <div class="why">输入面：<code>event</code> <code>team</code></div>
 </div>
 
 <h2 id="gap">③ ★ 写了但没接线：3 条</h2>
@@ -406,7 +415,7 @@ node scripts/mechanisms-html.mjs  # 重新生成 docs/mechanisms.html</code></pr
 </p>
 
 <footer>
-  生成于 2026/10/9 23:36:36 ·
+  生成于 2026/10/14 13:56:14 ·
   真值来源：<code>lib/gates/index.js</code>（注册表）、<code>lib/tool-names.js</code>、
   <code>lib/index.js</code>（<code>usageSectionText()</code>）·
   生成器：<code>scripts/mechanisms-html.mjs</code>
