@@ -1419,6 +1419,148 @@
           "escalated": {
             "type": "boolean"
           },
+          "gate_view": {
+            "additionalProperties": false,
+            "properties": {
+              "abnormal": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "type": "number"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "observed": {
+                      "type": "boolean"
+                    },
+                    "produced": {
+                      "type": "boolean"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "observed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "active": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "type": "number"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "observed": {
+                      "type": "boolean"
+                    },
+                    "produced": {
+                      "type": "boolean"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "observed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "points": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "blocked": {
+                      "type": "number"
+                    },
+                    "evaluated": {
+                      "type": "number"
+                    },
+                    "ok": {
+                      "type": "number"
+                    },
+                    "point": {
+                      "type": "string"
+                    },
+                    "registered": {
+                      "type": "number"
+                    },
+                    "skipped": {
+                      "type": "number"
+                    },
+                    "unmeasured": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "point",
+                    "registered",
+                    "evaluated",
+                    "ok",
+                    "blocked",
+                    "unmeasured",
+                    "skipped"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "additionalProperties": false,
+                "properties": {
+                  "abnormal": {
+                    "type": "number"
+                  },
+                  "active": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "active",
+                  "abnormal"
+                ],
+                "type": "object"
+              },
+              "unchecked": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated": {
+                      "type": "number"
+                    },
+                    "point": {
+                      "type": "string"
+                    },
+                    "registered": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "point",
+                    "registered",
+                    "evaluated"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
           "halted": {
             "type": "boolean"
           },

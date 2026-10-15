@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  B1 视觉定稿样张：判据管线图（不是成员列表）
+
+  ★ 本文件是【样张】：手写 SVG，零外部依赖，浏览器可直接打开。
+  ★ 它表达的是【一条流程／管线】（六个插入点 + 判据一格一符号），
+    不是"成员树"——用户原话：「它更多的是像流程图或架构图一样」。
+  ★ 三格并列 = 三种状态，用来对照「同一位置在不同状态下长什么样」：
+       格 A：正常态（有通过、有跳过、有进行）
+       格 B：★ 未检查（skippedAll 在场：有判据却一条都没跑）
+       格 C：★ 观察模式（observed:true：开火了但裁决被放过）
+  ★ 所有坐标都是【格内相对 + translate】，便于整体挪动与逐格对照。
+
+  ★ 布局常数（固定画布的依据，见 docs/B-VISUAL-SPEC.md 第 3 节）
+       行高 LINE_H = 22     符号列宽 20     格宽 560     格间距 24
+       最坏情形 23 行，画布高 = 23 x 22 = 506
+       （本样张只画 12 行，留白表示可扩展）
+
+  ★ 注意：XML 注释内不许出现连续两个连字符，本节已回避该写法。
+-->
+
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760"
+     viewBox="0 0 1200 760" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+
+  <defs>
+    <style>
+      /* 颜色只取宿主语义 token 的【近似值】（样张离线可看，不代表最终实现） */
+      .bg      { fill: #0f1115; }
+      .panel   { fill: #171a21; stroke: #2a2f3a; stroke-width: 1; }
+      .hdr     { fill: #1d2129; }
+      .t       { fill: #d7dbe3; font-size: 13px; }
+      .dim     { fill: #8b93a1; font-size: 12px; }
+      .faint   { fill: #5c6470; font-size: 11px; }
+      .ok      { fill: #3fb950; font-size: 15px; font-weight: 700; }
+      .skip    { fill: #5c6470; font-size: 15px; font-weight: 700; }
+      .run     { fill: #58a6ff; font-size: 15px; font-weight: 700; }
+      .fail    { fill: #f85149; font-size: 15px; font-weight: 700; }
+      .warn    { fill: #d29922; font-size: 15px; font-weight: 700; }
+      .obs     { fill: #d29922; font-size: 15px; font-weight: 700; }
+      .stage   { fill: #9aa4b2; font-size: 12px; font-weight: 600; }
+      .stageOn { fill: #d7dbe3; font-size: 12px; font-weight: 700; }
+      .rule    { stroke: #262b35; stroke-width: 1; }
+      .tick    { stroke: #3a4150; stroke-width: 1; }
+      .badge   { fill: #1f242e; stroke: #39404d; stroke-width: 1; rx: 3; }
+      .badgeT  { fill: #a9b1bd; font-size: 10.5px; }
+      .obsBg   { fill: #2a220f; stroke: #6b5416; stroke-width: 1; rx: 3; }
+      .note    { fill: #7d8695; font-size: 11px; }
+      .annot   { fill: #58a6ff; font-size: 11px; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="760"/>
+
+  <text class="t" x="24" y="30" font-size="15" font-weight="700">判据管线样张 · B1 视觉定稿</text>
+  <text class="dim" x="24" y="50">六插入点骨架 · 四符号 + 未检查 + 观察 · 只展开三类 · 固定画布 23 行 · 中文双宽</text>
+
+  <!-- ===================== 格 A：正常态 ===================== -->
+  <g transform="translate(24,74)">
+    <rect class="panel" x="0" y="0" width="560" height="300" rx="8"/>
+    <rect class="hdr" x="0" y="0" width="560" height="30" rx="8"/>
+    <rect class="hdr" x="0" y="20" width="560" height="10"/>
+    <text class="t" x="12" y="20" font-weight="600">t24 · implementation · 第 2 轮</text>
+    <text class="obs" x="470" y="20">●</text>
+    <text class="dim" x="486" y="20">进行中</text>
+    <text class="dim" x="531" y="20" text-anchor="end">12m</text>
+
+    <!-- 六个插入点：固定骨架，顺序即 INSERTION_POINTS -->
+    <g transform="translate(0,30)">
+      <!-- 行 1 admission（未注册 ⇒ 灰，见规格 §2.3） -->
+      <g transform="translate(12,22)">
+        <text class="stage" x="0" y="0">admission</text>
+        <g transform="translate(120,0)">
+          <text class="faint" x="0" y="0">—</text>
+          <text class="faint" x="18" y="0">3 条未注册</text>
+        </g>
+        <text class="faint" x="536" y="0" text-anchor="end">未接入</text>
+      </g>
+      <line class="rule" x1="12" y1="30" x2="548" y2="30"/>
+
+      <!-- 行 2 contract -->
+      <g transform="translate(12,56)">
+        <text class="stageOn" x="0" y="0">contract</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="ok" x="160" y="0">✓</text>
+        <text class="faint" x="536" y="0" text-anchor="end">3 通过</text>
+      </g>
+      <line class="rule" x1="12" y1="64" x2="548" y2="64"/>
+
+      <!-- 行 3 dispatch -->
+      <g transform="translate(12,90)">
+        <text class="stageOn" x="0" y="0">dispatch</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="skip" x="160" y="0">⊘</text>
+        <text class="faint" x="536" y="0" text-anchor="end">2 通过 · 1 跳过</text>
+      </g>
+      <line class="rule" x1="12" y1="98" x2="548" y2="98"/>
+
+      <!-- 行 4 completion（最宽：4 格） -->
+      <g transform="translate(12,124)">
+        <text class="stageOn" x="0" y="0">completion</text>
+        <text class="run" x="120" y="0">●</text>
+        <text class="skip" x="140" y="0">⊘</text>
+        <text class="skip" x="160" y="0">⊘</text>
+        <text class="skip" x="180" y="0">⊘</text>
+        <text class="faint" x="536" y="0" text-anchor="end">1 进行 · 3 跳过</text>
+      </g>
+      <line class="rule" x1="12" y1="132" x2="548" y2="132"/>
+
+      <!-- 行 5 delivery -->
+      <g transform="translate(12,158)">
+        <text class="stageOn" x="0" y="0">delivery</text>
+        <text class="skip" x="120" y="0">⊘</text>
+        <text class="skip" x="140" y="0">⊘</text>
+        <text class="faint" x="536" y="0" text-anchor="end">尚未到达</text>
+      </g>
+      <line class="rule" x1="12" y1="166" x2="548" y2="166"/>
+
+      <!-- 行 6 runtime（告警位，不拒绝） -->
+      <g transform="translate(12,192)">
+        <text class="stageOn" x="0" y="0">runtime</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="faint" x="536" y="0" text-anchor="end">2 通过</text>
+      </g>
+    </g>
+
+    <!-- 展开区：只展开【活跃】 -->
+    <line class="tick" x1="12" y1="234" x2="548" y2="234"/>
+    <g transform="translate(12,254)">
+      <text class="run" x="0" y="0">▶</text>
+      <text class="t" x="16" y="0">completion.mutation</text>
+      <text class="dim" x="182" y="0">运行中 · 变异 8/14 · 2m</text>
+    </g>
+    <g transform="translate(12,274)">
+      <text class="annot" x="0" y="0">↳ 只展开「活跃」这一类；通过的那些已坍缩成上面的计数</text>
+    </g>
+  </g>
+
+  <!-- ===================== 格 B：未检查（skippedAll） ===================== -->
+  <g transform="translate(616,74)">
+    <rect class="panel" x="0" y="0" width="560" height="300" rx="8"/>
+    <rect class="hdr" x="0" y="0" width="560" height="30" rx="8"/>
+    <rect class="hdr" x="0" y="20" width="560" height="10"/>
+    <text class="t" x="12" y="20" font-weight="600">t31 · verification · 第 1 轮</text>
+    <text class="warn" x="470" y="20">✗</text>
+    <text class="dim" x="486" y="20">未通过</text>
+
+    <g transform="translate(0,30)">
+      <!-- ★ 未检查：整行 + 文字，【不】与 ✓ 同形 -->
+      <g transform="translate(12,56)">
+        <text class="stageOn" x="0" y="0">completion</text>
+        <text class="skip" x="120" y="0">⊘</text>
+        <text class="skip" x="140" y="0">⊘</text>
+        <text class="skip" x="160" y="0">⊘</text>
+        <text class="skip" x="180" y="0">⊘</text>
+        <text class="none" x="536" y="0" text-anchor="end" fill="#d29922">0 跑 / 4 跳过 ⇒ ★未检查</text>
+      </g>
+      <rect x="8" y="44" width="544" height="24" fill="none" stroke="#6b5416" stroke-width="1" rx="3"/>
+      <line class="rule" x1="12" y1="76" x2="548" y2="76"/>
+
+      <g transform="translate(12,90)">
+        <text class="stageOn" x="0" y="0">contract</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="ok" x="160" y="0">✓</text>
+        <text class="faint" x="536" y="0" text-anchor="end">3 通过</text>
+      </g>
+    </g>
+
+    <line class="tick" x1="12" y1="150" x2="548" y2="150"/>
+    <g transform="translate(12,174)">
+      <text class="warn" x="0" y="0">⊘</text>
+      <text class="t" x="16" y="0">completion 全部跳过</text>
+      <text class="dim" x="196" y="0">4 条判据，0 条跑过</text>
+    </g>
+    <g transform="translate(12,194)">
+      <text class="dim" x="16" y="0">这一轮没有任何判据说话 ⇒ 报 <tspan class="warn">未检查</tspan>，</text>
+    </g>
+    <g transform="translate(12,212)">
+      <text class="dim" x="16" y="0">而【不是】"通过" —— 两者必须不同形（三态纪律）</text>
+    </g>
+
+    <g transform="translate(12,248)">
+      <text class="annot" x="0" y="0">★ 对照：左格 completion 同位置有 ● 与 ✓；本格全是 ⊘ 且带文字</text>
+    </g>
+    <g transform="translate(12,268)">
+      <text class="note" x="0" y="0">（此态来自 Evaluation.skippedAll 在场，registry.ts:205）</text>
+    </g>
+  </g>
+
+  <!-- ===================== 格 C：观察模式（observed） ===================== -->
+  <g transform="translate(24,398)">
+    <rect class="panel" x="0" y="0" width="1152" height="300" rx="8"/>
+    <rect class="hdr" x="0" y="0" width="1152" height="30" rx="8"/>
+    <rect class="hdr" x="0" y="20" width="1152" height="10"/>
+    <text class="t" x="12" y="20" font-weight="600">t44 · work · 第 1 轮</text>
+    <text class="obs" x="1062" y="20">⚑2</text>
+    <text class="dim" x="1086" y="20">观察中</text>
+
+    <g transform="translate(0,30)">
+      <!-- ★ 观察：同符号 ✗ + 底纹，位置级另有 ⚑ 计数 -->
+      <g transform="translate(12,56)">
+        <text class="stageOn" x="0" y="0">contract</text>
+        <rect x="112" y="-15" width="20" height="20" class="obsBg"/>
+        <text class="warn" x="120" y="0">✗</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="dim" x="240" y="0">开火了但裁决被放过（观察期）</text>
+        <text class="faint" x="1128" y="0" text-anchor="end">1 放过 · 1 通过</text>
+      </g>
+      <line class="rule" x1="12" y1="76" x2="1140" y2="76"/>
+
+      <g transform="translate(12,90)">
+        <text class="stageOn" x="0" y="0">dispatch</text>
+        <rect x="112" y="-15" width="20" height="20" class="obsBg"/>
+        <text class="warn" x="120" y="0">✗</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="dim" x="240" y="0">同上：它【确实开火了】，只是裁决暂不生效</text>
+        <text class="faint" x="1128" y="0" text-anchor="end">1 放过 · 1 通过</text>
+      </g>
+      <line class="rule" x1="12" y1="110" x2="1140" y2="110"/>
+
+      <g transform="translate(12,124)">
+        <text class="stageOn" x="0" y="0">completion</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="ok" x="160" y="0">✓</text>
+        <text class="faint" x="1128" y="0" text-anchor="end">3 通过</text>
+      </g>
+      <line class="rule" x1="12" y1="144" x2="1140" y2="144"/>
+
+      <g transform="translate(12,158)">
+        <text class="stageOn" x="0" y="0">delivery</text>
+        <text class="skip" x="120" y="0">⊘</text>
+        <text class="skip" x="140" y="0">⊘</text>
+        <text class="faint" x="1128" y="0" text-anchor="end">尚未到达</text>
+      </g>
+      <line class="rule" x1="12" y1="178" x2="1140" y2="178"/>
+
+      <g transform="translate(12,192)">
+        <text class="stageOn" x="0" y="0">runtime</text>
+        <text class="ok" x="120" y="0">✓</text>
+        <text class="ok" x="140" y="0">✓</text>
+        <text class="faint" x="1128" y="0" text-anchor="end">2 通过</text>
+      </g>
+      <g transform="translate(12,214)">
+        <text class="faint" x="0" y="0">admission</text>
+        <text class="faint" x="120" y="0">—</text>
+        <text class="faint" x="240" y="0">3 条未注册（见规格 §2.3）</text>
+      </g>
+    </g>
+
+    <line class="tick" x1="12" y1="252" x2="1140" y2="252"/>
+    <g transform="translate(12,272)">
+      <rect x="0" y="-14" width="20" height="20" class="obsBg"/>
+      <text class="warn" x="8" y="0">✗</text>
+      <text class="t" x="32" y="0">contract.plan-reviewed</text>
+      <text class="dim" x="260" y="0">开火了 · 观察期放过 · 不影响本轮判决</text>
+    </g>
+    <g transform="translate(600,272)">
+      <text class="annot" x="0" y="0">★ 底纹 = 结构位，不是字形差异 —— 它必须与"真被拒"不同形</text>
+    </g>
+  </g>
+
+  <!-- ===================== 图例 ===================== -->
+  <g transform="translate(24,724)">
+    <text class="faint" x="0" y="0">图例：</text>
+    <text class="ok" x="52" y="0">✓</text><text class="faint" x="66" y="0">通过</text>
+    <text class="skip" x="106" y="0">⊘</text><text class="faint" x="120" y="0">跳过（不占位）</text>
+    <text class="run" x="212" y="0">●</text><text class="faint" x="226" y="0">进行</text>
+    <text class="fail" x="266" y="0">✗</text><text class="faint" x="280" y="0">没过</text>
+    <rect x="326" y="-12" width="18" height="17" class="obsBg"/>
+    <text class="warn" x="334" y="0">✗</text><text class="faint" x="350" y="0">观察（同符号 + 底纹）</text>
+    <text class="warn" x="490" y="0">未检查</text><text class="faint" x="536" y="0">整行 + 文字（skippedAll）</text>
+    <text class="obs" x="690" y="0">⚑2</text><text class="faint" x="716" y="0">位置级观察计数</text>
+  </g>
+</svg>

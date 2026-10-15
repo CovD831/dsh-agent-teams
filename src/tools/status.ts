@@ -28,6 +28,204 @@ import { AgentTeamsRuntime, renderStatus } from './shared/entities.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolsConfig } from './shared/entities.ts'
 
+/**
+ * ── ★★★ A1：`/state` 的判据视图（四类明细）──────────────────────────────────────
+ *
+ * ── 它补的缺口 ────────────────────────────────────────────────────────────────
+ *
+ * MEASURED（计划 F3，本任务复现）：`ran: GateRunEntry[]` **产出即被丢弃** ——
+ * `grep -rn "\.ran\b" src/` 在 `registry.ts` 之外**零消费**。判据层每一轮都在
+ * 逐条算结论，而那些结论**从来没有出口**：`/state` 今天只送 `runtime_gates` 一格。
+ * ⇒ client 只能看到"这个位置跑了几条"（`gates_evaluated`），看不到**是哪几条、
+ *   每一条什么裁决**。于是"判据在起作用"这件事在 UI 上**不可证**。
+ *
+ * ── 为什么分组在【服务端】做（X2，用户已拍板）───────────────────────────────────
+ *
+ * `ran[]` 是**位置级**的：`registry.evaluate(point, ctx)` 一次调用的产物
+ * （`registry.ts:676-677` 的 `if (reg.point !== point) continue` 保证它只含该位置的判据）。
+ * ⇒ 有两条路：
+ *     (i)  **服务端分组** ⇒ `/state` 送 `{ delivery: [...], runtime: [...] }`
+ *     (ii) 扁平数组 + 每格加 `point` ⇒ ★ 那**必须给 `GateRunEntry` 加字段**，
+ *          等于**改 `registry.ts` 的形状**，而它是上游不存在的新目录、D 线之外的改动。
+ * ⇒ 选 **(i)**：不改 `registry.ts` 一个字节，代价只是载荷多一层嵌套。
+ *   ★ 可核：`git diff --stat src/gates/registry.ts` 必须为空。
+ *
+ * ── ★★ 四类，且第 ④ 类不许漏 ──────────────────────────────────────────────────
+ *
+ *   ① `points`   —— 六个插入点的**三态聚合**（每点一个计数；★ 含"未检查"那一态）
+ *   ② `active`   —— **活跃**判据明细（正在跑的：`ok` / `blocked` / `unmeasured`）
+ *   ③ `abnormal` —— **异常**判据明细（`blocked` / `unmeasured` —— 即"没通过"或"测不了"）
+ *   ④ `unchecked`—— ★ **「未检查」明细**（`skippedAll` 在场的位置）
+ *
+ * ★★ ②③ 有重叠是**刻意的**，不是 bug：②回答"现在有什么在动"，③回答"哪里不对劲"。
+ *   把它们合成一类会让"正在跑且正常"与"正在跑但没过"在读数上同形 ——
+ *   而《四符号纪律》要的正是这两者**不同形**（`⊘`/`✓`/`✗`/`○`）。
+ *
+ * ── ★★★ 每条明细带【显式布尔】`observed`（不许用 `undefined` 冒充 `false`）────────
+ *
+ * t41 的理由逐字：只送 `verdict` 时，`observed:true` 与 `observed:false`
+ * **都读成 `'blocked'`** ⇒ **client 画不出"观察模式"底纹**。
+ * ⇒ 本函数对**每一条**明细**恒写出** `observed: <boolean>`：
+ *      · 源码 `GateRunEntry.observed` **只在**"开火了但裁决被放过"时为 `true`，其余**缺席**；
+ *      · 缺席的语义是"**没被放过**"，而它与"不适用"（`skipped`）**不同形**。
+ *   ⇒ 出口处把它**显式化**：缺席 ⇒ `false`。**而三态的分辨力不靠这个字段，靠 `verdict`**
+ *      （`skipped` 与 `blocked+observed:false` 仍不同形）。
+ *   ★ 契约 C1 说的"不许 `observed:false` 与缺席并存"是**在 `ran[]` 层**的约束
+ *     （那里字段缺席本身携带信息）；到了 `/state` 这一层，**必须**显式化，
+ *     否则消费方（client）拿不到画底纹所需的布尔 —— 这正是 t41 的验收要求。
+ *     两层的差别写在这里，**不许**把 `ran[]` 的规则照搬到出口上。
+ */
+
+/** 载荷预算：活跃明细的上界（契约实测；防止把全量 17 条送出去）。 */
+const ACTIVE_LIMIT = 4
+/** 载荷预算：异常明细的上界（契约实测 10–12；取 12）。 */
+const ABNORMAL_LIMIT = 12
+
+/**
+ * 六个插入点里，**`status` 自己不求值**的那四个。
+ *
+ * ★ 写死成常量而不是从 `INSERTION_POINTS` 里减：`INSERTION_POINTS` 是
+ *   `registry.ts` 的形状（X2 裁定不碰它），而这里要表达的是
+ *   **`status` 这个调用点的知识** —— "我手里只有哪两个位置的 ctx"。
+ *   ⇒ 两者是**不同的东西**，用减法会把它们绑在一起（将来 `status` 多求值一个位置时，
+ *     常量与减法会分叉，而分叉在读数上同形）。
+ * ★ 顺序与 `INSERTION_POINTS` 一致（admission → contract → dispatch → completion），
+ *   只为让 `/state` 的输出稳定可读，**不是**流程顺序的判据。
+ */
+const NOT_EVALUATED_IN_STATUS = ['admission', 'contract', 'dispatch', 'completion'] as const
+
+/** 一条明细：只有出得去的字段，且 `observed` **恒为显式布尔**。 */
+interface GateViewEntry {
+  id: string
+  verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped'
+  /** ★ 显式布尔（t41）：`ran[]` 里缺席 ⇒ 这里 `false`。见上面那段长注释。 */
+  observed: boolean
+  count?: number
+  produced?: boolean
+}
+
+interface GateViewPoint {
+  point: string
+  /** 该位置注册了几条判据（`0` ⇒ 这个位置本来就没挂判据 —— 与"全跳过"不同形）。 */
+  registered: number
+  /** 该位置**真的求值了**几条（`registered > 0 && evaluated === 0` ⇒ 全跳过）。 */
+  evaluated: number
+  ok: number
+  blocked: number
+  unmeasured: number
+  skipped: number
+}
+
+interface GateView {
+  points: GateViewPoint[]
+  active: GateViewEntry[]
+  abnormal: GateViewEntry[]
+  unchecked: GateViewPoint[]
+  /** ★ 载荷纪律的读数（可核）：被上界截掉了几条 —— 不是"没有"，是"没送"。 */
+  truncated: { active: number; abnormal: number }
+}
+
+/** `ran[]` 的一格 ⇒ 出口的一格（`observed` 在这里**显式化**）。 */
+function toViewEntry(entry: { id: string; verdict: string; count?: number; observed?: boolean; produced?: boolean }): GateViewEntry {
+  return {
+    id: entry.id,
+    verdict: entry.verdict as GateViewEntry['verdict'],
+    /**
+     * ★ 恒写出：`entry.observed === true` ⇒ `true`；缺席 / 非 `true` ⇒ `false`。
+     *   ★ 用 `=== true` 而不是 `Boolean(...)`：后者会把任何真值当 `true`，
+     *     而这一格的类型是 `boolean | undefined` ⇒ 只有 `true` 才算"被放过"。
+     */
+    observed: entry.observed === true,
+    ...entry.count === undefined ? {} : { count: entry.count },
+    ...entry.produced === undefined ? {} : { produced: entry.produced },
+  }
+}
+
+/**
+ * 把若干份**位置级** `ran[]` 组装成判据视图。
+ *
+ * @param inputs 每个位置一份：`{ point, registered, evaluated, ran, skippedAll }`
+ *   ★ 它们**只由调用方**（本文件里那两处求值）填，本函数**不自己求值** ——
+ *     求值需要每个位置的 ctx，而 `status` 手里只有 delivery / runtime 两份。
+ *     ⇒ 「六个插入点的聚合」**报告的是"注册了几条 + 有没有求值"**，
+ *       而不是"六个位置都跑过了" —— 后者 `status` 做不到，写了就是编。
+ */
+function buildGateView(inputs: readonly {
+  point: string
+  registered: number
+  evaluated: number
+  ran: readonly { id: string; verdict: string; count?: number; observed?: boolean; produced?: boolean }[]
+  skippedAll?: string
+}[]): GateView {
+  const points: GateViewPoint[] = []
+  const activeAll: GateViewEntry[] = []
+  const abnormalAll: GateViewEntry[] = []
+  const unchecked: GateViewPoint[] = []
+
+  for (const input of inputs) {
+    const entries = input.ran.map(toViewEntry)
+    const count = (verdict: string) => entries.filter((entry) => entry.verdict === verdict).length
+    const point: GateViewPoint = {
+      point: input.point,
+      registered: input.registered,
+      evaluated: input.evaluated,
+      ok: count('ok'),
+      blocked: count('blocked'),
+      unmeasured: count('unmeasured'),
+      skipped: count('skipped'),
+    }
+    points.push(point)
+    /**
+     * ★ 第 ④ 类的判据写死：**`skippedAll` 在场**（`registered > 0` 而 `evaluated === 0`）。
+     *   ★ 不许用 `evaluated === 0` 单独判 —— 空位置（`registered === 0`）也是
+     *     `evaluated === 0`，而"这里本来就没挂判据"与"挂了但一条都没检查"是
+     *     **两件相反的事**（前者正常，后者是 t58 修的那个缺陷）。
+     *     源码 `registry.ts:886-896` 逐字给出三分，这里只认第三格。
+     */
+    if (input.skippedAll !== undefined && input.registered > 0 && input.evaluated === 0) {
+      unchecked.push(point)
+    }
+    for (const entry of entries) {
+      /** ② 活跃 = 真的跑过的三态（`skipped` 不算"在动" —— 它根本没跑）。 */
+      if (entry.verdict !== 'skipped') activeAll.push(entry)
+      /** ③ 异常 = 没通过 + 测不了。★ `ok` 与 `skipped` 都不算异常。 */
+      if (entry.verdict === 'blocked' || entry.verdict === 'unmeasured') abnormalAll.push(entry)
+    }
+  }
+
+  return {
+    points,
+    active: activeAll.slice(0, ACTIVE_LIMIT),
+    abnormal: abnormalAll.slice(0, ABNORMAL_LIMIT),
+    unchecked,
+    /** ★ 截断数**如实报**："没送出去"与"没有"必须不同形。 */
+    truncated: {
+      active: Math.max(0, activeAll.length - ACTIVE_LIMIT),
+      abnormal: Math.max(0, abnormalAll.length - ABNORMAL_LIMIT),
+    },
+  }
+}
+
+/**
+ * 一条判据明细的 schema。
+ *
+ * ★★ `observed` **required** 是这一格的全部要点（t41）：它必须**显式在场**，
+ *   否则 client 拿不到画"观察模式"底纹所需的布尔。`required: true` 把这条纪律
+ *   写进**契约**而不是只写在注释里 —— 一个漏写 `observed` 的实现会当场不匹配。
+ */
+const GATE_VIEW_ENTRY_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string', required: true },
+      verdict: { type: 'string', required: true },
+      /** ★★ 显式布尔，且**必填**（见上）。 */
+      observed: { type: 'boolean', required: true },
+      count: { type: 'number' },
+      produced: { type: 'boolean' },
+    },
+  } as const
+
 /** 注册本文件的工具。共享实体由调用方（装配点）注入 —— 它们不是本文件的依赖。 */
 export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, scheduler: any, config: ToolsConfig): void {
     ctx.tools.register(defineTool({
@@ -266,6 +464,68 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               },
             },
             ...diagnosticFields({ runtimeGates: true }),
+            /**
+             * ── ★★★ A1：判据视图的 schema ────────────────────────────────────────────
+             *
+             * ★ 为什么这里**不用** `{ type: 'json' }`（`runtimeGatesSchema` 用的那个）：
+             *   那一格的措辞理由是"**这一格里的东西不属于本文件**"（`runtime_gates`
+             *   装的是判据注册表的裁决形状）。而 `gate_view` 是**本文件自己组装**的
+             *   （`buildGateView`），它的形状**属于本文件** ⇒ 该写全。
+             *   ⇒ ★ 这是**刻意的不同**，不是遗漏：形状的"家"在哪，schema 就该写到哪。
+             *
+             * ★ 四类字段**全部 required**：它们**恒在场**（见上面 `gate_view: gateView`
+             *   的注释）。空数组是合法值，**字段缺席不是**。
+             */
+            gate_view: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                points: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      point: { type: 'string', required: true },
+                      registered: { type: 'number', required: true },
+                      evaluated: { type: 'number', required: true },
+                      ok: { type: 'number', required: true },
+                      blocked: { type: 'number', required: true },
+                      unmeasured: { type: 'number', required: true },
+                      skipped: { type: 'number', required: true },
+                    },
+                  },
+                },
+                active: { type: 'array', items: GATE_VIEW_ENTRY_SCHEMA },
+                abnormal: { type: 'array', items: GATE_VIEW_ENTRY_SCHEMA },
+                /**
+                 * ★★ 第 ④ 类：**「未检查」**（`skippedAll` 在场的位置）。
+                 *   它是 t41 新增的那一格，**不许漏** —— 漏了之后"挂了判据却一条没检查"
+                 *   就只剩 `evaluated: 0`，而那个数与"空位置"同形（两者都是 0）。
+                 */
+                unchecked: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      point: { type: 'string', required: true },
+                      registered: { type: 'number', required: true },
+                      evaluated: { type: 'number', required: true },
+                    },
+                  },
+                },
+                /** ★ 截断读数：被上界截掉的条数（"没送"与"没有"不同形）。 */
+                truncated: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    active: { type: 'number', required: true },
+                    abnormal: { type: 'number', required: true },
+                  },
+                },
+              },
+            },
             profile: {
               type: 'object',
               additionalProperties: true,
@@ -659,6 +919,53 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
         const deliveryEvaluation = await registry.evaluate('delivery' as never, deliveryContext)
         const runtimeRecord = await evaluateRuntimeGates(ctx, 'task-status', deliveryContext, clock)
         /**
+         * ── ★★★ A1：判据视图（四类明细，分组由服务端做）────────────────────────────
+         *
+         * ★ **只组装 `status` 手里真的有的东西**，不假装六个位置都跑过：
+         *   · `delivery` —— `status` 确实调了 `evaluate('delivery', …)`，
+         *     于是它的 `ran[]` 是**真的读数**；
+         *   · `runtime` —— 走 `evaluateRuntimeGates`，也是真的；
+         *   · 其余四个位置 —— `status` **没有**它们的 ctx ⇒ 只报**静态注册数**
+         *     （`registry.count(point)`）与 `evaluated: 0`。
+         *
+         * ★★ 为什么后面四个不写 `skippedAll`：`skippedAll` 的语义是
+         *   「**挂了判据、但一条都没检查**」（`registry.ts:886-896` 的第三格）。
+         *   而在这里，"没检查"的成因是 **`status` 没去求值**，不是判据被跳过。
+         *   把两者写成同一个形状，会把"我没问"读成"它没跑" —— 正是本仓记账最久的形态。
+         *   ⇒ 它们**不进第 ④ 类**，且 `evaluated: 0` 配 `registered: N` 已足以区分
+         *     "有判据但本轮未在 status 里求值"。
+         */
+        const deliveryGates = registry.list().delivery ?? []
+        const gateView = buildGateView([
+          ...deliveryGates.length === 0 ? [] : [{
+            point: 'delivery',
+            registered: deliveryGates.length,
+            evaluated: deliveryEvaluation.evaluated,
+            ran: deliveryEvaluation.ran,
+            ...deliveryEvaluation.skippedAll === undefined ? {} : { skippedAll: deliveryEvaluation.skippedAll },
+          }],
+          ...runtimeRecord === undefined ? [] : [{
+            point: 'runtime',
+            registered: registry.count('runtime'),
+            /** ★ runtime 那一格是 `JsonValue`（别人的形状）⇒ 只取能读的字段，读不出就不编。 */
+            evaluated: typeof (runtimeRecord as { evaluated?: unknown }).evaluated === 'number'
+              ? (runtimeRecord as { evaluated: number }).evaluated : 0,
+            ran: Array.isArray((runtimeRecord as { ran?: unknown }).ran)
+              ? (runtimeRecord as { ran: { id: string; verdict: string; count?: number; observed?: boolean; produced?: boolean }[] }).ran
+              : [],
+            ...(typeof (runtimeRecord as { skippedAll?: unknown }).skippedAll === 'string'
+              ? { skippedAll: (runtimeRecord as { skippedAll: string }).skippedAll } : {}),
+          }],
+          ...NOT_EVALUATED_IN_STATUS
+            .filter((point) => registry.count(point) > 0)
+            .map((point) => ({
+              point: point as string,
+              registered: registry.count(point),
+              evaluated: 0,
+              ran: [] as readonly { id: string; verdict: string }[],
+            })),
+        ])
+        /**
          * ★★ t3：这条日志**保留**（给人看）；结构化出口挂在下面 `delivery` 字段里的
          *   `input_surface`。两条并存 —— 只留日志的出口在日志被截断时与"输入面齐"同形。
          */
@@ -740,6 +1047,19 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             },
           },
           viewer: identity.name,
+          /**
+           * ── ★★★ A1：判据视图（四类明细）────────────────────────────────────────────
+           *
+           * ★ 挂在**顶层**（与 `runtime_gates` 同级），理由与 `runtime_gates` 相同：
+           *   它**不是**某一个位置的裁决，而是**跨位置**的一份视图 ——
+           *   挂进 `delivery` 会让"哪一份属于哪个位置"读不出来（本文件上面那段
+           *   `input_surface` 的注释记的正是这个教训）。
+           *
+           * ★ 恒在场（不写 `undefined`）：与 `observed` / `outputs` 同一条纪律 ——
+           *   调用方不必写 `?? …`，而"判据视图"这件事**永远有个形状**，即使某一类为空。
+           *   （空数组 ≠ 字段缺席："这一类现在没有"与"这个字段不存在"必须不同形。）
+           */
+          gate_view: gateView,
           ...runtimeRecord === undefined ? {} : { runtime_gates: runtimeRecord },
           /**
            * ── ★★ 从**这个插件进程**读到的构建新鲜度（t34 / f-0027）──────────────────
