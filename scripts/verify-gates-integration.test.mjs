@@ -745,6 +745,26 @@ test('④ 每条判据只 import registry.ts（或另一个纯函数模块），
          */
         || specifier === './kind-requirements.ts'
         /**
+         * ── ★ t59：`quality-gates/` 的**纯谓词**（路径与文本判定，一个纯函数模块）──
+         *
+         * ★ 加这一行**不是放宽**，而是与上面 `kind-requirements.ts`（t54）
+         *   和 `budget-stop.ts`（2026-10-12）**同一个先例**，且是**第 4 个同类实例**：
+         *   它在 `src/gates/` 外、**不是判据**（不 export `id`/`point`/`gate`）、
+         *   **零 `node:` import**、不带一条判据的语义。
+         *
+         * ★★ 它**比上面那条 `../../quality-gates.ts` 更该在这里**：
+         *   后者**带 I/O**（`quality-gates.ts:7` import `node:fs`），
+         *   而它**不带** —— ★ **这正是 t59 拆分的全部目的**：
+         *   `src/gates/{admission,dispatch}/*.ts` 的 4 个文件此前都 import
+         *   `quality-gates.ts` 的 `normalizeWorkspacePath`，于是**传递闭包带上了 I/O**，
+         *   而「判据不 import I/O」这条不变量**在闭包上破了**
+         *   （`gates/runtime/stall.ts` 逐字：「那条纯度是**载荷**，不是风格」）。
+         *
+         * ⇒ 放行它，是为了让那 4 条判据**拿得到纯谓词，又够不到 I/O**。
+         *   ★ 拦"判据之间互相调用"的能力**一个字都没变**。
+         */
+        || specifier === '../../quality-gates/predicates.ts'
+        /**
          * ── ★ 2026-10-12：预算停止的记号（`../budget-stop.ts`）──────────────────
          *
          * ★ 这一行**不是放宽**，而是 `./kind-requirements.ts` 那条先例的**又一个实例**：

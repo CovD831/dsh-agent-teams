@@ -65,7 +65,7 @@
  */
 
 import { ok, blocked, unmeasured, type GateVerdict } from '../registry.ts'
-import { normalizeWorkspacePath } from '../../quality-gates.ts'
+import { normalizeWorkspacePath } from '../../quality-gates/predicates.ts'
 import type { CtxPaths } from '../requires.ts'
 
 export const id = 'admission.absorb'

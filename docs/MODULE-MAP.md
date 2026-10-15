@@ -443,6 +443,154 @@ diff /tmp/before.txt /tmp/after.txt && echo "导出集合相等"
 
 ---
 
+## 7c. ★★ M3 执行记录：QG-A 已拆分，**传递闭包不再带 I/O**（t59）
+
+> 本节是 **M3 的实做记录**，也是 §1.1 那条「QG-A 拆出去会修掉 §2-B」的**兑现证明**。
+
+### 7c.1 拆分结果
+
+| 文件 | 行数 | 内容 |
+|---|---:|---|
+| **新增** `src/quality-gates/predicates.ts` | 285 | **QG-A**：Q1（纯路径谓词）+ Q2（文本谓词）+ `PathClassification` + 两个私有 helper |
+| `src/quality-gates.ts` | 2248 → 2265 | 去掉 QG-A 实现；**保留导出面**（见 7c.2） |
+| `src/gates/{admission,dispatch}/*.ts` | 各 **1 行** | import 改指 `../../quality-gates/predicates.ts` |
+
+★ **QG-A 的精确成员**（**不照抄 §1.1 的近似行号，我重新核过**）：
+`PathClassification`(51) · `normalizeWorkspacePath`(269) · `pathMatchesScope`(285) ·
+`isDefaultExcluded`(303, 私有) · `classifyChangedPath`(315) · `collectChangedPaths`(643) ·
+`inScopeOverlap`(663) · `looksLikeRepoPath`(750, 私有) · `normalizeRepoPath`(759, 私有) ·
+`repoPathsNamedIn`(771) · `verifyTargetOf`(785) · `armsNamedIn`(802) · `subjectTermsIn`(830) · `GENERIC_TERMS`(849)
+
+### 7c.2 ★ 一个必须写下的接线形状：`import` 与 `export … from` **并存**
+
+```ts
+import { normalizeWorkspacePath, /* …9 个… */ } from './quality-gates/predicates.ts'  // ← 本文件内部要用
+export { normalizeWorkspacePath, /* …9 个… */ } from './quality-gates/predicates.ts'  // ← 对外保持导出面
+```
+★ **两者缺一都不行**，我实测各撞一次：
+- **只 `export … from`** ⇒ 本文件内部 8 处调用报 **TS2304 Cannot find name**（`export-from` 不建本地绑定）；
+- **只 `import`** ⇒ 导出面塌掉（外部消费者取不到）。
+
+### 7c.3 ★★ 硬验收②：传递闭包不再带 I/O（拆前有路径 / 拆后无）
+
+**可复跑检查器**（跟相对 import 走，看是否到达 `node:*`；剥离注释以免"注释里提到"被算成引用）：
+
+```python
+# /tmp/ioclosure.py  ——  python3 /tmp/ioclosure.py <entry.ts> [...]
+import re, sys, io, os
+def resolve(base, rel):
+    p = os.path.normpath(os.path.join(os.path.dirname(base), rel))
+    for c in (p, p + '.ts'):
+        if os.path.exists(c): return c
+    return None
+def strip(t):
+    t = re.sub(r'/\*.*?\*/', '', t, flags=re.S)
+    return re.sub(r'//[^\n]*', '', t)
+IMP = re.compile(r"^\s*(?:import|export)[^'\"]*?from\s*['\"]([^'\"]+)['\"]", re.M)
+def closure(entry):
+    seen, stack, hits = set(), [entry], []
+    while stack:
+        cur = stack.pop()
+        if cur in seen or not os.path.exists(cur): continue
+        seen.add(cur)
+        t = strip(io.open(cur, encoding='utf-8', errors='replace').read())
+        hits += [(cur, ni) for ni in re.findall(r"from\s*['\"](node:[^'\"]+)['\"]", t)]
+        for rel in IMP.findall(t):
+            if rel.startswith('.'):
+                r = resolve(cur, rel)
+                if r and r not in seen: stack.append(r)
+    return seen, hits
+for e in sys.argv[1:]:
+    files, hits = closure(e)
+    print(f"── {e}  可达 {len(files)} 文件")
+    print(("★ 到达 I/O: " + str(hits)) if hits else "OK 未到达任何 node:*")
+```
+
+| | `changed-paths` | `absorb` | `checkpoint` | `convene` |
+|---|---|---|---|---|
+| **拆前** | ★ 到达 `node:fs`/`node:path`/`node:url`（经 `quality-gates.ts`） | 同 | 同 | 同 |
+| **拆后** | **OK 未到达任何 `node:*`** | OK | OK | OK |
+
+```
+# 拆前（HEAD，实测）
+── src/gates/dispatch/changed-paths.ts   可达文件数: 6
+   ★ 到达 I/O: src/quality-gates.ts  --node:fs-->
+   ★ 到达 I/O: src/quality-gates.ts  --node:path-->
+   ★ 到达 I/O: src/quality-gates.ts  --node:url-->
+# 拆后
+── src/gates/dispatch/changed-paths.ts   可达文件数: 5
+   OK 未到达任何 node:* I/O
+```
+
+★★ **最硬的一份证据：在【编译产物】上同样成立**（同一算法改走 `lib/**/*.js`）：
+```
+── lib/gates/dispatch/changed-paths.js → OK      ── lib/gates/admission/absorb.js      → OK
+── lib/gates/admission/checkpoint.js    → OK      ── lib/gates/admission/convene.js     → OK
+```
+⇒ **不是"源码看着干净"，而是"装上去的那份也不带 I/O"。**
+
+★ **`quality-gates.ts` 自己仍 import `node:fs`** —— 刻意保留：`checkTaskPremises`(890)
+与 `baselinePin`(1456) **确实要做文件系统检查**（前者按设计读工作树）。它们**不是判据层可达的**
+（那 4 个 gates 文件不取它们）⇒ 闭包干净。
+
+### 7c.4 ★ 执行中发现的 §1.1 边界问题（如实记录）
+
+§1.1 给 Q2 的范围 `~771-889` 是按"下一个顶层声明"推的，于是**含进了 `structurallyImpossiblePath`(875)**
+—— 而**那个函数带 I/O**（`:881 existsSync`）。★ 我**没有照抄该范围**：按"这个函数纯不纯"逐个判，
+把带 I/O 的两件（`structurallyImpossiblePath` / `checkTaskPremises`）**留在 `quality-gates.ts`**。
+⇒ **§1.1 的行范围确如它自陈的是近似；而"Q2 纯"这个结论需要这条修正才成立。**
+
+### 7c.5 ★ 硬验收④：反向半边（可复跑）
+
+```sh
+$ python3 /tmp/exportcheck.py /tmp/qg-orig.ts          # 正向
+OK 导出集合逐条相等（67 个）                            # exit=0
+$ sed -i '' 's/export function classifyChangedPath/function classifyChangedPath/' src/quality-gates/predicates.ts
+$ python3 /tmp/exportcheck.py /tmp/qg-orig.ts          # 反向
+*** 导出集合不等: before=67 after=66
+  只在拆分前: ['classifyChangedPath']                   # exit=1 ★ 报错
+$ git checkout -- src/quality-gates/predicates.ts      # 还原
+```
+★ **而我第一版对拍脚本再次没有分辨力**：它把桶的 `export {…} from` 名单 **union** 进 after 集
+⇒ 桶自己仍列着 `classifyChangedPath` ⇒ **测不出来**（t52 踩过同一个坑，这次我**先测反向半边**才发现）。
+⇒ 正确口径 = **只比对"直接声明"**（桶算指针不算源），并由 `tsc` 兜"桶是否解得开"。
+★ 本轮 `tsc` **同时**抓到了它：`TS2459 … declares 'classifyChangedPath' locally, but it is not exported`。
+
+### 7c.6 导出面与净变化
+
+```sh
+$ python3 /tmp/exportcheck.py /tmp/qg-orig.ts   # 源码：直接声明 67 == 67（符号级含 re-export 为 69 == 69）
+$ npx tsc -p tsconfig.json --noEmit             # exit=0
+$ pnpm build                                    # exit=0；新增 lib/quality-gates/predicates.js + 其 d.ts
+$ # lib/types/quality-gates.d.ts 导出面：before 69 == after 69
+```
+
+★ **基线口径修正（与 t52 同）**：任务书给 **1415 pass / 19 fail**，而我在**动任何代码之前**
+实测本 worktree 基线 = **1413 pass / 20 fail**（`tests 1471`）⇒ 差异先于我的改动存在。
+
+★★ **一处【净新失败】，性质与此前的抖动不同 —— 必须留下**：
+`scripts/verify-gates-integration.test.mjs:695`（"④ 每条判据只 import registry.ts…"）报：
+```
+dispatch/changed-paths.ts imports "../../quality-gates/predicates.ts"
+```
+**成因**：该夹具持有一份**显式 allowlist**（`:719-766`），逐行列出**允许判据 import 的共享纯模块**，
+每条都附**理由**与**先例引用**（`../requires.ts`(t6) · `./kind-requirements.ts`(t54) · `../budget-stop.ts`(2026-10-12)）。
+`'../../quality-gates.ts'` **本来就在名单里**；我把它换成新路径 ⇒ 不在名单 ⇒ 判负。
+
+★ **我没有放宽这个断言，也没有改这个夹具**（`scripts/` 在 outOfScope，
+且"不许为了让测试变绿而放宽断言"是硬纪律）。
+**实测：只加一行 allowlist 即可全绿** —— 临时加
+`|| specifier === '../../quality-gates/predicates.ts'` ⇒ 该夹具 **exit=0、19 个 ✔**；
+★ **已还原**（`git status --porcelain -- scripts/` ⇒ 空）。
+⇒ **这一行**（连同它需要的**理由注释**，按该名单既有格式）**需由拥有 `scripts/` 写域的人加**。
+★ 它**不是放宽**，而是该名单的**第四个同类实例**：`predicates.ts` 与
+`kind-requirements.ts` / `budget-stop.ts` 完全同形 —— 在 `src/gates/` 外、**不是判据**
+（不 export `id`/`point`/`gate`）、**零 `node:` import**、不带任何一条判据的语义。
+★ 而且它**比 `../../quality-gates.ts` 那一条更该在名单里**：后者**带 I/O**，前者**不带**
+—— 这正是本次拆分的全部目的。
+
+---
+
 ## 8. 优先级建议（按"收益 ÷ 风险"）
 
 1. ★ **`mutation.ts`**（1088 代码行，零 import，零冲突面）—— 最安全、收益明确。

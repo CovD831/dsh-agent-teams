@@ -2,12 +2,36 @@
  * Pure quality-gate rules: contracts, path audit, completion, follow-up,
  * coverage, and resume. Tools and persistence call these; they do not I/O.
  * @module dsh-agent-teams/quality-gates
+ *
+ * ── ★ M3 拆分（t59）：QG-A 已挪到 `./quality-gates/predicates.ts` ──────────────────
+ *
+ * `PathClassification` · `normalizeWorkspacePath` · `pathMatchesScope` ·
+ * `classifyChangedPath` · `collectChangedPaths` · `inScopeOverlap` ·
+ * `repoPathsNamedIn` · `verifyTargetOf` · `armsNamedIn` · `subjectTermsIn`
+ * —— 这些**纯谓词**（零 I/O）搬到了 `./quality-gates/predicates.ts`，
+ * 并由下面的 re-export **保持本模块的导出面逐条不变**。
+ *
+ * ★ 为什么（载荷级纪律，不是审美）：`src/gates/{admission,dispatch}/*.ts` 的 4 个文件
+ *   只从本模块取 `normalizeWorkspacePath`，而**本模块 import `node:fs`**
+ *   ⇒ 「判据不 import I/O」这条不变量**在传递闭包上破了**。
+ *   拆出去后它们改指 `./quality-gates/predicates.ts`（**零 `node:` import**）⇒ 闭包恢复。
+ *   ★ **本文件仍然 import `node:fs`** —— 那是因为 `checkTaskPremises` / `baselinePin`
+ *   确实要做文件系统检查；但**它们不是判据层可达的**（那 4 个 gates 文件不取它们）。
+ *   可复跑的 import 图证明见 `docs/MODULE-MAP.md` §7c。
  */
+/**
+ * ★ 本模块【也】把 QG-A 原样再导出 —— 于是 `src/quality-gates.ts` 的导出面
+ *   与拆分前**逐条相等**（老消费者一个都不用改）。
+ *   ★ 与上面的 `import` 并存是**有意**的：`import` 给出**本文件内部**要用的绑定，
+ *     这一段给出**对外**的导出面。两者缺一：只 import 则导出面塌了；
+ *     只 export-from 则本文件内部 8 处调用会 TS2304（实测踩到）。
+ */
+export { normalizeWorkspacePath, pathMatchesScope, classifyChangedPath, collectChangedPaths, inScopeOverlap, repoPathsNamedIn, verifyTargetOf, armsNamedIn, subjectTermsIn, } from './quality-gates/predicates.ts';
+export type { PathClassification } from './quality-gates/predicates.ts';
 import { type AcceptanceResult, type CommandResult, type ReviewFinding, type ReviewPolicy, type ReviewedStamp, type ReviewVerdict, type TaskKind, type TaskEvidence, type TaskRevision, type TaskStatus, type TeamState, type TeamTask } from './types.ts';
 declare const QUALITY_KINDS: readonly TaskKind[];
 declare const WRITE_KINDS: readonly TaskKind[];
 declare const DEFAULT_REVIEW_POLICY: Required<Pick<ReviewPolicy, 'requirementsMinRounds' | 'requirementsMaxRounds' | 'codeMaxRounds' | 'maxRepairAttempts'>>;
-export type PathClassification = 'in_scope' | 'out_of_scope' | 'undeclared' | 'illegal';
 export interface CreateTaskInput {
     subject: string;
     description?: string;
@@ -169,54 +193,6 @@ export declare function taskKindOf(task: Pick<TeamTask, 'kind'> | undefined): Ta
 export declare function isQualityKind(kind: TaskKind | undefined): boolean;
 export declare function resolveReviewPolicy(policy: ReviewPolicy | undefined): Required<typeof DEFAULT_REVIEW_POLICY> & ReviewPolicy;
 export declare function isReviewPolicy(value: unknown): value is ReviewPolicy;
-/** Normalize a workspace-relative POSIX path. `undefined` means illegal. */
-export declare function normalizeWorkspacePath(path: string): string | undefined;
-export declare function pathMatchesScope(path: string, pattern: string): boolean;
-export declare function classifyChangedPath(path: string, inScope?: readonly string[], outOfScope?: readonly string[]): PathClassification;
-/**
- * ── ★★ f-0020：repair 的判别力证据，不是「本次新增的测试」───────────────────────
- *
- * ── 它修的是什么（MEASURED：本队 6 次同形终止，全部由 captain 代落终态）─────────
- *
- *     t13 / t16 / t19 / t25 / t26 cancelled · t27 failed
- *
- * 原因不是交付物有问题，而是三道完工门的**问句与 repair 的验收不是同一件事**：
- *
- *     r5 / mutation 度量：「为【新工作】写了新测试吗」   ← 输入面 = `newTestFiles`
- *     repair 的验收    ：「改了【既有】夹具后它仍能判别吗」← 净改动全在既有文件上
- *
- * ⇒ `newTestFiles` 对一份 repair 恒为 `[]`（它数的是"新增"，而 repair 一个都没新增），
- *   于是 r5 报 `unmeasured`（"none of the 0 reported file(s)…"）、mutation 拿不到
- *   杀手套件。判据**没有撒谎** —— 它诚实地说"我没能测量"。
- *   但一个恒常的 `unmeasured` 同样**交不出终态** ⇒ 无人值守退化成 captain 逐个手收。
- *
- * ── ★★ 这一格**只换了文件来源**，没有降低判别的强度 ─────────────────────────────
- *
- * 判据问的仍是同一个问题：「这条夹具**还能不能抓住缺陷**」。
- * 变的只是"拿哪些文件去问"：
- *
- *     旧：本次【新增】的测试文件        ⇒ 对 repair 是空集 ⇒ 恒 unmeasured
- *     新：本次【改动过的既有的】测试夹具 ⇒ repair 的真实证据 ⇒ 可测量
- *
- * ★ 而"装饰性测试"这一路**一步都没让**：一条恒绿的既有夹具同样过不了 r5
- *   （它在父版本上就绿 ⇒ `decorative test` 拒绝）。见夹具的臂 3（定向突变）。
- *   ⇒ 换句话说：**"是不是新文件"是无关的；"它还能不能判别"才是问题。**
- *     旧口径读的是前者，代价是把后者的答案一起丢掉了。
- *
- * ── 三态（与 `observedChangedPaths` / `gitChangedPaths` 逐条对齐）──────────────
- *
- *   观察面缺席（`undefined`）    ⇒ 本函数返回 `[]`，且调用方**必须**报 unmeasured
- *        —— "我没能观察" 与 "观察了、确实没有" 不同形（本队记账最久的那条界线）。
- *   观察到了、一条夹具都没改动  ⇒ `[]`，同样是 unmeasured（没有可测量的判别力）。
- *   观察到了、改了既有夹具      ⇒ 那些路径 —— r5 拿它们去跑红前绿后。
- *
- * ★ 为什么不做成"猜一个默认目录"：猜出来的路径会让运行器返回 `[]`，
- *   而空集会被读成"没有新测试要查" ⇒ **ok**。那是把"没测到"并进"通过"，
- *   正是 r5 的注释里已经点名过的那个坑（"用没有根据的默认值…⇒ ok"）。
- *
- * @param ctx - 一份完成更新的上下文（任务是 `repair` / `implementation`）。
- * @returns 应当被当作判别力证据去测量的测试夹具路径（workspace 相对，已去重排序）。
- */
 export declare function repairEvidenceFiles(ctx: RepairCompletionContext | undefined): string[];
 /**
  * ── ★★ repair 的完工裁决：把「判别力证据」与「测量」分开报 ──────────────────────
@@ -377,8 +353,6 @@ export type RepairCompletionResult = {
     unmeasured: string;
     discriminable: boolean;
 };
-export declare function collectChangedPaths(gitStatusText: string): string[];
-export declare function inScopeOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): string[];
 /**
  * ── ★★★ t23：契约的【文件级前提】在**建任务时**就核对，而不是让成员在派发中途发现 ──────
  *
@@ -422,46 +396,6 @@ export interface PremiseFailure {
     /** 人话，指名**哪一条前提**失败（验收第 4 条）。 */
     readonly detail: string;
 }
-/**
- * 从一段自由文本（objective / acceptance）里取出**看起来像仓库路径**的 token。
- *
- * ★ 口径刻意**保守**：只认反引号里的那一类（本仓的契约几乎总是这样写路径），
- *   以及裸的 `dir/file.ext` 形态。
- * ★★ 而"取不到"⇒ 返回空数组（**不猜**）：一个靠猜的检查会在别的措辞上误报，
- *   而误报会教人忽略门禁 —— 与漏报同样有害。
- */
-export declare function repoPathsNamedIn(text: string): string[];
-/** 一条 verify 命令里"被跑的那个文件"（`node --test <path>` / `node <path>`）。 */
-export declare function verifyTargetOf(command: string): string | undefined;
-/**
- * 一条验收标准"点名的臂"—— 例如 `scripts/gate-friction-capture.test.mjs` 里的 `臂 4`。
- *
- * ★ 这是 (iii) 的**要害**：文件存在**不等于**它里面那条臂存在。
- *   t8 那一例正是如此：文件在（51755 字节），而 **C1 的臂一个都没有**。
- */
-export declare function armsNamedIn(text: string): string[];
-/**
- * ── ★★★ t8 那一例的最强读数：**臂名存在，而它承载的东西不存在**────────────────────
- *
- * MEASURED（本任务实测，`git show ba5b23a:scripts/gate-friction-capture.test.mjs`）：
- *
- *     `臂 4` 在那个修订上**存在**（2 处）—— 而它是一个**与 C1 无关的**老臂：
- *         「臂 4（★ 重放臂）：拿记录去重跑那条判据 —— 卡点必须**再发生一次**」
- *     而 C1 的词汇（`observeStall` / `recordClass` / `FrictionRecordClass`）**零出现**。
- *
- * ⇒ ★★ 于是"验收说臂 4 证明 escalate 池"在那棵树上**是空的**：
- *   臂名对得上，而**它证明的东西不存在**。
- *   ⇒ 一个只比臂名的检查**会放它过去** —— 而那正是本任务要消灭的形态本身：
- *     **一条读起来像被验证过的标准，其实没有主语。**
- *
- * ── 所以这一梯补的是**主语**：验收标准里点名的标识符，必须在那个文件里真的出现 ────────
- *
- * ★ 口径保守（与 `repoPathsNamedIn` 同一条纪律）：只认**反引号里**、
- *   且形状像**代码标识符**（camelCase / snake_case / PascalCase，可带点）的那些。
- *   ⇒ 取不到 ⇒ 不报（**不猜**）：一个靠猜的检查会在散文上误报，
- *     而误报会教人忽略门禁 —— 与漏报同样有害。
- */
-export declare function subjectTermsIn(text: string): string[];
 export declare function checkTaskPremises(input: {
     objective?: string;
     acceptance?: readonly string[];
