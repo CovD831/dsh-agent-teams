@@ -82,3 +82,84 @@ A/B 读数: {"ok":false,"evaluated":0,"skipped":4,"registered":4,"ranLen":4,
 - **S2**（下一任务）把 `task.gateEvaluation` 转发进 `/state` 的 per-task map（`status.ts` 的 `tasks.map` + schema）。
 - 本格与 t69 的 `auto.taskId/teamId`（卡点台账归属）**是两件事**：那个记"哪个任务被拒了"，这个记"判据在这条任务上看到了什么"。
 - `gate-tool-output-schema` 的产出面对账不受影响：本字段挂在**持久层**（team.json），不新增任何工具返回字段。
+
+---
+
+## ★★ t74 补记：上面第 11 行描述的设计**有一半是错的**，已修正
+
+> 本节**追加**，不改写上文 —— 上文如实记录了当时的实现与其自述，而那一自述本身是缺陷的一部分。
+
+### 事实更正（逐条）
+
+上文第 11 行写「S1 的形状**住 `state/tasks.ts`**，经 module augmentation 挂上 `TeamTask`」。
+**实测不成立**：
+
+```
+$ grep -rn "export interface GateEvaluationRecord" src/            # 改前
+src/state/tasks.ts:67:  export interface GateEvaluationRecord {
+src/types.ts:341:       export interface GateEvaluationRecord {    ← ★ 这一份才是【活的】
+```
+
+两份**逐字相同**（各 **1091 字符**，md5 同为 `0dc8f4bb3ec101a87665437770944106`）。
+而 `TeamTask.gateEvaluation` 绑定的是 **`types.ts` 那份**（`TeamTask` 与它同文件，
+编译进 `lib/types/types.d.ts:508`）⇒ `state/tasks.ts` 那份是**重复声明**。
+
+★ 连带发现：`gateEvaluation` 这个字段当时有 **3 处**声明 ——
+`types.ts` 的 `TeamTask` 接口体、`state/tasks.ts` 的 `declare module` augmentation、
+以及**它以为自己在做主**的那份接口。我的探针实测：**把 augmentation 整段删掉，`tsc --noEmit` 仍 exit=0**
+⇒ augmentation 从第 1 天起就是**冗余的**。
+
+### 为什么"以为在复制"却复制了已经存在的东西
+
+上文的理由逐字是：「`src/types.ts` 是零 import 叶子，**它不能 import 别的模块**」。
+★ **这条推理是对的，但它证明的结论不成立**：形状**本来就住在 `types.ts` 里**
+（`TeamTask` 就在那儿，字段也声明在那儿）⇒ 不需要"因为叶子不能 import，所以形状只能住别处"。
+⇒ 真正的成因是：**先假定"形状不该在 types.ts"，于是照那个假定写了一份** ——
+而这正是本仓记账最久的形态：**一个成立的局部论证，被用来支持一个不成立的结论。**
+
+### 改法（t74 实际做的）
+
+| 动作 | 位置 |
+|---|---|
+| 删掉**重复的那一份**（三个接口） | `src/state/tasks.ts`（原 `:45-122`） |
+| 改为 `import type { GateEvaluationRecord, GateRequiresSummary, GateRunEntryRecord }` | 同文件 import 块 |
+| 删掉**冗余的 module augmentation** | `src/state/tasks.ts`（原 `:211-252`） |
+| **不碰** `src/types.ts` | 它保留唯一声明，且仍是**零 import 叶子**（实测 `^import ` 计数 **0**） |
+
+★ **零新依赖、零新环**：`src/state/tasks.ts` **本来就** import `../types.ts`（同文件既有 import）
+⇒ 这次改动**没有新增任何依赖边**。
+
+### 验证
+
+```
+$ grep -c "export interface GateEvaluationRecord" src/types.ts        ⇒ 1
+$ grep -c "export interface GateEvaluationRecord" src/state/tasks.ts  ⇒ 0
+$ npx tsc -p tsconfig.json --noEmit                                    ⇒ exit=0
+$ pnpm build                                                           ⇒ exit=0
+$ pnpm test:gates   ⇒ 1482 tests / 1424 pass / 20 fail / 16 文件
+                       ★ 与基线【失败文件集合】逐条相同（comm 两侧均空）
+```
+
+**反向半边**（证明留下的那份**真在被用**，而非"两份都是死的"）：
+```
+$ 把 src/types.ts 的声明改名 ⇒ npx tsc --noEmit
+src/state/tasks.ts(18,8): error TS2305: Module '"../types.ts"' has no exported member 'GateEvaluationRecord'.
+src/types.ts(566,20):     error TS2304: Cannot find name 'GateEvaluationRecord'.
+                                                       ⇒ exit=2 ★ 两处独立报错
+```
+★ **`types.ts:566` 那条是关键的**：它由 `TeamTask.gateEvaluation` 触发
+⇒ 直接证明该字段绑的**就是**这一份，而不是靠推理。
+
+**产物核对**（重复在编译结果里也消失了）：
+```
+lib/types/types.d.ts        GateEvaluationRecord ×2 = 1 声明 + 1 字段引用   ← 唯一声明
+lib/types/state/tasks.d.ts  GateEvaluationRecord ×3 = 1 import + 2 使用      ← 【没有】声明
+```
+
+### 这一节与 t73 是同一条教训吗
+
+**不是，但相邻**。t73 修的是「判据的**参照**会自毁」；t74 修的是
+「**声明**有两份，而两份都编译得过」。
+★ 共同点是同一个问题的两面：**当"正确"与"错误"在编译器眼里同形时，编译器就不再是判据**。
+t65 为 `VisualTaskState` 删过一次同样的重复，并在那里写下了危害 ——
+**本次是同一个缺陷在同一模块上的第二次出现**，成因也相同：*以为自己在"必要时复制"，实际复制了已经存在的东西*。
