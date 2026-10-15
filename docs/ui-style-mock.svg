@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 300" font-family="-apple-system, 'SF Pro Text', 'PingFang SC', sans-serif">
+<style>
+  .bg{fill:#1c1f23}
+  .ln{stroke:#2b3036;stroke-width:1}
+  .hdr{fill:#c8ccd1;font-size:12px;font-weight:600;letter-spacing:.2px}
+  .dim{fill:#6f7780;font-size:11px}
+  .name{fill:#e8eaed;font-size:12.5px;font-weight:500}
+  .role{fill:#6f7780;font-size:11px}
+  .doing{fill:#b8bec5;font-size:11.5px}
+  .sub{fill:#6f7780;font-size:10.5px}
+  .working{fill:#5b9dd9} .idle{fill:#4a5158} .live{fill:#5b9dd9}
+  .done{fill:#5fbf7f} .warn{fill:#e0a35c} .bad{fill:#e06c6c}
+</style>
+<rect width="360" height="300" class="bg"/>
+<rect width="360" height="300" class="bg"/>
+<text x="14" y="22" class="hdr">Agent Team</text>
+<text x="346" y="22" class="dim" text-anchor="end">6 名成员</text>
+<line x1="0" y1="32" x2="360" y2="32" class="ln"/>
+<line x1="14" y1="40" x2="346" y2="40" class="ln"/>
+<circle cx="18" cy="50" r="3.5" class="live"/>
+<text x="30" y="54" class="name">ui-hy4</text>
+<text x="346" y="54" class="doing" text-anchor="end">在做 t77</text>
+<text x="30" y="69" class="sub">第 1 轮 · completion 段 · 变异测试 8/14</text>
+<line x1="14" y1="84" x2="346" y2="84" class="ln"/>
+<circle cx="18" cy="94" r="3.5" class="live"/>
+<text x="30" y="98" class="name">ui-dissect</text>
+<text x="346" y="98" class="doing" text-anchor="end">在做 t78</text>
+<text x="30" y="113" class="sub">第 1 轮 · completion 段 · 重跑验证</text>
+<line x1="14" y1="128" x2="346" y2="128" class="ln"/>
+<circle cx="18" cy="138" r="3.5" class="done"/>
+<text x="30" y="142" class="name">test-triage</text>
+<text x="346" y="142" class="doing" text-anchor="end">已完成 t76</text>
+<text x="30" y="157" class="sub">第 3 轮 · 本轮已完成</text>
+<line x1="14" y1="172" x2="346" y2="172" class="ln"/>
+<circle cx="18" cy="182" r="3.5" class="warn"/>
+<text x="30" y="186" class="name">archaeologist</text>
+<text x="346" y="186" class="doing" text-anchor="end">已完成 t74</text>
+<text x="30" y="201" class="sub">第 3 轮 · 评审发现问题 · 继续下一轮</text>
+<line x1="14" y1="216" x2="346" y2="216" class="ln"/>
+<circle cx="18" cy="226" r="3.5" class="done"/>
+<text x="30" y="230" class="name">reviewer-glm</text>
+<text x="346" y="230" class="doing" text-anchor="end">已完成 t71</text>
+<text x="30" y="245" class="sub">第 6 轮 · 本轮已完成</text>
+<line x1="14" y1="260" x2="346" y2="260" class="ln"/>
+<circle cx="18" cy="270" r="3.5" class="bad"/>
+<text x="30" y="274" class="name">ui-engineer</text>
+<text x="346" y="274" class="doing" text-anchor="end">t69 失败 · 待重派</text>
+<text x="30" y="289" class="sub">第 5 轮 · 本轮已失败</text>
+<line x1="0" y1="304" x2="360" y2="304" class="ln"/>
+</svg>
