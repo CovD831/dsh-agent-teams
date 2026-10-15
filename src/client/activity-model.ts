@@ -205,7 +205,6 @@ export function teamProgressSummary(
       detail: labels.slice(0, 2).join(separator),
     }
   }
-  if (team.tasks.length === 0) return { working: 0, detail: '' }
   return { working: 0, detail: '' }
 }
 

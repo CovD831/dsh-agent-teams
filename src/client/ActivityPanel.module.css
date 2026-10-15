@@ -681,8 +681,6 @@
 
 .memberRow {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  gap: 8px;
   align-items: center;
   width: 100%;
   min-width: 0;
@@ -1042,8 +1040,11 @@
   color: var(--dsw-alias-label-primary-inverted);
 }
 
-.taskDetailLine, .taskDetailMeta {
+.taskDetailLine {
   color: var(--dsw-alias-label-secondary);
+}
+
+.taskDetailLine, .taskDetailMeta {
   font-size: 9.5px;
   line-height: 14px;
 }
@@ -1336,9 +1337,12 @@
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 9px;
+}
+
+.planCardBody label {
+  gap: 4px;
 }
 
 .planCardBody label small {
@@ -1563,7 +1567,7 @@
   justify-content: flex-end;
 }
 
-.planActions button, .planNewTask button, .planApproveRow button, .planConfirm button {
+.planActions button, .planNewTask button, .planConfirm button {
   flex: none;
   min-height: 30px;
   padding: 5px 10px;
@@ -1571,6 +1575,19 @@
   border-radius: 6px;
   background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  font-size: 9.5px;
+  font-weight: 600;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+/* `.planApproveRow button` resets min-height/background/color below, so those
+ * three are declared only by the sibling list above — not duplicated here. */
+.planApproveRow button {
+  flex: none;
+  padding: 5px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
   cursor: pointer;
   font-size: 9.5px;
   font-weight: 600;
@@ -1719,10 +1736,16 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.planSecondaryActions > button, .planApproveActions > button[data-danger] {
+.planSecondaryActions > button {
   border-color: var(--dsw-alias-border-l2);
   background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-primary);
+}
+
+/* `color` is reset to the error token below, so it is not declared here. */
+.planApproveActions > button[data-danger] {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-button-ghost-active-fill);
 }
 
 .planSecondaryActions > button[data-danger], .planApproveActions > button[data-danger] {
@@ -1828,10 +1851,6 @@
 
   .memberBranch {
     width: 15px;
-  }
-
-  .assignmentLine {
-    padding-left: 53px;
   }
 
   .planFlow li {
@@ -2005,7 +2024,7 @@
 .team[data-workspace-team] .captainSummary { font-size: 12px; line-height: 1.6; }
 .team[data-workspace-team] .captainState { font-size: 11px; }
 .team[data-workspace-team] .memberName { font-size: 13px; }
-.team[data-workspace-team] .memberRole, .team[data-workspace-team] .memberState, .team[data-workspace-team] .memberCount { font-size: 11px; }
+.team[data-workspace-team] .memberRole, .team[data-workspace-team] .memberCount { font-size: 11px; }
 .team[data-workspace-team] .memberStatusLine { font-size: 12px; line-height: 1.6; }
 .team[data-workspace-team] .taskDetailSubject { font-size: 13px; line-height: 1.6; }
 .team[data-workspace-team] .taskDetailLine, .team[data-workspace-team] .taskDetailMeta { font-size: 12px; line-height: 1.6; }
@@ -2017,72 +2036,9 @@
   .team[data-workspace-team]:has(> [data-staging-editor]) > .delegationSection { grid-column: 2; grid-row: 2; }
   .team[data-workspace-team]:has(> [data-staging-editor]) > .dependencySection { grid-column: 2; grid-row: 3; border-left: 0; padding: 24px 0 0; }
 }
-.team[data-workspace-team] .memberBlock[data-selected-member] .memberRow { outline: 1px solid var(--dsw-alias-state-business-primary); outline-offset: 3px; }
 .team[data-workspace-team] .dagOwner { white-space: nowrap; max-width: 105px; }
 /* The page scrolls as a whole; an overlay approval bar would cover form saves. */
 .team[data-workspace-team] .planApproveRow { position: static; }
-
-/* ─────────────────────────────────────────────────────────────────────────────
- * Review convergence (t13): rounds, tones, and the member elapsed clock.
- *
- * ★ Colour comes only from host --dsw-alias-* tokens, so the panel keeps
- *   following the host theme (including dark mode) with no second palette.
- *   The loop laid out here follows the first-party conventions: a 32px row,
- *   16px markers/dots, and a fixed-width status column so tails align.
- * ───────────────────────────────────────────────────────────────────────────── */
-
-.loopSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 8px 0 0;
-}
-
-/* ★ First-party run/phase row height: 32px. */
-.loopRound {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-sizing: border-box;
-  min-width: 0;
-  height: 32px;
-}
-
-/* ★ First-party leading slot: 16px, fixed so markers align vertically. */
-.loopRoundMarker {
-  display: inline-flex;
-  flex: none;
-  width: 16px;
-  height: 16px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-label-tertiary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-/* ★ Fixed-width status column, right-aligned, so every round's tail aligns. */
-.loopStatusTail {
-  display: inline-flex;
-  flex: none;
-  width: 132px;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  overflow: hidden;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
-  line-height: 18px;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ── Member row: 16px status dot + fixed-width status tail (t13) ─────────────── */
 
