@@ -167,3 +167,57 @@ rebuilt(id) {
 ---
 
 *本文只写 `docs/`。未改动 `src/`、`scripts/`、`lib/`（测试用的 HMRTEST 已还原并重建）。*
+
+---
+
+## 7. ★★★ 准确的边界（补，2026-10-16）：**两条 HMR 通路,各管一半**
+
+★ 从 asar 取回的**官方说明**区分了两条**互不相同**的通路：
+
+### 通路 A：`dsh-hmr` —— 管【插件组装】
+
+> 「The enabled `dsh-hmr` plugin **watches the profile manifest and both user patch files**,
+>  re-reads the ordered bundle layers, and applies the reload failure policy.
+>  ★ **The launcher does not install HMR or watchers; disabled or absent HMR means
+>  changes require restart.**」
+> 「★ **package operations run outside its queue**」
+
+**它热的是**：`package.json`（manifest）· `cordis.patch.yml`（两个用户 patch 文件）
+⇒ ★ **即"用了哪些插件、怎么接线"。**
+
+### 通路 B：`dsh-client-modules` 的 stat 轮询 —— 管【client bundle】
+
+> 「每个 combo 或 chunk map …… **首次发布与 HMR 都从入口的 `mtimeMs`、`ctimeMs`
+>  和大小派生逐插件 revision,不对产物内容求哈希。**」
+
+**它热的是**：`lib/client.js`（**每 500ms 轮询 mtime/ctime/size**）
+
+### ★★★ 于是得到一张准确的表
+
+| 改什么 | 通路 | 生效方式 |
+|---|---|---|
+| `src/client/**` → `lib/client.js` | ★ **B** | ✅ **`pnpm build` + 刷新,不用重启**（**已实测**）|
+| `package.json` / `cordis.patch.yml` | ★ **A** | ✅ **保存即生效,不用重启** |
+| ★ **宿主侧 `src/*.ts` / `src/tools/**` → `lib/*.js`** | ❌ **两条都不覆盖** | ❌ **必须重启** |
+
+### ★★ 所以对"插件自迭代"的准确回答
+
+> **前端（UI）可以免重启迭代;宿主侧（工具/状态/判据逻辑）不能。**
+
+★ 而**这个划分对本插件特别要紧**:我们的大量逻辑在**宿主侧**
+（`src/tools/**`、`src/gates/**`、`src/state.ts`、`confidence.ts`…）
+⇒ ★ **改那些仍然要重启。**
+
+★ 而**"`pnpm build` 是必需的"** 那句话现在有了机制依据:
+**没有 build ⇒ mtime 不变 ⇒ 通路 B 静默不动作。**
+
+---
+
+## 8. 一句话总结
+
+```
+① src/client/**       → pnpm build → 刷新  ⇒ ✅ 免重启（已实测）
+② package.json / patch → 保存              ⇒ ✅ 免重启（通路 A）
+③ 宿主侧 src/*.ts      → 必须重启           ⇒ ❌ 两条通路都不覆盖
+④ ★ 任何情况都要 pnpm build 或主动保存 —— 否则 HMR 静默不动作
+```
