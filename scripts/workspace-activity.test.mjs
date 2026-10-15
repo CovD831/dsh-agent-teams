@@ -1334,6 +1334,50 @@ function readHeadFile(name) {
 }
 
 /**
+ * ── ★★★ t73：`key` 有没有在某一次提交里【真的消失过】？ ──────────────────────────────
+ *
+ * **为什么需要它**：本臂原来的 `neverLost` 拿 **`HEAD`** 当"删除之前"的参照，
+ * 而那个前提**只在删除尚未提交时成立** ⇒ **删除一被提交，参照就失效**，
+ * 于是**真删除被误报成凭空登记**（t70 提交那 41 条之后实测：41 条全红）。
+ * ⇒ 参照必须换成一个**不会随 `HEAD` 前进而失效**的东西，那就是**提交历史**。
+ *
+ * ── 判据（可复跑，且与"当前 HEAD 是什么"无关）────────────────────────────────────
+ *
+ * ```sh
+ * ∃ 提交 C : key ∈ C^  ∧  key ∉ C        # 某一次提交把它从"在"变成"不在"
+ * ```
+ *
+ * ★★ **为什么不能只用 `git log -S`**：`-S` 匹配的是"这个串的**出现次数变了**"，
+ *   所以它**同时**命中"加进去"和"删掉"两次提交。实测 `workspace.guide` 命中 **2** 条：
+ *   `867ff21` 是**加**、`7c3f056` 是**删**（t70）。
+ *   ⇒ 只用 `-S` 会把"它加过"误读成"它删过" ⇒ **必须再比两侧的存在性**才能定出方向。
+ *
+ * ★ 实测两个方向**都对**（这就是它保住分辨力的证据，见臂 27c）：
+ *   · 41 条真删除（t70 的 `7c3f056`）⇒ 全部 `true`
+ *   · `task.status.notRun` / `member.state.notCreated` / `workspace.title` ⇒ 全部 `false`
+ *
+ * ★ 只查 `src/client/locales.ts`：登记表**全部 41 条**都是 `face: 'dictionary'`，
+ *   而词典面就是关于这个文件的。★ 刻意**不加** `--follow`：**重命名不是删除**。
+ */
+function deletedInHistory(key) {
+  const commits = execFileSync('git',
+    ['log', '--format=%H', '-S', `'${key}'`, '--', 'src/client/locales.ts'],
+    { cwd: new URL('.', REPO_ROOT).pathname, encoding: 'utf8' })
+    .split('\n').map((line) => line.trim()).filter((line) => line !== '')
+  const occurrencesAt = (rev) => {
+    try {
+      const text = execFileSync('git', ['show', `${rev}:src/client/locales.ts`],
+        { cwd: new URL('.', REPO_ROOT).pathname, encoding: 'utf8' })
+      return text.split(`'${key}'`).length - 1
+    } catch {
+      /** ★ 那次提交里**没有这个文件** ⇒ 视为 0（"不在"），**不是**"读不出"。 */
+      return 0
+    }
+  }
+  return commits.some((commit) => occurrencesAt(`${commit}^`) > 0 && occurrencesAt(commit) === 0)
+}
+
+/**
  * Every dotted lowercase string literal in a source file (raw vocabulary scan).
  *
  * ★ 口径：本模块里只有**两种**点号字面量 —— locale 键（`a.b.c`）与 CSS 选择器片段。
@@ -1626,15 +1670,66 @@ test('★ 臂 27（R3 集合比对臂）：搬动之后**没有**任何渲染事
     ? { before: beforeDictionary, after: afterDictionary }
     : { before: beforeComponents, after: afterComponents })
 
+  /**
+   * ── ★★★ t73：`neverLost` 的参照必须是【历史】，不能是 `HEAD` ──────────────────────
+   *
+   * ── 它原来的形状（以及为什么它是**自毁**的）──────────────────────────────────────
+   *
+   * 原本判的是「`item` 在 `HEAD` 的参照里存在过，且现在不在」：
+   * ```js
+   * return after.has(item) || !before.has(item)     // before = HEAD 的树
+   * ```
+   * ★ 那个前提**只在"删除还没提交"时成立**。而 **t70 把 41 条删除提交了**
+   *   ⇒ `HEAD` 已经是**删除之后** ⇒ `before` 里**没有**那 41 条
+   *   ⇒ `!before.has(item)` 为真 ⇒ **41 条真删除全部被报成"凭空登记"**。
+   *
+   * ⇒ ★★ **这是一个一被满足就失效的判据**：它要求"删除尚未提交"，
+   *   而删除一旦提交（那是**正确**的做法）它就把正确答案判成错的。
+   *   ★ 更要命的是它的**修法诱惑**：把 `neverLost` 删掉或放松，它就"绿"了 ——
+   *     而那样会同时失去它**唯一**的价值（抓凭空登记）。
+   *
+   * ── 修法：参照换成"**这个 key 有没有在某一次提交里真的消失过**" ──────────────────
+   *
+   * 判据（可复跑、且**不随 `HEAD` 前进而失效**）：
+   * ```sh
+   * ∃ 提交 C : key ∈ C^  ∧  key ∉ C        # 即它在某次提交里从"在"变成了"不在"
+   * ```
+   * ★ 实测这个谓词**两个方向都对**（见 §4.6 与下面的 `--selftest`）：
+   *   · 41 条真删除（t70 的 `7c3f056`）⇒ 全部**判为已删除** ✅
+   *   · 3 个仍活着的 key（`task.status.notRun` / `member.state.notCreated` / `workspace.title`）
+   *     ⇒ 全部**判为从未删除** ✅
+   *   ⇒ 它**仍有分辨力**（A 半边要的），且**提交之后依然成立**（B 半边要的）。
+   *
+   * ★★ 为什么不用 `git log -S<key>` 就完事：`-S` 匹配的是"这个串的出现**次数变了**"，
+   *   所以它**同时**命中"加进去"与"删掉"两次提交（实测 `workspace.guide` 命中 2 条：
+   *   `867ff21` 是**加**、`7c3f056` 是**删**）。⇒ 只用 `-S` 会把"加过"误读成"删过"。
+   *   ⇒ 必须**再比一次两侧的存在性**（`C^` 有而 `C` 没有）才能定出方向。
+   *
+   * ── ★ `after.has(item)` 那一半**保留**（它挡的是另一种错）────────────────────────
+   *
+   * 条目**现在又回来了**（有人撤回了删除）⇒ 也必须报红：登记说"删了"，而它明明在。
+   *   ⇒ 两条合起来才是完整的判据：
+   *     (a) 它**现在不在**（`after`）—— 否则登记与现状矛盾；
+   *     (b) 它**曾经在某次提交里真的消失过**（历史）—— 否则就是凭空登记。
+   *
+   * ★ `deletedInHistory` 是**模块级函数**（见文件上方它的定义）而不是这里的闭包 ——
+   *   那样**臂 27c 能直接测它**，而这正是本任务的核心：这条判据的**分辨力**
+   *   必须能被单独复跑，不能只藏在臂 27 里面。
+   */
   const neverLost = [...INTENTIONAL_REMOVALS.entries()]
     .filter(([item, spec]) => {
-      const { before, after } = faceOf(spec.face)
-      // 反向半边：登记为"已删除"的条目，必须 (a) 在参照里真的存在过，且 (b) 现在真的不在了。
-      return after.has(item) || !before.has(item)
+      const { after } = faceOf(spec.face)
+      /**
+       * 反向半边（两条都要）：
+       *   (a) 登记为"已删除"，但它**现在还在** ⇒ 红（登记与现状矛盾）；
+       *   (b) 登记为"已删除"，但**历史里查不到它消失过** ⇒ 红（凭空登记）。
+       */
+      return after.has(item) || !deletedInHistory(item)
     })
     .map(([item]) => item)
   assert.deepEqual(neverLost, [],
-    `★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**（或在各自的面上根本不存在）——`
+    `★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**——`
+    + `要么现在还在，要么在提交历史里根本查不到它消失过。`
     + `一份会替未来删除打掩护的登记表比没有登记更坏。实测：${JSON.stringify(neverLost)}`)
   /** ★ 而"各面都真的读到了东西"必须各自成立，否则上面那条会退化成恒真。 */
   assert.ok(beforeDictionary.size > 0, '★ 反向半边：词典面的参照集合不能是空的')
@@ -1658,6 +1753,55 @@ test('★ 臂 27b（R3 反向半边）：把一条事实从集合里拿掉 ⇒ �
   /** ★ 而"没东西可丢"与"丢了没报"必须不同形：空集合与满集合的差异不同。 */
   assert.deepEqual(missingFrom(new Set(), sabotaged), [],
     '★ 对照：参照为空时差异必为空 —— 这正是上面那条前置要挡住的恒真态')
+})
+
+test('★ 臂 27c（t73）：`deletedInHistory` 的【两个方向】各自成立 —— 且与当前 HEAD 无关', () => {
+  /**
+   * ── 它测的是什么，以及为什么**必须**单独有一条 ───────────────────────────────────
+   *
+   * t73 修的是"**参照随 `HEAD` 前进而失效**"：原来拿 `HEAD` 当"删除之前"的树，
+   * 而删除一提交，`HEAD` 就变成"删除之后" ⇒ **41 条真删除被误报成凭空登记**。
+   * 修法把参照换成**提交历史**（`deletedInHistory`）。
+   *
+   * ★★ 而这个修法有一个**明显的诱惑**：让它恒 `false`（或让它恒 `true`）也能"绿"。
+   *   ⇒ 所以本条臂**同时**钉住两个方向 —— **只钉一个方向等于没有分辨力**：
+   *
+   *     方向 ①（B 半边）：**真的删过**的 key ⇒ `true`
+   *     方向 ②（A 半边）：**从未删过**的 key ⇒ `false`
+   *
+   * ★ 而它**不依赖 `HEAD` 是哪一个提交**：判据只查"历史里有没有那一次转变"。
+   *   这正是本任务要的性质 —— 下一个提交不会让它失效。
+   */
+  const REPO = new URL('.', REPO_ROOT).pathname
+  /** ★ 前置：git 在这个检出里可用（否则下面两条会"通过"得毫无意义）。 */
+  const probe = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: REPO, encoding: 'utf8' }).trim()
+  assert.equal(probe, 'true', '★ 前置：必须在 git 工作树里跑（否则这条判据无从谈起）')
+
+  /**
+   * 方向 ①：**t70（`7c3f056`）真的删掉了** `workspace.guide`。
+   * ★ 实测它在 `7c3f056^` 出现 2 次、在 `7c3f056` 出现 0 次。
+   */
+  assert.equal(deletedInHistory('workspace.guide'), true,
+    '★ 方向①：`workspace.guide` 在 t70 被真的删掉了 ⇒ `deletedInHistory` 必须为 true'
+    + '（若它是 false，说明参照又退回了"随 HEAD 前进而失效"的老毛病）')
+
+  /**
+   * 方向 ②：这三个**从未被删过** —— 它们要么一直活着（`task.status.notRun`、
+   * `workspace.title`），要么被 `scripts/verify.mjs:308` 钉着（`member.state.notCreated`）。
+   * ⇒ `deletedInHistory` 必须为 `false`，否则"凭空登记"就抓不住了。
+   */
+  for (const live of ['task.status.notRun', 'member.state.notCreated', 'workspace.title']) {
+    assert.equal(deletedInHistory(live), false,
+      `★ 方向②：\`${live}\` 从未被删除 ⇒ \`deletedInHistory\` 必须为 false`
+      + '（若它是 true，说明它会把"加过"误读成"删过"，凭空登记就抓不住了）')
+  }
+
+  /**
+   * ★★ 而"两个方向都对"这件事**必须能证伪**：另取一个**真的删过**的 key，
+   *   它与上面那个处于**同一次提交**里 —— 若判据只对某一个 key 生效，这里会露出来。
+   */
+  assert.equal(deletedInHistory('progress.delivered'), true,
+    '★ 对照：同一次提交（t70）里删掉的另一个 key 也必须判为 true')
 })
 
 /* ─────────────────────────────────────────────────────────────────────────────

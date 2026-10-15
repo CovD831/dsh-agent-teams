@@ -387,6 +387,91 @@ $ pnpm build ⇒ exit=0              # lib/client.js · lib/client/locales.js ·
 | `pnpm verify` 失败检查集合 | 8 条 | 8 条 | `diff` 空 ⇒ **逐条相同**（★ 它**本来就是红的**，不是本轮造成的） |
 | 臂 27 | 绿（空表） | 绿（41 条登记） | 两端都绿 ⇒ **不是"用登记换绿"** |
 
+### 4.6 ★★★ t73：`neverLost` 的参照是**自毁**的 —— 删除一提交它就反过来咬人
+
+★★ **t70 提交之后，臂 27 立刻由绿转红**，而**那 41 条确实已经删掉了**。这不是实现回归，
+是**判据本身的自毁**：
+
+```
+$ node --test --test-name-pattern="臂 27" scripts/workspace-activity.test.mjs
+✖ AssertionError: ★ 反向半边：这些条目登记为"已删除"，但它们**并没有真的消失**…
+  实测：["workspace.guide","workspace.eyebrow", … 共 41 条]
+```
+
+**根因**（`:1430` 那条设计逐字）：「参照 = **`HEAD`**（搬动之前的树）」。
+★ 那个前提**只在"删除尚未提交"时成立** —— **删除一提交，`HEAD` 就变成删除之后**
+⇒ `before` 里没有那 41 条 ⇒ `!before.has(item)` 为真 ⇒ **41 条真删除全被报成凭空登记**。
+
+⇒ ★★ **它一被满足就失效**：它要求"删除尚未提交"，而提交删除是**正确**做法。
+★ 而它的**修法诱惑**正是本任务要挡的：把 `neverLost` 删掉或放松，它就绿了 ——
+**而那会同时失去它唯一的价值**（`:1449` 记着它**做对**过的那一次：挑出 7 条凭空登记）。
+
+#### 4.6.1 修法：参照换成**提交历史**，而不是任何一个会前进的东西
+
+```
+判据：∃ 提交 C : key ∈ C^  ∧  key ∉ C      # 某一次提交把它从"在"变成"不在"
+```
+实现为模块级函数 `deletedInHistory(key)`（放在 `readHeadFile` 旁边）。
+
+★★ **为什么不能只用 `git log -S`**：`-S` 匹配"这个串出现**次数变了**"，
+所以它**同时**命中"加"与"删"。实测 `workspace.guide` 命中 **2** 条：
+`867ff21` 是**加**、`7c3f056` 是**删**。⇒ 只用 `-S` 会把"加过"误读成"删过"，
+**必须再比两侧的存在性**才能定方向。
+
+★★ **两条子句合起来才完整**（保留原来的 `after.has`）：
+1. 它**现在不在**（`after`）—— 否则登记与现状矛盾（例如有人撤回了删除）；
+2. 它**曾在某次提交里真的消失过**（历史）—— 否则就是凭空登记。
+
+#### 4.6.2 三条读数（都可复跑）
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 41 条真删除（t70 已提交） | **绿** | ✅ `✔ 臂 27` |
+| 登记指向**仍存在**的 `task.status.notRun` | **红** | ✅ `✖ 实测：["task.status.notRun"]` |
+| **撤回**一条删除（把 `workspace.guide` 加回去） | **红** | ✅ `✖`（子句 1 抓到） |
+| ★ **HEAD 再前进一次**（新增提交后重跑） | **仍绿** | ✅ `ℹ pass 2 · fail 0` ⇒ **原缺陷真的没了** |
+
+#### 4.6.3 ★★ 新增臂 27c：把"分辨力"本身钉住
+
+`deletedInHistory` 是模块级函数 ⇒ **可以单独测**。臂 27c 同时钉住两个方向：
+方向①（真删过的 ⇒ `true`）与方向②（从未删过的 ⇒ `false`）。
+★ 只钉一个方向**等于没有分辨力** —— 这正是 t68 那条自作自受的错（"归档用例只有 `upvoted===0`"）。
+
+**两个变异体都被检出**（这证明 27c 不是装饰）：
+
+| 变异体 | 臂 27 | 臂 27b | **臂 27c** |
+|---|---|---|---|
+| ① `deletedInHistory` 恒 `false` | ✖ | ✔ | **✖** |
+| ② `deletedInHistory` 恒 `true` | ✔ | ✔ | **✖** |
+
+★★ **变异体② 是关键的**：它**放过**了臂 27 与 27b（41 条登记全"通过"），
+**只有 27c 抓得住它**。⇒ 没有 27c，"判据退化成恒真"这件事**在报告里与成功同形**。
+
+#### 4.6.4 ★ 一处必须更正的口径：这个文件**不在 `test:gates` 里**
+
+契约写的验收是「`pnpm test:gates` 失败文件集合与基线逐条相同」。**实测那条对得上，
+但它对本文件没有分辨力** —— 因为：
+
+```sh
+$ python3 -c "…package.json scripts['test:gates']…"
+workspace-activity in test:gates: False
+```
+
+它真正的跑者是 **`verify:harness-contract`**（`package.json:105` 的末段：
+`node --test scripts/client-harness-migration.test.mjs scripts/workspace-activity.test.mjs`）。
+⇒ ★ 所以本轮的净变化证据**取自它自己的跑者**，而不是取一个**根本不跑它**的跑者：
+
+```sh
+$ node --test --test-name-pattern="臂 27" scripts/client-harness-migration.test.mjs scripts/workspace-activity.test.mjs
+✔ scripts/client-harness-migration.test.mjs
+✔ ★ 臂 27   ✔ ★ 臂 27b   ✔ ★ 臂 27c
+ℹ tests 4 · pass 4 · fail 0
+```
+
+★ 而 `pnpm test:gates` 仍按契约跑了：改后 `1471 / pass 1410 / fail 23 / 16 文件`，
+与基线（stash 掉本次改动后重跑）**逐条相同**（`diff` 空）——
+但**如实说明**：那 16 个文件里**本来就不含本文件**，所以它不是本修复的判据。
+
 ---
 
 ## 5. L0.4：死 `if`
