@@ -72,6 +72,8 @@ export declare const zh: {
     'member.status.executingModel': string;
     'member.status.working': string;
     'member.status.waitingAssignment': string;
+    'member.status.awaitingAssignment': string;
+    'member.status.awaitingRedispatch': string;
     'member.status.staged': string;
     'member.status.discarded': string;
     'member.status.stopped': string;
@@ -277,6 +279,8 @@ export declare const en: {
     'member.status.executingModel': string;
     'member.status.working': string;
     'member.status.waitingAssignment': string;
+    'member.status.awaitingAssignment': string;
+    'member.status.awaitingRedispatch': string;
     'member.status.staged': string;
     'member.status.discarded': string;
     'member.status.stopped': string;

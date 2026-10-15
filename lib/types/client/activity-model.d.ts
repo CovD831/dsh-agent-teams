@@ -288,6 +288,50 @@ export declare function reviewLoop<T extends LoopTask>(tasks: readonly T[]): Rev
  * @returns the member's highest round, or undefined when none carries one.
  */
 export declare function memberRound(tasks: readonly LoopTask[]): LoopRound<LoopTask> | undefined;
+/** Minimal task shape needed to tell "finished" apart from "never started" (D12). */
+export interface MemberHistoryTask {
+    readonly id: string;
+    readonly status: string;
+    readonly state?: string;
+    readonly updatedAt?: number;
+}
+/**
+ * ── ★★★ What a member's *history* says, once it has no open work left (D12)─────
+ *
+ * MEASURED（用户截图）：一个**刚做完 12 件**的成员与一个**从没派过活**的成员，
+ * 主行读出来是**同一句话**。而那两件事的处置**相反**：
+ *   · 有历史 ⇒ 队长**欠它**一个任务（该派了）；
+ *   · 无历史 ⇒ 它**还没参与过**（可能正常，也可能配置错了）。
+ *
+ * ★ 四种取值，且**两两不同形** —— 这正是本函数存在的理由：
+ *   · `open`     —— 还有未终结任务 ⇒ 调用方去显示那个任务（不是本函数的兜底）。
+ *   · `failed`   —— 最新的一条终结任务是失败 ⇒ 该**重派**。
+ *   · `finished` —— 有已完成的任务、最新那条不是失败 ⇒ 该**派下一件**。
+ *   · `never`    —— 名下一条任务都没有（或只有非终结且非完成的残留）⇒ 从未派工。
+ *
+ * ★ "最新"的判据必须是**确定**的：优先用宿主写的 `updatedAt`（唯一的持久时间戳），
+ *   缺席时退回**传入顺序的最后一条** —— 快照顺序是稳定的，而"随机挑一条"会让
+ *   同一份数据两次渲染给出不同的句子。
+ *
+ * ★ 反向半边：把 `failed` 与 `finished` 合流，或把 `finished` 与 `never` 合流，
+ *   都会让"刚做完 12 件"与"从没派过活"重新同形 —— 即本轮要修的缺陷本身。
+ * @param owned - the member's OWN tasks, in snapshot order.
+ * @returns which of the four non-open situations this member is in.
+ */
+export declare function memberHistoryState(owned: readonly MemberHistoryTask[]): 'open' | 'failed' | 'finished' | 'never';
+/**
+ * The newest task by `updatedAt`, falling back to snapshot order.
+ *
+ * ★ 缺 `updatedAt` 时**不打乱**相对次序：早于该字段的宿主快照里，
+ *   顺序是唯一可用的"先后"证据。
+ * ★ 导出是给 D12 的两句文案取任务 id 用的（"tN 失败" / "已完成 tN"）——
+ *   两处必须**同一口径**，否则两句话会指向不同的任务。
+ * @param tasks - candidate tasks, in snapshot order.
+ * @returns the newest one, or undefined for an empty list.
+ */
+export declare function latestOwnedTask<T extends {
+    readonly updatedAt?: number;
+}>(tasks: readonly T[]): T | undefined;
 /** One status tail value: which durable task states map to which tail text. */
 export type RoundTailCountKey = 'converging' | 'failed' | 'unmeasured' | 'running' | 'completed';
 /** Locale key of one round-tail count. */

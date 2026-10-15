@@ -27,8 +27,10 @@
 import { useCallback, type CSSProperties } from 'react'
 import {
   compactModelLabel,
+  latestOwnedTask,
   memberClock,
   memberClockStamp,
+  memberHistoryState,
   memberRowKey,
   memberRound,
   memberSubagentReadout,
@@ -143,9 +145,20 @@ function accentOf(id: string): string {
 /**
  * What this member is doing right now, in one line.
  *
- * ★ Every branch says *something*: a member with no current task reads "等待队长派工"
+ * ★ Every branch says *something*: a member with no current task reads a sentence
  *   rather than an empty line, because "this cell has nothing" and "this member has
  *   nothing to do" must not look the same.
+ *
+ * ── ★★★ D12：句子**不只一句**（用户从截图发现的缺陷）──────────────────────────
+ *
+ * MEASURED：改前这里只有一个兜底 `return`，于是**四种情形同形**。用户截图里
+ * 决定性的一对照 —— `ui-engineer`（完成 0 · 失败 1）与 `ui-dissect`（完成 12 ·
+ * 失败 3）主行**都是**「等待队长派工」。而这两件事的处置**相反**：
+ *   · 有历史（做完了在等下一件）⇒ 队长**欠它**一个任务；
+ *   · 无历史（生成后没派过活）  ⇒ 它**还没参与过**。
+ *
+ * ★ 纪律与紧邻的注释同源：**"空 vs 非空"防住了，"干完了 vs 没开始"没防住。**
+ *   所以这里必须**四种不同形**，而不是"有任务 / 没任务"两分。
  * @param member - the member row.
  * @param current - the member's task that `currentTask` names, when it resolves.
  * @param owned - every task assigned to this member.
@@ -164,11 +177,40 @@ export function memberDoingText(
       : t('member.doing.taskSubject', { taskId: current.id, subject })
   }
   if (member.activity === 'working') return t('member.status.working')
-  const open = owned.filter((task) => task.state !== 'completed' && task.state !== 'failed' && task.state !== 'cancelled')
-  if (open.length > 0) {
+  const history = memberHistoryState(owned)
+  if (history === 'open') {
+    const open = owned.filter((task) => task.state !== 'completed' && task.state !== 'failed' && task.state !== 'cancelled')
     return t('member.doing.task', { taskId: open[0]!.id })
   }
+  /**
+   * ★ 下面三句**必须**互不相同 —— "拆开了"与"拆了个恒等的"在屏幕上同形，
+   *   而反向半边 A/B 就是用来挡住后者的（见 docs/D12-STATUS-COLLAPSE.md）。
+   */
+  if (history === 'failed') {
+    return t('member.status.awaitingRedispatch', { taskId: latestTerminalId(owned) })
+  }
+  if (history === 'finished') {
+    return t('member.status.awaitingAssignment', { taskId: latestCompletedId(owned) })
+  }
   return t('member.status.waitingAssignment')
+}
+
+/** Id of the newest terminal task owned by this member (D12's failure line). */
+function latestTerminalId(owned: readonly ActivityTask[]): string {
+  const terminal = owned.filter((task) => task.state === 'completed' || task.state === 'failed' || task.state === 'cancelled')
+  return latestOwnedTask(terminal)?.id ?? ''
+}
+
+/**
+ * Id of the newest **completed** task owned by this member (D12's finished line).
+ *
+ * ★ 单独取 completed，而不是"最新那条终结任务"：最新那条可能是 cancelled，
+ *   而"已完成 tN · 待派工"里的 tN 必须是**真的完成了的那个**，
+ *   否则这句话会把一件被取消的任务说成已完成。
+ */
+function latestCompletedId(owned: readonly ActivityTask[]): string {
+  const completed = owned.filter((task) => task.status === 'completed')
+  return latestOwnedTask(completed)?.id ?? ''
 }
 
 /**

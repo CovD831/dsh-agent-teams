@@ -585,7 +585,6 @@ export {
   activateTaskAttempt,
   beginTaskAttempt,
   cancelUnfinishedTask,
-  gateEvaluationRecordOf,
   invalidateTaskAttempt,
 } from './state/tasks.ts'
 

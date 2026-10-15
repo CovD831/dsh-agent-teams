@@ -69,9 +69,20 @@ export declare function memberDotTone(member: MemberRowMember, context: MemberDo
 /**
  * What this member is doing right now, in one line.
  *
- * ★ Every branch says *something*: a member with no current task reads "等待队长派工"
+ * ★ Every branch says *something*: a member with no current task reads a sentence
  *   rather than an empty line, because "this cell has nothing" and "this member has
  *   nothing to do" must not look the same.
+ *
+ * ── ★★★ D12：句子**不只一句**（用户从截图发现的缺陷）──────────────────────────
+ *
+ * MEASURED：改前这里只有一个兜底 `return`，于是**四种情形同形**。用户截图里
+ * 决定性的一对照 —— `ui-engineer`（完成 0 · 失败 1）与 `ui-dissect`（完成 12 ·
+ * 失败 3）主行**都是**「等待队长派工」。而这两件事的处置**相反**：
+ *   · 有历史（做完了在等下一件）⇒ 队长**欠它**一个任务；
+ *   · 无历史（生成后没派过活）  ⇒ 它**还没参与过**。
+ *
+ * ★ 纪律与紧邻的注释同源：**"空 vs 非空"防住了，"干完了 vs 没开始"没防住。**
+ *   所以这里必须**四种不同形**，而不是"有任务 / 没任务"两分。
  * @param member - the member row.
  * @param current - the member's task that `currentTask` names, when it resolves.
  * @param owned - every task assigned to this member.

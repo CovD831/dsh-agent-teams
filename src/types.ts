@@ -320,82 +320,6 @@ export interface TaskExecution {
 }
 
 /**
- * ── S1：completion 判据结果的**落盘形状**（`TeamTask.gateEvaluation`）──────────────
- *
- * ★★ 为什么**不复用** `src/gates/registry.ts` 的 `GateEvaluation` 类型，而是在这里
- *   重新声明一份**结构相同**的形状：`src/types.ts` 是一个**零 import 的叶子**
- *   （t24 立的规矩，且有夹具逐字断言它）—— 它一旦 import `gates/registry.ts`
- *   就成了图上的一个节点，而 `registry` 反过来要用 `types` ⇒ **成环**。
- *   ★ 与 `FailureKindName` 在这里持一份字面量、由夹具逐字比对，是同一条取舍。
- *
- * ★ 字段集是 `GateEvaluation` 的**持久化投影**（不是全抄）：
- *   · `ran` 原样保留 —— `skipped` 条目保留为 `verdict: 'skipped'`（"判据没跑"是记录，
- *     不是丢掉）；`observed` 原样保留（"开火了、被放过"必须可读，符号表 #4 的数据源）。
- *   · `outputs` 保留 —— 判据的**产物**（如 verify-rerun 的 reruns）本来就是数据流的一部分。
- *   · `requires` 的投影保留（计数 + 人话清单，去掉当场日志才需要的 `checks[]`）—— S2 转发 /state 时要用。
- *   · **不保留**：`context`（太大、且属于"当时那一刻"，不是结论）。
- *
- * ★ 三态在**这个形状本身**上就是可读的（见 `TeamTask.gateEvaluation` 的长注释）：
- *   字段缺席 / `ran: []` / 有内容 —— 三者由**读取端**直接分辨，不需要第二套字段。
- */
-export interface GateEvaluationRecord {
-  /** 整体裁决：本次求值有没有产出【位置级】的拒绝。 */
-  ok: boolean
-  /** 位置级 blocker 原文（`[gate.id] …`）。空数组 = 没有位置级拒绝。 */
-  blockers: string[]
-  /** 判据【跑了】而说"测不了"时的原文；缺席 = 没有"测不了"。 */
-  unmeasured?: string
-  /**
-   * 逐条判据的结论，按注册顺序。
-   * ★ `skipped` 条目**原样保留**（"判据没跑"是记录，不是丢掉）——
-   *   它与"这条判据不存在"必须不同形（`registry.ts:136` 逐字警告过）。
-   */
-  ran: GateRunEntryRecord[]
-  /** 判据自己的产物（键 = 判据 id）。**空对象 ≠ 缺席**：缺席 = 没有任何产物。 */
-  outputs: Record<string, Record<string, unknown>>
-  /** 这次真的跑了（`verdict ≠ 'skipped'`）几条。`0` 且 `registered > 0` ⇒ 全跳过。 */
-  evaluated: number
-  /** 这次被 `appliesTo` 跳过几条。`evaluated + skipped` = 本次涉及的判据总数。 */
-  skipped: number
-  /** 该位置挂了几条判据（与上下文无关）。`0` = 空位置（正常情形）。 */
-  registered: number
-  /** 「挂了判据却一条没跑」的人话说明；缺席 = 不是这个情形（空位置不产出它）。 */
-  skippedAll?: string
-  /** 观察模式下开火并被放过的条数；缺席 = 这次没有（或没在观察）。 */
-  observedBlockers?: number
-  /** 被放过的裁决原文（观察模式）；缺席 = 没有。 */
-  observed?: {
-    blockers?: readonly string[]
-    unmeasured?: readonly string[]
-  }
-  /** 输入面核对结论（结构 = `registry.ts` 的 `RequiresAuditFieldView` 的持久化投影）。 */
-  requires?: GateRequiresSummary
-}
-
-/** 输入面核对结论的**落盘投影**（`registry.ts` 的 `RequiresAuditFieldView` 去掉 `checks[]` —— 那是给当场日志的，落盘只留计数与人话清单）。 */
-export interface GateRequiresSummary {
-  checked: number
-  incomplete: number
-  skipped: number
-  notApplicable: number
-  inputSurfaceAbsent: number
-  /** 缺了格子的（接线缺陷）人话清单。 */
-  missing: string[]
-  /** 声明缺口（`appliesTo` 读了、`requires` 没声明）清单 —— 与 `missing` 不同形。 */
-  gateCellsUndeclared: string[]
-}
-
-/** 逐条判据的落盘条目（结构 = `registry.ts` 的 `GateRunEntry`，见上为何重声明）。 */
-export interface GateRunEntryRecord {
-  id: string
-  verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped'
-  count?: number
-  produced?: boolean
-  /** 「开火了、裁决被观察模式放过」；缺席 = 不是这个情形（不许用 false 冒充缺席）。 */
-  observed?: boolean
-}
-
-/**
  * ── ★★★ 那份「已审查」的**逐条读数**（而不是一句"审过了"）────────────────────────
  *
  * 用户原话（本字段存在的理由）：
@@ -532,38 +456,6 @@ export interface TeamTask {
   changedPaths?: string[]
   acceptanceResults?: AcceptanceResult[]
   commandsRun?: CommandResult[]
-  /**
-   * ── ★★★ S1：completion 位置判据结果的【落盘】（此前：求值 → 裁决 → 丢弃）──────────
-   *
-   * MEASURED（t69 实测、队长复核）：`completion` 位置的判据只在
-   * `src/tools/update-task/completion.ts` 的 `registry.evaluate('completion', …)`
-   * 求值一次；它的结果曾用于【那一次】裁决，然后**没有任何地方持久化到 task**
-   * （`grep -rn "gateResults|gate_runs|gateRun" src/state.ts …` ⇒ 空）。
-   * ⇒ B 线"按成员呈现判据"缺的不是 UI，是【服务端没有按任务落盘的判据结果】。
-   *
-   * ── ★★ 三态（本任务的中心判据，三者必须不同形）────────────────────────────────
-   *
-   *   · **字段缺席**   —— 这条任务**从来没求值过** completion 判据
-   *                      （比如一次 in_progress 的中间更新、或终态补证据路径）。
-   *   · **`ran: []`**  —— 求值了，但**一条判据都没跑**（空位置：`registered === 0`；
-   *                      或全被 `appliesTo` 跳过 —— 那 `skippedAll` 在场）。
-   *   · **有内容**     —— 求值了，`ran[]` 里有带裁决的条目。
-   *
-   * ★★ **不许把"没求值"写成"求值了且通过"**：一个恒在场的空/通过记录会让
-   *   "这一步没被检查"与"这一步检查了且没事"在读取端同形 —— 那正是
-   *   `registry.ts` 的 `GateRunEntry.observed` 注释逐字警告过的合流形态。
-   *   ⇒ 落盘只在**真的求值过**时发生（见 `update-task.ts` 的落盘点），且**原样**
-   *   抄写 `GateEvaluation`（`ran[]` 原样进来，`skipped` 条目原样保留为
-   *   `verdict: 'skipped'`）—— 本字段是**记录**，不是**结论的改写**。
-   *
-   * ★ 与 `auto`（卡点台账）的 `taskId`/`teamId`（t69）**是两件事**：
-   *   那个是【卡点台账】的归属落盘；这个是【任务自己】的判据结果落盘。
-   *
-   * ★ 与 `TeamTask.verdict` 不同轴：那是"这次更新被不被接受"的裁决；
-   *   这个是"判据看到了什么"的记录 —— 判据开火而流程被放行（观察模式）时，
-   *   两者必须能各自读出来。
-   */
-  gateEvaluation?: GateEvaluationRecord
   /** Supplemental observations, attributed to their original execution generation. */
   supplementalEvidence?: TaskEvidence[]
   /**
