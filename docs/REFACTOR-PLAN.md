@@ -1259,3 +1259,39 @@ D 线整线顺序：D1 → D2；D3 独立（等用户拍板）。★ D4 已删�
 ---
 
 *本计划只写 `docs/`。未改动任何 `src/`、`scripts/`、`lib/` 文件。*
+
+---
+
+## 9. 工装缺陷 T5（★ 队长 2026-10-15 实测：闸门死锁）
+
+**现象**：凡 `inScope` 含 `src/tools/update-task.ts` 的任务，**无法创建** ——
+闸门对它产出的 `lib/types/tools/update-task.d.ts` 给出**两个互斥的判定**：
+
+```
+① 声明它 ⇒ refused：「lib/types/tools/update-task 是一个 DIRECTORY，
+            所以 lib/types/tools/update-task.d.ts 在结构上不可能」
+② 不声明 ⇒ refused：「src/tools/update-task.ts 在 inScope，所以构建会产出
+            lib/types/tools/update-task.d.ts，而它未被声明」
+```
+
+**而文件系统证明两者并存**（队长实测）：
+```sh
+$ ls -ld lib/types/tools/update-task lib/types/tools/update-task.d.ts
+drwxr-xr-x  lib/types/tools/update-task          ← 目录
+-rw-r--r--  lib/types/tools/update-task.d.ts     ← 文件
+```
+★ **同一个名字**：`src/tools/update-task.ts` 产出**文件** `update-task.d.ts`，
+而 `src/tools/update-task/*.ts`（子目录）产出**目录** `update-task/`。**两者都不冲突。**
+
+⇒ **T5 不是"契约写得不好",是闸门的两个判定互相矛盾,且其中之一与文件系统不符。**
+
+**影响**：`D1`（卡点 gates[]）的写域**必须**含 `update-task.ts`（三个 auto 写入点在那里）
+⇒ **D1 目前无法被派工**。而它是批次 1 的一条一等线。
+
+**绕法（队长采用，未绕开缺陷本身）**：
+把 D1 的改动**移进 A1 的写域**（`status.ts`）不可行 —— 那不是它的职责。
+⇒ 正确绕法是**给能改 `update-task.ts` 的任务开一条不经此闸门的路径**，
+   或**先把 T5 修掉**。★ 队长选择**记录并上报**，不伪造字段硬闯。
+
+**T5 与 T1–T4 同族**：都在"干活之前"消耗往返。而它的特别之处是 ——
+**它是唯一一条会让某类任务【完全无法开工】的**（前四条只是浪费一轮）。
