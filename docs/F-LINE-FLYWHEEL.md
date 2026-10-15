@@ -216,3 +216,78 @@ $ comm -23 …                                       # 净减少
 ---
 
 *本文件只写 `docs/F-LINE-FLYWHEEL.md`。改动：新增 `src/confidence.ts`，`src/tools/shared/entities.ts`（+98）及其 lib 产物。*
+
+---
+
+## ★★★ §7 队长补：转述保真度的核对（t68 无法自证的那条）
+
+**t68 在 §6 如实提出**：
+> 「我**读不到腾讯的源码** —— `docs/designs/git-native-memory.md` **不在这个仓库**，
+>  它是**队长的转述**。我实现了那份转述里的每一条，但**无法独立验证转述的保真度**。
+>  ★ **这不是我能自证的事。**」
+
+★★ **它说得对，而这正是分工该有的样子。** 那份原文**在队长手上**
+（走 `127.0.0.1:7890` 代理取回，副本在 `/tmp/tc-d-git-native-memory.md`）。
+⇒ **核对是队长的责任。下面是逐条核对结果。**
+
+### 核对 1 · 两个计数（F1 的核心）
+
+**队长转述**：「`recalled_count`（被找到）/ `upvoted_count`（被采纳），**两者分开**」
+
+**原文逐字（`:50-53`）**：
+```
+Ranked results → recalled_count++
+                      │
+      (adoption evidence: agent opens the doc, or
+       opt-in LLM-judge) → upvoted_count++
+```
+**`:64` 逐字**：
+> 「Recall bumps `recalled_count`; adoption evidence (agent opened the doc, or the
+>  opt-in LLM-judge) bumps `upvoted_count`」
+
+✅ **转述属实** —— 两个计数、两个触发点（检索命中 / 采纳证据），**确实分开**。
+
+### 核对 2 · 阈值
+
+**队长转述**：`≥0.90` 晋升 · `<0.15` 归档 · 且晋升需 `≥5 upvotes ∧ ≥2 contributors ∧ ≥14 天`
+
+**原文（`docs/guide/knowledge.md`）**：
+> 「A learning can become a skill, rule, or doc when its confidence is **at least 0.90**,
+>  it has **at least 5 upvotes**, **at least 2 contributors**, and it has existed for
+>  **at least 14 days**.」
+> 「`--archive` puts aside learnings whose confidence is **below 0.15**.」
+
+✅ **转述属实** —— 四条件与双阈值**逐字对上**。
+
+### ★ 核对 3 · 一个**转述时我漏了的**设计点（诚实补充）
+
+原文 `:64` 还有一段**队长没转述**的内容：
+```
+→ votes/<user>.yaml → aggregate at pull
+```
+★ 即：**每人一个文件**,而**聚合发生在 `pull` 时**。
+
+⇒ ★ **队长转述了"每人一个 YAML"（在决策 4 里），但漏了"聚合在 pull 时"这一步。**
+这不影响 t68 的实现（它做的是**计数与阈值**,不是聚合时机），
+但**将来接线上时要注意**：聚合是**拉取时批量做**的,不是每次投票都写。
+
+### 核对 4 · Hindsight 三阶
+
+**队长转述**：灵感来自 `retain / recall / reflect`
+
+**原文 `:10` 逐字**：
+> 「Borrow Hindsight's **three-layer retain/recall/reflect** memory model」
+
+✅ **属实**,且原文另给了映射表（`:56-63`），其中 **Reflect 标为 `⏳ Deferred`**。
+
+### ★★ 结论
+
+| # | 转述项 | 核对结果 |
+|---|---|---|
+| 1 | 两个计数分开 | ✅ 属实 |
+| 2 | 双阈值 + 四条件 | ✅ 属实（逐字对上）|
+| 3 | 「每人一个 YAML」 | ✅ 属实,**但漏了"聚合在 pull 时"** |
+| 4 | retain/recall/reflect | ✅ 属实 |
+
+⇒ **转述整体保真。** 而**第 3 条的遗漏已在此补上** ——
+★ 这就是"转述者不能自证"那条纪律的**具体收益**:它逼出了这次核对,而核对**发现了遗漏**。
