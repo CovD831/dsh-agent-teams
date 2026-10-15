@@ -29,6 +29,11 @@ import { parseRules, type RulesLoad } from '../../gates/contract/verify-command.
 import { CompletionBudgetExceeded } from '../../gates/budget-stop.ts'
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  readFlywheel,
+  type FlywheelVerdict,
+  type UsageTally,
+} from '../../confidence.ts'
 import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -3259,6 +3264,99 @@ export function auditSediment(entries: Iterable<SedimentEntry>): SedimentVerdict
       + (unsettled > 0 ? ' —— ★ 未沉淀的那些是 prompt/doc/convention，它们**不算**已解决' : ''),
   }
 }
+
+/**
+ * ── F 线（t68）：把**沉淀**接上**数据飞轮**的读数 ────────────────────────────────
+ *
+ * ★ 为什么接线点在这（不是新起一个平行的东西）：t63 的 {@link auditSediment}
+ *   回答「**这条沉淀成了哪条机械判据**」—— 那是**写**的一面；
+ *   而飞轮回答「**它被找到、被用上的次数**」—— 那是**用**的一面。
+ *   ⇒ 两者是**同一个条目**的两个面，所以这里把它们**并在一处**读，
+ *     而不是让"沉淀清单"与"使用读数"成为两份互不知晓的账（那正是本仓记账的形态）。
+ *
+ * ★★ 关键纪律（用户裁定）：**缺失一律 `undefined`，永不填 0**。
+ *   所以本函数对每一条都给出**四态裁决**（`promote`/`observe`/`archive`/**`unmeasured`**），
+ *   而 `unmeasured` 不是"还没算"—— 它是"**读数不够，我判不了**"这个**结论**。
+ */
+export interface SedimentFlywheelRow {
+  /** 台账 id 或那句话（与 `SedimentEntry.from` 同一个口径）。 */
+  readonly from: string
+  /** 它是不是一条真沉淀（`kind === 'gate'` 且形状合格）—— 复用 t63 的判据，**不重算**。 */
+  readonly settled: boolean
+  /** ★ 飞轮的四态裁决；`unmeasured` = 判不了（不是低分）。 */
+  readonly verdict: FlywheelVerdict
+  /** `undefined` ⇒ 判不了（**不是 0**）。 */
+  readonly confidence: number | undefined
+  readonly reasons: readonly string[]
+}
+
+export interface SedimentFlywheelReading {
+  readonly rows: readonly SedimentFlywheelRow[]
+  /** ★ 四个裁决**分开计数** —— 合并成一个"健康度"就丢掉了观察区。 */
+  readonly counts: { readonly promote: number; readonly observe: number; readonly archive: number; readonly unmeasured: number }
+  /**
+   * ★★ **判不了**的条数（`unmeasured`）—— 单列。
+   *   它就是"我们的库热在数量、冷在质量信号"这件事的**读数**：
+   *   ★ 384 条卡点里带使用读数的**一条都没有** ⇒ 这个数今天**等于全部**。
+   *     报出来比藏起来有用：它说明**接下来该攒数据，而不是该做 reflect**。
+   */
+  readonly unmeasured: number
+  readonly summary: string
+}
+
+/**
+ * 读一批沉淀条目的飞轮状态。
+ *
+ * @param entries 沉淀清单（t63 的形状）
+ * @param tallies 每个 `from` 对应的使用读数 —— ★ **缺席 ⇒ 没有读数**（不是全 0）
+ * @param now 当前时间（epoch ms），由调用方注入以便复现
+ */
+export function readSedimentFlywheel(
+  entries: Iterable<SedimentEntry>,
+  tallies: ReadonlyMap<string, UsageTally>,
+  now: number,
+): SedimentFlywheelReading {
+  const audit = auditSediment(entries)
+  const settledByFrom = new Map(audit.results.map((r) => [r.from, r.settled]))
+  const rows: SedimentFlywheelRow[] = []
+  for (const [from, settled] of settledByFrom) {
+    /**
+     * ★★ `tallies.get(from)` **可能返回 `undefined`** —— 那就是"没有使用读数"。
+     *   ★ 这里**绝不**写成 `tallies.get(from) ?? { recalled: 0, upvoted: 0 }`：
+     *     那个 `?? {0,0}` 正是腾讯点名要防的
+     *     「**No missing metric is converted into a fabricated zero**」——
+     *     补了零之后 `confidenceOf` 会算出 `0.5`（而非 `undefined`），
+     *     于是"没人记过"这条**会伪装成一个中立的读数**，再往下就是"观察区"而不是"判不了"。
+     */
+    const tally = tallies.get(from)
+    const reading = readFlywheel(tally ?? {}, now)
+    rows.push({
+      from,
+      settled,
+      verdict: reading.verdict,
+      confidence: reading.confidence,
+      reasons: reading.reasons,
+    })
+  }
+  const counts = {
+    promote: rows.filter((r) => r.verdict === 'promote').length,
+    observe: rows.filter((r) => r.verdict === 'observe').length,
+    archive: rows.filter((r) => r.verdict === 'archive').length,
+    unmeasured: rows.filter((r) => r.verdict === 'unmeasured').length,
+  }
+  const unmeasured = counts.unmeasured
+  return {
+    rows,
+    counts,
+    unmeasured,
+    summary: `沉淀条目 ${rows.length} 条：可晋升 ${counts.promote} · 观察区 ${counts.observe} · `
+      + `归档 ${counts.archive} · ★ **判不了** ${unmeasured}`
+      + (unmeasured === rows.length && rows.length > 0
+        ? '（全部 —— 即"热在数量、冷在质量信号"：飞轮还没转起来，此时做 reflect 是在没读数的库上反思）'
+        : ''),
+  }
+}
+
 
 
 /**

@@ -10,6 +10,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
  *     形状坏是**数据本身**的事实（`malformed`）—— 两者不同形，由两个地方各自判。
  */
 import { type RulesLoad } from '../../gates/contract/verify-command.ts';
+import { type FlywheelVerdict, type UsageTally } from '../../confidence.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
@@ -1433,6 +1434,56 @@ export interface SedimentVerdict {
  *   一个整体布尔会让"20 条里 18 条是真判据"与"一条都不是"在读数上同形。
  */
 export declare function auditSediment(entries: Iterable<SedimentEntry>): SedimentVerdict;
+/**
+ * ── F 线（t68）：把**沉淀**接上**数据飞轮**的读数 ────────────────────────────────
+ *
+ * ★ 为什么接线点在这（不是新起一个平行的东西）：t63 的 {@link auditSediment}
+ *   回答「**这条沉淀成了哪条机械判据**」—— 那是**写**的一面；
+ *   而飞轮回答「**它被找到、被用上的次数**」—— 那是**用**的一面。
+ *   ⇒ 两者是**同一个条目**的两个面，所以这里把它们**并在一处**读，
+ *     而不是让"沉淀清单"与"使用读数"成为两份互不知晓的账（那正是本仓记账的形态）。
+ *
+ * ★★ 关键纪律（用户裁定）：**缺失一律 `undefined`，永不填 0**。
+ *   所以本函数对每一条都给出**四态裁决**（`promote`/`observe`/`archive`/**`unmeasured`**），
+ *   而 `unmeasured` 不是"还没算"—— 它是"**读数不够，我判不了**"这个**结论**。
+ */
+export interface SedimentFlywheelRow {
+    /** 台账 id 或那句话（与 `SedimentEntry.from` 同一个口径）。 */
+    readonly from: string;
+    /** 它是不是一条真沉淀（`kind === 'gate'` 且形状合格）—— 复用 t63 的判据，**不重算**。 */
+    readonly settled: boolean;
+    /** ★ 飞轮的四态裁决；`unmeasured` = 判不了（不是低分）。 */
+    readonly verdict: FlywheelVerdict;
+    /** `undefined` ⇒ 判不了（**不是 0**）。 */
+    readonly confidence: number | undefined;
+    readonly reasons: readonly string[];
+}
+export interface SedimentFlywheelReading {
+    readonly rows: readonly SedimentFlywheelRow[];
+    /** ★ 四个裁决**分开计数** —— 合并成一个"健康度"就丢掉了观察区。 */
+    readonly counts: {
+        readonly promote: number;
+        readonly observe: number;
+        readonly archive: number;
+        readonly unmeasured: number;
+    };
+    /**
+     * ★★ **判不了**的条数（`unmeasured`）—— 单列。
+     *   它就是"我们的库热在数量、冷在质量信号"这件事的**读数**：
+     *   ★ 384 条卡点里带使用读数的**一条都没有** ⇒ 这个数今天**等于全部**。
+     *     报出来比藏起来有用：它说明**接下来该攒数据，而不是该做 reflect**。
+     */
+    readonly unmeasured: number;
+    readonly summary: string;
+}
+/**
+ * 读一批沉淀条目的飞轮状态。
+ *
+ * @param entries 沉淀清单（t63 的形状）
+ * @param tallies 每个 `from` 对应的使用读数 —— ★ **缺席 ⇒ 没有读数**（不是全 0）
+ * @param now 当前时间（epoch ms），由调用方注入以便复现
+ */
+export declare function readSedimentFlywheel(entries: Iterable<SedimentEntry>, tallies: ReadonlyMap<string, UsageTally>, now: number): SedimentFlywheelReading;
 /**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
  * 而读台账的人接下来要问的是「**是哪条判据**把它拒了」。
