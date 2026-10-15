@@ -1472,7 +1472,99 @@ test('★ 臂 27（R3 集合比对臂）：搬动之后**没有**任何渲染事
    * ⇒ 于是本条臂的判据改成：登记表**可以**为空；而**只要非空**，
    *   每一条都必须在自己那张面上真的丢过（下面的 `neverLost`）。
    */
-  const INTENTIONAL_REMOVALS = new Map()
+  /**
+   * ── ★★★ t70（L0.3）：41 条**死文案**的登记表 ────────────────────────────────────
+   *
+   * ── 它们是什么、以及"死"是怎么测出来的（可复跑）──────────────────────────────────
+   *
+   * 判据是 `docs/E-LINE-L0.md` §2.1 那段脚本：一个 key 算"死"，当且仅当
+   * **它的完整点号形式作为带引号字符串，在 `src/**` + `scripts/**` 的非 `locales.ts` 语料里一次都不出现**。
+   * 实测：`zh` / `en` 各 241 key，**41 条 dead**（见下）。
+   *
+   * ★★ **41，不是文档说的 40** —— `docs/UI-DISSECTION.md` §2.5 的分组表
+   *   `4+10+6+3+5+3+8+2` **本身就等于 41**，而表尾写「合计 40」。
+   *   差的那一条正是 `progress.delivered`，而**本仓库早就写明了它是死的**
+   *   （见下面那条登记的注释所引的 `:1355`）。
+   *
+   * ── ★ 为什么走这张表而不是改断言 ─────────────────────────────────────────────
+   *
+   * 本臂的 `unexplained` 断言**故意**是硬的：`没登记的差异 → 仍然红`。
+   * ⇒ 删掉词条就必须在这里逐条登记它们的**替代或理由**。这不是"让测试变绿"，
+   *   而是本臂的设计意图（`:1440-1444` 逐字：「悄悄删掉一件事实跑不掉」）。
+   *
+   * ── ★★ 每条都受 `neverLost` 约束（下面那段）────────────────────────────────────
+   *
+   * `neverLost` 要求：**每条登记都必须在自己的面上真的丢过**（`before.has` 且 `!after.has`）。
+   * ⇒ 这张表**不能**用来"替未来的删除打掩护"。下面 41 条**全部**是在**同一提交**里
+   *   真的从 `locales.ts` 删掉的（`face: 'dictionary'`）。
+   *
+   * ── ★★ 为什么不登记 `member.state.notCreated` ────────────────────────────────────
+   *
+   * 它**不在** dead 集里：它被 `scripts/verify.mjs:308` 逐字钉住
+   * （`localesSource.includes("'member.state.notCreated': '未创建'")`）
+   * ⇒ 它在语料里**作为带引号字符串出现** ⇒ 按判据它是**活的**。
+   * ★ 而且它是 **`verify.mjs` 的输入** —— 删了它，`verify` 直接红。
+   * ⇒ 一个"看着没人用、其实被另一条链钉着"的词条，正是这条臂要区分出来的东西。
+   *
+   * ── 每条的形状：`[key, { face, because }]` ──────────────────────────────────────
+   *
+   * `because` **必须**说出替代或理由（表尾的断言会检查它非空）。
+   * ★ 理由分四类，逐条注明：
+   *   · **superseded**  —— 有明确的替代 key（搬去别处了）
+   *   · **no-producer** —— 属性已从 `src/**` 消失（没有生产者了）
+   *   · **derived**     —— 该读数现在由别的来源算出（如 `progress.*` 由任务状态算）
+   *   · **retired-ui**  —— 那一块 UI 本身已被移除
+   */
+  const INTENTIONAL_REMOVALS = new Map(Object.entries({
+    /** ── superseded：文案搬去了别处 ────────────────────────────────────────── */
+    'workspace.guide': { face: 'dictionary', because: 'superseded — 该提示语已并入 workspace.emptyBody/plan.description 那条链；实测全仓零引用' },
+    'workspace.eyebrow': { face: 'dictionary', because: 'superseded — 眉题由 workspace.title 承担；实测全仓零引用' },
+    'workspace.description': { face: 'dictionary', because: 'superseded — 团队描述改由 workspace.emptyBody 承载；实测全仓零引用' },
+    'workspace.relationships': { face: 'dictionary', because: 'superseded — 依赖说明改由 DependencyGraph 内的提示承担；实测全仓零引用' },
+    'workspace.tasks': { face: 'dictionary', because: 'superseded — 计数后缀改由 workspace.current/history 那族给出；实测全仓零引用' },
+    'workspace.members': { face: 'dictionary', because: 'superseded — 同上，成员计数后缀已被取代；实测全仓零引用' },
+    'workspace.completed': { face: 'dictionary', because: 'superseded — 完成态改由 task.status.completed 表达；实测全仓零引用' },
+    'workspace.noTasks': { face: 'dictionary', because: 'superseded — 空态改由 workspace.emptyBody；实测全仓零引用' },
+    'activity.panelButton': { face: 'dictionary', because: 'superseded — 面板按钮改由 activity.panelAria/activity.title 那族承担；实测全仓零引用' },
+    'action.openActivityPanel': { face: 'dictionary', because: 'superseded — 动作名改由 activity.dockRight 等承载；实测全仓零引用' },
+
+    /** ── derived：读数现在由别处算出 ───────────────────────────────────────── */
+    'member.state.working': { face: 'dictionary', because: 'derived — 成员的"工作中"改由 member.clock.working 给出；实测全仓零引用' },
+    'member.state.failed': { face: 'dictionary', because: 'derived — 失败态改由 task.status.failed 承担；实测全仓零引用' },
+    'member.state.waiting': { face: 'dictionary', because: 'derived — 等待态改由 member.clock.waiting 承担；实测全仓零引用' },
+    'member.state.delivered': { face: 'dictionary', because: 'derived — 交付态改由 task.summary.allDelivered 承担；实测全仓零引用' },
+    'member.state.left': { face: 'dictionary', because: 'derived — 离队改由成员生命周期读数承担；实测全仓零引用' },
+    'member.state.removed': { face: 'dictionary', because: 'derived — 移除改由成员生命周期读数承担；实测全仓零引用' },
+    'member.state.pending': { face: 'dictionary', because: 'derived — 待执行改由 task.status.pending 承担；实测全仓零引用' },
+    'member.state.unassigned': { face: 'dictionary', because: 'derived — 待派工改由 task.assignee.unclaimed 承担；实测全仓零引用' },
+    'member.state.staged': { face: 'dictionary', because: 'derived — 待创建改由 task.summary.staged 承担；实测全仓零引用' },
+    'member.state.stopped': { face: 'dictionary', because: 'derived — 停止改由任务终态承担；实测全仓零引用' },
+    'member.status.waitingOn': { face: 'dictionary', because: 'derived — 带占位符的等待句改由 task.summary.waitingBreakdown 承担；实测全仓零引用' },
+    'member.status.waitingPrerequisite': { face: 'dictionary', because: 'derived — 同上，改由 task.summary.waitingBreakdown；实测全仓零引用' },
+    'member.status.delivered': { face: 'dictionary', because: 'derived — 同上，改由 task.summary.allDelivered；实测全仓零引用' },
+    'member.status.idle': { face: 'dictionary', because: 'derived — 改由 member.clock.idle 承担；实测全仓零引用' },
+    'member.status.unknown': { face: 'dictionary', because: 'derived — 改由 member.clock.unknown 承担；实测全仓零引用' },
+    'member.status.settled': { face: 'dictionary', because: 'derived — 改由 task.summary.ended 承担；实测全仓零引用' },
+    'progress.title': { face: 'dictionary', because: 'derived — 进度标题由面板自绘；同族的 progress.aria 仍在（无障碍面）；实测全仓零引用' },
+    'progress.running': { face: 'dictionary', because: 'derived — 计数由任务状态集合算出，不再读词条；实测全仓零引用' },
+    'progress.blocked': { face: 'dictionary', because: 'derived — 同上，由依赖阻塞集合算出；实测全仓零引用' },
+    'progress.delivered': { face: 'dictionary', because: 'derived — 同上；★ 本仓自己在 :1355 逐字记着它「已经没有任何一处渲染它」' },
+
+    /** ── no-producer：属性在 src/** 里已无生产者 ─────────────────────────────── */
+    'plan.member.provider': { face: 'dictionary', because: 'no-producer — 提供方改由 plan.model.route/providerDefault 那族表达；实测全仓零引用' },
+    'plan.member.reasoningHint': { face: 'dictionary', because: 'no-producer — 提示改由 plan.member.reasoning 承担；实测全仓零引用' },
+    'plan.model.defaultReasoning': { face: 'dictionary', because: 'no-producer — 改由 plan.model.reasoningDefault 承担；实测全仓零引用' },
+    'plan.approving': { face: 'dictionary', because: 'no-producer — 创建中态由按钮自身状态表达；实测全仓零引用' },
+    'plan.approveConfirmTitle': { face: 'dictionary', because: 'no-producer — 确认标题已并入 plan.approveConfirm 那条链；实测全仓零引用' },
+    'plan.approveWarning': { face: 'dictionary', because: 'no-producer — 警告改为内联文案，不再走词典；实测全仓零引用' },
+    'plan.approveConfirm': { face: 'dictionary', because: 'no-producer — 审批动作已由 plan.approveRow 那族承担；实测全仓零引用' },
+
+    /** ── retired-ui：那一块 UI 本身已被移除 ─────────────────────────────────── */
+    'assignment.label': { face: 'dictionary', because: 'retired-ui — 派发分组标题的渲染点已移除；实测全仓零引用' },
+    'assignment.staged': { face: 'dictionary', because: 'retired-ui — 同上，改由 task.summary.staged；实测全仓零引用' },
+    'assignment.discarded': { face: 'dictionary', because: 'retired-ui — 同上，改由 task.summary.discarded；实测全仓零引用' },
+    'assignment.empty': { face: 'dictionary', because: 'retired-ui — 同上；实测全仓零引用' },
+  }))
 
   /** ★ 组件面：**排除词典文件本身**，否则"词条还在"会被读成"读数还在"。 */
   const componentFiles = (names) => names.filter((name) => name !== 'locales.ts')
