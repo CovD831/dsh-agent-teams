@@ -217,6 +217,62 @@ export function proposalForJudgement(candidate, triage) {
  *     而 captain 只能逐条去读 —— 那正好抵消了本工具的全部价值。
  *   ⇒ 如实报 `unknown`，并**让那个数字可见**（它是"台账需要回填"这条读数）。
  */
+/**
+ * ── ★★★ t60（N4）：把 `auto` 里的判据 id 读成【三态】，而不是一个数组 ──────────────
+ *
+ * ── 它答的问题 ────────────────────────────────────────────────────────────────
+ *
+ * 「这条卡点记录**被哪些判据拒过**？」—— 而在台账里有**两代**记录：
+ *
+ *     `gates[]` 在场  ⇒ 写端给了**全量**（t30 之后写的记录）
+ *     `gates[]` 缺席  ⇒ 写于那个字段之前，**只有标量 `gate`**（= 首位，其余丢失）
+ *     两者都缺席      ⇒ 这条记录**根本没记到判据**（不是"没有判据"，是"没读出来"）
+ *
+ * ── ★★ 为什么返回的是 `{ ids, from }` 而不是 `string[]`（N-a 的全部要点）───────────
+ *
+ * 契约 §5 N-a 逐字：「N4 的接口面**必须先声明它**，否则 N4 的读数**静默变空**，
+ * 而**「字段没了」与「卡点本来就没有」同形**。」
+ *
+ * ★ 若本函数 `return origin.gates ?? []`，那么：
+ *     · 「这个字段不在（我读不到全量）」  ⇒ `[]`
+ *     · 「这一轮真的没有判据」            ⇒ `[]`
+ *   两件事**合成同一个读数** ⇒ 正是 N-a 点名的那一格。
+ * ⇒ 所以 `from` **必须**在场，且三态互斥：
+ *
+ *     from: 'gates'  ⇒ 权威全量（可能长度为 1，但那是**真的只有一条**）
+ *     from: 'gate'   ⇒ ★ **回退**：只有标量。**这不是全量** —— 非首位判据丢了
+ *     from: 'none'   ⇒ 这条记录没记到判据（第三种"没有"）
+ *
+ * ── 读法（★ 顺序与优先级写死）────────────────────────────────────────────────
+ *
+ * ① **`gates[]` 优先**（契约 §5 的 C4「权威源」）：它是 t30 之后写的全量。
+ *    ★ 只接受**非空字符串数组** —— 空数组按契约**根本不会被写出**（`entities.ts:3510`
+ *      的 `gates.length === 0 ? {} : { gates }`），所以若它真的出现了，那是**写侧损坏**，
+ *      按"读不出来"处置（落 `none`），**不许**静默当成"没有判据"。
+ * ② 否则退回标量 `gate`（★ N-c：**只接受 `string`**，不接受数组 —— 见调用点的长注释）。
+ * ③ 否则 `none`。
+ *
+ * ★ 本函数**只读**，不改任何记录、不写盘。
+ */
+export function readGateIds(origin) {
+  /** ① 权威全量。★ 非空字符串数组才算数（空数组 = 写侧损坏，不当作"没有"）。 */
+  if (Array.isArray(origin?.gates)) {
+    const ids = origin.gates.filter((id) => typeof id === 'string' && id !== '')
+    if (ids.length > 0 && ids.length === origin.gates.length) return { ids, from: 'gates' }
+    /**
+     * ★ 长度对不上（含非字符串 / 空串）⇒ 按"读不出来"处置：
+     *   一个**半坏的**全量比一个**诚实的**回退更危险 —— 它会让人以为"就这些判据"。
+     */
+    return { ids: [], from: 'none' }
+  }
+  /** ② 标量回退（N-c：**只接受 `string`**；数组在这里**不是**一条路）。 */
+  if (typeof origin?.gate === 'string' && origin.gate !== '') {
+    return { ids: [origin.gate], from: 'gate' }
+  }
+  /** ③ 两种都没有 ⇒ 这条记录没记到判据。 */
+  return { ids: [], from: 'none' }
+}
+
 export function actionForFriction(record) {
   const state = record?.resolution?.state
   if (state === 'fixed') return { action: 'no-action', why: 'resolution.state = fixed（已修）' }
@@ -289,13 +345,59 @@ export function actionForFriction(record) {
    */
   if (record?.auto !== undefined) {
     const origin = record.auto
-    const source = typeof origin?.gate === 'string' && origin.gate !== ''
-      ? `${String(origin.point ?? '?')} 位置的 ${origin.gate}`
+    /**
+     * ── ★★★ t60（N4）：读【全部】被拒的判据，而不是只有首项 ────────────────────────
+     *
+     * ── 消费的是什么 ────────────────────────────────────────────────────────────
+     *
+     * `auto.gates[]`（`src/tools/shared/entities.ts:3508-3511`，由 `fe7f2b0` 落地）。
+     * ★ 它**已经落盘**，只是本文件此前**只读标量 `gate`** ⇒ 一条含多个判据 id 的
+     *   拒绝记录在分诊眼里**只剩第一个** —— 那正是 t30 修掉的那个缺陷在**读端**的残留：
+     *   **写端早就把全量写下来了（`gates`），读端没去拿。**
+     *
+     * ── ★★ N-c：`gate` 保持单值 —— 本文件**不许**把它当数组用 ─────────────────────
+     *
+     * ★ 实测依据（不是约定）：`noteStall` 用**标量相等** `previous.gate === gate`
+     *   （`src/types.ts:717-719`）判"同一个判据又拒了一次"。
+     *   ⇒ 若 `gate` 被写成数组，那条相等**恒为 false** ⇒ `sameGate` 恒 false
+     *     ⇒ 每次拒绝都被算成"第一次" ⇒ **卡点计数永不触发**（整个机制失效）。
+     *   ★ 所以下面那道 `typeof origin.gate === 'string'` 是**"我只接受标量"**的显式形式 ——
+     *     而**不写 `Array.isArray(origin.gate)` 的分支**：那会暗示"它可能是数组"，
+     *     而这个字段按契约**永远是标量**。
+     *
+     * ── ★★★ N-a：接口面必须先声明它，否则读数【静默变空】────────────────────────────
+     *
+     * 契约 §5 N-a 逐字：「N4 的接口面**必须先声明它**，否则 N4 的读数**静默变空**，
+     * 而**「字段没了」与「卡点本来就没有」同形**。」
+     *
+     * ⇒ 这两件事**必须不同形**，所以 `readGateIds()` 返回的**不是一个数组**，而是
+     *   **带三态的读数**（见该函数的注释）：`from: 'gates' | 'gate' | 'none'`。
+     *   ★ 只返回 `[]` 就会把「这个字段不在（N4 读不到全量）」与「这一轮真的没有判据」
+     *     合成同一个读数 —— 而那正是 N-a 点名要防的那一格。
+     */
+    const gateRead = readGateIds(origin)
+    const source = gateRead.ids.length > 0
+      ? `${String(origin.point ?? '?')} 位置的 ${gateRead.ids.join(' + ')}`
       : String(origin?.point ?? '?')
     return {
       action: 'auto-recorded',
+      /**
+       * ★★ 把**全量**交出去，且**连同它是从哪读来的**（`gates` / `gate` / `none`）。
+       *   ⇒ 下游不必再自己解析 `why` 那句话，也**读得出"是不是走的回退"**。
+       *   ★ 而它与 `gate` **不同格**：`gate` 是兼容标量（N-c），`gates` 是权威全量。
+       */
+      gates: gateRead.ids,
+      gatesFrom: gateRead.from,
       why: `自动记录的拒绝（${source}）—— 它没有 resolution.state **是设计如此**：`
-        + '记录发生在判据拒绝的那一下，那时没有人做过决定。★ 它**不要求人回填**。',
+        + '记录发生在判据拒绝的那一下，那时没有人做过决定。★ 它**不要求人回填**。'
+        /**
+         * ★ N-a 的读数落进 `why`（人读的那一格）：当全量读不到而只能吃标量回退时，
+         *   那句话**必须说出来**，否则读的人会以为"这条记录只有一个判据"。
+         */
+        + (gateRead.from === 'gate'
+          ? '★ 注意：这条记录只有标量 `gate`，没有 `gates[]`（它写在 t30 加那个字段之前）'
+            + ' ⇒ 上面那个 id 是**首位**，而这条记录**可能还拒过别的判据**。'
+          : ''),
     }
   }
   /**

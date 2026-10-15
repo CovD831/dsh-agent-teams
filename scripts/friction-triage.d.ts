@@ -73,3 +73,50 @@ export function triage(options?: {
 }): TriageReport
 
 export function dispatchable(report: TriageReport, options?: Record<string, unknown>): DispatchableResult
+
+/**
+ * ── ★★★ t60（N4）：判据 id 的三态读数 —— 契约 §5 **N-a** 的落点 ──────────────────────
+ *
+ * 契约 N-a 逐字：「`auto.gates[]` 是 N4 要消费的新字段 ⇒ N4 的接口面**必须先声明它**；
+ * 否则 N4 的读数**静默变空**，而**「字段没了」与「卡点本来就没有」同形**。」
+ *
+ * ⇒ 这里就是"先声明它"那一半：`from` **必填**，于是"我读到的是全量吗"
+ *   在**类型层**就答得出来（不必去读 `why` 里那句话猜）。
+ *
+ *     'gates' ⇒ 权威全量（`auto.gates[]` 在场）
+ *     'gate'  ⇒ ★ **回退**：只有标量 `gate`（= 首位，非首位判据**丢了**）
+ *     'none'  ⇒ 两种都没有 —— 这条记录**没记到判据**
+ *
+ * ★ 三态**不许合并**：把 `'gate'` 与 `'gates'` 合成一个 `string[]`，会让
+ *   "我只有首位、可能还漏了别的" 与 "这就是全部" **同形** —— 那正是 N-a 要防的。
+ */
+export interface FrictionAutoGateRead {
+  /** 读到的判据 id（**保序**；`from === 'gates'` 时是权威全量）。 */
+  readonly ids: readonly string[]
+  /** ★ 这份 id 是从哪读来的（必填 —— 见上）。 */
+  readonly from: 'gates' | 'gate' | 'none'
+}
+
+/** 把一条 `auto` 读成三态（★ 只读；不改记录、不写盘）。 */
+export function readGateIds(origin: unknown): FrictionAutoGateRead
+
+/**
+ * `actionForFriction(record)` 的返回。
+ *
+ * ★ `gates` / `gatesFrom` **只在 `action === 'auto-recorded'` 时在场** ——
+ *   它们是那条读数的产物，别的分支没有判据可报。
+ * ★ 而 `gates` 与记录里的标量 `gate` **不是同一格**：`gate` 是兼容标量（契约 N-c，
+ *   `noteStall` 的标量相等依赖它），`gates` 是**权威全量**。
+ */
+export interface FrictionAction {
+  readonly action: string
+  readonly why: string
+  /** 全量被拒判据（保序）。 */
+  readonly gates?: readonly string[]
+  /** ★ 那份 `gates` 的来源（三态之一）。 */
+  readonly gatesFrom?: 'gates' | 'gate' | 'none'
+  /** 走标题前缀回退时在场。 */
+  readonly via?: string
+}
+
+export function actionForFriction(record: unknown): FrictionAction
