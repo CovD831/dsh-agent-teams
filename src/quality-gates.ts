@@ -67,7 +67,7 @@ function normalizeRepoPath(token: string): string {
   return token.replace(/\\/g, '/').replace(/^\.\//, '').replace(/[.,;:)]+$/, '')
 }
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -670,13 +670,47 @@ export interface PremiseFailure {
   readonly detail: string
 }
 
+/**
+ * ── ★★★ T5 修复（2026-10-15，队长）：按【磁盘上是什么】判，不按"有没有同名目录" ──────
+ *
+ * MEASURED（t5-check，修前 3 处误报）：
+ *   `lib/types/state.d.ts`       是**文件**，而 `lib/types/state` 也是**目录** —— 两者并存
+ *   `lib/types/tools/update-task.d.ts`  同上
+ *   `lib/types/quality-gates.d.ts`      同上
+ *
+ * ★ 修前的写法是 `if (existsSync(目录)) return '结构上不可能'` —— 它**只查目录**，
+ *   从不查那个路径**本身**是不是文件 ⇒ **把真实存在的文件判成"不可能"**。
+ *
+ * ★★ 后果不是"多一条提示"，而是**死锁**：任务声明它 ⇒ 被拒（"那是目录"）；
+ *   不声明 ⇒ 被另一条规则拒（"`src/X.ts` 会产出它"）⇒ **该任务无法创建**。
+ *   已两次挡住一等线（D1 的 `update-task.ts`、S1 的 `state.ts`）。
+ *
+ * ⇒ 修法：**先看 `normalized` 自己** —— 若它已是**文件**，就**不是**不可能（返回 undefined）。
+ *   只有当它**不存在**、而它去掉 `.d.ts` 的同名**目录存在**时，才是真正的
+ *   "声明写在了目录上" ⇒ 才报错。
+ */
 function structurallyImpossiblePath(normalized: string, root: string): string | undefined {
   const match = /^(.*)\.d\.ts$/.exec(normalized)
   if (match === null) return undefined
   const directoryLike = match[1]!
   if (directoryLike === '' || !directoryLike.includes('/')) return undefined
   try {
+    /**
+     * ★★★ 第一问（T5 的新增）：**这个路径本身是文件吗？**
+     * 是 ⇒ 它**真的存在** ⇒ 绝不能说"结构上不可能"。这一问修前没有。
+     */
+    if (existsSync(join(root, normalized))) return undefined
+    /**
+     * ★ 第二问（保留修前的意图）：同名目录在不在？
+     * 只有当**文件不在、目录在**时，才真的是"把声明写在目录上了"。
+     */
     if (!existsSync(join(root, directoryLike))) return undefined
+    /**
+     * ★ 第三问（新增，防目录误伤）：那个路径**是目录**吗？
+     * 若它既不是文件、也不是目录，那只是**缺席**（由别的规则报"不存在"），
+     * 不是"结构上不可能" —— 两件事必须不同形。
+     */
+    if (!statSync(join(root, directoryLike)).isDirectory()) return undefined
   } catch {
     return undefined
   }
