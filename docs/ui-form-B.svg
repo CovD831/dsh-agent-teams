@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 364" font-family="-apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif">
+<rect width="1200" height="364" fill="#1a1d21"/>
+<style>
+  .bg{fill:#1a1d21} .card{fill:#22262b;stroke:#33383e;stroke-width:1}
+  .hdr{fill:#2a2f36} .t{fill:#e6e8ea;font-size:12px} .dim{fill:#8b939c;font-size:10px}
+  .ok{fill:#5fbf7f} .bad{fill:#e06c6c} .skip{fill:#8b939c} .live{fill:#e0a35c}
+  .obs{fill:#e0a35c} .mono{font-family:'SF Mono',Menlo,monospace}
+  .tabon{fill:#2f3a46;stroke:#4d6bfe;stroke-width:1} .taboff{fill:#22262b;stroke:#33383e;stroke-width:1}
+  .ln{stroke:#33383e;stroke-width:1} .bar{fill:#4d6bfe} .bar2{fill:#e0a35c}
+</style>
+<rect width="1200" height="364" class="bg"/>
+<rect x="0" y="0" width="1200" height="30" rx="0" class="hdr"/>
+<text x="14" y="20" class="dim">主对话区  ← ★ 管线图搬到这儿，侧边栏留成员</text>
+<rect x="500" y="4" width="90" height="22" rx="4" class="tabon"/>
+<text x="545" y="19" class="dim" text-anchor="middle">成员</text>
+<rect x="596" y="4" width="90" height="22" rx="4" class="taboff"/>
+<text x="641" y="19" class="t" text-anchor="middle">管线图</text>
+<text x="20" y="56" class="t" font-size="14" font-weight="600">t77 · implementation · 第 1 轮</text>
+<text x="320" y="56" class="live">● 进行中</text>
+<text x="400" y="56" class="dim">43m</text>
+<text x="1160" y="56" class="obs" text-anchor="end">⚑2 观察</text>
+<line x1="20" y1="66" x2="1180" y2="66" class="ln"/>
+<rect x="20" y="94" width="285" height="80" rx="4" class="card"/>
+<text x="30" y="109" class="t" font-weight="600">contract</text>
+<text x="295" y="109" class="dim" text-anchor="end">3 条</text>
+<circle cx="34" cy="124" r="3" class="ok"/>
+<text x="44" y="128" class="dim" font-size="9">contract.verify-command</text>
+<text x="293" y="128" class="ok" text-anchor="end" font-size="12">✓</text>
+<circle cx="34" cy="144" r="3" class="ok"/>
+<text x="44" y="148" class="dim" font-size="9">contract.build-artifact</text>
+<text x="293" y="148" class="ok" text-anchor="end" font-size="12">✓</text>
+<circle cx="34" cy="164" r="3" class="ok"/>
+<text x="44" y="168" class="dim" font-size="9">contract.task-atomicity</text>
+<text x="293" y="168" class="ok" text-anchor="end" font-size="12">✓</text>
+<rect x="313" y="94" width="285" height="80" rx="4" class="card"/>
+<text x="323" y="109" class="t" font-weight="600">dispatch</text>
+<text x="588" y="109" class="dim" text-anchor="end">3 条</text>
+<circle cx="327" cy="124" r="3" class="ok"/>
+<text x="337" y="128" class="dim" font-size="9">dispatch.worktree</text>
+<text x="586" y="128" class="ok" text-anchor="end" font-size="12">✓</text>
+<circle cx="327" cy="144" r="3" class="ok"/>
+<text x="337" y="148" class="dim" font-size="9">dispatch.plan-reviewed</text>
+<text x="586" y="148" class="ok" text-anchor="end" font-size="12">✓</text>
+<circle cx="327" cy="164" r="3" class="skip"/>
+<text x="337" y="168" class="dim" font-size="9">dispatch.changed-paths</text>
+<text x="586" y="168" class="skip" text-anchor="end" font-size="12">⊘</text>
+<rect x="606" y="94" width="285" height="100" rx="4" class="card"/>
+<text x="616" y="109" class="t" font-weight="600">completion</text>
+<text x="881" y="109" class="dim" text-anchor="end">4 条</text>
+<circle cx="620" cy="124" r="3" class="live"/>
+<text x="630" y="128" class="dim" font-size="9">completion.verify-rerun</text>
+<text x="879" y="128" class="live" text-anchor="end" font-size="12">●</text>
+<circle cx="620" cy="144" r="3" class="dim"/>
+<text x="630" y="148" class="dim" font-size="9">completion.r5</text>
+<text x="879" y="148" class="dim" text-anchor="end" font-size="12">○</text>
+<circle cx="620" cy="164" r="3" class="dim"/>
+<text x="630" y="168" class="dim" font-size="9">completion.mutation</text>
+<text x="879" y="168" class="dim" text-anchor="end" font-size="12">○</text>
+<circle cx="620" cy="184" r="3" class="dim"/>
+<text x="630" y="188" class="dim" font-size="9">completion.backtest</text>
+<text x="879" y="188" class="dim" text-anchor="end" font-size="12">○</text>
+<rect x="899" y="94" width="285" height="60" rx="4" class="card"/>
+<text x="909" y="109" class="t" font-weight="600">delivery</text>
+<text x="1174" y="109" class="dim" text-anchor="end">2 条</text>
+<circle cx="913" cy="124" r="3" class="dim"/>
+<text x="923" y="128" class="dim" font-size="9">delivery.coverage</text>
+<text x="1172" y="128" class="dim" text-anchor="end" font-size="12">○</text>
+<circle cx="913" cy="144" r="3" class="dim"/>
+<text x="923" y="148" class="dim" font-size="9">delivery.convergence</text>
+<text x="1172" y="148" class="dim" text-anchor="end" font-size="12">○</text>
+<rect x="20" y="218" width="1160" height="54" rx="4" class="card"/>
+<text x="34" y="238" class="obs">★ 未检查（skippedAll 在场）</text>
+<text x="34" y="256" class="obs" font-size="11">completion  ⊘⊘⊘⊘   0 跑 / 4 跳过  ⇒ ★未检查</text>
+<rect x="20" y="288" width="1160" height="54" rx="4" class="card"/>
+<text x="34" y="308" class="obs">★ 观察模式（observed）—— 开火了、裁决被放过</text>
+<text x="34" y="326" class="obs" font-size="11">✗ 加琥珀底纹 · 位置级 ⚑2</text>
+</svg>
