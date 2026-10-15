@@ -13,7 +13,17 @@
 ## 0. ★ 开工前必须先读：任务书里有一条前提在本分支上**不成立**
 
 任务书（t47）逐字写：
-> ★ **注意**：`gateIdFromMessage` 的丢数据缺陷**已修**（提交 `4be6952`，新增 `gateIdsFromMessage`）
+> ★ **注意**：`gateIdFromMessage` 的丢数据缺陷**已修**（新增 `gateIdsFromMessage`）。
+>
+> ★★ **判据用【函数是否存在】，不要用提交哈希**（t55 实测更正）：
+> ```sh
+> grep -c "export function gateIdsFromMessage" src/tools/shared/entities.ts   # ⇒ 1
+> ```
+> **为什么不用哈希**：该功能的**原始提交 `4be6952` 从未合入本分支**
+> （`git merge-base --is-ancestor 4be6952 HEAD` ⇒ NOT an ancestor），
+> 它是**由另一个哈希 `fe7f2b0` 到达本分支**的。
+> ⇒ ★ 用 `4be6952` 当判据会让人**把已完成的工作误判为未完成** ——
+> **本会话真实发生过一次**（队长据此派了重复任务 t55）。
 
 **实测：在该提交上为真，但在本分支上不成立。** 三条命令：
 
