@@ -133,12 +133,42 @@ function moduleLevelProducers({ root = ROOT } = {}) {
   const scriptFiles = walk(join(root, 'scripts'), ['.mjs', '.js'])
   const rel = (file) => relative(root, file).split('\\').join('/')
 
+  /**
+   * ── ★ P5：一次遍历建索引（原实现是 O(符号 × 文件 × 行)）────────────────────────
+   *
+   * MEASURED（P5 改前）：670 个符号 × 76 个文件 = **50,920 次全文扫描**，
+   * 而每次都要 `source.split('\n')` 重切一遍全文；**每个符号还各编译一个新正则**。
+   * ⇒ 成本随「每加一个导出」**线性增长** —— 这就是本仓记的「越加越慢的结构性根因」。
+   *
+   * ★ 改法（三条，各自独立、各自可测）：
+   *   ① **每个文件只读一次、只 `stripComments` 一次**（原实现读了两次：
+   *      一次收集导出、一次建 `textByFile`）；
+   *   ② **每个文件只切一次行**（原来在符号循环里对每个文件重切）；
+   *   ③ **符号匹配只扫一遍全文**，而不是每个符号重扫全部文件。
+   *
+   * ★★ 语义必须逐条不变 —— 尤其这三条：
+   *   · 定义行按 `(文件, 行)` 排除，**不是**排除整个文件；
+   *   · 索引的是**剥注释后**的文本（`stripComments` 上记过实测：一句
+   *     「t41 接上了 X ✓」的注释会把零调用方的函数读成"有 2 个生产调用方"）；
+   *   · `unmeasured` 是**附条件**（生产点在可扫范围之外），**不是** `unconsumed`。
+   */
+
+  /** ① 每个文件读一次、剥注释一次、切行一次 —— 后面两个循环共用这一份。 */
+  const perFile = new Map()   // relPath -> { lines, isScript }
+  for (const file of [...srcFiles, ...scriptFiles]) {
+    const fileKey = rel(file)
+    perFile.set(fileKey, {
+      lines: stripComments(readFileSync(file, 'utf8')).split('\n'),
+      isScript: fileKey.startsWith('scripts/'),
+    })
+  }
+
   /** 收集导出（只收 value —— type/interface 在运行期不存在，本判据不判它们）。 */
   const producers = new Map()
   for (const file of srcFiles) {
     const fileKey = rel(file)
     /** ★ 导出声明也从**剥注释后**的文本里找 —— 注释里的示例不是导出。 */
-    stripComments(readFileSync(file, 'utf8')).split('\n').forEach((line, index) => {
+    perFile.get(fileKey).lines.forEach((line, index) => {
       const match = line.match(/^export\s+(?:async\s+)?(?:function|const|let|class)\s+([A-Za-z0-9_$]+)/)
       if (match === null) return
       const name = match[1]
@@ -148,30 +178,47 @@ function moduleLevelProducers({ root = ROOT } = {}) {
   }
 
   /**
-   * 全文索引（只索引一次）。
-   * ★★ 索引**剥注释后**的文本 —— 否则"关于这个产出的讨论"会被当成"这个产出的消费"
-   *   （见 `stripComments` 上记的那次实测：一句「t41 接上了 X ✓」的注释，
-   *    会把一个零调用方的函数读成"有 2 个生产调用方"）。
+   * ③ 一次扫描建**倒排索引**：符号名 -> 文件 -> 命中行号集合。
+   *
+   * ★ 等价性论证（本改动的核心，逐条对上旧实现）：
+   *   · 旧：`new RegExp('\\b' + name.replace(/\$/g,'\\$') + '\\b', 'g')`，
+   *     数的是**一行里该符号出现几次**（`line.match(pattern).length`）。
+   *   · 新：先按**词边界等价口径**把行切成 token（`tokenize`），只保留在
+   *     `producers` 里的那些；统计时仍用 `occurrencesInLine` 复算**真实出现次数**
+   *     ⇒ 不是"按行去重"，而是**按出现次数累加**，与旧实现同口径。
+   *   · ★ 这一步的正确性**由臂 6 的机械对拍保证**（同一行同时跑旧正则与新切分，
+   *     逐符号比对命中数），而不是靠上面这段论证。
    */
-  const textByFile = new Map()
-  for (const file of [...srcFiles, ...scriptFiles]) textByFile.set(rel(file), stripComments(readFileSync(file, 'utf8')))
+  const hitsBySymbol = new Map()   // name -> Map(file -> Set<lineNo>)
+  for (const [fileKey, { lines }] of perFile) {
+    lines.forEach((line, index) => {
+      for (const token of tokenize(line)) {
+        if (!producers.has(token)) continue
+        let byFile = hitsBySymbol.get(token)
+        if (byFile === undefined) { byFile = new Map(); hitsBySymbol.set(token, byFile) }
+        let lineSet = byFile.get(fileKey)
+        if (lineSet === undefined) { lineSet = new Set(); byFile.set(fileKey, lineSet) }
+        lineSet.add(index + 1)
+      }
+    })
+  }
 
   const results = []
   for (const [name, definitions] of producers) {
     /** ★ 定义行本身要排除 —— 逐个 (文件, 行) 排除，不是整个文件排除。 */
     const definitionKeys = new Set(definitions.map((d) => `${d.file}:${d.line}`))
-    const pattern = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`, 'g')
 
     let production = 0
     let fixture = 0
-    for (const [file, source] of textByFile) {
-      source.split('\n').forEach((line, index) => {
-        if (definitionKeys.has(`${file}:${index + 1}`)) return
-        const hits = (line.match(pattern) ?? []).length
-        if (hits === 0) return
+    for (const [file, lineNumbers] of hitsBySymbol.get(name) ?? []) {
+      for (const lineNo of lineNumbers) {
+        if (definitionKeys.has(`${file}:${lineNo}`)) continue
+        // ★ 该行命中几次就计几次 —— 与旧实现 `line.match(...).length` 同口径
+        const hits = occurrencesInLine(perFile.get(file).lines[lineNo - 1], name)
+        if (hits === 0) continue
         if (file.startsWith('scripts/')) fixture += hits
         else production += hits
-      })
+      }
     }
 
     /**
@@ -189,6 +236,38 @@ function moduleLevelProducers({ root = ROOT } = {}) {
     results.push({ name, definition: definitions[0], production, fixture, verdict })
   }
   return results
+}
+
+/**
+ * 把一行切成**标识符候选** token（与旧实现 `\bNAME\b` 的口径对齐）。
+ *
+ * ★ 为什么要处理 `$`：`\b` 的词字符集是 `[A-Za-z0-9_]` —— **不含 `$`**。
+ *   而导出名可能含 `$`。若简单按 `[$A-Za-z0-9_]+` 切，`foo$` 会成为一个 token，
+ *   而 `\bfoo\b` 在 `foo$` 里**其实是命中的**（`$` 非词字符 ⇒ 中间有词边界）。
+ *   ⇒ 本函数按 **`[A-Za-z0-9_]+`** 切，并对每个片段**同时**产出
+ *     "片段本身"与"片段 ⊗ 邻接 `$` 串"，覆盖 `NAME` / `NAME$` / `$NAME` 三形。
+ */
+function tokenize(line) {
+  const out = []
+  for (const match of line.matchAll(/[A-Za-z0-9_]+/g)) {
+    const word = match[0]
+    const start = match.index
+    const end = start + word.length
+    out.push(word)
+    let before = start
+    while (before > 0 && line[before - 1] === '$') before -= 1
+    let after = end
+    while (after < line.length && line[after] === '$') after += 1
+    if (before !== start || after !== end) out.push(line.slice(before, after))
+  }
+  return out
+}
+
+/** 一行里 `NAME`（按词边界）出现几次 —— 与旧实现 `line.match(/\bNAME\b/g).length` 同口径。 */
+function occurrencesInLine(line, name) {
+  if (line === undefined) return 0
+  const pattern = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`, 'g')
+  return (line.match(pattern) ?? []).length
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
