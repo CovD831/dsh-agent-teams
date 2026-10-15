@@ -3395,6 +3395,32 @@ export interface FrictionAutoOrigin {
    * ★ 为什么只在**读得出来**时才写这一格（与 `gate` 同一条纪律）：读不出来 ⇒ 缺席，**不猜**。
    */
   gates?: readonly string[]
+  /**
+   * ── ★★★ t69：把这条卡点**归到哪条任务 / 哪个队**落盘 ──────────────────────────
+   *
+   * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+   *
+   * `FrictionCapture` **早就有** `taskId` / `teamId`（本文件 `:2647-2648`），
+   * 而 `auto` 从来没有落过它们。实测后果：台账 384/384 条的
+   * `context.eventRefs` 都是**同一句**：
+   *
+   *     「★ 缺口：会话事件未按任务索引 ⇒ 无法指到当时那几条」
+   *
+   * ⇒ 于是**"这个成员这一步有哪些判据裁决"根本答不出来** —— 不是没渲染，
+   *   是**记录里没有那个连接键**。B 线按成员切分的前提就是这一格。
+   *
+   * ── 为什么落进 `auto` 而不是顶层 ──────────────────────────────────────────────
+   *
+   * `auto` 的定义是"这条是**自动**记的"，而 `taskId` 正是自动路径**手里本来就有**的东西
+   * （`capture.taskId`）——与 `tool` / `point` 同源。⇒ 放同一格，不新开顶层字段。
+   *
+   * ★ 缺席语义与 `gate` **逐字相同**：读不出来（未给 / 空串）⇒ **缺席，不猜**。
+   *   编一个 taskId 会让"这条卡点属于谁"变成一条**假事实**，而归因错了比没有归因坏
+   *   ——读的人会照着它去查那条任务。
+   */
+  taskId?: string
+  /** ★ t69：落盘时那条任务所属的队（同上，缺席即"未给"，不猜）。 */
+  teamId?: string
 }
 
 /**
@@ -3946,6 +3972,14 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
           tool: capture.auto.tool,
           point: capture.auto.point,
           ...capture.auto.gate === undefined ? {} : { gate: capture.auto.gate },
+          /**
+           * ★ t69：把**归属键**落盘（`capture.taskId` / `capture.teamId`）。
+           *   缺席语义与 `gate` 逐字相同 —— 空串/未给 ⇒ 不写这一格（不猜）。
+           */
+          ...typeof capture.taskId !== 'string' || capture.taskId.trim() === ''
+            ? {} : { taskId: capture.taskId },
+          ...typeof capture.teamId !== 'string' || capture.teamId.trim() === ''
+            ? {} : { teamId: capture.teamId },
           /**
            * ── ★★★ t30：全部判据 id（`gates`），与单值的 `gate` **并存**────────────
            *
