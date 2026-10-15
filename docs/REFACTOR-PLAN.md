@@ -1295,3 +1295,48 @@ drwxr-xr-x  lib/types/tools/update-task          ← 目录
 
 **T5 与 T1–T4 同族**：都在"干活之前"消耗往返。而它的特别之处是 ——
 **它是唯一一条会让某类任务【完全无法开工】的**（前四条只是浪费一轮）。
+
+---
+
+## 10. 工装缺陷 T6：改工具 output 的任务必撞 golden 快照
+
+**由 t54 实测发现，队长复核成立。**
+
+**现象**：`scripts/fixtures/tool-definitions.json` 是 `gate-tool-split` 臂2 的
+**golden 快照**（要求"一个字符都不该变"，因为它守的是**纯搬运**）。
+⇒ **任何有意改动工具 output 的任务，都会让那条臂红** —— 而更新 golden 需要写 `scripts/`。
+
+★ 若契约的 `inScope` **不含**该文件（T6 的触发条件），则：
+- 更新它 ⇒ 闸门拒绝（`is undeclared`）
+- 不更新 ⇒ **一条本来正确的臂永久红**
+
+⇒ **两头堵**。t54 因此登记为 `failed`（工作已完成、已提交，仅登记受阻）。
+
+### 修法（已确认为"不是放宽断言"）
+
+该更新走**仓库自带命令**，不是手改 JSON：
+```sh
+pnpm fixtures:tools     # = node scripts/tool-definitions.mjs --write
+pnpm verify:fixtures    # = node scripts/tool-definitions.mjs --check
+```
+t54 实测形态：**142 行增 / 0 行删**，16 个工具里**只有 `status` 变**
+⇒ **纯新增**，`--check` exit=0。
+
+### ★ 可复用判据（写进后续所有契约）
+
+> **任何改工具 output 的 task，其 `inScope` 必须带上
+> `scripts/fixtures/tool-definitions.json`**，否则每个这样的 task 都会撞同一面墙。
+
+★ 反之也成立：**若 golden 的 diff 不是"纯新增"**（出现了删行，或改了不止一个工具），
+那**不是 T6，是真的行为变更** —— 必须先问清是谁要的，不许用 `--write` 抹过去。
+
+### T6 与 T1–T5 的关系
+
+| 缺陷 | 触发条件 | 代价 |
+|---|---|---|
+| T1 sourceTaskId | 审查闭环产出 repair | 重复派发一轮 |
+| T2 输入不过桥 | 输入是未提交文件 | 成员拿到空输入 |
+| T3 行号锚定 | 契约引行号 | 每次上游改写失效一次 |
+| T4 移除成员 requeue | 换模型/移除成员 | 全队干扰 |
+| T5 闸门死锁 | inScope 含 `update-task.ts` | ★ 该任务**无法创建** |
+| **T6 golden 快照** | ★ **改工具 output** | ★ 要么拒绝、要么永久红 |
