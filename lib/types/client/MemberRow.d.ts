@@ -23,7 +23,7 @@
  * {@link MemberClock}（它自己拥有表），本组件**不持有** `now`。
  * @module dsh-agent-teams/client/member-row
  */
-import { type MemberSubagent } from './activity-model.ts';
+import { type MemberGateReadout, type MemberSubagent } from './activity-model.ts';
 import type { ActivityMember, ActivityTask, ActivityTeam } from './activity-monitor.ts';
 import type { ModelDirectory } from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type { AgentTeamsTranslate } from './locales.ts';
@@ -43,6 +43,19 @@ export type MemberRowMember = ActivityMember & {
     readonly subagentsReason?: string;
     /** ★ R1/t27: the member's highest task round, absent when it has none. */
     readonly round?: number;
+};
+/**
+ * One task as the row reads it, plus the S2 gate field when the wire carried it.
+ *
+ * ★ `gateEvaluation` is read **structurally**, not typed from `ActivityTask`:
+ *   `src/client/activity-monitor.ts` declares a `src/tools/status.ts` field name
+ *   (`gateEvaluation`) while the status tool actually serialises it to
+ *   `gate_evaluation` **string**. Reading loosely here keeps the panel honest
+ *   about both spellings instead of silently seeing `undefined` forever.
+ */
+export type MemberRowTask = ActivityTask & {
+    readonly gateEvaluation?: unknown;
+    readonly gate_evaluation?: unknown;
 };
 /** Presentation tone of one member's status dot (moved verbatim from the panel). */
 export type MemberDotTone = 'running' | 'stalled' | 'delivered' | 'idle' | 'dormant';
@@ -66,6 +79,25 @@ export interface MemberDotContext {
  *   exactly as before rather than inferring a state nobody measured.
  */
 export declare function memberDotTone(member: MemberRowMember, context: MemberDotContext): MemberDotTone;
+/**
+ * ── ★★★ S3：按【成员】渲染判据裁决（默认精简层）────────────────────────────────
+ *
+ * ★★ 主屏是【成员】；点开成员才是【约束的体现】（用户的裁定）。所以这一层只给
+ *   **当前阶段的一句话裁决**，逐条判据的明细留给展开层。
+ *
+ * ★★ **四种答案不合流**（本队记账最久的形态）：
+ *   · `absent`  ⇒ 「读不出」  ★ 绝不印成「全通过」（反向半边 A）
+ *   · `empty`   ⇒ 「⊘ 未检查」★ 绝不印成「✓ 通过」（反向半边 B）
+ *   · `verdict` ⇒ 裁决符号 + 人话
+ *
+ * @param readout - the one task's readout for this member.
+ * @param t - locale lookup.
+ */
+export declare function memberGateBand(readout: MemberGateReadout | undefined, t: AgentTeamsTranslate): {
+    readonly mark: string;
+    readonly tone: string;
+    readonly text: string;
+};
 /**
  * What this member is doing right now, in one line.
  *
@@ -101,7 +133,12 @@ export declare function subagentDoingText(subagent: MemberSubagent, t: AgentTeam
 export type MemberRowProps = {
     readonly team: ActivityTeam;
     readonly member: MemberRowMember;
-    readonly tasks: readonly ActivityTask[];
+    /**
+     * ★ S3：宽到 {@link MemberRowTask} —— 它需要读 `gate_evaluation`（status 工具
+     *   序列化后的那一格），而 `ActivityTask` 尚未声明它。ActivityTask 兼容 widening，
+     *   所以既有调用方（`MemberScreen` 传 `team.tasks`）**一行不用改**。
+     */
+    readonly tasks: readonly MemberRowTask[];
     /**
      * ★ 模型这一格由**调用方**算好交进来（面板用 `memberRouteLabel` 算一次）。
      *   判定口径只有一份：这里只负责**画**。

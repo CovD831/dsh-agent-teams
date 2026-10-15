@@ -810,6 +810,42 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           findings_open: (task.findings ?? []).filter((finding) => finding.resolved !== true).length,
           ...task.profileSeedId === undefined ? {} : { seed_id: task.profileSeedId },
           ...task.output !== undefined ? { output: task.output } : {},
+          /**
+           * ── ★★★ S2：`gate_evaluation` —— 把已落盘的判据结果**交出去** ─────────────
+           *
+           * S1（`t71`）把一次 completion 求值的结果写进了 `task.gateEvaluation`；
+           * 而在这里之前，投影任务的行一个字段都没转发它 ⇒ **正确地算出来、
+           * 正确地落了盘，然后在到达任何读者之前被丢掉**（与 `failure_kind`
+           * 在 t12 之前同一形态）。
+           *
+           * ── ★★ 三态在**本出口**上必须不同形（本仓的中心纪律）──────────────────
+           *
+           * · **字段缺席** —— 这条任务**从来没求值过** completion 判据
+           *                  （中间更新 / 终态补证据那条路径）。
+           * · **`ran: []`**  —— 求值了，但**一条判据都没跑**
+           *                  （空位置 `registered === 0`；或全跳过，`skippedAll` 在场）。
+           * · **有内容**     —— 求值了，`ran[]` 里带裁决。
+           *
+           * ★ 缺席必须用"**整个 key 不出现**"表达 —— **不许**用 `ran: []` 或
+           *   一个 `ok: true` 的空记录冒充：那会让"这一步没被检查"与
+           *   "这一步检查了、没事"在读取端同形，而二者的处置恰好相反
+           *   （`types.ts` 该字段的长注释逐字警告过）。
+           *
+           * ★ 它**原样转发**：不重算、不化简 `ran[]`（`skipped` 与 `observed`
+           *   条目原样保留）—— 这里是**记录**，不是结论的改写。
+           *
+           * ── ★ 为什么是 `JSON.stringify` 而不是直接塞对象 ──────────────────────
+           *
+           * 本工具的产出面要求 `Record<string, JsonValue>`，而 `GateEvaluationRecord`
+           * 是 interface（没有隐式索引签名）⇒ 直接塞进去过不了类型。
+           * ★ 这里**沿用紧邻那一行** `supplemental_evidence` 的既有做法，
+           *   而不是自己发明一个 `as unknown as JsonValue`：那样做会被"像是有关无处
+           *   不在对象的人"顺手按字段访问，而它其实是被计值序列化过的文本。
+           * ★ 缺席仍然是【整个 key 不出现】—— stringify 只在字段在场时发生。
+           */
+          ...task.gateEvaluation === undefined
+            ? {}
+            : { gate_evaluation: JSON.stringify(task.gateEvaluation) },
         }))
         const mailboxWarnings: string[] = []
         let mailboxWarningCount = 0

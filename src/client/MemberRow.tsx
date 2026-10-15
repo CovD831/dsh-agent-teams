@@ -30,6 +30,7 @@ import {
   latestOwnedTask,
   memberClock,
   memberClockStamp,
+  memberGateReadouts,
   memberHistoryState,
   memberRowKey,
   memberRound,
@@ -40,6 +41,7 @@ import {
   type LoopTask,
   type MemberClockKind,
   type LoopTone,
+  type MemberGateReadout,
   type MemberSubagent,
 } from './activity-model.ts'
 import { MemberClock } from './MemberClock.tsx'
@@ -79,6 +81,20 @@ export type MemberRowMember = ActivityMember & {
   readonly round?: number
 }
 
+/**
+ * One task as the row reads it, plus the S2 gate field when the wire carried it.
+ *
+ * ★ `gateEvaluation` is read **structurally**, not typed from `ActivityTask`:
+ *   `src/client/activity-monitor.ts` declares a `src/tools/status.ts` field name
+ *   (`gateEvaluation`) while the status tool actually serialises it to
+ *   `gate_evaluation` **string**. Reading loosely here keeps the panel honest
+ *   about both spellings instead of silently seeing `undefined` forever.
+ */
+export type MemberRowTask = ActivityTask & {
+  readonly gateEvaluation?: unknown
+  readonly gate_evaluation?: unknown
+}
+
 /** Presentation tone of one member's status dot (moved verbatim from the panel). */
 export type MemberDotTone = 'running' | 'stalled' | 'delivered' | 'idle' | 'dormant'
 
@@ -115,6 +131,62 @@ export function memberDotTone(member: MemberRowMember, context: MemberDotContext
   }
   if (member.activity === 'working') return 'running'
   return member.activity === 'idle' ? 'idle' : 'dormant'
+}
+
+/**
+ * Locale key for one member-level gate verdict.
+ *
+ * ★ Reuses **existing** keys rather than adding any: `src/client/locales.ts` is
+ *   out of this task's scope, and every one of these four already says the
+ *   right thing in both dictionaries.
+ */
+const MEMBER_GATE_LABEL: Readonly<Record<string, AgentTeamsLocaleKey>> = {
+  ok: 'round.tone.completed',
+  blocked: 'round.tone.failed',
+  unmeasured: 'round.tone.unmeasured',
+  observed: 'round.tone.converging',
+}
+
+/**
+ * The one symbol for the compact band (`docs/B-VISUAL-SPEC.md` 四符号).
+ *
+ * ★ `⊘` never collapses into `✓`: an all-skipped run has `evaluated === 0`,
+ *   so it **cannot** be a pass — see reverse-edge B in {@link memberGateReadouts}.
+ */
+const MEMBER_GATE_MARK: Readonly<Record<string, string>> = {
+  ok: '✓',
+  blocked: '✗',
+  unmeasured: '●',
+  observed: '✗',
+}
+
+/**
+ * ── ★★★ S3：按【成员】渲染判据裁决（默认精简层）────────────────────────────────
+ *
+ * ★★ 主屏是【成员】；点开成员才是【约束的体现】（用户的裁定）。所以这一层只给
+ *   **当前阶段的一句话裁决**，逐条判据的明细留给展开层。
+ *
+ * ★★ **四种答案不合流**（本队记账最久的形态）：
+ *   · `absent`  ⇒ 「读不出」  ★ 绝不印成「全通过」（反向半边 A）
+ *   · `empty`   ⇒ 「⊘ 未检查」★ 绝不印成「✓ 通过」（反向半边 B）
+ *   · `verdict` ⇒ 裁决符号 + 人话
+ *
+ * @param readout - the one task's readout for this member.
+ * @param t - locale lookup.
+ */
+export function memberGateBand(
+  readout: MemberGateReadout | undefined,
+  t: AgentTeamsTranslate,
+): { readonly mark: string; readonly tone: string; readonly text: string } {
+  if (readout === undefined || readout.state === 'absent') {
+    return { mark: '·', tone: 'absent', text: t('task.status.notRun') }
+  }
+  if (readout.state === 'empty') return { mark: '⊘', tone: 'skipped', text: t('round.tone.unmeasured') }
+  return {
+    mark: MEMBER_GATE_MARK[readout.verdict] ?? '✓',
+    tone: readout.verdict,
+    text: t(MEMBER_GATE_LABEL[readout.verdict] ?? 'round.tone.completed'),
+  }
 }
 
 /** Initial-letter fallback for unmatched roles. */
@@ -256,7 +328,12 @@ const ROUND_TONE_LABEL: Readonly<Record<LoopTone, AgentTeamsLocaleKey>> = {
 export type MemberRowProps = {
   readonly team: ActivityTeam
   readonly member: MemberRowMember
-  readonly tasks: readonly ActivityTask[]
+  /**
+   * ★ S3：宽到 {@link MemberRowTask} —— 它需要读 `gate_evaluation`（status 工具
+   *   序列化后的那一格），而 `ActivityTask` 尚未声明它。ActivityTask 兼容 widening，
+   *   所以既有调用方（`MemberScreen` 传 `team.tasks`）**一行不用改**。
+   */
+  readonly tasks: readonly MemberRowTask[]
   /**
    * ★ 模型这一格由**调用方**算好交进来（面板用 `memberRouteLabel` 算一次）。
    *   判定口径只有一份：这里只负责**画**。
@@ -295,6 +372,14 @@ export function MemberRow({
   const stamp = clock.stamp ?? memberClockStamp(member, tasks as readonly ClockTask[])
   const round = memberRound(owned as readonly LoopTask[])
   const subs = memberSubagentReadout(member)
+  /**
+   * ── ★ S3：该成员名下每条任务的判据裁决（精简层）──────────────────────────────
+   *
+   * ★ 读数在**渲染期之外**算（`memberGateReadouts` 是纯函数），这样四种答案的
+   *   分辨力可以被独立检验 —— 而不是藏在一个组件的分支里。
+   */
+  const gates = memberGateReadouts(owned as readonly MemberRowTask[])
+  const gateBand = memberGateBand(gates.get(latestOwnedTask(owned)?.id ?? ''), t)
   const dotTone = memberDotTone(member, { discarded, stopped, staged: team.phase === 'staged', historic })
   /**
    * ── ★★★ "它在做什么"，以及**三态下的终态口径**（原来长在面板里）─────────────
@@ -356,6 +441,24 @@ export function MemberRow({
           <span className={css.memberLine}>
             <span className={css.memberName}>{member.name}</span>
             {member.role !== '' && <span className={css.memberRole}>{member.role}</span>}
+            {/**
+              * ── ★ S3 精简层：当前阶段裁决的一句话（默认可见）─────────────────
+              *
+              * ★ `data-member-gate-tone` 是四态的**机械探针**：
+              *   `absent` / `skipped` / `ok` / `blocked` / `unmeasured` / `observed`
+              *   —— 「读不出」与「全通过」必须落到**不同的 tone**，
+              *   否则它们在报告里同形（反向半边 A）。
+              */}
+            {owned.length > 0 && (
+              <span
+                className={css.memberGateBand}
+                data-member-gate-tone={gateBand.tone}
+                title={gateBand.text}
+              >
+                <span className={css.memberGateMark}>{gateBand.mark}</span>
+                <span className={css.memberGateText}>{gateBand.text}</span>
+              </span>
+            )}
             {/**
               * ★ 模型：**行内文字**，不再是药丸（用户投诉的"badge-like elements"）。
               *   完整路由留在 title / aria-label / data-member-model 上，可见的是末段。
@@ -435,6 +538,63 @@ export function MemberRow({
             {memberModel !== '' && <span className={css.memberExpandedModel}>{memberModel}</span>}
             <span className={css.memberExpandedDoing}>{doing}</span>
           </div>
+          {/**
+            * ── ★★★ S3 展开层（用户：点开成员才看【约束的体现】）────────────────
+            *
+            * 精简层给一句话裁决；**逐条约束**在这里 —— 这是"我们造了很多判据、
+            * 做了很多约束"真正 VISIBLE 的那一层。
+            *
+            * ★★★ 四态在展开层同样**不合流**：
+            *   · `absent`  ⇒ 「读不出」—— **不列任何判据**（列也列不出来）
+            *   · `empty`   ⇒ 「⊘ 跑了 0 条 / 跳过 N 条」+ skippedAll 原文
+            *   · `verdict` ⇒ 逐条 `<id> <符号>`，observed 的条目带自己的标记
+            *
+            * ★ 与精简层同源：两者读的是同一个 `memberGateReadouts`，
+            *   不可能出现"一句话说通过、展开写着有 blocker"的分叉。
+            */}
+          {owned.length > 0 && (
+            <ul className={css.memberGateList} data-member-gates={key}>
+              {owned.map((task) => {
+                const readout = gates.get(task.id)
+                return (
+                  <li key={task.id} className={css.memberGateItem} data-member-gate={task.id} data-member-gate-state={readout?.state ?? 'absent'}>
+                    <button
+                      type="button"
+                      className={css.memberGateTask}
+                      onClick={() => { onSelectTask?.(task.id) }}
+                      title={task.id}
+                    >{task.id}</button>
+                    {readout === undefined || readout.state === 'absent'
+                      ? <span className={css.memberGateNote} data-member-gate-readout="absent">{t('task.status.notRun')}</span>
+                      : readout.state === 'empty'
+                        ? (
+                          <span className={css.memberGateNote} data-member-gate-readout="empty" title={readout.skippedAll ?? ''}>
+                            {`⊘ 0 跑 / ${readout.registered} 跳过`}
+                          </span>
+                        )
+                        : (
+                          <span className={css.memberGateEntries}>
+                            {readout.evaluation.ran.map((entry) => (
+                              <span
+                                key={entry.id}
+                                className={css.memberGateEntry}
+                                data-verdict={entry.verdict}
+                                data-observed={entry.observed === true ? 'true' : undefined}
+                                title={entry.observed === true ? `${entry.id} · 观察模式放过` : entry.id}
+                              >
+                                <span className={css.memberGateEntryMark}>
+                                  {entry.verdict === 'ok' ? '✓' : entry.verdict === 'skipped' ? '⊘' : entry.verdict === 'unmeasured' ? '●' : '✗'}
+                                </span>
+                                <span className={css.memberGateEntryId}>{entry.id}</span>
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
           {/**
             * ★★★ 三态：`observed` + 空 ⇒ "**读了**，真的没有"；
             *   `could-not-measure` ⇒ "**没读成**"。后者必须带上成因，

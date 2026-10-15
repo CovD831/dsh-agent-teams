@@ -2410,3 +2410,155 @@
   font-size: 10px;
   line-height: 15px;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * S3: per-member gate verdicts — compact band + per-constraint detail on expand
+ *
+ * ★ 复用 **`memberRound*` 同一套 token**（warn/error/success/label），不另立颜色系统。
+ * ★ `absent` 用中性灰 + 不占 contrast强度的 `·`，与「通过」的绿色 `✓` 不同形 ——
+ *   这是「读不出」与「全通过」在**视觉上也**必须可分的那一条（反向半边 A）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberGateBand {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.memberGateMark {
+  flex: none;
+  font-weight: 700;
+}
+
+.memberGateText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+/* `absent`：读了但读不出 ⇒ 中性灰。★ 绝不给 success 色（那会被读成"通过"）。 */
+.memberGateBand[data-member-gate-tone='absent'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* `skipped`：跑过但一条都没跑 ⇒ 中性灰 + ⊘。★ 与 completed 的绿 ✓ 不同形（反向半边 B）。 */
+.memberGateBand[data-member-gate-tone='skipped'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberGateBand[data-member-gate-tone='ok'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.memberGateBand[data-member-gate-tone='blocked'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberGateBand[data-member-gate-tone='unmeasured'] {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* `observed`：确实开火了但被观察模式放过 ⇒ 琥珀底纹 + ✗（它会与设计蒙混平滑）。 */
+.memberGateBand[data-member-gate-tone='observed'] {
+  color: var(--dsw-alias-state-warn-primary);
+  background: var(--dsw-alias-state-warn-secondary);
+}
+
+/* ── 展开层：逐条约束 ─────────────────────────────────────────────────────── */
+
+.memberGateList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 0 0 0 60px;
+  list-style: none;
+}
+
+.memberGateItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 9.5px;
+  line-height: 14px;
+}
+
+.memberGateTask {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.memberGateTask:hover {
+  text-decoration: underline;
+}
+
+.memberGateNote {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.memberGateEntries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.memberGateEntry {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.memberGateEntryMark {
+  flex: none;
+  font-weight: 700;
+}
+
+.memberGateEntryId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.memberGateEntry[data-verdict='ok'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.memberGateEntry[data-verdict='skipped'] .memberGateEntryMark {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberGateEntry[data-verdict='blocked'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberGateEntry[data-verdict='unmeasured'] .memberGateEntryMark {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ★ 观察模式：開火而被放过 ⇒ 琥珀底纹，与「真拦下」的红不同形。 */
+.memberGateEntry[data-observed='true'] {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--dsw-alias-state-warn-secondary);
+}
+
+.memberGateEntry[data-observed='true'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-warn-primary);
+}

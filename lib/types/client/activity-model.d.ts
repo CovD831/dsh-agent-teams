@@ -601,3 +601,95 @@ export declare function compactDagLayout<T extends RelationshipTask>(tasks: read
  * durable data contains a cycle.
  */
 export declare function relatedTaskIds(taskId: string, tasks: readonly RelationshipTask[]): ReadonlySet<string>;
+/**
+ * One judged constraint as the panel reads it off `/state`.
+ *
+ * ★ Declared structurally rather than imported from the host half (same reason
+ *   as {@link MemberSubagent}): the payload crosses the wire as JSON, and a
+ *   client typed from `src/types.ts` would make a server refactor a
+ *   browser-only breakage.
+ */
+export interface GateRunView {
+    readonly id: string;
+    readonly verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped';
+    readonly count?: number;
+    readonly produced?: boolean;
+    /** Fired but its verdict was waived by observe mode; absent = not that case. */
+    readonly observed?: boolean;
+}
+/** The gate record for one task, as it reaches the panel. */
+export interface GateEvaluationView {
+    readonly ok: boolean;
+    readonly blockers: readonly string[];
+    readonly unmeasured?: string;
+    readonly ran: readonly GateRunView[];
+    readonly evaluated: number;
+    readonly skipped: number;
+    readonly registered: number;
+    readonly skippedAll?: string;
+    readonly observedBlockers?: number;
+}
+/**
+ * ★★★ What the member's verdict band can say — **four answer shapes, never
+ * three**. This is the acceptance's core requirement and every list here is
+ * deliberate:
+ *
+ *   `absent`      —— this task was **never evaluated** (the wire carried no
+ *                    reading). Must read "cannot tell", **never** "all passed":
+ *                    those two are opposite actions (re-run vs ship).
+ *   `empty`       —— evaluated, but **no constraint ran** at all. Renders with
+ *                    its own glyph (⊘) and wording, distinct from `pass`.
+ *   `verdict`     —— evaluated with a real judgement (`ok` / `blocked` /
+ *                    `unmeasured` / `observed`).
+ *
+ * ★ Note the two memberships that MUST NOT be collapsed:
+ *   · a record present but `ran: []` is `empty`, **not** `verdict`/`pass`
+ *     (an all-skipped run has `evaluated === 0` ⇒ it cannot be a `✓`);
+ *   · a missing record is `absent`, **not** an empty pass.
+ *
+ * Deliberately **not** a boolean: a boolean would be exactly the collapse this
+ * whole module exists to prevent.
+ */
+export type MemberGateReadout = {
+    readonly state: 'absent';
+} | {
+    readonly state: 'empty';
+    readonly registered: number;
+    readonly skippedAll?: string;
+} | {
+    readonly state: 'verdict';
+    readonly verdict: MemberGateVerdict;
+    readonly evaluation: GateEvaluationView;
+};
+/**
+ * The verdict for every task a member owns, keyed by task id.
+ *
+ * ★ Purely derived: one `Map` walk, no host calls, so it is testable from the
+ *   compiled `lib/client/activity-model.js` without a browser.
+ */
+export declare function memberGateReadouts(tasks: readonly {
+    readonly id: string;
+    readonly gateEvaluation?: unknown;
+}[]): ReadonlyMap<string, MemberGateReadout>;
+/** The one symbol for a member's compact verdict band. */
+export type MemberGateVerdict = 'ok' | 'blocked' | 'unmeasured' | 'observed';
+/**
+ * The one symbol for a member's compact verdict band.
+ *
+ * ★ `observed` (fired but waived) is its own answer — it must not read as `ok`
+ *   ("gentle, nothing happened") nor as `blocked` ("it stopped the flow").
+ *
+ * ── ★★★ 队长修复（2026-10-16）：`skippedAll` 在场 ⇒ 绝不是 `ok` ──────────────
+ *
+ * MEASURED（实测）：全跳过时 `ran` 里**有**条目（每条 `verdict:'skipped'`），
+ * 而修前这里只数 `blocked`/`unmeasured` ⇒ **返回 `ok`** ⇒ 界面画成 **✓**。
+ *
+ * ★★ 而注册表**逐字**说了它的本意（`registry.ts:884-886`）：
+ *   「采用 ② 的本意：**让裁决不再无条件给 `ok`**，而不复用 `unmeasured`：
+ *      `ok: false` + `blockers: []` + `unmeasured: undefined` + `skippedAll: <说明>`」
+ *   ⇒ 即 **`skippedAll` 在场就是"不是 ok"的机械标志**。
+ *
+ * ⇒ 所以这一支**按注册表自己的判据**判，不发明新的：
+ *   `skippedAll` 在场 ⇒ `unmeasured`（"没测到"，与它的同为"没测到"一族）。
+ */
+export declare function memberGateVerdict(evaluation: GateEvaluationView): MemberGateVerdict;

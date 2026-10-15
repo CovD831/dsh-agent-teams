@@ -1155,3 +1155,186 @@ export function relatedTaskIds(taskId: string, tasks: readonly RelationshipTask[
   visitDownstream(taskId)
   return related
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * S3: per-member gate verdicts (compact layer + full detail on expand)
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * One judged constraint as the panel reads it off `/state`.
+ *
+ * ★ Declared structurally rather than imported from the host half (same reason
+ *   as {@link MemberSubagent}): the payload crosses the wire as JSON, and a
+ *   client typed from `src/types.ts` would make a server refactor a
+ *   browser-only breakage.
+ */
+export interface GateRunView {
+  readonly id: string
+  readonly verdict: 'ok' | 'blocked' | 'unmeasured' | 'skipped'
+  readonly count?: number
+  readonly produced?: boolean
+  /** Fired but its verdict was waived by observe mode; absent = not that case. */
+  readonly observed?: boolean
+}
+
+/** The gate record for one task, as it reaches the panel. */
+export interface GateEvaluationView {
+  readonly ok: boolean
+  readonly blockers: readonly string[]
+  readonly unmeasured?: string
+  readonly ran: readonly GateRunView[]
+  readonly evaluated: number
+  readonly skipped: number
+  readonly registered: number
+  readonly skippedAll?: string
+  readonly observedBlockers?: number
+}
+
+/**
+ * ★★★ What the member's verdict band can say — **four answer shapes, never
+ * three**. This is the acceptance's core requirement and every list here is
+ * deliberate:
+ *
+ *   `absent`      —— this task was **never evaluated** (the wire carried no
+ *                    reading). Must read "cannot tell", **never** "all passed":
+ *                    those two are opposite actions (re-run vs ship).
+ *   `empty`       —— evaluated, but **no constraint ran** at all. Renders with
+ *                    its own glyph (⊘) and wording, distinct from `pass`.
+ *   `verdict`     —— evaluated with a real judgement (`ok` / `blocked` /
+ *                    `unmeasured` / `observed`).
+ *
+ * ★ Note the two memberships that MUST NOT be collapsed:
+ *   · a record present but `ran: []` is `empty`, **not** `verdict`/`pass`
+ *     (an all-skipped run has `evaluated === 0` ⇒ it cannot be a `✓`);
+ *   · a missing record is `absent`, **not** an empty pass.
+ *
+ * Deliberately **not** a boolean: a boolean would be exactly the collapse this
+ * whole module exists to prevent.
+ */
+export type MemberGateReadout =
+  | { readonly state: 'absent' }
+  | { readonly state: 'empty'; readonly registered: number; readonly skippedAll?: string }
+  | { readonly state: 'verdict'; readonly verdict: MemberGateVerdict; readonly evaluation: GateEvaluationView }
+
+/** How many `ran[]` entries carry one verdict. */
+function verdictTally(entries: readonly GateRunView[], verdict: GateRunView['verdict']): number {
+  return entries.filter((entry) => entry.verdict === verdict).length
+}
+
+/**
+ * The verdict for every task a member owns, keyed by task id.
+ *
+ * ★ Purely derived: one `Map` walk, no host calls, so it is testable from the
+ *   compiled `lib/client/activity-model.js` without a browser.
+ */
+export function memberGateReadouts(
+  tasks: readonly { readonly id: string; readonly gateEvaluation?: unknown }[],
+): ReadonlyMap<string, MemberGateReadout> {
+  const out = new Map<string, MemberGateReadout>()
+  for (const task of tasks) {
+    const raw = task.gateEvaluation
+    // ★ Absent / unreadable ⇒ 'absent'. This branch is the whole reason an
+    //   unread tape must not look like a clean run.
+    if (raw === undefined || raw === null || raw === '') {
+      out.set(task.id, { state: 'absent' })
+      continue
+    }
+    const evaluation = readGateEvaluation(raw)
+    if (evaluation === undefined) {
+      out.set(task.id, { state: 'absent' })
+      continue
+    }
+    if (Array.isArray(evaluation.ran) && evaluation.ran.length === 0) {
+      out.set(task.id, {
+        state: 'empty',
+        registered: evaluation.registered,
+        ...evaluation.skippedAll === undefined ? {} : { skippedAll: evaluation.skippedAll },
+      })
+      continue
+    }
+    out.set(task.id, { state: 'verdict', verdict: memberGateVerdict(evaluation), evaluation })
+  }
+  return out
+}
+
+/**
+ * Normalise one task's gate field into a record, whether it arrived serialised
+ * or as an object. `undefined` = **unreadable**, which stays its own answer.
+ */
+function readGateEvaluation(raw: unknown): GateEvaluationView | undefined {
+  if (typeof raw === 'string') return parseGateEvaluation(raw)
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const record = raw as Partial<GateEvaluationView>
+  if (!Array.isArray(record.ran)) return undefined
+  return {
+    ok: record.ok === true,
+    blockers: Array.isArray(record.blockers) ? record.blockers as string[] : [],
+    ran: record.ran as GateRunView[],
+    evaluated: typeof record.evaluated === 'number' ? record.evaluated : 0,
+    skipped: typeof record.skipped === 'number' ? record.skipped : 0,
+    registered: typeof record.registered === 'number' ? record.registered : 0,
+    ...record.unmeasured === undefined ? {} : { unmeasured: record.unmeasured },
+    ...record.skippedAll === undefined ? {} : { skippedAll: record.skippedAll },
+    ...record.observedBlockers === undefined ? {} : { observedBlockers: record.observedBlockers },
+  }
+}
+
+/** Parse the stringified record the status tool emits; undefined when unreadable. */
+function parseGateEvaluation(raw: string): GateEvaluationView | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const record = parsed as Partial<GateEvaluationView>
+    if (!Array.isArray(record.ran)) return undefined
+    return {
+      ok: record.ok === true,
+      blockers: Array.isArray(record.blockers) ? record.blockers as string[] : [],
+      ran: record.ran as GateRunView[],
+      evaluated: typeof record.evaluated === 'number' ? record.evaluated : 0,
+      skipped: typeof record.skipped === 'number' ? record.skipped : 0,
+      registered: typeof record.registered === 'number' ? record.registered : 0,
+      ...record.unmeasured === undefined ? {} : { unmeasured: record.unmeasured },
+      ...record.skippedAll === undefined ? {} : { skippedAll: record.skippedAll },
+      ...record.observedBlockers === undefined ? {} : { observedBlockers: record.observedBlockers },
+    }
+  } catch {
+    // ★ Malformed text is "cannot read", NOT "read and clean". Same shape rule.
+    return undefined
+  }
+}
+
+/** The one symbol for a member's compact verdict band. */
+export type MemberGateVerdict = 'ok' | 'blocked' | 'unmeasured' | 'observed'
+
+/**
+ * The one symbol for a member's compact verdict band.
+ *
+ * ★ `observed` (fired but waived) is its own answer — it must not read as `ok`
+ *   ("gentle, nothing happened") nor as `blocked` ("it stopped the flow").
+ *
+ * ── ★★★ 队长修复（2026-10-16）：`skippedAll` 在场 ⇒ 绝不是 `ok` ──────────────
+ *
+ * MEASURED（实测）：全跳过时 `ran` 里**有**条目（每条 `verdict:'skipped'`），
+ * 而修前这里只数 `blocked`/`unmeasured` ⇒ **返回 `ok`** ⇒ 界面画成 **✓**。
+ *
+ * ★★ 而注册表**逐字**说了它的本意（`registry.ts:884-886`）：
+ *   「采用 ② 的本意：**让裁决不再无条件给 `ok`**，而不复用 `unmeasured`：
+ *      `ok: false` + `blockers: []` + `unmeasured: undefined` + `skippedAll: <说明>`」
+ *   ⇒ 即 **`skippedAll` 在场就是"不是 ok"的机械标志**。
+ *
+ * ⇒ 所以这一支**按注册表自己的判据**判，不发明新的：
+ *   `skippedAll` 在场 ⇒ `unmeasured`（"没测到"，与它的同为"没测到"一族）。
+ */
+export function memberGateVerdict(evaluation: GateEvaluationView): MemberGateVerdict {
+  if (typeof evaluation.unmeasured === 'string' && evaluation.unmeasured !== '') return 'unmeasured'
+  /**
+   * ★ 全跳过：`ran` 非空（全是 `skipped`），而 `skippedAll` 在场。
+   * ⇒ 它是"判据没跑"，**不是**"跑过且通过"。两者在界面上必须不同形。
+   */
+  if (typeof evaluation.skippedAll === 'string' && evaluation.skippedAll !== '') return 'unmeasured'
+  const observed = evaluation.ran.filter((entry) => entry.observed === true)
+  if (observed.length > 0 || (evaluation.observedBlockers ?? 0) > 0) return 'observed'
+  const abnormal = verdictTally(evaluation.ran, 'blocked') + verdictTally(evaluation.ran, 'unmeasured')
+  if (abnormal > 0) return 'blocked'
+  return 'ok'
+}
