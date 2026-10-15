@@ -20,6 +20,7 @@ import {
 } from './state.ts'
 import { TERMINAL_TASK_STATUSES, type GateEvaluationRecord, type MemberStatus, type TeamState, type TeamTask } from './types.ts'
 import type { FailureKind, VisualTaskState } from './state.ts'
+import { registry, INSERTION_POINTS } from './gates/index.ts'
 
 /**
  * Visual task state for the activity panel.
@@ -149,6 +150,43 @@ export interface TeamActivityMessage {
   readonly content: string
 }
 
+/**
+ * One registered criterion, as the **UI** needs it (window v4 / t78-shaped hop).
+ *
+ * ★ 这是"**可插拔**"的落点（用户原话：这些测试信息需要是可插拔的）：
+ *   UI 不硬编码任何判据名 —— 它读 `id` + `description`，于是**换掉一条判据**
+ *   （改 `src/gates/**` 里的模块）⇒ 两者都变 ⇒ **UI 自动跟着变，不用改代码**。
+ */
+export interface TeamActivityGate {
+  readonly id: string
+  readonly description: string
+  /** 观察模式（开火了但放过）。★ 必须在清单里看得见，否则"被把关了"是假的。 */
+  readonly observing: boolean
+}
+
+/**
+ * ── ★★★ registry.list() 的**转发**（v4 甲，与 t78 同构）──────────────────────────
+ *
+ * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+ *
+ * `registry.list()` 原本只在 `src/tools/status.ts` 里被读 —— 而那是
+ * **UI 不读的通道**（t78 已实测：client 轮询的是 `collectTeamsActivity`，
+ * status 工具的返回值根本不流向浏览器）。
+ * ⇒ 判据**清单**若只做在 status.ts 上，UI 就永远拿不到"这个阶段挂着哪些判据"。
+ *
+ * ── ★ 为什么带 `registered` 而不只是数组 ──────────────────────────────────────
+ *
+ * 空位置（`registered: 0`）与"挂了判据但一条都没跑"是**两件事**，
+ * 而只给一个数组会让两者同形（都是 `[]`）—— 本仓记账最久的那条形态。
+ */
+export interface TeamActivityGateCatalog {
+  readonly point: string
+  /** 该位置**注册了几条**（与上下文无关）。`0` = 空位置（正常情形）。 */
+  readonly registered: number
+  /** 逐条清单，按注册顺序。 */
+  readonly gates: readonly TeamActivityGate[]
+}
+
 /** The full panel payload for one team. */
 export interface TeamActivitySnapshot {
   readonly workspace: string
@@ -182,6 +220,14 @@ export interface TeamActivitySnapshot {
   readonly unattributedSubagents: readonly LiveSubagent[]
   readonly messageCount: number
   readonly captainInbox: readonly TeamActivityMessage[]
+  /**
+   * ── ★★★ v4：判据**清单**（registry.list() 的转发，与 t78 同构）──────────────────
+   *
+   * 六个位置**都在**（含空位置），因为"这个位置没有判据"与"这个位置没被读"
+   * 必须不同形。★ 它是**每份快照都带**的静态目录（判据注册表在模块加载时就建好），
+   * 所以不依赖任何任务的状态 —— 于是"可插拔"才成立。
+   */
+  readonly gateCatalog: readonly TeamActivityGateCatalog[]
 }
 
 /** Snapshot projection switches for live and archived teams. */
@@ -190,6 +236,33 @@ export interface TeamSnapshotOptions {
   readonly includeRemoved?: boolean
   /** Archived teams have no meaningful live activity after their sessions stop. */
   readonly historic?: boolean
+}
+
+/**
+ * ── ★★★ v4：把判据清单投影成 UI 读得懂的形状（registry.list() 的转发）────────────
+ *
+ * ★ **为什么必须在这一侧做**：`registry.list()` 的条目里带 `appliesTo`
+ *   （**函数**，不能过 JSON）与 `requires`（输入面声明）—— 那些是**求值侧**的东西。
+ *   UI 要的是"这个阶段挂着哪些判据、它们各自是什么"，即 `id` + `description`。
+ *   ⇒ 在**服务端**就投影掉，于是线上穿的全是可序列化的、且**没有多余的内部形状**。
+ *
+ * ★ 六个位置**逐个出现**（含 `gates: []` 的空位置）：空位置与缺席必须不同形。
+ * @returns one catalog row per insertion point, in the registry's own order.
+ */
+export function gateCatalogForUi(): TeamActivityGateCatalog[] {
+  const listed = registry.list()
+  return INSERTION_POINTS.map((point) => {
+    const gates = listed[point] ?? []
+    return {
+      point,
+      registered: gates.length,
+      gates: gates.map((gate) => ({
+        id: gate.id,
+        description: gate.description,
+        observing: gate.observing,
+      })),
+    }
+  })
 }
 
 /** The current task of a member: its first unfinished owned task. */
@@ -443,6 +516,17 @@ export async function assembleTeamSnapshot(
       from: message.from,
       content: message.content,
     })),
+    /**
+     * ── ★★★ v4：判据**清单**（最后一跳，与 t78 的 gateEvaluation 同构）──────────────
+     *
+     * `registry.list()` 原本只在 `src/tools/status.ts` 被读，而那是**UI 不读的通道**。
+     * 这一行把它接到 UI **真读**的那条路上（`collectTeamsActivity`），
+     * 于是展开态才有"这个阶段挂着哪些判据、各自是什么"可画。
+     *
+     * ★ 它是**静态目录**：判据注册表在模块加载时就建好，与任务状态无关。
+     *   所以它每份快照都带同一份 —— 这正是"可插拔"成立的前提（换判据 ⇒ UI 自动变）。
+     */
+    gateCatalog: gateCatalogForUi(),
   }
 }
 

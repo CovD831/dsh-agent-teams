@@ -23,7 +23,7 @@
  * {@link MemberClock}（它自己拥有表），本组件**不持有** `now`。
  * @module dsh-agent-teams/client/member-row
  */
-import { type MemberGateReadout, type MemberSubagent } from './activity-model.ts';
+import { type FlowStage, type MemberGateReadout, type MemberSubagent, type StageGroupView } from './activity-model.ts';
 import type { ActivityMember, ActivityTask, ActivityTeam } from './activity-monitor.ts';
 import type { ModelDirectory } from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type { AgentTeamsTranslate } from './locales.ts';
@@ -99,6 +99,30 @@ export declare function memberGateBand(readout: MemberGateReadout | undefined, t
     readonly text: string;
 };
 /**
+ * ── ★★★ v4：一根判据的**全部阶段分组**（展开态画的就是这个）────────────────────
+ *
+ * 规格 §5：按**阶段**分组，每段给整段形状 + 逐条 `id` + `description`。
+ *
+ * ★★ **甲方案的边界落在这里**（与 `stageGateRows` 同一条纪律）：
+ *   只有 `completion` 段有落盘裁决 ⇒ 其余段**逐条只能是 ○/·**，
+ *   绝不许从别处推一个 `✓` 出来。`hasVerdicts` 就是那条边界的**可读标记**。
+ *
+ * ★ 目录（`catalog`）来自 `/state` 的 `gateCatalog` —— 它是**每份快照都带**的
+ *   静态清单，于是"换掉一条判据 ⇒ UI 自动跟着变"（可插拔）。
+ * @param stage - the stage this member's current task is in, or undefined.
+ * @param catalog - the registered criteria for every stage.
+ * @param evaluation - the completion-stage verdicts, when the wire carried them.
+ * @returns one group per stage, in flow order; `rows` is empty for empty stages.
+ */
+export declare function stageGroups(stage: FlowStage | undefined, catalog: readonly {
+    readonly point: string;
+    readonly gates: readonly {
+        readonly id: string;
+        readonly description: string;
+        readonly observing: boolean;
+    }[];
+}[], evaluation: unknown): StageGroupView[];
+/**
  * What this member is doing right now, in one line.
  *
  * ★ Every branch says *something*: a member with no current task reads a sentence
@@ -158,6 +182,16 @@ export type MemberRowProps = {
     /** Frozen observation instant; when omitted the clock owns a real timer. */
     readonly frozenNow?: number;
 };
+/** One registered stage of the forwarded criterion catalog. */
+export interface MemberGateCatalogEntry {
+    readonly point: string;
+    readonly registered: number;
+    readonly gates: readonly {
+        readonly id: string;
+        readonly description: string;
+        readonly observing: boolean;
+    }[];
+}
 /**
  * One member row: identity, model, current work, elapsed state; expansion
  * reveals the live subagents underneath it.

@@ -693,3 +693,124 @@ export type MemberGateVerdict = 'ok' | 'blocked' | 'unmeasured' | 'observed';
  *   `skippedAll` 在场 ⇒ `unmeasured`（"没测到"，与它的同为"没测到"一族）。
  */
 export declare function memberGateVerdict(evaluation: GateEvaluationView): MemberGateVerdict;
+/** The six insertion points, in flow order. Mirrors the host's `INSERTION_POINTS`. */
+export declare const FLOW_STAGES: readonly ["admission", "contract", "dispatch", "completion", "delivery", "runtime"];
+/** One flow stage. */
+export type FlowStage = typeof FLOW_STAGES[number];
+/**
+ * Which stage a task is in, **derived from its status** (spec §4).
+ *
+ *   `pending`      ⇒ `dispatch`   （等派工）
+ *   `in_progress`  ⇒ `completion` （成员在做）
+ *   `completed` + 判据在场 ⇒ `delivery`（待交付）
+ *   `completed` 无判据     ⇒ 省略阶段（`undefined`）
+ *
+ * ★ `undefined` 与任何一段都**不同形**：省略是"这一格没有阶段可报"，
+ *   而不是"它在第一段"。
+ * @param status - the durable task status.
+ * @param hasEvaluation - whether a gate record is on the task at all.
+ * @returns the stage, or undefined when the spec says to omit it.
+ */
+export declare function taskStage(status: string, hasEvaluation: boolean): FlowStage | undefined;
+/**
+ * ── ★★★ 六种判据状态（本仓纪律：**两两不同形**）────────────────────────────────
+ *
+ *   `passed`   ✓  真的跑过且通过
+ *   `skipped`  ⊘  跳过（`skippedAll` 在场）—— ★ **绝不是 `passed`**
+ *   `running`  ●  正在跑
+ *   `registered` ○ 注册了但本轮未跑
+ *   `pending`  ·  未开始（本段还没轮到）
+ *   `observed` ✗  失败 / 观察中开火
+ *
+ * ★★ `passed` / `registered` / `skipped` 三者必须可辨 ——
+ *   分别是"通过了""没跑""跳过了"。把前两者合流，就是 `c4cbeaf` 修过的那个缺陷；
+ *   把后两者合流，就是"我没问"读成"它没跑"。
+ */
+export type GateState = 'passed' | 'skipped' | 'running' | 'registered' | 'pending' | 'observed';
+/** The single glyph for each state. ★ 每个都不一样 —— 这是本模块存在的理由。 */
+export declare const GATE_GLYPH: Readonly<Record<GateState, string>>;
+/** One criterion as the expanded panel draws it. */
+export interface GateRowView {
+    readonly id: string;
+    readonly description: string;
+    readonly state: GateState;
+    /** Fired but waived by observe mode; only meaningful with a reading. */
+    readonly observing: boolean;
+}
+/** One stage group as the expanded panel draws it. */
+export interface StageGroupView {
+    readonly stage: FlowStage;
+    /** How the stage as a whole reads, for its own glyph. */
+    readonly state: GateState;
+    /** ★ 该段有没有**真的**逐条裁决（甲方案：只有 completion 有）。 */
+    readonly hasVerdicts: boolean;
+    readonly rows: readonly GateRowView[];
+}
+/**
+ * ── ★★★ 一段的逐条投影 ──────────────────────────────────────────────────────
+ *
+ * ★★ **甲方案的边界就落在这个函数里**：`stage !== 'completion'` 时
+ * **一律不看 `evaluation`**，因为那几个段的结果根本不落盘
+ * ⇒ 逐条只能是 `registered` / `pending`，**不许**从别处推一个 `✓` 出来。
+ *
+ * ★ completion 段按 `evaluation.ran[]` 逐条对齐（**按注册顺序**，与注册表一致）：
+ *   · `verdict: 'ok'`        ⇒ `passed`
+ *   · `verdict: 'skipped'`   ⇒ ★ `skipped`（⊘）—— 而 `skippedAll` 在场时**整段**是 ⊘
+ *   · `verdict: 'blocked'`   ⇒ `observed` 若是 observe 放过，否则 `observed`/✗
+ *   · `verdict: 'unmeasured'`⇒ `observed`（"测不了"不是"通过"）
+ *   · **不在 `ran[]` 里**     ⇒ `registered` ○（注册了但本轮没跑）
+ *
+ * ★★ **反向半边 A 的落点**：`evaluation` 缺席 ⇒ 每条都 `registered`（○），
+ *   **一个 `✓` 都不许出现**。这条不是"顺手" —— 它是"从未跑过"与"跑过且干净"
+ *   不同形的**唯一**保证。
+ */
+export declare function stageGateRows(stage: FlowStage, catalog: readonly {
+    readonly id: string;
+    readonly description: string;
+    readonly observing: boolean;
+}[], evaluation: GateEvaluationView | undefined): GateRowView[];
+/**
+ * ── ★★★ 整段的形状 ──────────────────────────────────────────────────────────
+ *
+ * ★ 一段的"状态"不是它第一条判据的状态：`skippedAll` 在场 ⇒ **整段** ⊘；
+ *   一条 `✗` ⇒ 整段 ✗（这是要人看的那件事实）；全 `✓` ⇒ ✓；
+ *   有 `●` ⇒ ●；否则 ○。
+ *
+ * ★ 甲方案：**非 completion 段**只报"有没有判据"，不报裁决 ——
+ *   因为它们的结果不落盘，报裁决就是编。
+ */
+export declare function stageGroupState(stage: FlowStage, rows: readonly GateRowView[], evaluation: GateEvaluationView | undefined): GateState;
+/**
+ * ── ★★★ 两行式的行 2：`第 N 轮 · 阶段 · 测试`，按优先级**截断**──────────────────
+ *
+ * 规格 §3：行 2 超出就**先省"测试"，再省"阶段"** —— **不许溢出**。
+ * 所以返回的是**按优先级排好的候选清单**，从最全到最省；渲染层取**第一个放得下**的。
+ *
+ * ★ 为什么把"截断"做成**候选清单**而不是在渲染层现算：这样"放不下"这件事
+ *   可以用纯函数测，不需要浏览器量宽度。
+ * @param round - the member's round, or undefined when it has none.
+ * @param stage - the derived stage, or undefined when the spec says to omit it.
+ * @param testLabel - the "which test" text, or '' when there is none.
+ * @returns candidates from fullest to sparsest; '' means "nothing to show".
+ */
+export declare function doingLineCandidates(round: number | undefined, stage: FlowStage | undefined, testLabel: string): readonly string[];
+/**
+ * ── ★★★ v4：一个成员的**裁决 tone**（旧的 `data-member-gate-tone` 词表）────────────
+ *
+ * ★ 这个词表是**已经存在**的（旧的"一句话裁决"band 用它）：`absent` / `skipped` /
+ *   `ok` / `blocked` / `unmeasured` / `observed` —— 而 v4 把那句话换成了**阶段分组**，
+ *   于是这个 tone 改由"当前那一段的形状"推出来。
+ *
+ * ★ **保留它的理由**：臂 27 逐条比对渲染出的 `data-*` 探针，一个都不许无声消失。
+ *   事实没丢（"这个成员的判据现在什么形状"仍然可读），只是换了承载 ——
+ *   所以这里给出**同名同词表**的读数，而不是让探针消失。
+ *
+ * ★★ 映射**不发明新词**：六态压进旧词表时，"没跑"与"跳过了"必须仍然不同形 ——
+ *   `registered`/`pending` ⇒ `absent`（没有任何裁决），`skipped` ⇒ `skipped`，
+ *   `passed` ⇒ `ok`，`observed` ⇒ `observed`，`running` ⇒ `unmeasured`
+ *   （"还在跑"与"测不了"同属"还没有结论"这一族，且都不是 `ok`）。
+ * @param stage - the stage the member's current task is in, or undefined.
+ * @param groups - the stage groups derived for this row.
+ * @returns the legacy tone, or 'absent' when there is no stage at all.
+ */
+export declare function memberGateTone(stage: FlowStage | undefined, groups: readonly StageGroupView[]): 'absent' | 'skipped' | 'ok' | 'blocked' | 'unmeasured' | 'observed';

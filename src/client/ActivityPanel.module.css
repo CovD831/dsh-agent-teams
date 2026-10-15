@@ -2562,3 +2562,235 @@
 .memberGateEntry[data-observed='true'] .memberGateEntryMark {
   color: var(--dsw-alias-state-warn-primary);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ v4（甲）：纵向两行式 · 简约 · 去徽章 ─────────────────────────────────
+ *
+ * 用户裁定：「像现在这种徽章之类的，肯定是要去除的」「简约的，简洁的，高级的」
+ * 队长裁定排版：**纵向两行式**（内容按阶段推进的一串，纵向最自然；
+ *   而 360px 容器下横向四列每列只有 90px —— 几何上不成立）。
+ *
+ * ★ 这一节**整段覆盖**上面那套"头像 + 网格四列"的皮肤，而不是去改它 ——
+ *   于是回滚只需要删掉这一节。
+ * ★ 去掉的：头像（`memberAvatar` 整块）· 立绘 · 徽章 · 卡片围栏。
+ * ★ 保留的唯一图元：一颗 **3.5px 状态点** —— 它是**信息**（liveness 三态），不是装饰。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* ★ 两行式：第 1 列是状态点，第 2 列是**两行内容**（不再有三列/四列）。 */
+.team[data-workspace-team] .memberRow,
+.memberRow {
+  grid-template-columns: 3.5px minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 1px;
+  min-height: 0;
+  padding: 5px 0;
+  border-radius: 0;
+  align-items: start;
+}
+
+/* ★ 一行 = 一个按钮，但**不要**底纹块：hover 只用极轻的底色，不做卡片。 */
+.memberRow:hover, .memberRow[data-activity='working'] {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+}
+
+/* ★★ 唯一保留的图元：**3.5px** 状态点。它是信息，所以留着；但它不占一列宽。 */
+.memberDot {
+  width: 3.5px;
+  height: 3.5px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 50%;
+}
+
+/* ★ 行 1：名字（500）+ 状态短语（400）+ 折叠箭头，**同一行**。 */
+.memberLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.memberName {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* ★ 状态短语移到行 1 右端：`margin-left: auto` 把它推到最右，箭头跟在它后面。 */
+.memberLine > .memberStatusLine {
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-secondary);
+  text-align: right;
+}
+
+/* 行 1 的箭头：不参与挤压。 */
+.memberRow > .memberInfo > .memberLine > svg:last-child {
+  flex: none;
+}
+
+/* ★ 行 2：`第 N 轮 · 阶段 · 测试`，10.5px / 400，超出**省略号**（截断在 JS 侧按优先级做）。 */
+.memberStageLine {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ★ 两行内容之间不用分割线（分割线只用在同一行与下一行之间，见下）。 */
+.memberInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* ★★ 分割：**1px #2b3036 细线**，不用卡片围栏。 */
+.memberBlock {
+  border-bottom: 1px solid #2b3036;
+  padding: 2px 0;
+}
+
+.memberBlock:last-child {
+  border-bottom: 0;
+}
+
+/* ★ 去头像后，`memberBranch` 那根"分支线"也不再需要（它是给头像列做视觉连线的）。 */
+.memberBranch,
+.memberBranch::before {
+  display: none;
+}
+
+/* ── 展开层：按阶段分组（文字为主，无卡片、无底纹块）────────────────────────── */
+
+.memberStageGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 0;
+}
+
+.memberStageHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.memberStageMark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  font-size: 10.5px;
+}
+
+.memberStageName {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.memberStageCount {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+}
+
+/* ★★ 六态**只用语义色**，且六者**色不同形**（符号之外的第二重区分）。 */
+.memberStageHead[data-stage-state='passed'] .memberStageMark { color: var(--dsw-alias-state-success-primary); }
+.memberStageHead[data-stage-state='observed'] .memberStageMark { color: var(--dsw-alias-state-error-primary); }
+.memberStageHead[data-stage-state='running'] .memberStageMark { color: var(--dsw-alias-state-business-primary); }
+.memberStageHead[data-stage-state='skipped'] .memberStageMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageHead[data-stage-state='registered'] .memberStageMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageHead[data-stage-state='pending'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+
+.memberStageRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0 0 0 17px;
+  list-style: none;
+}
+
+.memberStageRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.memberStageRowMark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+}
+
+.memberStageRowId {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.memberStageRowDesc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 400;
+}
+
+/* ★★ 六态在**逐条**上同样只用语义色，且与段头同表。 */
+.memberStageRow[data-gate-state='passed'] .memberStageRowMark { color: var(--dsw-alias-state-success-primary); }
+.memberStageRow[data-gate-state='observed'] .memberStageRowMark { color: var(--dsw-alias-state-error-primary); }
+.memberStageRow[data-gate-state='running'] .memberStageRowMark { color: var(--dsw-alias-state-business-primary); }
+.memberStageRow[data-gate-state='skipped'] .memberStageRowMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageRow[data-gate-state='registered'] .memberStageRowMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageRow[data-gate-state='pending'] .memberStageRowMark { color: var(--dsw-alias-border-l3); }
+
+/* ★ 观察中的判据：段头/逐条都带一个可读标记（不是只靠颜色）。 */
+.memberStageRow[data-gate-observing='true'] .memberStageRowId {
+  font-style: italic;
+}
+
+/**
+ * ★★ 未读标记：头部/头像去掉之后，`data-unread` 这个**事实**留在行 1 上。
+ *   ★ 不复用 `memberAvatar[data-unread]` 那颗圆点（它随头像整块走了）；
+ *     这里只要一个**不带装饰**的最小标记 —— 一个 4px 的点，与状态点同色系。
+ */
+.memberUnread {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+  align-self: center;
+}

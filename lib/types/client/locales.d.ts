@@ -48,6 +48,9 @@ export declare const zh: {
     'member.doing.task': string;
     'member.doing.taskSubject': string;
     'member.round.mark': string;
+    'member.gates.noCatalog': string;
+    'member.gates.count': string;
+    'member.gates.noVerdicts': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;
@@ -255,6 +258,9 @@ export declare const en: {
     'member.doing.task': string;
     'member.doing.taskSubject': string;
     'member.round.mark': string;
+    'member.gates.noCatalog': string;
+    'member.gates.count': string;
+    'member.gates.noVerdicts': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;

@@ -143,3 +143,141 @@ docs/UI-REFACTOR-V4.md              ← 实施记录
 ---
 
 *本文只写 `docs/`。未改动 `src/`、`scripts/`、`lib/`。*
+
+---
+
+# 实施记录（t79，2026-10-16）
+
+**基线**：HEAD = `1d7912c`（`git merge-base --is-ancestor 71790be HEAD` ✅）。
+开工时 stamp `c4cbeaf` ≠ HEAD，**先 `pnpm build` 取新鲜基线**。
+**写域**：`src/client/**` + `src/snapshot.ts` + 构建产物 + 本文。`src/gates/**`、`src/state.ts`、`src/types.ts` 一行未动。
+
+## 0. 验收读数
+
+| 命令 | 结果 |
+|---|---|
+| `npx tsc -p tsconfig.json --noEmit` | **exit=0** |
+| `npx tsc -p tsconfig.client.json --noEmit` | **exit=0** |
+| `pnpm build` | **exit=0**（`lib/client.js` 351.70 kB） |
+| `grep -n 'registry.list()' src/snapshot.ts` | **7 处命中**（转发本体在 `:253`） |
+| `pnpm test:gates` | **1482 tests / 1424 pass / 20 fail / 16 文件**，失败**文件集合**与基线 `diff` 无输出 ⇒ **净新 = 0** |
+
+★ 任务书给的基线是 `1482/1425/20/16`，我实测 **1424** —— 差 1。按净变化纪律**以本 HEAD 实测基线为准**，并如实记在这里。
+
+## 1. 五条 ①–⑤ 的落点
+
+| # | 规格 | 落点 |
+|---|---|---|
+| ① | 纵向两行式 | `MemberRow.tsx` 行 1 = 名字 + 角色 + 模型 + 状态短语 + 计时 + 箭头；行 2 = `第 N 轮 · 阶段 · 测试`（`.memberStageLine`） |
+| ② | 简约/去徽章 | `ActivityPanel.module.css` 末尾新增 v4 一节（**整段覆盖**那套"头像+四列网格"皮肤，回滚只需删这一节） |
+| ③ | 六态不同形 | `GATE_GLYPH`（`✓ ⊘ ● ○ · ✗`）单一表，逐条与段头**共用** |
+| ④ | 每条显示 `description` | 展开态的 `memberStageRowDesc` 直接印 `registry.list()` 的 `description` |
+| ⑤ | 转发 `registry.list()` | `src/snapshot.ts` 的 `gateCatalogForUi()` → 快照新增 `gateCatalog` 字段 |
+
+## 2. ★★ 反向半边（两条 + **变异体实测**）
+
+判据写成纯函数层（`lib/client/activity-model.js` 可直接跑，不需要浏览器）：
+`stageGateRows` / `stageGroupState` / `taskStage` / `doingLineCandidates`。
+
+- **A**（从未跑过 ⇒ 展开态**不许**有 `✓`）：`evaluation` 缺席时逐条一律 `registered`（○），
+  实测 9 条全是 `○`，`✓` 计数 **0**。
+- **B**（`skippedAll` 在场 ⇒ 必须 `⊘`）：逐条与整段都实测为 `⊘`；对照臂（全 `ok`）实测为 `✓`
+  ⇒ **`⊘` ≠ `✓` 且两者都真的会出现**（否则上面全是恒真）。
+
+### ★★★ 变异体实测（证明判据**有分辨力**，不是"拆了个恒等的"）
+
+对 `src/client/activity-model.ts` 逐个注入变异体、重新 `pnpm build`、跑同一份判据：
+
+| 变异体 | 含义 | 被检出 |
+|---|---|---|
+| M1 `skipped ⇒ passed` | **`c4cbeaf` 的合流复活** | ✅ FAIL=2 |
+| M2 `registered ⇒ passed` | **破坏反向半边 A** | ✅ FAIL=3 |
+| M3 非 completion 段也读裁决 | **越过甲方案边界** | ✅ FAIL=1 |
+| M4 `completed 无判据` 也报 `delivery` | 阶段推导错 | ✅ FAIL=1 |
+| M5 `ok+observed ⇒ passed` | **观察模式折回"通过"** | ✅ FAIL=1 |
+| M6 行 2 截断顺序反转 | 先省"阶段"而非"测试" | ✅ FAIL=3 |
+
+**6/6 全部被检出。** 判据总数 **32 条**，全绿。
+
+★ **两处我自己抓到的错**（如实记下，因为它们都是"看起来通了的假绿"）：
+1. 我第一版反向半边 B 的**辨识力探针**写成 `check(..., true, ...)` —— 那是一条**恒真**断言，
+   它不可能证明任何事。已改成真的跑两半：①只有 `skippedAll`、②只有 `verdict:'skipped'`。
+2. 收紧后我发现 `stageGroupState` / `gateRunState` 里的 `skippedAll` 支**在真实线上形状下是冗余的**
+   （全跳过时每条 `verdict` 本来就是 `'skipped'`，`registry.ts:681` 逐字写着）。
+   ⇒ 它是**防御支**（旧宿主 / 形状漂移），不是主路径。这条区别被写进了测试注释。
+3. 反向半边 B 的第一版夹具用了 `verdict:'blocked', observed:true` —— 那走的是**另一支**，
+   M5 因此**没被检出**。补上 `verdict:'ok', observed:true` 这一条（线上真实存在的形状）后 M5 才被钉住。
+
+## 3. ★★ 保留的探针：去掉**装饰**不许丢掉**事实**
+
+改头像那一块时，`data-unread` 与被 v4 取代的三个旧探针
+（`data-member-gate` / `-state` / `-readout` `/ -tone` / `data-verdict` / `data-observed`）
+会**随 DOM 一起消失**。臂 27 逐条比对渲染出的 `data-*`，**当场报红**（改前它是绿的，我实测过）。
+
+★ 处置：**同名探针以别名保留在行/段上**，而不是去 `scripts/` 里登记"有意删除"（那越界）：
+- `data-unread` ⇒ 行 1 上一个 4px 点（`.memberUnread`）；
+- `data-member-gate` / `-state` / `-readout` ⇒ 段 `<li>` 上（形状换了承载，事实同一件）；
+- `data-verdict` / `data-observed` ⇒ 逐条 `<li>` 上（`data-observed` 仍是**缺席而非 false**）；
+- `data-member-gate-tone` ⇒ 成员块上，由新函数 `memberGateTone()` 用**旧词表**推出
+  （`absent/ok/skipped/observed/unmeasured`，不发明新词；`registered`/`pending` ⇒ `absent`，
+  因为"还没有任何裁决"**不是** `ok`）。
+
+⇒ 结果：**臂 25a / 26 / 27 全绿**（10/10），且**没有改 `scripts/` 一个字**。
+
+## 4. ★ `artwork.ts` 核查结论：**不是死模块**，`ACTION_ART` 也**不能删**
+
+规格 §7 要求核查。实测：
+- `artwork.ts` 仍被 **4 个组件** import（`LEAD_ART`）：`ActivityPanel` / `AgentTeamsCard` / `TeamChatEntry` / `CaptainNode`；
+  且 `memberArtUrl` 被 `AgentTeamsCard` 与 `scripts/verify.mjs:74` 使用 ⇒ **模块活着**。
+- `ACTION_ART` 在 `src/` 里**确实只剩自己的声明**（我删掉头像那处是它唯一消费者），**但它不能删**：
+  `scripts/verify.mjs:353` 断言 `artworkSource` 包含**每一个**打包图（含 6 个 `action-*.png`），
+  而那 6 个名字**只在 `ACTION_ART` 里**出现（`src/index.ts:624` 的宿主白名单是另一份镜像）。
+
+⇒ 删了它会红一条 **host 侧的打包契约**，而那条契约不在本任务写域。
+⇒ 结论：**保留**，并在代码注释里写明"为什么它看着没用却必须留着"。
+
+## 5. ★ 本机**量不到**的部分（如实报出，不声称验证过）
+
+臂 33 / 33b / 33c / 33d 用**真实 headless Chrome** 量成员行布局。
+实测本机 `launchChrome()` 的 promise **不 resolve**（`tests 4 / pass 0 / fail 0`），
+且**干净树上同样如此** ⇒ 非本轮造成。
+
+⇒ **我没有验证过真实渲染**。规格 §2 的宽度读数（行 1 最长 119 vs 286、行 2 最长 248 / 346）
+来自队长在能跑 Chrome 的环境里的实测；本轮**只保证**：
+- 行 2 的截断是**按优先级**做的（`doingLineCandidates`，变异体 M6 钉住顺序）；
+- 逐条/段头的 `id`、`description`、符号都带 `overflow: hidden; text-overflow: ellipsis`，
+  即**溢出被省略号吸收**而不是撑破（CSS 静态可读）。
+- ★ 而 `overflow` 是否真的生效**需要浏览器**才能确认 —— 这一条**留给能跑 Chrome 的环境**。
+
+## 6. 改动清单
+
+```
+src/snapshot.ts                     + gateCatalogForUi() / TeamActivityGate(Catalog) / 快照字段（t78 同构转发）
+src/client/activity-model.ts        + 阶段推导 · 六态 · 阶段分组 · 行2候选 · memberGateTone（纯函数）
+src/client/MemberRow.tsx            纵向两行式 · 去头像块 · 展开态按阶段分组 · 旧探针别名
+（`MemberScreen.tsx` **未改** —— 它不在 inScope，见 §7）
+src/client/locales.ts               zh + en 各 3 条（判据清单/条数/不落盘）
+src/client/ActivityPanel.module.css + v4 一节（两行式皮肤 + 3.5px 点 + 语义色 + #2b3036 细线）
+lib/**（对应产物）+ lib/git-artifact-stamp.json
+docs/UI-REFACTOR-V4.md              本节
+```
+
+**未动**：`src/gates/**` · `src/state.ts` · `src/types.ts` · `src/tools/**` · `scripts/**` · `src/client/artwork.ts`（见 §4）。
+
+## 7. ★ 一处**越界**与它的更正（如实记下）
+
+我第一版把判据清单做成 `MemberRow` 的 prop，于是去改 `MemberScreen.tsx` 传它 ——
+**提交时被闸门拒了**：`src/client/MemberScreen.tsx is undeclared`。
+
+★ **闸门是对的，我读错了任务书**：t79 的 `inScope` **没有** `MemberScreen.tsx`
+（它在 **t72** 的 inScope 里，而我把两轮记混了）。
+
+★ 更正方式不是"补一条许可"，而是**去掉这次越界的必要性**：
+`MemberRow` 本来就**拿到了 `team`**（它就在 props 上），所以判据清单**就地读**
+即可 —— 新增 `gateCatalogOf(team)` 住在 `MemberRow.tsx`（inScope 内），
+`MemberScreen.tsx` **一行未改**（`git diff` 为空）。
+
+⇒ 最终改动 **17 条路径，逐条都在 inScope 内**（实测 `git status --short` 与 inScope 对拍）。
+
+★ 这一条值得留下：**"多一跳 prop"不只是风格问题** —— 它在这里**把改动推出了写域**。
+改成就地读之后，既少了接口，也不再越界。
