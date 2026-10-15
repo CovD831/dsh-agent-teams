@@ -1248,6 +1248,192 @@ export declare function poolForRescue(state: RescueState | undefined): 'self' | 
  */
 export declare function missingRescueEvidence(rescue: FrictionRescue | undefined): string[];
 /**
+ * ── ★★★ R1：把 `poolForRescue` 的**裁决**变成**动作** ─────────────────────────────
+ *
+ * MEASURED（t63 开工前实测）：`poolForRescue`（上面那个唯一分诊点）**只被写进台账**，
+ *   而**没有任何地方读它** —— `grep -rn "\.pool\b" src/ --include=*.ts` ⇒ 除定义与写入处**零命中**。
+ *   而 `entities.ts:2854` 的注释里引用的 `actionForFriction` **根本不存在**。
+ *   ⇒ 于是"分诊"只产出**字符串**，不产出**动作** —— 用户第 5 点要的正是后者。
+ *
+ * ★ 本函数就是那个缺失的落点：**输入一个救援读数，输出一个可执行的动作**。
+ *
+ * ── ★★ 三态**必须三者不同形**（本仓记账最久的形态）────────────────────────────────
+ *
+ * | 输入 | `kind` | 动作 | 为什么不能与别态合流 |
+ * |---|---|---|---|
+ * | `solved` | `none` | **不再待办** | 已经解掉了 ⇒ 再报一次是"把已完成的读成待处理" |
+ * | `trying` | `self-resolve` | 交给**我自己**解 | 还在解 ⇒ 不能上报（上报是例外） |
+ * | `cannot-solve` | `escalate` | **请人进来**，且**必须带理由** | 只有它进上报池（C2） |
+ * | `undefined` | `unknown` | ★ **不动**，但**留痕** | 「没人标注过」≠「还在自己解」≠「解不掉」 |
+ *
+ * ★★ 第四态（`undefined`）是本函数存在的第二个理由：`poolForRescue` 对 `undefined`
+ *   返回 `'self'`（**按裁定的默认值**，不是猜 —— 见它的长注释），但那**丢掉了一个事实**：
+ *   这条记录**没有 rescue 读数**。⇒ 本函数把它**单独标成 `unknown`**：
+ *   归宿仍是"不惊动人"，但**形状上**与 `trying` 不同，于是"没人看过的卡点积了多少"
+ *   是一个读得出来的数，而不是被默认值藏起来。
+ *
+ * ★ 而 `cannot-solve` **必须**带理由才允许上报 —— 复用既有的
+ *   {@link missingRescueEvidence}：缺 `whyCannotSolve` 时**降级为 `unknown`**，
+ *   因为一条"要人管而说不出为什么"的记录，正是实测那 214 条的复现形态。
+ */
+export type RescueActionKind = 'none' | 'self-resolve' | 'escalate' | 'unknown';
+export interface RescueAction {
+    /** 动作种类 —— ★ 四态，且 `unknown` 与 `trying`/`cannot-solve` 不同形。 */
+    kind: RescueActionKind;
+    /** 归属池（与 `poolForRescue` 同一读数；`unknown` 时与 `self` 同归宿，但**形状可辨**）。 */
+    pool: 'self' | 'escalate';
+    /**
+     * ★ 给人读的一句：**这一步会发生什么**。
+     *   `unknown` 那一支**必须**说清"没人标注过"，不许读成"有人管着"。
+     */
+    because: string;
+    /**
+     * ★ `escalate` 时**必须**在场 —— 它就是请人进来时要说清的那句"为什么解不掉"。
+     *   其余三态**必须缺席**（否则"带理由"这件事就不再是 `escalate` 的专属形状）。
+     */
+    why?: string;
+}
+export declare function actionForFriction(rescue: FrictionRescue | undefined): RescueAction;
+/**
+ * ── ★★★ R2：三类识别规则**两两不同形** ──────────────────────────────────────────
+ *
+ * 用户第 5 点问的是「**什么不自觉 / 什么自己解决 / 什么必须上报**」。
+ * ★ 本函数把这三类**显式枚举**出来，并给出**每类的机械判据**（不是措辞判断）。
+ *
+ * | 类 | 判据（机械） | 处置 |
+ * |---|---|---|
+ * | `unnoticed` 什么不自觉 | **没有 rescue 读数**（`state === undefined`） | `unknown`：不惊动人，但**留下计数**（积压可读） |
+ * | `self` 什么自己解决 | `trying` 或 `solved` **且证据齐** | `self-resolve` / `none` |
+ * | `escalate` 什么必须上报 | **只有** `cannot-solve` **且** `whyCannotSolve` 在场 | `escalate`（带理由） |
+ *
+ * ★★ 三者**不同形**的落点是 `RescueAction.kind` 的**四个取值**（`unknown` 单列）——
+ *   而不是"三个字符串"：`unknown` 与 `self-resolve` **归宿相同（都是 self）而形状不同**，
+ *   这正是本仓记的那条：「归宿相同」不等于「是同一件事」。
+ */
+export type RescueClass = 'unnoticed' | 'self' | 'escalate';
+export declare function classifyRescue(record: {
+    rescue?: {
+        state?: unknown;
+    };
+} | FrictionRescue | undefined): RescueClass;
+/**
+ * ── ★★★ R3：上报比值**可从台账复算**，且**新增卡点后可重算** ──────────────────────
+ *
+ * 契约读数：`self 378 / escalate 6`（98.44% 自消化）。
+ * ★ 本函数是那条读数的**唯一复算入口** —— 给它一批记录，它给出**同一套口径**的比值。
+ *
+ * ★★ 为什么必须有这个函数（而不是"人去 grep 台账"）：
+ *   实测那 378/6 是**人工归档**出来的（`docs/GATE-EFFICACY.md`）。
+ *   人工口径会随人漂 —— 而"新增卡点后可重算"这条验收要求的正是**同一函数再跑一次**。
+ *
+ * ★ 分母口径写死：**只计入有 rescue 读数的记录**（即三类里的 `self` + `escalate`）；
+ *   `unnoticed` 那一类**单列**、**不进分母** —— 否则"没人标注过"会把自消化率**抬高**，
+ *   而它恰恰是"还没被看过"的那一批（把它们算成"自己解决了"就是本仓反复记账的合流）。
+ */
+export interface RescueRatio {
+    /**
+     * ── ★★★ R3 实测发现（t63）：台账有【两个时代】─────────────────────────────────
+     *
+     * MEASURED（真台账 `.agent-teams/frictions/`，384 条）：
+     *   · **376 条**只有 `resolution.pool`（**没有**顶层 `rescue` 读数）；
+     *   · **8 条**两者都有（都是 `rescue.state='trying'` + `pool='self'`）。
+     * ⇒ 文档记的 `self 378 / escalate 6` 用的是 **`resolution.pool`** 那一口径
+     *   （我逐条复算确认：`Counter(resolution.pool) = {self:378, escalate:6}`）。
+     *
+     * ★★ 所以本函数**必须给出两个口径的数**，而不是二选一：
+     *   · `byRescue` —— 按**救援三态**（本线倡导的口径，只在有 `rescue` 的 8 条上算得出）；
+     *   · `byPool`   —— 按**已归档的池子**（`resolution.pool`，374 条历史的唯一来源）。
+     *   ⇒ 只报一个会让"口径换了"这件事**看不出来** —— 而那个数正是 R3 的验收读数。
+     */
+    /** ★ 旧口径：按 `resolution.pool` 计（与文档记的 378/6 同一口径）。 */
+    readonly byPool: {
+        readonly self: number;
+        readonly escalate: number;
+    };
+    /** ★ 新口径：按顶层 `rescue` 三态计（只有带该读数的记录参与）。 */
+    readonly byRescue: {
+        readonly self: number;
+        readonly escalate: number;
+        readonly unnoticed: number;
+    };
+    /** 落 `self` 的记录数（`solved` + `trying`，证据齐）。 */
+    self: number;
+    /** 落 `escalate` 的记录数（`cannot-solve` 且带理由）。 */
+    escalate: number;
+    /** ★ 三类之外：**没有 rescue 读数**的（单列，不进分母）。 */
+    unnoticed: number;
+    /** 台账总条数。 */
+    total: number;
+    /** ★ `self / (self + escalate)`；分母为 0 ⇒ `undefined`（**不是 0**，也不是 NaN）。 */
+    selfRatio: number | undefined;
+    /** 人读的一句。 */
+    summary: string;
+}
+export declare function rescueRatio(records: Iterable<{
+    rescue?: {
+        state?: unknown;
+    };
+}>): RescueRatio;
+/**
+ * ── ★★★ R5：卡点**沉淀**的形态 —— 机械判据，**prompt 不算** ──────────────────────
+ *
+ * 用户原话（逐字）：
+ *   「卡点常被沉淀为 **prompt**，而 prompt 是**软手段**；插件更多靠**机械校验**兜底，
+ *    即使有语义判断也要配合机械校验。**所有的判断都应是多信号来源的框架。**」
+ *
+ * ⇒ 本段把"沉淀"从一个**说法**变成一条**可校验的记录**：
+ *   每一条沉淀**必须**指出它变成了**哪条机械判据**（`gate` + `at: file:line`），
+ *   而**指向 prompt / 文档 / 约定的那些一律不算**。
+ *
+ * ── ★★ 为什么必须用【数据 + 校验器】而不是写在注释里 ────────────────────────────
+ *
+ * 因为「沉淀成 prompt」的症状**恰恰**是"它读起来像已经解决了"：
+ *   一句写进 prompt 的话、一段写进文档的约定，与一条真判据**在报告里同形**。
+ *   ⇒ 只有**机械校验**能把它们分开 —— 这与本仓 `kind-requirements.ts`
+ *     （数据 + 校验器，住在"不是判据"的地方）是同一条纪律。
+ *
+ * ── 判据（逐条机械可核）────────────────────────────────────────────────────────
+ *
+ *   ① `kind` **必须**是 `'gate'` —— 指向一条真判据；
+ *      `'prompt'` / `'doc'` / `'convention'` 三类**一律**判为**未沉淀**（用户原话）；
+ *   ② `at` **必须**是 `文件:行` 的形状（`/^src\/.+:\d+$/`）—— 指不出行号的不算；
+ *   ③ `gate` **必须**与 `at` 指向同一处（同一个文件路径前缀）；
+ *   ④ 每条沉淀 `必须` 有 `because`（**为什么它是一条机械判据**，而不是一句劝告）。
+ */
+export type SedimentKind = 'gate' | 'prompt' | 'doc' | 'convention';
+export interface SedimentEntry {
+    /** 这条沉淀的形态。★ 只有 `'gate'` 算数（用户原话：prompt 是软手段）。 */
+    kind: SedimentKind;
+    /** 它变成了哪条机械判据 —— 判据 id（如 `completion.backtest`）或机制名。 */
+    gate?: string;
+    /** ★ `文件:行` —— 指不出行号的不算沉淀。 */
+    at?: string;
+    /** 为什么这**是**一条机械判据（可执行、会红、会拒），而不是一句劝告。 */
+    because?: string;
+    /** 这条沉淀对应的**原始卡点**（台账 id 或一句话）。 */
+    from: string;
+}
+export interface SedimentVerdict {
+    /** 逐条的机械结论。 */
+    readonly results: readonly {
+        readonly from: string;
+        readonly settled: boolean;
+        readonly why: string;
+    }[];
+    /** ★ 真沉淀数（`kind === 'gate'` 且形状合格）。 */
+    readonly settled: number;
+    /** ★ **未沉淀**数（prompt / doc / convention，或形状不合格）。 */
+    readonly unsettled: number;
+    readonly summary: string;
+}
+/**
+ * 校验一批沉淀 —— ★ **每一条都能指出它变成了哪条机械判据，否则不算**。
+ *
+ * ★ 三态纪律的落点：返回的是**逐条结论**，不是一个布尔 ——
+ *   一个整体布尔会让"20 条里 18 条是真判据"与"一条都不是"在读数上同形。
+ */
+export declare function auditSediment(entries: Iterable<SedimentEntry>): SedimentVerdict;
+/**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
  * 而读台账的人接下来要问的是「**是哪条判据**把它拒了」。
  */
