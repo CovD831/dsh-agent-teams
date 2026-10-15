@@ -9,7 +9,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import { type MemberLiveness, type StrandedWorktrees, type MemberSubagents, type LiveSubagent } from './members.ts';
-import { type MemberStatus, type TeamState } from './types.ts';
+import { type GateEvaluationRecord, type MemberStatus, type TeamState } from './types.ts';
 import type { FailureKind, VisualTaskState } from './state.ts';
 /**
  * Visual task state for the activity panel.
@@ -114,6 +114,21 @@ export interface TeamActivityTask {
     readonly failureKind?: FailureKind;
     /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
     readonly updatedAt: number;
+    /**
+     * ── ★★★ t78：判据求值结果（**端到端可见**的最后一跳）───────────────────────────
+     *
+     * 本仓有**两个互不相连**的 `/state`：client 轮询的是 `collectTeamsActivity`（本文件），
+     * 而 `status` 工具的返回值**根本不流向浏览器**（实测 `lib/client.js` 里
+     * `failure_kind` / `attempt_id` / `findings_open` 全是 **0 处**）。
+     * ⇒ 判据结果若只做在 `status.ts`，就落在 **UI 不读的通道**上。本字段把它接到 UI 真读的那条路。
+     *
+     * ★ **缺席语义**：`undefined` ⇒ 投影里**整个 key 不出现**（用展开式，不用赋值式）。
+     *   而这是**有意的**：客户端的 `memberGateReadouts` 靠"key 在不在"把**从未求值过**
+     *   读成 `absent`，与"求值了但没有数据"**不同形**（本仓三态纪律）。
+     *   ⇒ 拿到 `undefined` 时**不许**填一个假的 `{ ok: true, ran: [] }`：那会把
+     *     "没测过"画成"测过且干净"，正是本仓记账最久的那条形态。
+     */
+    readonly gateEvaluation?: GateEvaluationRecord;
 }
 /** One captain-inbox preview row. */
 export interface TeamActivityMessage {

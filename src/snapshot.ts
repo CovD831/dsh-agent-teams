@@ -18,7 +18,7 @@ import {
   CAPTAIN_KEY, failureKindOf, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
   taskDepthsById, taskVisualState,
 } from './state.ts'
-import { TERMINAL_TASK_STATUSES, type MemberStatus, type TeamState, type TeamTask } from './types.ts'
+import { TERMINAL_TASK_STATUSES, type GateEvaluationRecord, type MemberStatus, type TeamState, type TeamTask } from './types.ts'
 import type { FailureKind, VisualTaskState } from './state.ts'
 
 /**
@@ -126,6 +126,21 @@ export interface TeamActivityTask {
   readonly failureKind?: FailureKind
   /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
   readonly updatedAt: number
+  /**
+   * ── ★★★ t78：判据求值结果（**端到端可见**的最后一跳）───────────────────────────
+   *
+   * 本仓有**两个互不相连**的 `/state`：client 轮询的是 `collectTeamsActivity`（本文件），
+   * 而 `status` 工具的返回值**根本不流向浏览器**（实测 `lib/client.js` 里
+   * `failure_kind` / `attempt_id` / `findings_open` 全是 **0 处**）。
+   * ⇒ 判据结果若只做在 `status.ts`，就落在 **UI 不读的通道**上。本字段把它接到 UI 真读的那条路。
+   *
+   * ★ **缺席语义**：`undefined` ⇒ 投影里**整个 key 不出现**（用展开式，不用赋值式）。
+   *   而这是**有意的**：客户端的 `memberGateReadouts` 靠"key 在不在"把**从未求值过**
+   *   读成 `absent`，与"求值了但没有数据"**不同形**（本仓三态纪律）。
+   *   ⇒ 拿到 `undefined` 时**不许**填一个假的 `{ ok: true, ran: [] }`：那会把
+   *     "没测过"画成"测过且干净"，正是本仓记账最久的那条形态。
+   */
+  readonly gateEvaluation?: GateEvaluationRecord
 }
 
 /** One captain-inbox preview row. */
@@ -370,6 +385,38 @@ export async function assembleTeamSnapshot(
       ...task.kind === undefined ? {} : { kind: task.kind },
       ...task.round === undefined ? {} : { round: task.round },
       ...task.verdict === undefined ? {} : { verdict: task.verdict },
+      /**
+       * ── ★★★ t78：把**判据结果**也送到浏览器（最后那一跳）─────────────────────────
+       *
+       * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+       *
+       * 本仓存在**两个互不相连**的 `/state`：
+       *
+       *     · **client 真正轮询的那个** → `collectTeamsActivity`（本函数）
+       *     · status 工具的返回值       → `src/tools/status.ts`
+       *
+       * MEASURED（队长实测 `lib/client.js` 的引用计数）：
+       *
+       *     failure_kind   : 0 处
+       *     attempt_id     : 0 处
+       *     findings_open  : 0 处
+       *     gate_evaluation: 0 处   ← ★ 连刚加的也没有
+       *
+       * ⇒ **status 工具的返回值【根本不流向浏览器】** ⇒ 做在 `status.ts` 里的那一跳
+       *   落在**UI 不读的通道**上。⇒ 本行就是把判据结果接到**UI 真读的那条路**上。
+       *
+       * ── ★ 缺字段的语义（与上面 `kind` / `round` / `verdict` 逐字相同的先例）───────
+       *
+       * 用**展开式**而不是 `gateEvaluation: task.gateEvaluation`：
+       *
+       *     展开式：  key **整个不出现**   ⇒ "**从来没求值过**"
+       *     赋值式：  key 出现、值为 undefined ⇒ 与"求值了但没有数据"**同形**
+       *
+       * ★ 而这两件事必须不同形（本仓三态纪律）：前者是"这一格没有任何读数"，
+       *   后者是"读了、但读出来是空的"。客户端的 `readGateEvaluation` 靠
+       *   **key 在不在**把前者读成 `absent` ⇒ 缺字段**不许**被填成空对象或 fake `ok`。
+       */
+      ...task.gateEvaluation === undefined ? {} : { gateEvaluation: task.gateEvaluation },
       /**
        * ── ★★★ `failed` 的【三种】成因（t13 的客户端那一半）──────────────────────
        *

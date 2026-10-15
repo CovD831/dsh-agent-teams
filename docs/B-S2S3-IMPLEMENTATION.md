@@ -171,3 +171,117 @@ E observed    -> {"mark":"✗","tone":"observed","text":"[round.tone.converging]
 实测为 **1**（该文件里只有那一个定义；其它 4 处在 `state.ts` / `update-task.ts`
 的 import 与调用点，共 5 处）。HEAD 确认是 `a575fdc`，所以**树是对的**，
 是那个「3」的预期值不成立。
+
+---
+
+# ★★ 移交项已关闭（t78，2026-10-16）
+
+> 本节补完上面「移交」表里的**第一行**：`src/snapshot.ts` 的任务投影**已转发** `gateEvaluation`。
+> 基线：worktree `task-agent-teams-refactor-t78`，base `c4cbeaf`（`git merge-base --is-ancestor 71790be HEAD` ⇒ 成功）。
+
+## t78-1. 改了什么
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `src/snapshot.ts:404` | 投影新增 `...task.gateEvaluation === undefined ? {} : { gateEvaluation: task.gateEvaluation },` |
+| 2 | `src/snapshot.ts:130-146` | ★ **把字段声明到 `TeamActivityTask` 上**（+ `GateEvaluationRecord` 的 import） |
+
+★ **第 1 处照抄本文件既有先例**（同处上方三行就是 `kind` / `round` / `verdict` 的同一种展开式写法），不自造。
+
+★ **第 2 处不在任务书里，是我核对时发现的**：只做第 1 处，字段**上了线**但**没进对外声明的接口** ——
+实测 `grep -c gateEvaluation lib/types/snapshot.d.ts` ⇒ **0**。
+⇒ **线上有、类型上没有**。t77 的读取器靠自己的结构类型（`gateEvaluation?: unknown`）工作，功能不受影响；
+但下一个按 `TeamActivityTask` 编程的人**看不到这一格**，而"类型查不到"与"字段不存在"**同形**。
+补上声明后 ⇒ `lib/types/snapshot.d.ts` 命中 **1 处**。
+
+## t78-2. 铁证复测（用队长同一方法）
+
+`lib/client.js` 的引用计数：
+
+| 字段 | 改前 | 改后 |
+|---|---:|---:|
+| `failure_kind` | 0 | 0 |
+| `attempt_id` | 0 | 0 |
+| `findings_open` | 0 | 0 |
+| **`gateEvaluation`** | **0** | ★ **1** |
+
+## t78-3. ★★ 三条端到端读数（真实投影函数 → t77 未改动读取器）
+
+**方法**：调用**真实导出的** `assembleTeamSnapshot`（`lib/snapshot.js`，**不重写它**），
+喂构造的 `TeamState`，把**它产出的 `snap.tasks`** 交给 `memberGateReadouts`。
+
+```
+real projection keys   : ["id","subject","description","status","state","assignee","model","dependencies","depth","updatedAt"]
+A has gateEvaluation   : false   ← 从未求值过 ⇒ key 不出现
+B has gateEvaluation   : true
+C has gateEvaluation   : true
+A → state = absent    | verdict = undefined
+B → state = verdict   | verdict = unmeasured      ★ 全跳过 ⇒ unmeasured
+C → state = verdict   | verdict = ok              ★ 对照臂
+★ A absent  ✅   ★ B unmeasured ✅   ★ C ok ✅   ★ B ≠ C 不同形 ✅
+```
+
+★ **C 臂（对照）为什么必需**：没有它，B 的 `unmeasured` 可能来自一个**恒返回 `unmeasured`** 的实现。
+`B ≠ C` 才说明这对读数**有分辨力**。
+
+## t78-4. ★ 反向半边：删掉那一行 ⇒ B 与 C 双双塌成 absent
+
+```
+删掉 src/snapshot.ts:404 那一行 → 重建 → 重跑同一夹具：
+B has gateEvaluation : false      ← 从 true 变 false
+C has gateEvaluation : false      ← 从 true 变 false
+B → state = absent | verdict = undefined   ← ★ 全跳过被读成"从未求值过"
+```
+⇒ **删掉那一行，一个「全跳过」的任务与一个「从未求值过」的任务完全同形。**
+还原后三行立刻都回来 ⇒ 这一格**真的在管事**。
+
+★ 这正**是 `c4cbeaf` 修掉的那个缺陷在端到端路上的形态**（修前「全跳过」被画成 ✓ ok）。
+**现在端到端这条路也对了，且我能证明它依赖这一行。**
+
+## t78-5. 一处我自己的读数错误（如实记录，因为它差点变成一个行为改动）
+
+我第一版验证脚本把 B 臂的期望写成 `state === 'unmeasured'`，于是**报了 ❌**。
+回源看 `MemberGateReadout`（`src/client/activity-model.ts:1215-1217`）：
+
+```ts
+| { readonly state: 'absent' }
+| { readonly state: 'empty'; … }
+| { readonly state: 'verdict'; readonly verdict: MemberGateVerdict; … }
+```
+
+⇒ **`state` 是"信封"，三态结论在 `.verdict` 里**。全跳过的正确形状是
+`state='verdict'` + `verdict='unmeasured'`。
+
+★ **我没有改 t77 的读取器去迁就我的错误期望**，而是改了我自己的断言。
+（若当时"顺手"把读取器改成返回 `state='unmeasured'`，那会是一个**由错误读数驱动的行为改动** ——
+而它看起来同样合理，且**没有任何断言会因此变红**。）
+
+## t78-6. 硬纪律与净变化
+
+| 项 | 读数 |
+|---|---|
+| `tsc -p tsconfig.json` | **exit=0** |
+| `tsc -p tsconfig.client.json` | **exit=0** |
+| `pnpm build` | **exit=0** |
+| **`src/client/**` 是否改动** | `git diff --stat -- src/client/` ⇒ **空**（t77 的 tolerant reader 一字未动） |
+| 零新依赖 | 未引入任何 npm 包 |
+
+**`pnpm test:gates` 净新失败 = 0，用【失败集合】判定**（臂级，`awk '/^✖ /' | sed 's/ (.*//' | sort -u`）：
+
+| | 臂级失败数 |
+|---|---:|
+| 基线（`git stash` 掉改动、同 worktree 同命令） | **14** |
+| 改后 | **11** |
+
+`comm -13 base after` ⇒ **空**（无任何新增）。减少的 **3 条是 stamp / 新鲜度臂** ——
+因为我跑了 `pnpm build` **刷新了 stamp**，**不是代码效果**。
+
+★ **关于契约点名的 `gate-member-process-probe`**：它在**本 worktree** 实测 **6 pass / 0 fail**
+（**没有复现出**契约说的沙箱红），且**不在**改前改后的任一失败集合里
+⇒ 既不是我的回归，也不需要 stash 判定 —— 如实报读数。
+
+## t78-7. 留在表上的第二行（未做，如实登记）
+
+| 缺口 | 状态 |
+|---|---|
+| `src/client/activity-monitor.ts` 的 `ActivityTask` 未声明 `gateEvaluation` | **仍未做** —— `src/client/**` 被本任务**硬纪律禁止**改动。★ 但**不影响功能**：t77 的读取器用 structural widening（`readonly gateEvaluation?: unknown`）读取，已实测三条读数全绿。⇒ 这一行是**类型整洁度**问题，不是阻塞。 |
