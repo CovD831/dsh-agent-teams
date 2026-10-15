@@ -591,6 +591,138 @@ dispatch/changed-paths.ts imports "../../quality-gates/predicates.ts"
 
 ---
 
+## 7d. ★★ M4 执行记录：`state.ts` 拆出 S-B + **收敛逐字重复的 `VisualTaskState`**（t65）
+
+### 7d.1 拆分结果
+
+| 文件 | 行数 | 内容 |
+|---|---:|---|
+| **新增** `src/state/tasks.ts` | 109 | **S-B**：`TASK_TRANSITIONS` · `transitionError` · `activateTaskAttempt` · `beginTaskAttempt` · `cancelUnfinishedTask` · `invalidateTaskAttempt` + 私有 `clearAttemptResult` |
+| `src/state.ts` | 1504 → **1436** | 去掉 S-B 实现；**保留导出面**（`export {…} from './state/tasks.ts'`） |
+| `src/snapshot.ts` | 451 → 468 | ★ 去掉重复的 `VisualTaskState`，改为**再导出** `./state.ts` 的那一个 |
+
+★ **块边界我重新核过**（任务书提醒 M1 的行范围是**近似**的）：
+M1 给 S3 的范围是 `571-701`，而**真实边界是 `567-658`** ——
+`701` 越过了 `createTeamDir`(665) 的开头。★ 若照抄 `571-701`，会把
+`createTeamDir` **从中间切断**（它属于 S4 持久化，不属于状态机）。
+我按「**这个函数属于哪件事**」逐个判，并与「下一个顶层声明」交叉核对。
+
+★★ **`零外部依赖`是实测出来的、不是猜的**：脚本逐名核过 —— S-B 只引用
+`TERMINAL_TASK_STATUSES`(types) + `randomUUID`(node:crypto) + 类型 `TaskStatus`/`TeamTask`，
+**不引用 `state.ts` 里任何其它顶层声明**。⇒ 搬出来不需要任何妥协。
+
+### 7d.2 ★★ 收敛 `VisualTaskState`：重复声明的真实危害
+
+```sh
+$ diff <(sed -n '1454p' src/state.ts) <(sed -n '25p' src/snapshot.ts)
+（无输出）                              # ★ 逐字相同 —— 确认是【重复】不是有意分叉
+```
+
+**收敛后：声明只剩 1 处**
+```sh
+$ grep -rn "^export type VisualTaskState =" src/ --include=*.ts | wc -l
+1                                       # 改前是 2
+$ grep -rn "VisualTaskState" src/state.ts src/snapshot.ts
+src/state.ts:1386:  export type VisualTaskState = 'blocked' | …      ← ★ 唯一来源
+src/snapshot.ts:42: export type { VisualTaskState } from './state.ts' ← 再导出（导出面不变）
+```
+
+★ **为什么声明留在 `state.ts` 而不是 `snapshot.ts`**：那里有**生产者**
+`taskVisualState()` —— 「类型与它的生产者同住」是正确的一侧。
+`snapshot.ts` 只是**消费者**（`TeamActivityMember.state` 读它）。
+★ **为什么是再导出而不是直接 `import`**：`snapshot.ts` 的
+`export type VisualTaskState` 是**对外的**，既有消费者从它取 ⇒ 去掉会打断它们。
+
+★★ **危害不是"多一行"，而是两处可以各自漂移**：
+`state.ts:taskVisualState()` 产出的值喂给 `snapshot.ts:TeamActivityMember.state` ——
+改一处忘了另一处，就是**类型说 A、运行期给 B**，而两者**都编译得过**
+（它们是两个独立类型，编译器不会替你发现）。★ t48 那句判断很准：
+「这是**重复**不是混装，**拆文件只会让它移位**」—— 所以它**必须单独修**，
+本任务把它与拆分**一起**做了，但**它是独立的一件**。
+
+### 7d.3 硬验收
+
+**① 导出集合逐条相等**
+```sh
+$ python3 /tmp/exportcheck.py /tmp/state-orig.ts src/state.ts 'src/state/*.ts'
+OK 导出集合逐条相等（52 个）
+# 符号级（含 re-export 名单）：before 73 == after 73
+$ diff <(git show HEAD:src/snapshot.ts | grep -E '^export ' | sort) <(grep -E '^export ' src/snapshot.ts | sort)
+# 仅第 10 行由「声明」变为「再导出」，**符号集合不变**（10 == 10）
+```
+
+**② 反向半边（可复跑）**
+```sh
+$ sed -i '' 's/export function transitionError/function transitionError/' src/state/tasks.ts
+$ python3 /tmp/exportcheck.py /tmp/state-orig.ts src/state.ts 'src/state/*.ts'
+*** 导出集合不等: before=52 after=51
+  只在拆分前: ['transitionError']        # exit=1 ★ 报错
+$ npx tsc -p tsconfig.json --noEmit      # 同时报 TS2459（第二个独立检测器）
+$ git checkout -- src/state/tasks.ts     # 还原
+```
+★ **我的第一版对拍脚本又一次没有分辨力**：它把桶的 `export {…} from` 名单
+**union** 进 after 集 ⇒ 桶自己仍列着 `transitionError` ⇒ **测不出来**
+（t52/t59 踩过同一个坑，这是**第三次**）。⇒ 正确口径 = **只比对"直接声明"**，
+桶算**指针**不算**源**，并由 `tsc` 兜"桶是否解得开"。
+
+**③ import 图不引入新环**（可复跑）
+```sh
+$ python3 /tmp/cycles.py          # 改后：src/ 92 文件，**环 5 个**
+$ （在 git HEAD 的干净树上跑同一个脚本）  # 改前：src/ 91 文件，**环 5 个**
+# 两边【逐条相同】：
+  src/state.ts -> src/types.ts -> src/state.ts
+  src/scheduler.ts -> src/tools/shared/entities.ts -> src/scheduler.ts
+  src/tools.ts -> src/tools/update-task.ts -> src/tools.ts
+  src/tools.ts -> src/tools/amend-task.ts -> src/tools.ts
+  src/tools.ts -> src/tools/message.ts -> src/tools.ts
+⇒ ★ **净新环 = 0**（文件数 91→92 就是那个新文件）。
+```
+★ 这 5 个环是**存量**，本次既没引入也没修复它们。
+
+### 7d.4 ★★ 一处【净新失败】—— 必须留下的那条（与 t59 同形）
+
+```sh
+$ comm -13 <(改前失败文件集) <(改后失败文件集)
+scripts/gate-delivery-failure-visible.test.mjs        ← ★ 净新 1 个
+```
+
+**根因**：该夹具在 **`:35`** 处 `const stateSrc = strip(read('src','state.ts'))` ——
+**只读 `src/state.ts` 这一个文件**，然后在 `:91` 用正则断言
+`/export function beginTaskAttempt[\s\S]{0,300}?delete task\.deliveryFailure/`。
+⇒ `beginTaskAttempt` 搬到 `src/state/tasks.ts` 后，**那段文本不在它读的文件里**。
+
+★ **这不是行为回归 —— 是夹具的位置假设**。行为我用运行期证明了：
+```sh
+$ node -e "…import('./lib/state.js')…beginTaskAttempt(task,'alice')…"
+before: {"attempt":1,"reason":"old"}
+after : undefined            ← ★ deliveryFailure 仍被清掉
+attempt advanced to: 2       ← ★ 且 attempt 正常推进
+attemptId: set
+```
+★ **影响面 = 6 个臂里的 1 个**（臂 5；臂 1/2/3/4/6 全绿）。
+★ **修法只需一行**（实测）：
+```js
+const stateSrc = strip(read('src','state.ts')) + strip(read('src','state/tasks.ts'))
+```
+临时加上 ⇒ 该夹具 **exit=0、6 个 ✔**；★ **已还原**（`git status --porcelain -- scripts/` ⇒ 空）。
+★ **我没有改它**：`scripts/` 在 outOfScope，且"不许为了让测试变绿而放宽断言"是硬纪律。
+★ 也**不能**靠在 `state.ts` 里留一份复制来绕过 —— 那正是**本次刚修掉的那个缺陷**
+（同一实现的第二份真相）。
+
+### 7d.5 构建与净变化
+
+```sh
+$ npx tsc -p tsconfig.json --noEmit    # exit=0
+$ pnpm build                           # exit=0；新增 lib/state/tasks.js + lib/types/state/tasks.d.ts
+$ # lib/types/state.d.ts 导出面：before 73 == after 73（only-before/only-after 均空）
+$ pnpm test:gates                      # tests 1471 / pass 1412 / fail 21
+```
+★ **失败【文件集合】**：净新 = **1**（上面 7d.4 那条）、净减少 = **0**。
+★ **基线口径修正**：任务书给 1415/19，而我**动代码前实测** = **1413 pass / 20 fail**（16 个失败文件）
+⇒ 差异先于我的改动存在。★ 契约要求用**集合**判定（本仓计数会抖），我照做了。
+
+---
+
 ## 8. 优先级建议（按"收益 ÷ 风险"）
 
 1. ★ **`mutation.ts`**（1088 代码行，零 import，零冲突面）—— 最安全、收益明确。

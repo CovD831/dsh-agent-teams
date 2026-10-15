@@ -21,7 +21,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -32,7 +32,36 @@ const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$
 
 const membersSrc = strip(read('src', 'members.ts'))
 const schedulerSrc = strip(read('src', 'scheduler.ts'))
-const stateSrc = strip(read('src', 'state.ts'))
+/**
+ * ★★ t65（2026-10-15）：`state.ts` 拆出了 `state/tasks.ts`（M1 的 S-B 状态机）。
+ *
+ * 本行原为 `read('src', 'state.ts')` —— 只读**一个文件**。于是函数一搬家，
+ * 断言就报「`beginTaskAttempt` 里没有 `delete task.deliveryFailure`」——
+ * ★ 而**行为没变**（t65 用运行期证明了：`deliveryFailure` 仍被清掉）。
+ * ⇒ 它断言的是「**那段文本在哪个文件**」，而不是「**机制在不在**」。
+ *
+ * ★ 修法**不是**再补一个路径 —— 那样每拆一块就要回来补一次
+ *   （本仓 `src/state/`、`src/members/`、`src/scheduler/`、`src/tools/` 都还会再拆）。
+ *   而是**读整个模块目录**，让"文件在哪"不再影响读数。
+ *
+ * ★ 本仓已有同一先例：`scripts/tools-source.mjs` 的 `toolsSource()`
+ *   （t39 拆分之后，`verify-input-requires` 就是那样收口的：
+ *    「从 `readFileSync('src/tools.ts')` 换成 `toolsSource()`」）。
+ *   ⇒ 这里用同样的形状，只是内联，避免为此新增一个共享模块。
+ */
+const readModule = (dir) => {
+  const out = []
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, e.name)
+      if (e.isDirectory()) walk(full)
+      else if (e.name.endsWith('.ts')) out.push(readFileSync(full, 'utf8'))
+    }
+  }
+  walk(join(ROOT, 'src', dir))
+  return out.join('\n')
+}
+const stateSrc = strip(readModule('state'))
 const typesSrc = strip(read('src', 'types.ts'))
 
 test('★★★ 臂 1：投递的失败【把成因交出来】（而不只是 return false）', () => {

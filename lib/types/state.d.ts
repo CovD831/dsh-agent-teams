@@ -297,28 +297,20 @@ export declare function summariseDeliveries(tasks: readonly TeamTask[]): {
  */
 export declare function describeDeliveries(summary: ReturnType<typeof summariseDeliveries>): string;
 /**
- * The allowed task status transitions, keyed by current status.
- * Terminal statuses have no outgoing transitions.
+ * ── ★ M4：S-B（任务状态机）已挪到 `./state/tasks.ts` ─────────────────────────────
+ *
+ * `TASK_TRANSITIONS` · `transitionError` · `activateTaskAttempt` ·
+ * `beginTaskAttempt` · `cancelUnfinishedTask` · `invalidateTaskAttempt`
+ * —— 这六件（外加私有 helper `clearAttemptResult`）搬到了 `./state/tasks.ts`，
+ * 并由下面的 re-export **保持本模块的导出面逐条不变**。
+ *
+ * ★ 为什么两者缺一不可（M2/M3 都实测踩过）：
+ *   · **只 `export … from`** ⇒ 本文件内部若还有调用会报 TS2304（`export-from` 不建本地绑定）；
+ *   · **只 `import`** ⇒ 导出面塌掉（外部消费者取不到）。
+ *   ⇒ 本文件现在**两者都写**（见下）。
+ * ★ 实测：该块**零外部引用**（不需要本文件里任何其它声明）⇒ 前提成立。
  */
-export declare const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>>;
-/**
- * Validate one task status transition.
- * @param current - the task's current status.
- * @param next - the requested status.
- * @returns the transition error, or undefined when allowed.
- */
-export declare function transitionError(current: TaskStatus, next: TaskStatus): string | undefined;
-/** Activate the task's current generation for one owner and return its capability id. */
-export declare function activateTaskAttempt(task: TeamTask, assignee: string): string;
-/** Start a fresh task generation for one owner. */
-export declare function beginTaskAttempt(task: TeamTask, assignee: string): string;
-/**
- * Revoke the current worker immediately. Clearing its capability makes old
- * updates stale; a separate handoff generation serializes async quiescence.
- */
-/** Cancel one unfinished task without returning it to the ready pool. */
-export declare function cancelUnfinishedTask(task: TeamTask, output?: string): void;
-export declare function invalidateTaskAttempt(task: TeamTask, nextAssignee?: string, reassigning?: boolean): void;
+export { TASK_TRANSITIONS, transitionError, activateTaskAttempt, beginTaskAttempt, cancelUnfinishedTask, invalidateTaskAttempt, } from './state/tasks.ts';
 /**
  * Create the team directory structure and the initial team record.
  * @param stateRoot - resolved absolute state root directory.

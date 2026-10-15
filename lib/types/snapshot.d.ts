@@ -10,9 +10,26 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { type MemberLiveness, type StrandedWorktrees, type MemberSubagents, type LiveSubagent } from './members.ts';
 import { type MemberStatus, type TeamState } from './types.ts';
-import type { FailureKind } from './state.ts';
-/** Visual task state for the activity panel. */
-export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled';
+import type { FailureKind, VisualTaskState } from './state.ts';
+/**
+ * Visual task state for the activity panel.
+ *
+ * ── ★★ M4 收敛（t65）：本类型**不再在这里声明** ────────────────────────────────
+ *
+ * 实测（t48 发现 A，我逐字复核过）：本行与 `src/state.ts` 的那一行**逐字相同**
+ *   ⇒ 那是**重复声明**，不是巧合，也不是有意分叉。
+ *
+ * ★ 危害不是"多一行"，而是**两处可以各自漂移**：
+ *   改一处、忘了另一处 ⇒ 两边的取值集合分叉，而 `state.ts` 的 `taskVisualState()`
+ *   产出的值喂给 `TeamActivityMember.state`（本文件）—— 那时就是**类型说 A、
+ *   运行期给 B**，而两者**都编译得过**（因为它们是两个独立的类型）。
+ *
+ * ⇒ 收敛为**单一来源**：声明留在 `src/state.ts`（那里有 `taskVisualState()`
+ *   这个**生产者**，所以"类型与它的生产者同住"是正确的一侧），本文件**再导出**它。
+ *   ★ 再导出而非直接 import：本文件的 `export type VisualTaskState` 是**对外面**，
+ *     既有消费者从 `snapshot.ts` 取它 ⇒ 去掉会打断它们（导出面必须逐条不变）。
+ */
+export type { VisualTaskState } from './state.ts';
 /** One member row of the activity snapshot. */
 export interface TeamActivityMember {
     readonly id: string;
