@@ -310,7 +310,7 @@ export declare function describeDeliveries(summary: ReturnType<typeof summariseD
  *   ⇒ 本文件现在**两者都写**（见下）。
  * ★ 实测：该块**零外部引用**（不需要本文件里任何其它声明）⇒ 前提成立。
  */
-export { TASK_TRANSITIONS, transitionError, activateTaskAttempt, beginTaskAttempt, cancelUnfinishedTask, invalidateTaskAttempt, } from './state/tasks.ts';
+export { TASK_TRANSITIONS, transitionError, activateTaskAttempt, beginTaskAttempt, cancelUnfinishedTask, gateEvaluationRecordOf, invalidateTaskAttempt, } from './state/tasks.ts';
 /**
  * Create the team directory structure and the initial team record.
  * @param stateRoot - resolved absolute state root directory.
