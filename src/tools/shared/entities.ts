@@ -1340,22 +1340,82 @@ export function emittedProductGaps(
   const scope = new Set((inScope ?? []).map((entry) => entry.replace(/\\/g, '/').replace(/^\.\//, '')))
   const gaps: ScopeContradiction[] = []
   for (const entry of scope) {
-    /** ★ 只对 src 下的 TypeScript 文件说话：其余目录（docs · scripts · package.json…）没有这条强制同步关系。 */
-    if (!entry.startsWith('src/') || !entry.endsWith('.ts')) continue
+    /**
+     * ★ 只对 `src/` 下的 TypeScript 文件说话：其余目录（docs · scripts · package.json…）
+     *   没有这条强制同步关系。
+     *
+     * ★★★ T8 修复（2026-10-15，队长）：**`.tsx` 也算**。
+     *   MEASURED（实测）：`src/client/**` 用的全是 `.tsx`，而修前这里只认 `.ts`
+     *   ⇒ 整个 client 目录**被这条过滤挡在门外**，它的产物（含 `lib/client.js.map`）
+     *   **从来没被算进"必须声明"** —— 那正是 t70 撞墙的机制。
+     *   而 `tsconfig` 的 `include` 本来就同时收 `.ts` 与 `.tsx`（两者都编译、都产出）。
+     */
+    if (!entry.startsWith('src/') || !/\.tsx?$/.test(entry)) continue
     /** ★★ 只在**真的在盘上**时要求产物（见上面那段）—— 象征性路径与"还没建的文件"都不报。 */
     try {
       if (!existsSync(join(root, entry))) continue
     } catch {
       continue
     }
-    const rel = entry.slice('src/'.length).replace(/\.ts$/, '')
-    for (const product of [`lib/${rel}.js`, `lib/types/${rel}.d.ts`]) {
+    const rel = entry.slice('src/'.length).replace(/\.tsx?$/, '')
+    /**
+     * ── ★★★ T8 修复（2026-10-15，队长）：产物要【从盘上算】，不能只背两个名字 ──────────
+     *
+     * MEASURED（t70 撞的墙）：
+     *   `lib/client.js` **末尾写着** `sourceMappingURL=client.js.map`，
+     *   而 `scripts/clean-build.mjs:132` 把它们当**一对**搬运
+     *   （`CARRIED_FORWARD = ['client.js', 'client.js.map']`）。
+     *   ⇒ 只声明 `lib/client.js` 而漏 `.map`，**会把产物对弄坏**（指向过期 map）。
+     *   同一形状已发作三次（t54 的 golden / t60 的 .d.ts / t70 的 .map）。
+     *
+     * ★★ 修法：不看"同名兄弟"，而是**看盘上真实的配对**。
+     *
+     * ★ 为什么不能用"同名兄弟"（第一版试过，实测不成立）：
+     *   `src/client/index.ts` 的产物是 `lib/client/index.js`，
+     *   而 map **不在文件级** —— `tsdown.config.ts:61/128` 把
+     *   `lib/client/index.js` **打成** `lib/client.js`，map 跟着**bundle** 走
+     *   （实测：盘上只有 `lib/client.js` ←→ `lib/client.js.map` 这一对）。
+     *   ⇒ "源文件旁的 .map"这个层次是**错的**，bundle 与源**名字对不上**。
+     *
+     * ⇒ 所以按【这个 src 文件所在的模块】去盘上找它**真实的产出对**：
+     *   凡是**在盘上、且被 git 跟踪**的 `lib/**\/*.js`，若它有同名 `.map` 伙伴，
+     *   而**这个 src 文件与它在同一个顶层模块**（`src/X/...` ↔ `lib/X...`），
+     *   就把那个 `.map` 也算作必须声明的产物。
+     */
+    const products = [`lib/${rel}.js`, `lib/types/${rel}.d.ts`]
+    /**
+     * ★ 只对**顶层模块目录**做这件事（`src/client/**` ⇒ 模块 `client`），
+     *   因为 bundle 就是按顶层模块产出的。
+     */
+    const segments = rel.split('/')
+    if (segments.length > 1) {
+      const moduleName = segments[0]!
+      try {
+        for (const name of readdirSync(join(root, 'lib'))) {
+          if (!name.startsWith(moduleName) || !name.endsWith('.js')) continue
+          const candidate = `lib/${name}.map`
+          if (!existsSync(join(root, candidate))) continue
+          /**
+           * ★ 只有当这个 bundle **真的存在**时才要求它 —— 与上面"真的在盘上"同一条纪律。
+           * ★ 且只有当它**还没被声明**时才报（下面统一判）。
+           */
+          if (!products.includes(candidate)) products.push(candidate)
+        }
+      } catch {
+        /* 读不出就不报 —— 与"不猜"一致 */
+      }
+    }
+    for (const product of products) {
       if (scope.has(product)) continue
       gaps.push({
         check: 'emit',
         detail: `\`${entry}\` is in scope, so the build emits \`${product}\` from it, but that product is NOT declared — `
           + 'this repository keeps lib/ in lockstep with src/ (tsconfig outDir=lib, declarationDir=lib/types), '
-          + 'so an undeclared product makes the task impossible to complete honestly',
+          + 'so an undeclared product makes the task impossible to complete honestly'
+          + (product.endsWith('.map')
+            ? ' ★ 它是**成对的产物**：源文件末尾写着它的 `sourceMappingURL`，'
+              + '只声明 `.js` 而漏 `.map` 会把产物对弄坏（见 T8）'
+            : ''),
       })
     }
   }
