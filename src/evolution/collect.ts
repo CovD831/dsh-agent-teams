@@ -101,18 +101,114 @@ export function signalsPathOf(stateRoot: string): string {
  * ★ 读不出来 ⇒ 从 1 开始（不是"猜一个大的"）—— 宁可撞一次也不伪造历史密度。
  */
 export async function nextSignalId(stateRoot: string): Promise<string> {
-  let max = 0
+  const text = await readSignalsText(stateRoot)
+  return `e-${String(maxSignalNumberIn(text) + 1).padStart(4, '0')}`
+}
+
+/**
+ * ── ★★★ t93：读 `signals.jsonl`（读不出来 ⇒ 空串，**不是**抛）──────────────────────
+ */
+async function readSignalsText(stateRoot: string): Promise<string> {
   try {
     const { readFile } = await import('node:fs/promises')
-    const text = await readFile(signalsPathOf(stateRoot), 'utf8')
-    for (const line of text.split('\n')) {
-      const matched = /"id":"e-(\d+)"/.exec(line)
-      if (matched !== null) max = Math.max(max, Number(matched[1]))
-    }
+    return await readFile(signalsPathOf(stateRoot), 'utf8')
   } catch {
-    /** 文件还不存在 ⇒ 从 1 开始。 */
+    /** 文件还不存在 ⇒ 没有已知的 id。 */
+    return ''
   }
-  return `e-${String(max + 1).padStart(4, '0')}`
+}
+
+/**
+ * ── ★★★ t93：从既有文本里算**已用过的最大编号**（两种序列化格式都要认）────────────
+ *
+ * ── 这里修的是一个**真缺陷**（MEASURED，2026-10-16）────────────────────────────────
+ *
+ * 旧实现是 `/"id":"e-(\d+)"/` —— ★ **它要求 `"id"` 与 `"e-…"` 之间【没有空格】**。
+ * 而同一个文件里**两种写法共存**：
+ * ```
+ * t88 手工补录的那 10 行：  {"id": "e-0001", …}   ← ★ 冒号后有空格（JSON.stringify(x, null, 0) 之外的写法）
+ * t87 `appendSignal` 写的：  {"id":"e-0001",…}     ← ★ 无空格（`JSON.stringify(signal)` 的默认形状）
+ * ```
+ * ⇒ ★★ 正则**只认得第二种** ⇒ 那 10 行对 `max` **完全不可见**
+ *   ⇒ `max` 从 0 起算 ⇒ 分配出 `e-0001` ⇒ **覆盖了已存在的 `e-0001`**
+ *   ⇒ 实测**五组 id 各出现两次**（`e-0001` … `e-0005`）。
+ *
+ * ── ★★★ 而真正的教训不是"正则少写了 `\s*`" ────────────────────────────────────────
+ *
+ * ★ 补一个 `\s*` 只修**这一次**。**根因是"靠解析文本推断状态"这件事本身** ——
+ *   它假设了**写者与读者对序列化的约定一致**，而那个假设**没有任何地方强加**：
+ *   任何人用 `JSON.stringify(x, null, 2)`（带缩进）都能让同一个正则**再次失明**。
+ * ⇒ 所以本函数**不再假设格式**：它**逐行 `JSON.parse`**，从**解析出来的对象**上读 `id`。
+ *   ★ 文本形状再怎么变（空格、缩进、键序、多了别的键），`JSON.parse` 都给出**同一个对象**
+ *     ⇒ 读 id 这件事**与序列化格式解耦**。
+ *   ★ 而**解析失败的那一行只跳过它自己**（不整文件放弃）：
+ *     坏一行不该让**所有**既有 id 都变得不可见 —— 那正是旧实现会**静默放大**的错。
+ *
+ * ★ 保留一条**极轻的**文本兜底：若某行 `JSON.parse` 失败，仍试着用**容忍空白**的正则
+ *   抠出编号。★ 理由：历史数据里若有半行，它的编号**已经被占用过**，
+ *   漏掉它会让同一个 id 被分配第二次 —— 而"撞车"正是本函数要消灭的东西。
+ */
+export function maxSignalNumberIn(text: string): number {
+  let max = 0
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    /** ① 正路：**从解析出来的对象**读 —— 与序列化格式无关。 */
+    try {
+      const record = JSON.parse(line) as { readonly id?: unknown }
+      const id = record?.id
+      if (typeof id === 'string') {
+        const matched = /^e-(\d+)$/.exec(id)
+        if (matched !== null) max = Math.max(max, Number(matched[1]))
+        continue
+      }
+    } catch {
+      /** 落到下面的兜底。 */
+    }
+    /**
+     * ② 兜底：这一行**解析不了**（半行/损坏），但它可能**已经占用过**一个编号。
+     * ★ 正则**容忍空白** —— 这是旧实现缺的那一半（它只认无空格）。
+     */
+    const loose = /"id"\s*:\s*"e-(\d+)"/.exec(line)
+    if (loose !== null) max = Math.max(max, Number(loose[1]))
+  }
+  return max
+}
+
+/**
+ * ── ★★★ t93：`signals.jsonl` 里**重复出现**过的 id（审计读数，**不改数据**）─────────
+ *
+ * ★ 它的存在理由：那五组撞车是**既成事实**（审计数据不许改写），
+ *   而"曾经撞过"**必须读得出来** —— 静默修好会让
+ *   「**它曾经撞过**」与「**它从来没撞过**」**同形**（本仓记账最久的形态）。
+ *
+ * ★★ 读端为什么需要它：`e-0001` 指向**两条不同的记录**（一条 t88 手工补录、
+ *   一条 t87 采集）⇒ **任何按 id 回溯的读取端会读到错的那条**。
+ *   ⇒ 本函数就是那个"**明确的可区分读数**"：它让读取端能**先问一句**再决定信谁。
+ *
+ * ★ 返回 `{ id, lines: [行号…] }`（行号从 1 起，**给人去查的定位**）。
+ */
+export function duplicateSignalIds(text: string): readonly { readonly id: string; readonly lines: readonly number[] }[] {
+  const seen = new Map<string, number[]>()
+  const lines = text.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!
+    if (line.trim() === '') continue
+    let id: unknown
+    try {
+      id = (JSON.parse(line) as { readonly id?: unknown })?.id
+    } catch {
+      const loose = /"id"\s*:\s*"e-(\d+)"/.exec(line)
+      id = loose === null ? undefined : `e-${loose[1]}`
+    }
+    if (typeof id !== 'string') continue
+    const at = seen.get(id) ?? []
+    at.push(index + 1)
+    seen.set(id, at)
+  }
+  return [...seen.entries()]
+    .filter(([, at]) => at.length > 1)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, lines2]) => ({ id, lines: lines2 }))
 }
 
 /**
@@ -139,6 +235,94 @@ export async function appendSignal(stateRoot: string, signal: EvolutionSignal): 
      *   ⇒ 失败由调用方写一条 `warn`（它是旁路，不是裁决）。
      */
     return undefined
+  }
+}
+
+/**
+ * ── ★★★ t93：**分配 id 并追加** —— 分配与占用合成一步（与 t89 同族）───────────────
+ *
+ * ── 要回答的那个问题：「**并发两次 `appendSignal`，怎么保证 id 不撞？**」────────────
+ *
+ * ★ 先说**不是**怎么修的：给 `nextSignalId` 的正则补一个 `\s*` **只修这一次**。
+ *   根因是「**读-算-写**」这个三段式 —— 两个并发调用者**都读到同一个 max**，
+ *   各自算出**同一个** `e-00NN` ⇒ 撞车。★ 而这一步**与序列化格式无关**：
+ *   即使正则完全正确，那个竞态**照样存在**。
+ *
+ * ── ★★ 实测：这条流的 append **本身已经是原子的** ────────────────────────────────
+ *
+ * MEASURED（本任务）：**20 次并发 `appendFile`** 到同一路径
+ * ⇒ **20/20 行都在，且 20/20 都能 `JSON.parse`**（`O_APPEND` 的写入是原子的）。
+ * ⇒ ★★ **所以竞态只在【分配】那一段，不在【写入】那一段。**
+ *   （这与 `frictions/` 那边不同：那边一次写一个**文件**，写入**不是**原子的 ⇒ t89 要修两处。）
+ *
+ * ── ★★ 修法：把"读-算-写"整段**串行化** ──────────────────────────────────────────
+ *
+ * 与 t89 的 `claimFrictionId` **同一条纪律**（"分配与占用是一步"），
+ * 但**落点不同** —— 因为这里的占用**不是一个文件**，而是**一行**：
+ * ```
+ *   frictions/      占用 = 创建一个文件（O_EXCL 天然排他）⇒ t89 用 `open(path,'wx')`
+ *   evolution/      占用 = 追加一行（O_APPEND 原子，但**不排他**）
+ *   ⇒ ★ 所以这里排他的落点是【那个文件上的临界区】，而不是某个 id 的路径
+ * ```
+ * ⇒ 用本仓**已有**的进程内互斥（`state.ts` 的 `withTeamLock`，与 scheduler 同源）
+ *   把「读 max → 算 id → 追加」整段包住 ⇒ **同一个进程里的两个并发调用必然拿到不同 id**。
+ *
+ * ── ★★ 而它的**边界**必须写清楚（不许让"一个进程内"读成"任何地方"）────────────────
+ *
+ * ★ `withTeamLock` 是**进程内**的（`locks` 是模块级 `Map`）⇒ 它**不跨进程**。
+ *   ⇒ 若**两个进程**同时往同一棵树追加，它们仍可能撞 id。
+ * ★ 而那个边界**现在有一个显式的读数**：`duplicateSignalIds()`。
+ *   它让"撞了"**读得出来**，而不是表现为"某条记录不见了"。
+ * ★ 为什么不干脆做**跨进程**的锁（`O_EXCL` 锁文件）：那会引入**清理问题** ——
+ *   持锁进程崩溃留下的锁文件会让**整条采集流永远卡住**，而采集是**旁路**
+ *   （`void … .then(warn)`）⇒ **卡住比偶尔撞一次更坏**（t89 那条注释逐字记过同一取舍）。
+ *   ★ 所以本任务选择"**进程内串行 + 撞击可读**"，而不是"跨进程排他 + 可能永久卡死"。
+ *
+ * @param build - 由调用方给**除 id 以外**的那部分（id 由本函数在临界区内定）。
+ * @returns 写成功的 id；写不进去 ⇒ `undefined`（**不抛** —— 同 `appendSignal`）。
+ */
+export async function appendSignalClaimingId(
+  stateRoot: string,
+  build: (id: string) => EvolutionSignal,
+): Promise<string | undefined> {
+  return withEvolutionLock(stateRoot, async () => {
+    /**
+     * ★★ **在临界区内**重读 —— 这是全部要点。
+     *   把这一行挪到锁外面，两个并发调用就又会读到同一个 max（= 旧缺陷）。
+     */
+    const id = await nextSignalId(stateRoot)
+    const signal = build(id)
+    return await appendSignal(stateRoot, signal)
+  })
+}
+
+/**
+ * ── ★★ 进程内互斥（t93）────────────────────────────────────────────────────────
+ *
+ * ★ 自实现而不是 import `state.ts` 的 `withTeamLock`：与 t89 的 `writeFileAtomic`
+ *   **同一条理由** —— 那个函数在 `state.ts` 里是**导出的**（可复用），但它绑的是
+ *   "team" 语义；信号流的 key 是 **stateRoot 下的 evolution 目录**。
+ *   ★ 而形状**完全相同**（前一个 promise 链尾 = 队列），注释注明同源。
+ *
+ * ★ 用 `Map` 而不是一把全局锁：两个**不同**的 `stateRoot` 互不影响
+ *   （全局锁会把不相干的仓库串起来，那是本仓记账过的"用锁掩盖并发问题"）。
+ */
+const evolutionLocks = new Map<string, Promise<unknown>>()
+
+async function withEvolutionLock<T>(stateRoot: string, fn: () => Promise<T>): Promise<T> {
+  const key = `evolution:${stateRoot}`
+  const previous = evolutionLocks.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const tail = previous.then(() => gate)
+  evolutionLocks.set(key, tail)
+  await previous
+  try {
+    return await fn()
+  } finally {
+    release()
+    /** ★ 仍是队尾才清掉（与 `withTeamLock` 的清理纪律一致，否则会留一条链）。 */
+    if (evolutionLocks.get(key) === tail) evolutionLocks.delete(key)
   }
 }
 
