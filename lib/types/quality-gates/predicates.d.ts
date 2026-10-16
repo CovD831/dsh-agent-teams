@@ -32,6 +32,43 @@ export type PathClassification = 'in_scope' | 'out_of_scope' | 'undeclared' | 'i
 /** Normalize a workspace-relative POSIX path. `undefined` means illegal. */
 export declare function normalizeWorkspacePath(path: string): string | undefined;
 export declare function pathMatchesScope(path: string, pattern: string): boolean;
+/**
+ * ── ★★★ t95（吸收上游 #183 / `648fd9a`）：**任何质量契约都不许认领的路径** ──────────────
+ *
+ * 版本控制、harness/插件状态、密钥与私钥。
+ *
+ * ── ★★★ 为什么它必须【导出】，而不再是一个私有函数 ────────────────────────────
+ *
+ * 上游 #183 的题（逐字）：
+ * > 「`repairScopeFromFindings` collected paths the completion gate classifies
+ * >   `out_of_scope` by default (secrets/, .env*, .git, .dsh, .agent-teams),
+ * >   **producing unsatisfiable contracts.**」
+ *
+ * MEASURED（t95 开工在本仓复现）：
+ * ```
+ * repairScopeFromFindings([{ file: 'secrets/k.json' }, { file: 'src/a.ts' }])
+ *   ⇒ 推导出的 inScope = ["secrets/k.json","src/a.ts"]
+ * ★ 而闸门对第一条的裁决是 `out_of_scope`（下面 classifyChangedPath 的【第一行】）
+ * ⇒ ★★ 一条路径被【写进】 inScope，而闸门仍然判它 out_of_scope
+ * ⇒ ★★★ 【契约自身不可满足】—— 成员无论怎么做都过不了，于是死锁。
+ * ```
+ *
+ * ★★ 而根因**不是"两份谓词"**（本仓只有这一份），而是：
+ *   **推导侧【根本没用它】** —— 那一侧自己收集路径，**从不问闸门**。
+ *   ⇒ 这就是上游说的 "**Derivation and gate now share one**"。
+ *
+ * ⇒ 所以它现在**导出**，供两侧共用：闸门（{@link classifyChangedPath}）与
+ *   契约生成（`repairScopeFromFindings`）。
+ *   ★ **下一次改排除规则时只有这一处改** —— 那是本次改动的**唯一验收点**。
+ *
+ * ── ★★ `excluded: false` 时 `.agent-teams/` 也一并排除（上游本次新加的一格）──────
+ *
+ * 上游 `648fd9a` 在这一行加了 `|| segments[0] === '.agent-teams'`。
+ * ★ 而本仓此前**没有**它 ⇒ 实测 `.agent-teams/foo.json` 被判 `undeclared`
+ *   （不是 `out_of_scope`）。⇒ 本次照上游补齐，且这**不是**可选的：
+ *   契约生成器**不该走进** `.agent-teams/`（那是台账/状态目录）。
+ */
+export declare function isDefaultExcludedPath(path: string): boolean;
 export declare function classifyChangedPath(path: string, inScope?: readonly string[], outOfScope?: readonly string[]): PathClassification;
 /**
  * ── ★★ f-0020：repair 的判别力证据，不是「本次新增的测试」───────────────────────

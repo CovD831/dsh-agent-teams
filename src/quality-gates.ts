@@ -30,6 +30,8 @@ import {
   verifyTargetOf,
   armsNamedIn,
   subjectTermsIn,
+  /** ★★★ t95：与闸门**共用**的默认排除谓词（上游 #183 的 "share one exclusion predicate"）。 */
+  isDefaultExcludedPath,
 } from './quality-gates/predicates.ts'
 import type { PathClassification } from './quality-gates/predicates.ts'
 
@@ -236,6 +238,19 @@ export interface PlanQualityFollowUpResult {
   tasks: PlannedFollowUpTask[]
   escalated?: boolean
   status?: 'escalated'
+  /**
+   * ★★ t95（上游 #183）：**为什么**自动循环停下了 —— 交给队长看。
+   * ★ 缺它时"升级"只有一个布尔 ⇒ 读的人**不知道去做什么**，
+   *   而"升级了但没说为什么"与"没升级"在读端补救动作上其实一样。
+   */
+  reason?: string
+  /**
+   * ★★★ t95（上游 #183）：被**拒绝作为契约材料**的 finding id
+   *   （它们报的每条路径都被默认排除）。
+   * ★ 与 `reason` 分工：`reason` 给人读，这一格给**机器**读
+   *   （"哪几条 finding 需要人裁决"是一个可枚举的集合）。
+   */
+  excludedFindings?: string[]
 }
 
 export interface CoverageRow {
@@ -1666,16 +1681,84 @@ export function repairScopeFromFindings(
   fallback: string[] | undefined,
 ): string[] | undefined {
   const derived: string[] = []
-  const push = (raw: string): void => {
-    const normalized = normalizeWorkspacePath(raw.replace(REPAIR_SCOPE_LINE_SUFFIX, ''))
-    if (normalized === undefined || derived.includes(normalized)) return
-    derived.push(normalized)
-  }
+  /**
+   * ── ★★★ t95：**推导侧现在用与闸门同一个谓词**（上游 #183）────────────────────
+   *
+   * ★ 上面那段长注释（"Keep all derived paths until the generator resolves
+   *   inherited exclusions; filtering first would silently discard a required
+   *   fix target"）**方向是对的，但只做了一半** —— 它说"等生成器去解析排除"，
+   *   而**生成器从来没有做那个解析** ⇒ 被排除的路径**原样进了 inScope**。
+   *
+   * ★★ 后果（t95 开工实测）：
+   * ```
+   * 推导 ⇒ inScope = ["secrets/k.json", …]
+   * 闸门 ⇒ classifyChangedPath("secrets/k.json") = "out_of_scope"   ← 它【第一行】就查这个
+   * ⇒ ★★★ 契约自身不可满足：成员把那条路径做完，闸门照样拒。
+   * ```
+   *
+   * ⇒ 所以排除**在这里做**，而且用 `isDefaultExcludedPath`（**同一个**）。
+   *   ★ 那正是"不改注释、改行为"的那一半 —— 注释说"稍后解析"，而这里就是"稍后"。
+   *
+   * ★ 而"silently discard a required fix target"那条顾虑**仍然成立**，所以它
+   *   **不是**被丢掉了：{@link excludedFindingsOf} 会把"每条候选路径都被排除"
+   *   的 finding **单独挑出来**，由调用方**升级并给理由**（不是静默丢）。
+   *   ⇒ 两条顾虑各有各的落点，不再互相抵消。
+   */
   for (const finding of findings) {
-    if (nonemptyString(finding.file)) push(finding.file)
-    for (const match of finding.requiredFix.matchAll(REPAIR_SCOPE_PATH_PATTERN)) push(match[0])
+    for (const path of findingDerivedPaths(finding)) {
+      if (isDefaultExcludedPath(path) || derived.includes(path)) continue
+      derived.push(path)
+    }
   }
   return derived.length > 0 ? derived : fallback === undefined ? undefined : [...new Set(fallback)]
+}
+
+/**
+ * ── ★★ t95：一条 finding 报出的**全部**候选路径（**在任何排除规则之前**）──────────────
+ *
+ * ★ 为什么要把它**单独**提出来：{@link excludedFindingsOf} 要问的是
+ *   「这条 finding 的**每一条**路径是不是都被排除了」——
+ *   而那要求"路径集合"与"排除判定"**分开**。
+ * ★★ 若把它们揉在一个函数里，就只能得到"过滤后的结果"，
+ *   而**分不出**「它本来就没路径」与「它的路径全被排除」——
+ *   两者补救动作相反（前者不是排除问题，后者要人裁决）。
+ *
+ * ★ 输入侧含 `requiredFix` 里的路径引用（与改造前[逐字同源]，只是搬了位置）。
+ */
+export function findingDerivedPaths(finding: ReviewFinding): string[] {
+  const paths: string[] = []
+  const push = (raw: string): void => {
+    const normalized = normalizeWorkspacePath(raw.replace(REPAIR_SCOPE_LINE_SUFFIX, ''))
+    if (normalized === undefined || paths.includes(normalized)) return
+    paths.push(normalized)
+  }
+  if (nonemptyString(finding.file)) push(finding.file)
+  for (const match of finding.requiredFix.matchAll(REPAIR_SCOPE_PATH_PATTERN)) push(match[0])
+  return paths
+}
+
+/**
+ * ── ★★★ t95：**每一条**候选路径都被默认排除的 finding（上游 #183）──────────────────
+ *
+ * 上游逐字：
+ * > 「findings whose every cited path is excluded **escalate with a reason
+ * >   instead of dead-locking a member.**」
+ *
+ * ★★ 为什么它必须存在（而不是"过滤掉就算了"）：
+ *   一条 finding 若**所有**路径都被排除 ⇒ 它**进不了任何可满足的契约** ⇒
+ *   成员无法诚实地完成它。⇒ **静默丢掉它 = 让那个缺陷消失**
+ *   （而"修好了"与"从来没修"在报告里同形 —— 本仓记账最久的形态）。
+ *   ⇒ 所以它被**挑出来交给调用方**，由调用方**升级 + 给理由**。
+ *
+ * ★★ 而一条**根本没报路径**的 finding **不算**被排除
+ *   （`paths.length > 0` 那个条件）—— 它不是"路径被排除"，而是"没给路径"，
+ *   两者补救动作不同：前者要人裁决，后者要审查员补一条路径。
+ */
+export function excludedFindingsOf(findings: readonly ReviewFinding[]): ReviewFinding[] {
+  return findings.filter((finding) => {
+    const paths = findingDerivedPaths(finding)
+    return paths.length > 0 && paths.every((path) => isDefaultExcludedPath(path))
+  })
 }
 
 /** Captain-only amendment payload: replacement values for contract fields. */
@@ -1873,7 +1956,36 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
   // inScope is derived from the findings below: the observed file plus any
   // workspace-relative paths referenced by the requiredFix instructions.
 
-  const repairScope = repairScopeFromFindings(findings, source?.inScope)
+  /**
+   * ── ★★★ t95（上游 #183）：**每条候选路径都被排除**的 finding ⇒ 升级，不死锁 ─────────
+   *
+   * ★ 上游逐字：「findings whose every cited path is excluded **escalate with a
+   *   reason instead of dead-locking a member.**」
+   *
+   * ★★ 为什么这比"过滤掉就算了"更对：把那些 finding 静默滤掉之后，
+   *   生成的契约**看起来是干净的**（inScope 里没有被排除的路径），
+   *   而它们**指出的缺陷一条都没被修** ⇒
+   *   ★ **"修好了"与"从来没修"在报告里同形**（本仓记账最久的形态）。
+   *   ⇒ 所以这里的判据是：**一条 actionable 的 finding 都不剩** ⇒ 停下来找人。
+   *
+   * ★ 而**还有** actionable 的 ⇒ 正常运行，但那些被排除的 finding
+   *   **仍记在 `excludedFindings` 里**（不静默）—— 见下面的正常返回。
+   */
+  const excluded = excludedFindingsOf(findings)
+  const actionable = findings.filter((finding) => !excluded.includes(finding))
+  if (findings.length > 0 && actionable.length === 0) {
+    return {
+      ...empty,
+      escalated: true,
+      status: 'escalated',
+      reason: `every finding of ${closed.id} cites only default-excluded paths`
+        + ` (${excluded.map((finding) => finding.file ?? finding.id).join(', ')});`
+        + ' the completion gate classifies those out_of_scope by default,'
+        + ' so no honest repair contract exists - a human must decide',
+      excludedFindings: excluded.map((finding) => finding.id),
+    }
+  }
+  const repairScope = repairScopeFromFindings(actionable, source?.inScope)
   const implementer = schedulableAssignee(source?.assignee, team)
   const repair: PlannedFollowUpTask = {
     id: `repair-round-${nextRound}`,
@@ -1906,7 +2018,17 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
     acceptance: sanitizeReviewAcceptance(closed.acceptance),
     reviewedTaskId: repair.id,
   }
-  return { created: [repair, review], tasks: [repair, review] }
+  return {
+    created: [repair, review],
+    tasks: [repair, review],
+    /**
+     * ★★ 而那些被排除的 finding **在这一支上也不能静默**（它们在下面是有账的）：
+     *   正常支上它们不阻塞，但必须**读得出来** —— 否则"审查报了但它没进契约"这件事
+     *   只能靠人去比对 findings 与 acceptance。
+     * ★ 缺席（而不是空数组）当没有时：`undefined` = 没有，`[]` = "有这一格但是空的"。
+     */
+    ...excluded.length === 0 ? {} : { excludedFindings: excluded.map((finding) => finding.id) },
+  }
 }
 
 export function buildCoverageMatrix(goalItems: readonly string[], tasks: readonly TeamTask[]): CoverageRow[] {
