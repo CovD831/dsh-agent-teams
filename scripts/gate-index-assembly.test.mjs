@@ -166,6 +166,33 @@ const NEW_POSITION_GATES = [
    * ★ 与 `contractTaskAtomicity` 同一个病：**本体在盘上（t8）、而一次都不会跑**。
    */
   { binding: 'dispatchPlanReviewed', id: 'dispatch.plan-reviewed', point: 'dispatch' },
+  /**
+   * ── ★★★ t85（接线）：`admission` 位置的三条 —— 本表里**最后一次**收口 ────────────
+   *
+   * ★ 上面 `contractTaskAtomicity` 那段的注释**逐字**把它们指认出来了：
+   *   「★ 这与 `admission` 那三条是**同一个病**：「写了但没接线」。」
+   *   ⇒ 本行就是把那句话执行掉。
+   *
+   * ★ **改前它防的是什么**：这张表 + 臂 3 的 `known` 列表一起防的是
+   *   「**有人绕过 `gates/index.ts` 的清单注册判据**」（多了 ⇒ 编排层会读到
+   *   一份不是这份清单的东西）与「**有人把判据摘掉**」（少了 ⇒ 臂 2 会红）。
+   *   ★ 而 `admission` 那三条**一直不在这张表里** —— 因为**它们本来就没接线**：
+   *     那三条的 `binding` 在 `index.ts` 里**根本不存在**，所以"登记"它们
+   *     在那时是**登记一个不存在的东西**（那正是本表不给"未接的槽位"留位的原因，
+   *     见下面 `wiringState()` 的用法）。
+   *
+   * ★ **为什么现在要改**：`t85` 在 `index.ts` 里落下了这三个 `binding`
+   *   （`admissionAbsorb` / `admissionCheckpoint` / `admissionConvene`）⇒
+   *   它们现在**可以被登记**了，而**不登记就会被臂 3 判为"绕过清单"**。
+   *   ⇒ 于是这三行**不是可选的美化**，而是"接线"这件事在本表上的**另一半**。
+   *
+   * ★ `point` 三个都是 `'admission'`（见各自文件 `export const point`）。
+   * ✅ 反向半边 A：把这三条从 `ALL_GATES` 拿掉 ⇒ `wiringState().isImported()`
+   *   变假 ⇒ `newPositionGateIds()` 少三条 ⇒ **臂 2 的期望值对不上** ⇒ 立刻红。
+   */
+  { binding: 'admissionAbsorb', id: 'admission.absorb', point: 'admission' },
+  { binding: 'admissionCheckpoint', id: 'admission.checkpoint', point: 'admission' },
+  { binding: 'admissionConvene', id: 'admission.convene', point: 'admission' },
 ]
 
 /** 登记表里某条判据挂在哪。 */
@@ -208,6 +235,16 @@ const ASSEMBLY_PLACES = [
    * 落之前它们**不在**这份表里 —— 于是"少了"与"表里没有"仍然不同形。
    */
   { task: 'T10', path: './contract/build-artifact-scope.ts', binding: 'buildArtifactScope', id: 'contract.build-artifact-scope', point: 'contract' },
+  /**
+   * ── ★★ t86：第七个位置 `collection` 的四条 ─────────────────────────────────
+   *
+   * ★ 加它们【不是放宽】—— 是让这份清单与本仓真实的装配状态重新一致。
+   *   在加进来之前，臂 2 会判它们「**绕过装配清单**」—— 而那正是它该做的。
+   */
+  { task: 'T186', path: './collection/dedupe.ts', binding: 'collectionDedupe', id: 'collection.dedupe', point: 'collection' },
+  { task: 'T187', path: './collection/cooldown.ts', binding: 'collectionCooldown', id: 'collection.cooldown', point: 'collection' },
+  { task: 'T188', path: './collection/attributable.ts', binding: 'collectionAttributable', id: 'collection.attributable', point: 'collection' },
+  { task: 'T189', path: './collection/immunity.ts', binding: 'collectionImmunity', id: 'collection.immunity', point: 'collection' },
 ]
 
 /** 一个最小的、合法的判据模块（对照臂用）。 */
@@ -1022,8 +1059,44 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
      *     而那条实质在新分布上**仍然成立**（否则下面那一段会红）。
      *   ⇒ 这个数字是**位置快照**，随接线变；性质不随。
      */
-    { admission: 0, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 2 },
-    '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
+    /**
+     * ── ★★★ t85（接线）：`admission` 由 **0 → 3** ─────────────────────────────────
+     *
+     * ★ **改前它防的是什么**：这一行的实质（上面几条注释逐字）是
+     *   **「在这个分布上，每条判据都声明了输入面」** —— 而那个数字本身是
+     *   **位置快照**，随接线变；性质不随。
+     *   ★ 具体到 `admission: 0`：它钉住的是"`t5` 只加位置、一条判据都没加"
+     *     —— 而那是一个**当下快照**（`gate-admission-point` 的报文同样写明了）。
+     *
+     * ★ **为什么现在要改**：`t85` 把 `admission` 位置上那三条（absorb /
+     *   checkpoint / convene）接进了 `ALL_GATES` ⇒ **`0 → 3` 是接线的定义**，
+     *   不是分布漂移。★ 而 `index.ts` 顶部两段注释**逐字预告过这一步**
+     *   （「t6/t7/t8 会往里挂判据」）。
+     *
+     * ★★ **这不是放宽 —— 是同一句话在新分布上重新成立**：
+     *   下面那一段仍然要求"每条判据都声明了 `requires`"，
+     *   而那三条**各自都声明了**（实测：三条的 `requires` 都非空）。
+     *   ⇒ 若它们没声明，本条**照样会红** —— 所以改用 3 之后它**没有变弱**。
+     *
+     * ★ 三个数一起改（0 → 3），且**只改 admission 这一格**：
+     *   其余五个位置一格未动（`contract: 3` / `dispatch: 3` / `completion: 4` /
+     *   `delivery: 2` / `runtime: 2`）⇒ 证明这次接线**没有波及别处**。
+     * ✅ 若日后有人把这三条从 `ALL_GATES` 拿掉，本行会**立刻**变红
+     *   （`0 !== 3`）—— 这就是反向半边 A 赖以成立的那一格。
+     */
+    /**
+     * ── ★★ t86：`collection` 位置上线（`0 → 4`）──────────────────────────────
+     *
+     * ★ **只加 `collection` 这一格**，其余六个一字未动
+     *   （`admission: 3` / `contract: 3` / `dispatch: 3` / `completion: 4` /
+     *     `delivery: 2` / `runtime: 2`）⇒ 证明加位置**没有波及别处**。
+     *
+     * ★★ **这不是放宽**：下面那一段仍要求每条判据声明 `requires`，
+     *   而那四条**各自都声明了** ⇒ 若没声明，本条照样红。
+     * ✅ 反向半边：把那四条从 `ALL_GATES` 拿掉 ⇒ `0 !== 4` ⇒ 立刻红。
+     */
+    { admission: 3, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 2, collection: 4 },
+    '★ 七位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })
 

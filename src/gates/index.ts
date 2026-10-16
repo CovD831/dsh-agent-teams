@@ -296,6 +296,44 @@ import * as contractVerifyCommand from './contract/verify-command.ts'
 import * as admissionAbsorb from './admission/absorb.ts'
 import * as admissionCheckpoint from './admission/checkpoint.ts'
 import * as admissionConvene from './admission/convene.ts'
+/**
+ * ── T5 ——— 已接：`collection` 位置的四条采集判据（★ t86 加，第七个位置的第一批）───────
+ *
+ *      id = 'collection.dedupe' / '.cooldown' / '.attributable' / '.immunity'
+ *      四条都是**纯函数级**：输入 = 一条信号 + 已有索引，输出 = 三态裁决。
+ *
+ * ★ 顺序 = dedupe → cooldown → attributable → immunity，理由与别处一致：
+ *   先问最便宜也最致命的（**是不是同一件事**，实测占 85.5%），
+ *   再问来源频率（cooldown），最后才问"说不说得清"（attributable / immunity）。
+ *
+ * ★★ 这一层的 `blocked` 含义与前六个位置**不同**：它说的是"**这条信号不采**"，
+ *   而那**不是错误**，是正常结局（重复 / 太勤 / 已知噪声）。
+ *   ⇒ 所以四条**都不进任何裁决路径** —— 它们是采集层的守卫，不是任务的门禁。
+ */
+/**
+ * ── T186 ——— 已接：去重（`collection` 位置的第 1 条）───────────────────────
+ *
+ *      id = 'collection.dedupe' · point = 'collection'
+ */
+import * as collectionDedupe from './collection/dedupe.ts'
+/**
+ * ── T187 ——— 已接：冷却（`collection` 位置的第 2 条）───────────────────────
+ *
+ *      id = 'collection.cooldown' · point = 'collection'
+ */
+import * as collectionCooldown from './collection/cooldown.ts'
+/**
+ * ── T188 ——— 已接：可分性（`collection` 位置的第 3 条）───────────────────────
+ *
+ *      id = 'collection.attributable' · point = 'collection'
+ */
+import * as collectionAttributable from './collection/attributable.ts'
+/**
+ * ── T189 ——— 已接：免疫（`collection` 位置的第 4 条）───────────────────────
+ *
+ *      id = 'collection.immunity' · point = 'collection'
+ */
+import * as collectionImmunity from './collection/immunity.ts'
 
 /**
  * 一个判据模块必须交出的四个名字（+ 可选的 `appliesTo`）。
@@ -435,6 +473,20 @@ const ALL_GATES = [
   admissionAbsorb,
   admissionCheckpoint,
   admissionConvene,
+  /**
+   * ── ★ T5（collection）：四条采集判据（由 t86 接线）──────────────────────────────
+   *
+   * ★ 只加自己这四行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   * ★ 顺序 = dedupe → cooldown → attributable → immunity（理由见上面 import 那段）。
+   */
+  // T186 ——— 已接：collectionDedupe
+  collectionDedupe,
+  // T187 ——— 已接：collectionCooldown
+  collectionCooldown,
+  // T188 ——— 已接：collectionAttributable
+  collectionAttributable,
+  // T189 ——— 已接：collectionImmunity
+  collectionImmunity,
 ] as const
 
 /**

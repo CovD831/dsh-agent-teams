@@ -1348,12 +1348,49 @@ test('★ 臂 3c：三态里的 C 态（**字段不出现**）—— 在册 0 �
    *     判据模块的 `point` 是两件事）。本臂要求它**真的**在册 0 条 —— 否则
    *     它就不是 C 态，而是一条关于别的东西的读数。
    */
-  const emptyPoint = 'admission'
+  /**
+   * ── ★★★ t85：C 态的位置从 `admission` 换成「**结构上就没有模块**的位置名」─────────
+   *
+   * ★ **改前它防的是什么**：这一臂守的是三态里的**第三种** —— 「字段**不出现**」。
+   *   判据说：`checked + skipped === 0` ⇒ 这个位置这一轮**没有判据** ⇒
+   *   `inputSurfaceOf` 返回 `undefined`。
+   *   ★ 它防的是**恒挂**：把那一行改成 `if (false)` ⇒ 于是"没有判据"与
+   *     "有判据且都齐"在返回值上**同形** —— 而那正是本文件的中心纪律。
+   *
+   * ★ **为什么现在要改**：它此前**拿 `admission` 充 C 态**，理由是
+   *   「`gateModuleViews()` 里出现过判据模块、但不挂在这五个读数位置之一」
+   *   —— 那时 admission **恰好一条都没接线**。
+   *   ⇒ `t85` 把三条接上 ⇒ **`admission` 现在在册 3 条**，
+   *     实测 `inputSurfaceOf('admission', {})` 已**返回一个真实的面**
+   *     （`{checked:1, incomplete:1, skipped:2, missing:[…]}`），不再是 `undefined`
+   *     ⇒ 拿它当 C 态**测的已经是别的东西**。
+   *
+   * ★★ **一个必须如实说清的后果**：接线之后，
+   *   **`INSERTION_POINTS` 的六个位置全都 ≥1 条判据了**（实测
+   *   `admission 3 / contract 3 / dispatch 3 / completion 4 / delivery 2 / runtime 2`）
+   *   ⇒ **这六个位置里再也没有"天然的 C 态"了**。
+   *   ★ 而这**不是**让这条断言消失的理由 —— C 态是三态之一，必须继续**可被观测**，
+   *     否则"恒挂"那一行就再也没人盯着。
+   *
+   * ★★ **改法：把 C 态的位置从"某个恰好为空的位置"换成"一个结构上就没有模块的位置名"**。
+   *   判据本身（`checked + skipped === 0 ⇒ undefined`）**一字未动**，
+   *   只是不再依赖"哪个位置恰好为空"这个**偶合**。
+   *   ★ 而"注册表里没有那个位置的模块"这件事是**真实的**：`inputSurfaceOf` 读的是
+   *     `gateModuleViews()`，一个没有模块的位置名在那里读出来就是空的
+   *     —— 这正是 C 态的定义，与它叫什么无关。
+   *
+   * ★ 实测三种写法都给 `undefined`：`'nonexistent'` / `''` / `'gateModuleViews-unknown'`
+   *   ⇒ 用 `'no-such-position'`（读起来就是"这个位置不存在"，**故意不伪装成真位置**）。
+   *   ★ **它仍然能被打红**：把 `checked + skipped === 0` 那行改成 `if (false)`
+   *     ⇒ 这里会返回一个挂出来的空面 ⇒ 本臂照样红（分辨力**没有**变弱）。
+   */
+  const emptyPoint = 'no-such-position'
   assert.equal(
     views.filter((view) => view.point === emptyPoint).length, 0,
     `★ 前置：\`${emptyPoint}\` 位置必须真的在册 0 条（实测 ${views.filter((view) => view.point === emptyPoint).length} 条）——`
-    + ' 否则它不是 C 态，本臂测的是别的东西。★ 而它同时是**真实**状态：'
-    + ' 一个判据模块可以存在而不挂在读数位置上。',
+    + ' 否则它不是 C 态，本臂测的是别的东西。'
+    + '★ t85 起：六个真实位置都已接线 ⇒ C 态改用**结构上没有模块的位置名**表达；'
+    + '  而"某个真实位置恰好为空"这件事**已不存在**（那是接线的直接后果）。',
   )
   const empty = inputSurfaceOf(emptyPoint, {})
   assert.equal(

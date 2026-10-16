@@ -237,7 +237,7 @@ export declare const FAILURE_KIND_NAMES: readonly FailureKindName[];
  * ★ 它是**顺序敏感**的：`GATE_INSERTION_POINTS` 的次序**必须**与 `INSERTION_POINTS` 一致，
  *   因为读取端（UI 的六段遍历、`stageGroupState`）按它铺开。⇒ 逐字比对是**含序**的比对。
  */
-export type GateInsertionPoint = 'admission' | 'contract' | 'dispatch' | 'completion' | 'delivery' | 'runtime';
+export type GateInsertionPoint = 'admission' | 'contract' | 'dispatch' | 'completion' | 'delivery' | 'runtime' | 'collection';
 /**
  * 上述取值的运行期清单（与 `gates/registry.ts` 的 `INSERTION_POINTS` **同源同序**，
  * 由一条夹具逐字比对；★ 该夹具已注册进 `test:gates`）。

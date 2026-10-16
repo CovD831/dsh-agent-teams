@@ -297,6 +297,7 @@ export type GateInsertionPoint =
   | 'completion'
   | 'delivery'
   | 'runtime'
+  | 'collection'
 
 /**
  * 上述取值的运行期清单（与 `gates/registry.ts` 的 `INSERTION_POINTS` **同源同序**，
@@ -309,6 +310,7 @@ export const GATE_INSERTION_POINTS: readonly GateInsertionPoint[] = [
   'completion',
   'delivery',
   'runtime',
+  'collection',
 ]
 
 /**
