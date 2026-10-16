@@ -47,6 +47,8 @@ import type { GatePoint } from '../../gates/index.ts'
 import { installMemberSelectionRuntime, resolveMemberLlmSelection, validateMemberLlmSelections } from '../../members.ts'
 import { resolveTeamProfile } from '../../profiles.ts'
 import { createTeamDir } from '../../state.ts'
+import { sessionLeadsTeam, type LiveSessionRef } from '../../lineage.ts'
+import { identityOfTeam } from '../../members.ts'
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts'
 import { inScopeOverlap, isQualityKind, planQualityFollowUp, WRITE_KINDS } from '../../quality-gates.ts'
 import { auditRequires } from '../../gates/requires.ts'
@@ -1153,8 +1155,22 @@ export async function requireParticipantTeam(workspace: string, config: ToolsCon
 export type ParticipantIdentity =
   | { kind: 'captain'; name: typeof CAPTAIN_KEY }
   | { kind: 'member'; name: string }
-export function participantIdentityOf(team: TeamState, agentId: string): ParticipantIdentity | undefined {
-  if (team.captainSessionId === agentId) return { kind: 'captain', name: CAPTAIN_KEY }
+export function participantIdentityOf(
+  team: TeamState,
+  agentId: string,
+  /**
+   * ★★★ #176（乙）：活会话清单（t98）。**缺席 ⇒ 退回精确相等**（与今天同结论）。
+   * ★ 做成**可选**：它有三个调用方，而那些调用点的上下文各不相同 ——
+   *   做成必填会逼拿不到 `ctx` 的路径编一个空清单（那是"假装测过"）。
+   */
+  liveSessions?: readonly LiveSessionRef[],
+): ParticipantIdentity | undefined {
+  /**
+   * ── ★★★ #176（乙）：lead 身份收口（t98）───────────────────────────────────────
+   * ★ 它答"这个会话在这个队里算什么" —— 若 fork 出来的队长在这里落到
+   *   `undefined`，那么它**什么都不是**（比"成员"更坏：读的人会以为它不在这个队里）。
+   */
+  if (sessionLeadsTeam(agentId, identityOfTeam(team), liveSessions ?? [])) return { kind: 'captain', name: CAPTAIN_KEY }
   const member = team.members.find((candidate) => candidate.id === agentId && candidate.status !== 'removed')
   return member === undefined ? undefined : { kind: 'member', name: member.name }
 }

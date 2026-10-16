@@ -15,6 +15,7 @@ import { type FlywheelVerdict, type UsageTally } from '../../confidence.ts';
 import type { GateEvaluation } from '../../gates/registry.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
+import { type LiveSessionRef } from '../../lineage.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
 import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '../../types.ts';
 import type { StallObservation } from '../../types.ts';
@@ -401,7 +402,13 @@ export type ParticipantIdentity = {
     kind: 'member';
     name: string;
 };
-export declare function participantIdentityOf(team: TeamState, agentId: string): ParticipantIdentity | undefined;
+export declare function participantIdentityOf(team: TeamState, agentId: string, 
+/**
+ * ★★★ #176（乙）：活会话清单（t98）。**缺席 ⇒ 退回精确相等**（与今天同结论）。
+ * ★ 做成**可选**：它有三个调用方，而那些调用点的上下文各不相同 ——
+ *   做成必填会逼拿不到 `ctx` 的路径编一个空清单（那是"假装测过"）。
+ */
+liveSessions?: readonly LiveSessionRef[]): ParticipantIdentity | undefined;
 export declare function requireFreshTeam(stateRoot: string, teamId: string): Promise<TeamState>;
 export declare function requireFreshCaptainTeam(stateRoot: string, teamId: string, captainId: string): Promise<TeamState>;
 export declare function requireFreshParticipant(stateRoot: string, teamId: string, callerId: string): Promise<{

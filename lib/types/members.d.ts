@@ -15,6 +15,11 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type Agent } from '@deepseek-ai/dsh-agent';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { type TeamMember, type TeamState, type TeamTask } from './types.ts';
+/**
+ * ── ★★★ #176（乙）：lead 身份收口（t98）───────────────────────────────────────────
+ * ★ 本模块**不再**自己写 `captainSessionId === <id>`。
+ */
+import { type LiveSessionRef, type TeamIdentity } from './lineage.ts';
 /** Persona snapshot of a profile protocol; the full text lives on team.json. */
 export declare const PERSONA_PROTOCOL_MAX_CHARS = 400;
 /** Runtime knobs for member spawning, resolved from plugin config. */
@@ -580,6 +585,19 @@ export declare const AGENT_ENUMERATION_UNAVAILABLE = "the host exposes no live-s
 export declare function liveSessionRefs(ctx: Context): SubagentProjection;
 /** 一个已被枚举的会话的父会话 id（顶层会话缺席）。 */
 export declare function parentSessionOf(entry: unknown): string | undefined;
+/**
+ * ── ★★★ #176（乙）：把 `ctx` 的活会话清单折成 `lineage` 要的形状（t98）───────────────
+ *
+ * ★ 它是**唯一**碰 `ctx.agents` 的地方（经 `liveSessionRefs`），而那个函数只**读**。
+ * ★★ 拿不到枚举入口时返回 **`[]`** —— 而不是抛：那会让"枚举不可用"变成
+ *   **每个调用点的崩溃**。★ 返回 `[]` ⇒ 链走不动 ⇒ `sessionLeadsTeam` 落到
+ *   `unmeasured` ⇒ 按 `'exact'` 策略**退回今天的行为**（精确相等）。
+ *   ⇒ ★ 即"枚举不可用"与今天**同结论**，而那是**对的**：本任务只加一条路，
+ *     不该让"枚举坏了"改变任何既有裁决。
+ */
+export declare function liveRefsOf(ctx: Context): readonly LiveSessionRef[];
+/** 把一个 team 记录折成本模块要的那两格身份面（**只读**；口径与 `state.ts` 的同名助手一致）。 */
+export declare function identityOfTeam(team: TeamState): TeamIdentity;
 /**
  * 把一份活会话清单**按父会话**归组，然后交给每个成员。
  *

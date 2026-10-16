@@ -151,6 +151,8 @@ import { steerCaptainReport } from '../tools.ts'
 import { CommandResult, ReviewVerdict } from '../types.ts'
 import { AgentTeamsRuntime, applyQualityFollowUp, parseAcceptanceResults, parseCommandResults, parseFindings } from './shared/entities.ts'
 import type { Context } from '@deepseek-ai/cordis'
+import { sessionLeadsTeam } from '../lineage.ts'
+import { identityOfTeam, liveRefsOf } from '../members.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { pathToFileURL } from 'node:url'
 
@@ -2152,7 +2154,12 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             )
           }
         }
-        await scheduler.kickTeam(workspace, team.id, team.captainSessionId === caller.id ? caller : undefined)
+        /**
+         * ── ★★★ #176（乙）：队长那一半走活的 fork 链（t98）─────────────────────────
+         * ★ 这里决定那次 kick 带不带 `caller` 作为队长 —— 认不出来 ⇒ 传 `undefined`
+         *   ⇒ 那条 kick 会以**另一个身份**发出去（或干脆不派）。
+         */
+        await scheduler.kickTeam(workspace, team.id, sessionLeadsTeam(caller.id, identityOfTeam(team), liveRefsOf(ctx)) ? caller : undefined)
         return updated
       },
     })))
