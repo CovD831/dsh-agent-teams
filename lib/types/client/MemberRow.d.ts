@@ -99,6 +99,44 @@ export declare function memberGateBand(readout: MemberGateReadout | undefined, t
     readonly text: string;
 };
 /**
+ * ── ★★★ t80 缺陷②：把"**本轮真跑了的**"与"**没有落盘读数的**"分开 ────────────────
+ *
+ * ── 根因（MEASURED，用户截图：「展开详情之后会很杂乱」）──────────────────────────
+ *
+ * MEASURED（从 team.json 读 t79）：`gateEvaluation.ran` **只有 4 条**，全在
+ * `completion` 段；而 UI 展开态把 `registry.list()` 的**全部 17 条**都列了出来
+ * ⇒ 其余 **13 条**没有裁决 ⇒ 逐条都是 `registered`（○）。
+ *
+ * ⇒ ★★ 于是展开态把**两件不同的事**并列了：
+ *
+ *     "注册表里有哪些判据"    ← 17 条（一份**清单**）
+ *     "这次实际跑了哪些判据"  ←  4 条（一个**事实**）
+ *
+ * ⇒ 13 个 ○ 淹没 4 条真实裁决 ⇒ **看起来像"什么都没跑"**。
+ *
+ * ★★★ 而"看起来什么都没跑"是**误导**：它**不是没跑**，是**其余段的结果不落盘**
+ *   —— 那是甲方案的已知边界（只有 `completion` 段写 `task.gateEvaluation`）。
+ *
+ * ⇒ 所以切成两块，且**两块的措辞必须不同形**：
+ *   · `ran`    —— 这一轮**真的**有裁决（`hasVerdicts`），逐条列出；
+ *   · `silent` —— **没有落盘读数**，折叠成一行计数（**不是**"没跑"）。
+ *
+ * ★ 空段（`rows.length === 0`）**两块都不进** —— `admission 0 条` 不显示。
+ *   而"不显示"与"显示 0 条"必须不同形：后者会让人以为那个位置**该有**判据却没有。
+ *
+ * ★ `hasVerdicts` 才是"有没有裁决"的**唯一**判据 —— 不是 `rows.some(r => r.state === 'passed')`：
+ *   一个"跑了 4 条、全部 unmeasured"的段**有裁决**（只是结论不好看），
+ *   按状态去推会把它错读成"没有读数"（实测变异体 M7 钉住这一点）。
+ * @param groups - every stage group derived for this row.
+ * @returns the two blocks, each in flow order.
+ */
+export declare function splitStageGroups(groups: readonly StageGroupView[]): {
+    readonly ran: readonly StageGroupView[];
+    readonly silent: readonly StageGroupView[];
+};
+/** Total criteria across one block of stage groups. */
+export declare function stageGroupCount(groups: readonly StageGroupView[]): number;
+/**
  * ── ★★★ v4：一根判据的**全部阶段分组**（展开态画的就是这个）────────────────────
  *
  * 规格 §5：按**阶段**分组，每段给整段形状 + 逐条 `id` + `description`。

@@ -197,6 +197,55 @@ export function memberGateBand(
   }
 }
 
+
+/**
+ * ── ★★★ t80 缺陷②：把"**本轮真跑了的**"与"**没有落盘读数的**"分开 ────────────────
+ *
+ * ── 根因（MEASURED，用户截图：「展开详情之后会很杂乱」）──────────────────────────
+ *
+ * MEASURED（从 team.json 读 t79）：`gateEvaluation.ran` **只有 4 条**，全在
+ * `completion` 段；而 UI 展开态把 `registry.list()` 的**全部 17 条**都列了出来
+ * ⇒ 其余 **13 条**没有裁决 ⇒ 逐条都是 `registered`（○）。
+ *
+ * ⇒ ★★ 于是展开态把**两件不同的事**并列了：
+ *
+ *     "注册表里有哪些判据"    ← 17 条（一份**清单**）
+ *     "这次实际跑了哪些判据"  ←  4 条（一个**事实**）
+ *
+ * ⇒ 13 个 ○ 淹没 4 条真实裁决 ⇒ **看起来像"什么都没跑"**。
+ *
+ * ★★★ 而"看起来什么都没跑"是**误导**：它**不是没跑**，是**其余段的结果不落盘**
+ *   —— 那是甲方案的已知边界（只有 `completion` 段写 `task.gateEvaluation`）。
+ *
+ * ⇒ 所以切成两块，且**两块的措辞必须不同形**：
+ *   · `ran`    —— 这一轮**真的**有裁决（`hasVerdicts`），逐条列出；
+ *   · `silent` —— **没有落盘读数**，折叠成一行计数（**不是**"没跑"）。
+ *
+ * ★ 空段（`rows.length === 0`）**两块都不进** —— `admission 0 条` 不显示。
+ *   而"不显示"与"显示 0 条"必须不同形：后者会让人以为那个位置**该有**判据却没有。
+ *
+ * ★ `hasVerdicts` 才是"有没有裁决"的**唯一**判据 —— 不是 `rows.some(r => r.state === 'passed')`：
+ *   一个"跑了 4 条、全部 unmeasured"的段**有裁决**（只是结论不好看），
+ *   按状态去推会把它错读成"没有读数"（实测变异体 M7 钉住这一点）。
+ * @param groups - every stage group derived for this row.
+ * @returns the two blocks, each in flow order.
+ */
+export function splitStageGroups(groups: readonly StageGroupView[]): {
+  readonly ran: readonly StageGroupView[]
+  readonly silent: readonly StageGroupView[]
+} {
+  const nonEmpty = groups.filter((group) => group.rows.length > 0)
+  return {
+    ran: nonEmpty.filter((group) => group.hasVerdicts),
+    silent: nonEmpty.filter((group) => !group.hasVerdicts),
+  }
+}
+
+/** Total criteria across one block of stage groups. */
+export function stageGroupCount(groups: readonly StageGroupView[]): number {
+  return groups.reduce((total, group) => total + group.rows.length, 0)
+}
+
 /**
  * ── ★★★ v4：一根判据的**全部阶段分组**（展开态画的就是这个）────────────────────
  *
@@ -521,7 +570,41 @@ export function MemberRow({
   const groups = stageGroups(stage, catalog, current?.gateEvaluation)
   const stageGroup = stage === undefined ? undefined : groups.find((group) => group.stage === stage)
   const testLabel = stageGroup === undefined ? '' : testLabelOf(stageGroup)
-  const line2 = doingLineCandidates(round?.round, stage, testLabel)
+  /**
+   * ★★★ t80 缺陷①：轮次**在这里、且只在这里**渲染一次。
+   *
+   * ★ 经 `t('member.round.mark')` 而不是硬编码「第 N 轮」两步好处：
+   *   · 这个词条仍是轮次的**唯一**出处（臂 25b 逐字钉住它出现在**本行**里）；
+   *   · 缺席（没有带轮次的任务）⇒ `''` ⇒ **整段不出现**，而不是印"第 0 轮"
+   *     （"没有轮次概念"与"第 0 轮"必须不同形）。
+   */
+  const roundLabel = round === undefined ? '' : t('member.round.mark', { round: round.round })
+  /**
+   * ★★ `doingLineCandidates` 内部硬编码了 `第 N 轮`（它在 `activity-model.ts` 里，
+   *   **不在本任务写域**）⇒ 这里把那一小段**替换**为词条渲染的结果。
+   *   MEASURED：不替换的话臂 25b 会红 —— 它逐字断言 `member.round.mark:2`
+   *   出现在**本行**的渲染结果里，而硬编码那串**绕开了词条**。
+   * ★ 只在行首匹配（`startsWith`），不会误伤任务名里恰好含同样字样的情形。
+   */
+  /**
+   * ★★ 替换的是候选**首段**（第一个 ` · ` 之前那段）—— 而不是 `startsWith('第 N 轮')`：
+   *   词条渲染出来的是 `t('member.round.mark', …)` 的结果，它在真实 locale 下正好是
+   *   「第 N 轮」，但在**夹具的 t 桩**下是 `member.round.mark:2` ⇒ 按字面 startsWith 匹配
+   *   会**匹配不上、静默不替换**（而"没替换"与"替换了"在屏幕上同形 —— 正是本仓纪律
+   *   要挡的那种）。⇒ 按**位置**（首段）替换，与文案无关。
+   */
+  const line2 = roundLabel === ''
+    ? doingLineCandidates(round?.round, stage, testLabel)
+    : doingLineCandidates(round?.round, stage, testLabel).map((candidate) => {
+      const separator = candidate.indexOf(' · ')
+      return separator === -1 ? roundLabel : `${roundLabel}${candidate.slice(separator)}`
+    })
+  /**
+   * ★★★ t80 缺陷②：把分组切成「本轮真跑了的」与「没有落盘读数的」两块。
+   *   ★ 读数在**渲染期之外**算（纯函数）⇒ 两块的分辨力可以被独立检验，
+   *     而不是藏在一个组件的分支里。
+   */
+  const split = splitStageGroups(groups)
   const toggle = useCallback(() => { onToggle(key) }, [key, onToggle])
 
   return (
@@ -616,9 +699,53 @@ export function MemberRow({
             * ★ 三段**按优先级组装**，`data-line2-level` 如实标出用的是第几档候选
             *   （0 = 最全）—— 于是"截断了没有、截掉了哪一段"是**可读的**，
             *   而不是要靠量宽度才知道。
+            *
+            * ── ★★★ t80 缺陷①：**这一行现在是"第 N 轮"的唯一出处** ─────────────────
+            *
+            * MEASURED（用户截图）：「第几轮是重复的，有两个」—— 改前**两块**都印轮次：
+            *   · 本行（`memberStageLine`）印 `第 N 轮 · 阶段 · 测试`
+            *   · 下面那个 `memberRoundLine` 又印一次 `第 N 轮` + 「本轮已完成」
+            * ⇒ 同一个事实印两遍。
+            *
+            * ★ 修法不是删掉旧块（它**不是纯冗余**：含可点的任务 id 按钮），
+            *   而是**把按钮并进来**、把旧块里**重复的那两句**删掉。
+            *   于是：轮次说**一次**，任务 id 仍然可点 —— 一个事实一个出处。
             */}
           <span className={css.memberStageLine} data-line2={line2[0]} data-line2-level={0}>
             {line2[0]}
+            {/**
+              * ★★ 任务 id 按钮：从旧 `memberRoundLine` **并入**这里。
+              *   点它 ⇒ `onSelectTask(id)`（跳到那条任务）—— 这个功能不许随重复文字一起消失。
+              */}
+            {round !== undefined && round.tasks.length > 0 && (
+              <span
+                className={css.memberStageTasks}
+                /**
+                 * ★★ `data-member-round` 与 `data-tone` 两个探针**原样保留**（臂 27 依赖）：
+                 *   它们原来长在 `memberRoundLine` 那个 `<div>` 上，现在长在这里 ——
+                 *   位置变了，事实与探针名都没变。
+                 */
+                data-member-round={round.round}
+                data-tone={discarded ? 'cancelled' : round.tone}
+              >
+                {round.tasks.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    className={css.memberRoundTask}
+                    data-tone={discarded ? 'cancelled' : task.round === undefined ? 'open' : round.tone}
+                    onClick={(event) => {
+                      /** ★ 这一行整体是个展开/收起的 `<button>` ⇒ 必须拦住冒泡，否则点任务会顺带折叠。 */
+                      event.stopPropagation()
+                      onSelectTask?.(task.id)
+                    }}
+                    title={`${task.id}`}
+                  >
+                    {task.id}
+                  </button>
+                ))}
+              </span>
+            )}
           </span>
         </span>
       </button>
@@ -637,33 +764,17 @@ export function MemberRow({
       )}
 
       {/**
-        * ── ★★★ 轮次：**行内**，就在这一行上（用户原话：round data moves UP）───────
+        * ── ★★★ t80 缺陷①：**旧轮次块已被删除**（用户截图：「第几轮是重复的，有两个」）──
         *
-        * ★ 缺席（这个成员名下没有带轮次的任务）⇒ **整块不渲染**，
-        *   而不是印一个"第 0 轮" —— "没有轮次概念"与"第 0 轮"必须不同形。
+        * 它原来在这里印 `第 N 轮` + 「本轮已完成」+ 任务 id 按钮，而"第 N 轮"与
+        * 上面第 2 行**逐字重复** ⇒ 同一个事实两个出处。用户看出来了。
+        *
+        * ★ 而它不是**纯**冗余：任务 id 按钮（可点、跳任务）与两个探针
+        *   （`data-member-round` / `data-tone`，臂 27 依赖）都从它来 ——
+        *   所以修法是**把它们并进第 2 行**，而不是"看到重复就删掉整块"。
+        *
+        * ★ 净效果：轮次说**一次**，任务 id 仍可点，两个探针仍在。
         */}
-      {round !== undefined && (
-        <div className={css.memberRoundLine} data-member-round={round.round} data-tone={discarded ? 'cancelled' : round.tone}>
-          <span className={css.memberRoundMark}>{t('member.round.mark', { round: round.round })}</span>
-          <span className={css.memberRoundTone}>
-            {discarded ? t('task.status.notRun') : t(ROUND_TONE_LABEL[round.tone])}
-          </span>
-          <span className={css.memberRoundTasks}>
-            {round.tasks.map((task) => (
-              <button
-                key={task.id}
-                type="button"
-                className={css.memberRoundTask}
-                data-tone={discarded ? 'cancelled' : task.round === undefined ? 'open' : round.tone}
-                onClick={() => { onSelectTask?.(task.id) }}
-                title={`${task.id}`}
-              >
-                {task.id}
-              </button>
-            ))}
-          </span>
-        </div>
-      )}
 
       {expanded && (
         <div className={css.memberSubagents} data-member-subagents={key}>
@@ -683,83 +794,109 @@ export function MemberRow({
             * 所以这一段**不硬编码任何判据名**：分组的骨架来自转发过来的 `gateCatalog`，
             * 逐条的 `id` + `description` 直接印出来 ⇒ 换掉一条判据，界面自动变。
             *
-            * ★★★ 两条反向半边就落在这里：
-            *   · **A** —— 目录缺席（老快照）⇒ 报"读不到清单"，**一个 ✓ 都不印**
-            *     （因为逐条根本没有读数，而不是"读了、干净"）；
-            *   · **B** —— `completion` 段 `skippedAll` 在场 ⇒ 整段 ⊘，**绝不是 ✓**
-            *     （`c4cbeaf` 修过的那个缺陷在 UI 上的形态）。
+            * ── ★★★ t80 缺陷②：**两块，不是一个平铺列表**（用户：「展开详情之后会很杂乱」）
             *
-            * ★ 甲方案的边界：只有 `completion` 段有落盘裁决 ⇒ 其余段逐条只能是
-            *   ○ / ·，且段头**如实写**"无逐条裁决（结果不落盘）"，不假装有。
+            * MEASURED：`gateEvaluation.ran` 只有 **4 条**（全在 completion 段），
+            * 而改前把 `registry.list()` 的**全部 17 条**平铺出来 ⇒ 其余 13 条是 ○
+            * ⇒ 13 个 ○ 淹没 4 条真实裁决 ⇒ **看起来像"什么都没跑"**。
+            *
+            * ★★ 而那是**误导**：其余段**不是没跑，是结果不落盘**（甲方案边界）。
+            * ⇒ 拆成两块，且**两块的措辞不同形**：
+            *   · 上块 `ran`    —— 「本轮跑了 N 条判据」，逐条列；
+            *   · 下块 `silent` —— 「其余 N 条在别的段 —— **本轮没有落盘读数**」，
+            *     折叠成**一行**计数（★ 不许逐条列 13 个 ○）。
+            *
+            * ★★★ 两条反向半边仍然落在这里：
+            *   · **A** —— 目录缺席 ⇒ 报"读不到清单"，**一个 ✓ 都不印**；
+            *   · **B** —— `skippedAll` 在场 ⇒ ⊘（且与 ○ **不同色**），**绝不是 ✓**。
             */}
           {catalog.length === 0 ? (
             <span className={css.memberGateNote} data-member-gates={key} data-member-gates-readout="no-catalog">
               {t('member.gates.noCatalog')}
             </span>
           ) : (
-            <ul className={css.memberGateList} data-member-gates={key}>
-              {groups.map((group) => (
-                <li
-                  key={group.stage}
-                  className={css.memberStageGroup}
-                  data-member-stage={group.stage}
-                  /**
-                   * ★★ 三个**旧探针**在这里以别名保留（臂 27 逐条比对 `data-*`）：
-                   *   `data-member-gate` / `-state` / `-readout` 原来长在那个
-                   *   "一句话裁决"的 band 上，而 band 被 v4 的**阶段分组**取代。
-                   *   ⇒ 事实没丢（段的形状还在），只是换了一层承载 ——
-                   *     所以这里如实给出同名探针，而不是让它们**无声消失**。
-                   */
-                  data-member-gate={key}
-                  data-member-gate-state={group.state}
-                  data-member-gate-readout={group.hasVerdicts ? 'verdict' : 'registered'}
-                  data-member-stage-state={group.state}
-                  data-stage-state={group.state}
-                  data-stage-has-verdicts={group.hasVerdicts ? 'true' : 'false'}
-                >
-                  <span className={css.memberStageHead}>
-                    <span className={css.memberStageMark} data-stage-mark={group.state}>{GATE_GLYPH[group.state]}</span>
-                    <span className={css.memberStageName}>{group.stage}</span>
-                    <span className={css.memberStageCount}>
-                      {group.hasVerdicts
-                        ? t('member.gates.count', { count: String(group.rows.length) })
-                        : t('member.gates.noVerdicts', { count: String(group.rows.length) })}
+            /**
+              * ★ 空段（`rows.length === 0`）**两块都不进** ⇒ `admission 0 条` 不显示
+              *   （规格硬约束 4）。而"不显示"与"显示 0 条"不同形 —— 后者会让人以为
+              *   那个位置该有判据却没有。
+              */
+            <div className={css.memberStageBlocks} data-member-gates={key}>
+              {/* ── 上块：本轮**真的**跑了的 ─────────────────────────────────── */}
+              {split.ran.length > 0 && (
+                <ul className={css.memberGateList} data-gate-block="ran">
+                  <li className={css.memberStageSummary} data-gate-block-summary="ran">
+                    <span className={css.memberStageMark} data-stage-mark="passed">✓</span>
+                    <span className={css.memberStageSummaryText}>
+                      {t('member.gates.ranSummary', {
+                        count: String(stageGroupCount(split.ran)),
+                        stages: split.ran.map((group) => group.stage).join('、'),
+                      })}
                     </span>
-                  </span>
-                  {/**
-                    * ★ 逐条列出 **id + description**（规格 §5：四条以上的段逐条列出）。
-                    *   每条自带 `data-gate-state`（六态之一）与它自己的符号 ——
-                    *   "通过了 / 没跑 / 跳过了"三者在 DOM 上就是三个不同的值。
-                    */}
-                  {group.rows.length > 0 && (
-                    <ul className={css.memberStageRows}>
-                      {group.rows.map((row) => (
-                        <li
-                          key={row.id}
-                          className={css.memberStageRow}
-                          data-gate-id={row.id}
-                          data-gate-state={row.state}
-                          data-gate-observing={row.observing ? 'true' : 'false'}
-                          /**
-                           * ★★ 旧探针 `data-verdict` / `data-observed` 的别名：
-                           *   逐条裁决原来印在 `memberGateEntry` 那一族上；v4 换了
-                           *   承载（`data-gate-state`），但**事实是同一件**。
-                           *   `data-observed` 只在"观察模式放过"时为 'true' 在场 ——
-                           *   与旧处同一缺席语义（不是 false，是**不在**）。
-                           */
-                          data-verdict={row.state === 'passed' ? 'ok' : row.state === 'skipped' ? 'skipped' : row.state === 'observed' ? 'blocked' : undefined}
-                          data-observed={row.state === 'observed' ? 'true' : undefined}
-                        >
-                          <span className={css.memberStageRowMark} data-gate-mark={row.state}>{rowGlyph(row)}</span>
-                          <span className={css.memberStageRowId} title={row.id}>{row.id}</span>
-                          <span className={css.memberStageRowDesc}>{row.description}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-            </ul>
+                  </li>
+                  {split.ran.map((group) => (
+                    <li
+                      key={group.stage}
+                      className={css.memberStageGroup}
+                      data-member-stage={group.stage}
+                      /**
+                       * ★★ 三个**旧探针**在这里以别名保留（臂 27 逐条比对 `data-*`）：
+                       *   `data-member-gate` / `-state` / `-readout` 原来长在那个
+                       *   "一句话裁决"的 band 上，而 band 被 v4 的**阶段分组**取代。
+                       *   ⇒ 事实没丢（段的形状还在），只是换了一层承载 ——
+                       *     所以这里如实给出同名探针，而不是让它们**无声消失**。
+                       */
+                      data-member-gate={key}
+                      data-member-gate-state={group.state}
+                      data-member-gate-readout={group.hasVerdicts ? 'verdict' : 'registered'}
+                      data-member-stage-state={group.state}
+                      data-stage-state={group.state}
+                      data-stage-has-verdicts={group.hasVerdicts ? 'true' : 'false'}
+                    >
+                      <span className={css.memberStageHead}>
+                        <span className={css.memberStageMark} data-stage-mark={group.state}>{GATE_GLYPH[group.state]}</span>
+                        <span className={css.memberStageName}>{group.stage}</span>
+                        <span className={css.memberStageCount}>
+                          {t('member.gates.count', { count: String(group.rows.length) })}
+                        </span>
+                      </span>
+                      <StageRows rows={group.rows} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {/* ── 下块：**没有落盘读数**（★ 不是"没跑"）─────────────────────── */}
+              {split.silent.length > 0 && (
+                <ul
+                  className={css.memberGateList}
+                  data-gate-block="silent"
+                  /**
+                   * ★★ 这一格的 `data-*` 名就是**判据**：它说"这里没有落盘读数"，
+                   *   而不是"这些判据没跑"。两者在报告里必须不同形。
+                   */
+                  data-gate-readout-absent={String(stageGroupCount(split.silent))}
+                >
+                  <li className={css.memberStageSummary} data-gate-block-summary="silent">
+                    <span className={css.memberStageMark} data-stage-mark="registered">○</span>
+                    <span className={css.memberStageSummaryText}>
+                      {t('member.gates.silentSummary', { count: String(stageGroupCount(split.silent)) })}
+                    </span>
+                    {/**
+                      * ★★ 逐段给一行计数，**用 `member.gates.noVerdicts`** ——
+                      *   它逐字说的就是"结果不落盘"，正是这一块的语义。
+                      *   ★ 这样那个词条**仍然有人用**：一个被 v4 换掉用法的词条若只是
+                      *     留在词典里没人引用，它就是新的死文案（本仓记账最久的形态之一）。
+                      *   ★★ 而"逐段一行"**不是**"逐条列 ○" —— 规格硬约束 1 禁的是后者。
+                      */}
+                    <span className={css.memberStageSummaryDetail}>
+                      {split.silent
+                        .map((group) => `${group.stage} ${t('member.gates.noVerdicts', { count: String(group.rows.length) })}`)
+                        .join(' · ')}
+                    </span>
+                  </li>
+                </ul>
+              )}
+            </div>
           )}
           {/**
             * ★★★ 三态：`observed` + 空 ⇒ "**读了**，真的没有"；
@@ -819,3 +956,41 @@ export function MemberRow({
 
 /** Exported for the panel: the session id a member's transcript lives under. */
 export type MemberSessionId = SessionId
+
+/**
+ * ── ★★★ t80：一个阶段里**逐条**判据的列表 ──────────────────────────────────────
+ *
+ * ★ 抽成组件而不是内联，理由与 `StageRows` 这个名字同一件：**两块（ran / silent）
+ *   共用同一套逐条渲染**时，抽出来才能保证"跑了的"与"没读数的"**不会各写一份**
+ *   —— 而两份一定会漂移（本仓判据：「第二份实现一定会漂移」）。
+ *
+ * ★ 每条自带 `data-gate-state`（六态之一）与它自己的符号 ⇒
+ *   "通过了 / 没跑 / 跳过了"三者在 DOM 上就是三个不同的值。
+ * ★★ 旧探针 `data-verdict` / `data-observed` 以**别名**保留在这里（臂 27 逐条比对
+ *   `data-*`）：逐条裁决原来印在 `memberGateEntry` 那一族上，v4 换了承载
+ *   （`data-gate-state`），但**事实是同一件**。`data-observed` 只在"观察模式放过"
+ *   时为 `'true'` 在场 —— 与旧处同一缺席语义（**不是 false，是不在**）。
+ * @param rows - the criteria to draw, in registration order.
+ */
+function StageRows({ rows }: { readonly rows: readonly GateRowView[] }): JSX.Element {
+  if (rows.length === 0) return <></>
+  return (
+    <ul className={css.memberStageRows}>
+      {rows.map((row) => (
+        <li
+          key={row.id}
+          className={css.memberStageRow}
+          data-gate-id={row.id}
+          data-gate-state={row.state}
+          data-gate-observing={row.observing ? 'true' : 'false'}
+          data-verdict={row.state === 'passed' ? 'ok' : row.state === 'skipped' ? 'skipped' : row.state === 'observed' ? 'blocked' : undefined}
+          data-observed={row.state === 'observed' ? 'true' : undefined}
+        >
+          <span className={css.memberStageRowMark} data-gate-mark={row.state}>{rowGlyph(row)}</span>
+          <span className={css.memberStageRowId} title={row.id}>{row.id}</span>
+          <span className={css.memberStageRowDesc}>{row.description}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}

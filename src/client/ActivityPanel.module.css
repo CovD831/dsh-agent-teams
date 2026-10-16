@@ -2773,7 +2773,14 @@
 .memberStageRow[data-gate-state='observed'] .memberStageRowMark { color: var(--dsw-alias-state-error-primary); }
 .memberStageRow[data-gate-state='running'] .memberStageRowMark { color: var(--dsw-alias-state-business-primary); }
 .memberStageRow[data-gate-state='skipped'] .memberStageRowMark { color: var(--dsw-alias-label-tertiary); }
-.memberStageRow[data-gate-state='registered'] .memberStageRowMark { color: var(--dsw-alias-label-tertiary); }
+/**
+ * ★★ 队长（2026-10-16）：`registered` 的规则**只有一处** —— 见下方 v4 那一节。
+ *   此前这里还有一条 `registered → label-tertiary`，与 `skipped` 同色；
+ *   t80 在文件**末尾**又加了一条 `registered → border-l3`，靠 CSS「后者胜出」生效。
+ *   ⇒ ★ 那是**靠顺序生效**：谁把末尾那条移到前面，○ 就静默变回与 ⊘ 同色。
+ *   而"同色"与"不同色"在截图里都是两个灰符号 —— 正是本仓反复栽的形态。
+ *   ⇒ 删掉这条死规则，让 `registered` 的颜色**只有一处可读**。
+ */
 .memberStageRow[data-gate-state='pending'] .memberStageRowMark { color: var(--dsw-alias-border-l3); }
 
 /* ★ 观察中的判据：段头/逐条都带一个可读标记（不是只靠颜色）。 */
@@ -2793,4 +2800,92 @@
   border-radius: 50%;
   background: var(--dsw-alias-state-business-primary);
   align-self: center;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t80：六态**两两不同色**，尤其是 ○(registered) 与 ⊘(skipped) ────────────
+ *
+ * MEASURED（队长实测 `ActivityPanel.module.css:2775-2776`）：改前两者**同为**
+ * `var(--dsw-alias-label-tertiary)` ⇒ 在屏幕上同一个灰 ⇒
+ * 「**注册了但本轮没跑**」与「**跳过了**」分不出来 —— 而这两件事的处置**相反**：
+ *   · `registered`（○）—— 这一格**没有读数**（甲方案边界：结果不落盘）；
+ *   · `skipped`（⊘）—— 判据**跑了、按设计闭嘴**（`appliesTo` 把它挡在门外）。
+ * ⇒ ★ 本仓纪律：**不同的事实不许同形**；而"同色"就是同形的一种。
+ *
+ * ★ 修法：`registered` 用**更暗的边框色**（`--dsw-alias-border-l3`，它本来就是
+ *   `pending` · 用的那一族，即"还没有东西"），`skipped` 保持 `label-tertiary`
+ *   （它是**有结论**的：跑了、跳过了）。于是三者在色上也分开了：
+ *     ✓ 绿（通过） · ⊘ 三级灰（跳过，有结论） · ○ 边框灰（没读数） · · 更暗（未开始）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberStageRow[data-gate-state='registered'] .memberStageRowMark { color: var(--dsw-alias-border-l3); }
+.memberStageHead[data-stage-state='registered'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+
+/* ★ 未读数的整块用同一个"没有东西"的色系 —— 与"跑了但有结论"的块分开。 */
+.memberStageSummary[data-gate-block-summary='silent'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+.memberStageSummary[data-gate-block-summary='ran'] .memberStageMark { color: var(--dsw-alias-state-success-primary); }
+
+/* ── 两块（ran / silent）与它们的摘要行 ─────────────────────────────────────── */
+
+.memberStageBlocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memberStageSummary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.memberStageSummaryText {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ★ "其余 N 条在别的段" 那一段的明细：★ 换行显示，因为它是【一行人看】的清单。 */
+.memberStageSummaryDetail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ★ 任务 id 按钮并进第 2 行之后的位置：跟在文字后面，不抢溢出。 */
+.memberStageTasks {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-left: 6px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t80 缺陷③：队长头像去掉之后，**网格的头像列也要去掉** ──────────────────
+ *
+ * ★ 只删 DOM 不删列 = 左边留一条 48px 的空槽。那比"有头像"更糟：
+ *   它看起来像"图没加载出来"，是另一种误导（而本仓纪律：去掉一件东西要
+ *   连它的**占位**一起去掉，否则读的人看到的是一个新的、没有名字的缺口）。
+ * ★ 两处都改：宽侧边栏的 3 列 → 2 列，窄态本来就 2 列 → 1 列。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.captainNode {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+@media (max-width: 640px) {
+  .captainNode {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

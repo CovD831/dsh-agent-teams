@@ -12,7 +12,10 @@
  * @module dsh-agent-teams/client/captain-node
  */
 
-import { LEAD_ART } from './artwork.ts'
+/**
+ * ★ t80：`LEAD_ART` 的 import 已删 —— 本组件不再显示队长头像。
+ *   ★ **资源仍在** `artwork.ts` 里（`verify.mjs:311` 的打包契约钉着它）。
+ */
 import { WorkGlyph } from './DependencyGraph.tsx'
 import type { AgentTeamsTranslate } from './locales.ts'
 import css from './ActivityPanel.module.css'
@@ -40,16 +43,24 @@ export type CaptainNodeProps = {
  *
  * ★ 文案的分支顺序**原样保留**：discarded > captainBusy > staged > 默认。
  *   重排它会让两张不同的读数在某些输入上换位 —— 而那正是"搬动改了行为"。
+ * ★ t80：头像那一格已按用户裁定去掉（见返回体里的注释）；其余逐行未动。
  */
 export function CaptainNode({
   discarded, captainBusy, busyCount, allCompleted, allSettled, staged, awaitingFeedback,
   assignedCount, captainTaskIds, taskCount, memberCount, t,
-}: CaptainNodeProps) {
+}: CaptainNodeProps): JSX.Element {
   return (
     <div className={css.captainNode}>
-      <span className={css.captainAvatar}>
-        <img className={css.leadAvatar} src={LEAD_ART} alt="" aria-hidden />
-      </span>
+      {/**
+        * ── ★★★ t80 缺陷③：队长头像**不再显示**（用户截图：「队长的图标还在」）────────
+        *
+        * ★ 删的是**显示**，不是**资源**：`artwork.ts` 的 `LEAD_ART` 原样保留 ——
+        *   `team-lead-v2.png` 在 `scripts/verify.mjs:311` 的打包契约清单里，
+        *   删图会红一条 **host 侧**契约（不在本任务写域）。
+        * ★ 连 `css.captainAvatar` 那个空壳一起去掉：留一个空的定位容器会让网格的
+        *   "头像列"仍然占位 —— 那看起来像"图没加载出来"，是另一种误导。
+        *   列宽由 CSS 侧把 `grid-template-columns` 的头像列去掉来收。
+        */}
       <span className={css.captainInfo}>
         <span className={css.captainLine}>
           <span className={css.captainName}>{t('captain.name')}</span>

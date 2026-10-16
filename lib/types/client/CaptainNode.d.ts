@@ -34,5 +34,6 @@ export type CaptainNodeProps = {
  *
  * ★ 文案的分支顺序**原样保留**：discarded > captainBusy > staged > 默认。
  *   重排它会让两张不同的读数在某些输入上换位 —— 而那正是"搬动改了行为"。
+ * ★ t80：头像那一格已按用户裁定去掉（见返回体里的注释）；其余逐行未动。
  */
-export declare function CaptainNode({ discarded, captainBusy, busyCount, allCompleted, allSettled, staged, awaitingFeedback, assignedCount, captainTaskIds, taskCount, memberCount, t, }: CaptainNodeProps): import("react").JSX.Element;
+export declare function CaptainNode({ discarded, captainBusy, busyCount, allCompleted, allSettled, staged, awaitingFeedback, assignedCount, captainTaskIds, taskCount, memberCount, t, }: CaptainNodeProps): JSX.Element;

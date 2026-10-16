@@ -54,7 +54,12 @@ import {
   type ActivityTask,
   type ActivityTeam,
 } from './activity-monitor.ts'
-import { LEAD_ART } from './artwork.ts'
+/**
+ * ★ t80 缺陷③：`import { LEAD_ART } from './artwork.ts'` **已删** ——
+ *   它在本文件里**只有 import 一处**（实测 `grep -c LEAD_ART` = 1），即**死 import**：
+ *   本文件从不渲染队长头像。⇒ 四处里它是"核查后确认不显示"的那一处。
+ *   ★ **资源仍在** `artwork.ts`（`verify.mjs:311` 的打包契约钉着 `team-lead-v2.png`）。
+ */
 import { OPEN_PANEL_EVENT } from './AgentTeamsCard.tsx'
 import { memberModelEditability, StagingPlanEditor } from './StagingPlanEditor.tsx'
 import { MemberRow } from './MemberRow.tsx'

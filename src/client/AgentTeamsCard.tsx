@@ -19,7 +19,8 @@ import {
   subscribeActivitySnapshots,
 } from './activity-monitor.ts'
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts'
-import { LEAD_ART, memberArtUrl } from './artwork.ts'
+/** ★ t80：`LEAD_ART` 已从本文件的 import 里去掉（卡片不再显示队长头像；资源仍在 artwork.ts）。 */
+import { memberArtUrl } from './artwork.ts'
 import css from './AgentTeamsCard.module.css'
 
 /** Window event name the floater listens for to open itself. */
@@ -87,7 +88,11 @@ export function AgentTeamsSummary({ data, openMember, sessionId, t }: AgentTeams
   return (
     <section className={css.root} data-agent-teams-card data-team-id={resolved.teamId}>
       <header className={css.head}>
-        <img className={css.leadAvatar} src={LEAD_ART} alt="" aria-hidden />
+        {/**
+          * ★★★ t80 缺陷③：卡片顶部的队长头像**不再显示**（用户截图：「队长的图标还在」）。
+          *   ★ 删的是**显示**，不是**资源** —— `LEAD_ART` 的取值仍在 `artwork.ts` 里，
+          *     被 `verify.mjs:311` 的打包契约钉着（删图会红一条 host 侧契约）。
+          */}
         <span className={css.teamName} title={resolved.teamName}>{resolved.teamName}</span>
         <span className={css.memberCount}>{t('card.memberCount', { count: resolved.members.length })}</span>
         <button

@@ -51,6 +51,12 @@ export declare const zh: {
     'member.gates.noCatalog': string;
     'member.gates.count': string;
     'member.gates.noVerdicts': string;
+    /**
+     * ★★ t80 缺陷②：两块，且**措辞必须不同形**（前者是事实，后者是数据缺口）。
+     * 「跑了」= 关于**这一轮**的结论；「没有落盘读数」= 关于**我们能看到什么**的陈述。
+     */
+    'member.gates.ranSummary': string;
+    'member.gates.silentSummary': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;
@@ -261,6 +267,8 @@ export declare const en: {
     'member.gates.noCatalog': string;
     'member.gates.count': string;
     'member.gates.noVerdicts': string;
+    'member.gates.ranSummary': string;
+    'member.gates.silentSummary': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;
