@@ -17,6 +17,8 @@ import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
 import { deliverToMember, deliverToMemberDetailed } from './members.ts'
+import { sessionLeadsTeam } from './lineage.ts'
+import { identityOfTeam, liveRefsOf } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
 import { createTaskWorktree, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
 import { restartQueueFrom } from './tools/shared/entities.ts'
@@ -1186,7 +1188,12 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       parkedAttempts.delete(agent.id)
       return
     }
-    if (located.captainSessionId === agent.id) {
+    /**
+     * ── ★★★ #176（乙）：队长那一半走活的 fork 链（t98）───────────────────────────
+     * ★ 传 `liveRefsOf(ctx)` ⇒ 一个**队长 fork 出来的**会话也认得出自己带的队。
+     *   ★ 缺席/枚举不可用 ⇒ 退回精确相等（与今天同结论）。
+     */
+    if (sessionLeadsTeam(agent.id, identityOfTeam(located), liveRefsOf(ctx))) {
       // Captain takeover is scoped to the captain's current turn. Unlike a
       // durable member, the captain has no scheduler lane that can resume an
       // abandoned attempt later. Returning unfinished captain-owned work to

@@ -11,6 +11,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
 import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, describeStrandedWorktrees } from '../members.ts'
+import { sessionLeadsTeam } from '../lineage.ts'
+import { identityOfTeam, liveRefsOf } from '../members.ts'
 /**
  * ★★ t84：检出那一支的读数（t80 建的），接到 `deployment.worktree`。
  *   ★ 它与 `moduleFreshness`（进程那一支）**并列而不合并** —— 见下面那段长注释。
@@ -650,7 +652,12 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
         const workspace = workspaceOf(caller)
         const stateRoot = stateRootOf(workspace, config)
         const located = await requireParticipantTeam(workspace, config, caller)
-        if (located.captainSessionId === caller.id) {
+        /**
+         * ── ★★★ #176（乙）：队长那一半走活的 fork 链（t98）─────────────────────────
+         * ★ 这里决定"要不要 kick 队" —— 若 fork 出来的队长认不出自己的队，
+         *   那一次 kick 会**静默不发生**（而"没 kick"与"没什么可 kick"同形）。
+         */
+        if (sessionLeadsTeam(caller.id, identityOfTeam(located), liveRefsOf(ctx))) {
           await scheduler.kickTeam(workspace, located.id, caller)
         }
         const { team, identity } = await withTeamLock(

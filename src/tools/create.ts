@@ -9,6 +9,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { captainLockKey, requireCaptain, stateRootOf, teamLockKey, workspaceOf } from './shared/entities.ts'
 import { createTeamDir, findTeamByParticipant, readTeam, sanitizeKey, withTeamLock } from '../state.ts'
+import { sessionLeadsTeam } from '../lineage.ts'
+import { identityOfTeam, liveRefsOf } from '../members.ts'
 import { TeamState } from '../types.ts'
 import { initializeProfileTeam } from './shared/entities.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -85,8 +87,15 @@ export function register(ctx: Context, memberSelections: any, scheduler: any, co
         const created = await withTeamLock(captainLockKey(stateRoot, captain.id), async () => {
           const current = await findTeamByParticipant(stateRoot, captain.id)
           if (current !== undefined) {
-            const relationship = current.captainSessionId === captain.id ? 'lead' : 'belong to'
-            const guidance = current.captainSessionId === captain.id
+            /**
+             * ── ★★★ #176（乙）：lead 身份收口（t98）───────────────────────────────
+             * ★ 这两行**同源**（同一个布尔），所以**必须一起收口** ——
+             *   ★★ 只改一行会让"关系"与"指引"分叉：它会说"你是 lead"
+             *     却给出"作为一个成员继续"的指引（**同一份事实两个结论**）。
+             */
+            const isLeadOfCurrent = sessionLeadsTeam(captain.id, identityOfTeam(current), liveRefsOf(ctx))
+            const relationship = isLeadOfCurrent ? 'lead' : 'belong to'
+            const guidance = isLeadOfCurrent
               ? 'Use agent_teams_status and continue the existing team. Do not delete and recreate it merely to continue work. End it only when the user explicitly wants a separate new team.'
               : 'Continue your assigned member work and report to your captain; do not create a separate team.'
             throw new Error(`you already ${relationship} team "${current.name}" (id ${current.id}). ${guidance}`)
