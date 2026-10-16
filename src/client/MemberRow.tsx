@@ -26,6 +26,7 @@
 
 import { useCallback, type CSSProperties } from 'react'
 import {
+  charColumns,
   compactModelLabel,
   doingLineCandidates,
   GATE_GLYPH,
@@ -40,6 +41,7 @@ import {
   memberRound,
   memberSubagentReadout,
   memberRouteLabel,
+  wrapByColumns,
   stageGateRows,
   stageGroupState,
   segmentAbsence,
@@ -564,6 +566,16 @@ const ROUND_TONE_LABEL: Readonly<Record<LoopTone, AgentTeamsLocaleKey>> = {
   cancelled: 'task.status.cancelled',
 }
 
+/**
+ * ── ★★★ B6：职责那一行**能放多少列**、**最多折几行**（见组件里的用法注释）。
+ *
+ * ★ 44 列的依据：面板最窄容器是 360px（`@container agent-team (max-width: 360px)`），
+ *   减去状态点与间距后的可用宽度；按 10.5px 字号下 ~1 字符 ≈ 7px 估算，
+ *   ★ **该换算是估算**，而反向半边 C 给的是**逐行的列数读数**（不依赖这个换算）。
+ */
+const MEMBER_ROLE_MAX_COLUMNS = 44
+const MEMBER_ROLE_MAX_LINES = 2
+
 export type MemberRowProps = {
   readonly team: ActivityTeam
   readonly member: MemberRowMember
@@ -669,6 +681,20 @@ export function MemberRow({
     historic,
     openWork: memberHasOpenWork(owned),
   })
+  /**
+   * ── ★★★ B6：职责按**列数**折行 ──────────────────────────────────────────────
+   *
+   * ★ `MEMBER_ROLE_MAX_COLUMNS` 的来源**不是猜的**：面板最窄的容器是
+   *   `@container agent-team (max-width: 360px)`（`ActivityPanel.module.css:1901`），
+   *   而这一行左边还有状态点 + 间距 ⇒ 可用列数取 **44**（≈360px 在 12px 字号下
+   *   能放的等宽列数，见本文档的反向半边 C 一节给出的逐行读数）。
+   * ★ **上限 2 行**：职责最多占两行；再长靠 `title` 与展开层全文兜底。
+   * ★ 折行本身是**纯函数**（`wrapByColumns`）⇒ "中文会不会溢出"可以在没有浏览器
+   *   的地方被判据钉住。
+   */
+  const roleLines = member.role === ''
+    ? []
+    : wrapByColumns(member.role, MEMBER_ROLE_MAX_COLUMNS, MEMBER_ROLE_MAX_LINES)
   /**
    * ── ★★★ "它在做什么"，以及**三态下的终态口径**（原来长在面板里）─────────────
    *
@@ -792,7 +818,6 @@ export function MemberRow({
               *   而臂 27 正是逐条比对这个的（`data-*` 一个都不许无声消失）。
               */}
             {member.unread > 0 && <span className={css.memberUnread} data-unread="true" aria-hidden />}
-            {member.role !== '' && <span className={css.memberRole}>{member.role}</span>}
             {/**
               * ── ★★ 模型：**行内文字**，不是徽章（用户投诉的 "badge-like elements"）────
               *
@@ -825,6 +850,37 @@ export function MemberRow({
             </span>
             <IconChevronDownOutline14 />
           </span>
+          {/**
+            * ── ★★★ B6：职责**另起一行**（改前它与名字挤在同一行被截断）────────────────
+            *
+            * 用户报的形态：名字右边跟一长串被截断的英文
+            * （`Layer historian: reconstructs what this f…`）。而 `role` 是**自由文本**
+            * （队长写进去的 106–209 字符长句；**将来也可以由成员定义给出中文**）。
+            *
+            * ★★ 所以这里做的事**不是翻译**，而是**让长文本显示好**：
+            *   ① **换行** ⇒ 不再与名字抢同一行的宽度；
+            *   ② ★ **按【列数】折行**（`wrapByColumns`），**不是按字符数** ——
+            *      中文一个字占 **2 列**，按字符数折会让中文行**宽一倍** ⇒ 溢出；
+            *   ③ 折行上限 `MEMBER_ROLE_MAX_LINES`；超出的部分靠 `title` 与展开层全文兜底
+            *      （"看不全"与"没有"必须不同形）。
+            *
+            * ★ `data-member-role-columns` / `-lines` 是**机械探针**：把"这段占多少列、
+            *   折了几行"如实写进 DOM ⇒ 反向半边 C（360px 不溢出）是**读得出来的数**，
+            *   而不是目测。
+            */}
+          {member.role !== '' && (
+            <span
+              className={css.memberRoleLine}
+              data-member-role={member.role}
+              data-member-role-columns={charColumns(member.role)}
+              data-member-role-lines={roleLines.length}
+              title={member.role}
+            >
+              {roleLines.map((line, index) => (
+                <span key={`${index}-${line}`} className={css.memberRoleRow} data-member-role-row={index}>{line}</span>
+              ))}
+            </span>
+          )}
           {/**
             * ── ★★★ v4 行 2：`第 N 轮 · 阶段 · 测试` ────────────────────────────────
             *

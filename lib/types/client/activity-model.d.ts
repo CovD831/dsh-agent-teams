@@ -915,3 +915,81 @@ export declare function doingLineCandidates(round: number | undefined, stage: Fl
  * @returns the legacy tone, or 'absent' when there is no stage at all.
  */
 export declare function memberGateTone(stage: FlowStage | undefined, groups: readonly StageGroupView[]): 'absent' | 'skipped' | 'ok' | 'blocked' | 'unmeasured' | 'observed';
+/**
+ * Whether one **codepoint** occupies two columns.
+ * @param code - a Unicode codepoint (from `codePointAt`, **not** `charCodeAt`).
+ *
+ * ★★ 必须吃**码点**：补充平面（U+10000 以上）的字在 UTF-16 里是**代理对**，
+ *   `charCodeAt` 给的是代理码元（U+D800–U+DFFF）⇒ 表里查不到 ⇒ 会被算成 1 列。
+ *   ★ 这一点是**对拍臂抓出来的**（见文件里 `cjkWidthTableCrossCheck` 的注释）：
+ *     我第一版用 `charCodeAt`，`😀` 与 `𠀀` 两条对不上，臂报 disagree=2。
+ */
+export declare function isWideCode(code: number): boolean;
+/**
+ * ── ★★★ B5：这段文字的**列数**（不是字符数）────────────────────────────────────
+ *
+ * ★ 为什么需要它：`role` 是**自由文本**（队长写进去的是 106–209 字符的英文长句），
+ *   而将来它可以由成员定义给出**中文**。中文字占 **2 列** ⇒
+ *   **同样的字符数，中文占的宽度约两倍** ⇒ 用"字符数"判"放不放得下"会**判错**。
+ *
+ * ★ 逐**码元**累加（`charCodeAt`）：BMP 之外的字按两个码元各算 1 列，
+ *   与"一个补充平面字符"的差异见文件头那段**已知边界**。
+ * @param text - the text to measure.
+ * @returns the number of terminal columns the text occupies.
+ */
+export declare function charColumns(text: string): number;
+/**
+ * ── ★★★ B5 的对拍臂（B0.6 逐字要求「若采用，必须先出一条对拍臂」）────────────────
+ *
+ * ── 为什么需要它 ──────────────────────────────────────────────────────────────
+ *
+ * 上面那张表**是我手写的**，而 B0.6 逐字记着「该内联表的准确度**未验证**」。
+ * ⇒ 一张手写的表必须与一个**独立来源**对拍，否则它就是**自证**
+ *   （"我自己写的表说我算对了" —— 本仓记账最久的那一类）。
+ *
+ * ── 对拍源怎么选的（★ 关键：它必须与上表**独立**）─────────────────────────────
+ *
+ * ★ **不许把"我自己写的表"当对拍源**（那是自证）。这里用的是**另一条独立性质**：
+ *   对每个被测码位，**用 `codePointAt` 取码点**（而不是 `charCodeAt` 的码元），
+ *   然后按**区间表之外的独立判据**分类：
+ *
+ *     ① `toLowerCase`/`toUpperCase` 能改变它（拉丁/希腊/西里尔等字母）⇒ **窄**；
+ *     ② 它是 ASCII 可打印字符 ⇒ **窄**；
+ *     ③ 它在半宽片假名/半宽谚文区间 ⇒ **窄**；
+ *     ④ 其余 ⇒ 按 Unicode **East_Asian_Width=W/F** 的区间表（**另一份独立的表**，见下）判。
+ *
+ * ★★ 而这里**必须诚实标注它证明了什么**：它证明的是
+ *   「**两张独立写成的区间表在样本上一致**」，**不是**「这两张表等于 Unicode 全文」。
+ *   真正的权威是 Unicode 的 `EastAsianWidth.txt` —— 而**引它就是一个依赖**，
+ *   这正是 B0.6 要避免的。⇒ 判据的强度如实写在返回值里（`authority` 字段）。
+ * @param samples - the codepoints to cross-check.
+ * @returns per-sample verdicts plus an honest statement of what the check proves.
+ */
+export interface CrossCheckRow {
+    readonly code: number;
+    readonly char: string;
+    /** What the inline table says. */
+    readonly table: 1 | 2;
+    /** What the independent classifier says. */
+    readonly independent: 1 | 2;
+    readonly agrees: boolean;
+}
+export declare function cjkWidthTableCrossCheck(samples: readonly number[]): {
+    readonly rows: readonly CrossCheckRow[];
+    readonly agree: number;
+    readonly disagree: number;
+    /** ★ 这条臂**能证明什么**、**不能证明什么** —— 不许让读者以为它验了全部 Unicode。 */
+    readonly authority: string;
+};
+/**
+ * ── ★★★ B6：把一行长文本**按列数**折成若干行（不是按字符数）────────────────────
+ *
+ * ★ 用 `charColumns` 而不是 `length`：`role` 里一旦出现中文，
+ *   按字符数折行会让**中文行比英文行宽一倍** ⇒ 溢出。
+ *
+ * ★ 折行点优先取**空格**（英文长句不断词），中文没有空格 ⇒ 按**列**硬折。
+ * @param text - the text to wrap.
+ * @param maxColumns - the container's usable column count.
+ * @returns the wrapped lines, at most `maxLines`.
+ */
+export declare function wrapByColumns(text: string, maxColumns: number, maxLines?: number): readonly string[];

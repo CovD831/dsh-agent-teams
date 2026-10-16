@@ -2889,3 +2889,35 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ B6：职责**另起一行**（改前它与名字挤在同一行被截断）────────────────────
+ *
+ * 用户报的形态：名字右边跟一长串被截断的英文。
+ * ⇒ 名字一行、职责一行；而**折行由 JS 按列数做**（`wrapByColumns`），
+ *   CSS 这边只负责"它是一块、每行不换行、超出用省略号收尾"。
+ * ★ 为什么不靠 CSS 的 `word-break` 自动折：中文没有空格，浏览器会**按字符**折 ——
+ *   而"按字符折"与"按列折"在**行数**上不等价（中文一个字 2 列）⇒ 行数会估错。
+ *   这里要的是**可预判的行数**（反向半边 C 要的是"逐行列数读数"），所以折行放 JS。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberRoleLine {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ★ 每个折行片段一行；`nowrap` + `ellipsis` 是**兜底**（JS 已经按列折过）。 */
+.memberRoleRow {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
