@@ -92,6 +92,25 @@ export interface DeliveryRecord {
 }
 /** Structured quality-gate kind. Absent / unknown values are treated as `work`. */
 export type TaskKind = 'requirements' | 'implementation' | 'verification' | 'review' | 'repair' | 'integration' | 'work';
+/**
+ * ── ★★★ t97（S1）：哪几类 kind 的"完成"是**关于某个修订的判决** ─────────────────────
+ *
+ * 上游把它叫作 `VERDICT_KINDS`，用途是**筛**：只有这几类的完成才需要绑定字节。
+ *
+ * ★★ 判据是**语义的**：一次"完成"是不是在说「**这批字节**行不行」？
+ *
+ * | kind | 是判决吗 | 为什么 |
+ * |---|---|---|
+ * | `review` | ✅ | 它的 verdict 就是说"被审的那批字节行不行" |
+ * | `requirements` | ✅ | 同理 —— 它判的是需求/契约那批材料 |
+ * | `verification` | ✅ | 它判的是"这个实现过不过得了验证" |
+ * | `implementation` · `repair` · `integration` | ❌ | 它们的完成是"**我把活干了**"，不判决任何字节 |
+ * | `work` | ❌ | "我做完研究了" —— 同样不判决字节 |
+ *
+ * ★ 给非判决类也记一份绑定是**造一个不存在的语义**（"这次研究绑定了哪些字节"没有意义），
+ *   而那会让读取端把"干活"读成"判决"。
+ */
+export declare const VERDICT_KINDS: readonly TaskKind[];
 export declare const TASK_KINDS: readonly TaskKind[];
 /**
  * ── ★★★ 哪些 kind 会被派发到一个【隔离的 worktree】────────────────────────────
@@ -125,6 +144,56 @@ export declare const KINDS_NEEDING_WORKTREE: readonly TaskKind[];
 export declare function needsWorktreeFor(kind: string | undefined): boolean;
 /** Review / requirements conclusion. Only `pass` may complete those kinds. */
 export type ReviewVerdict = 'pass' | 'needs_revision' | 'reject';
+/**
+ * ── ★★★ t97：一次判决**绑定到的一份字节**（内容摘要）────────────────────────────────
+ *
+ * ★ `digest` 是**内容**摘要（sha256 of the file bytes 的 hex），
+ *   **不是** git 对象名 —— 见 `TeamTask.reviewedArtifacts` 的注释（T7 的教训：
+ *   `cherry-pick` 会改 hash 而字节不变）。
+ *
+ * ★ 由**调用方**算并传入（本仓同一条纪律：纯类型/纯函数不做 I/O）——
+ *   先例是 `mutation-guard.ts`：「读文件、跑 git、算指纹全部由调用方注入」。
+ */
+/**
+ * ── ★★★ t97（S1）：一份**工作时读到的字节**的摘要（上游 `ArtifactDigest`）──────────────
+ *
+ * ★ 与 {@link ReviewedArtifact} 是**同一个形状的两个名字**吗？**不是**：
+ *   · `ReviewedArtifact` —— **判决落盘时**记下的（"我判的是这批字节"，是**历史**）；
+ *   · `ArtifactDigest`   —— **当前**读到的（"现在是什么"，是**现状**）。
+ *   ★★ 两者形状相同，而**语义相反** —— 恰如 `before`/`after`。
+ *     合成一个名字会让"记下来的"与"读出来的"在读取端同形，
+ *     而那正是这套机制要防的事（判决说的字节 vs 现在的字节）。
+ */
+export interface ArtifactDigest {
+    /** workspace 相对路径（POSIX）。 */
+    readonly path: string;
+    /** `sha256` 的 hex。★ 内容摘要，与 git 修订标识无关。 */
+    readonly digest: string;
+}
+/**
+ * ── ★★★ t97（S1）：这次读取**没能完成**的部分 ────────────────────────────────────
+ *
+ * 上游逐字：
+ * > 「Parts of the *current* read that could not be completed (expansion cap,
+ * >   unreadable directory or file, illegal pattern). A non-empty list means
+ * >   the audit itself is incomplete, so **no verdict may be confirmed from it**.」
+ *
+ * ★★ 这是"没能测量"那一态 —— 与"读到了、且一致"**必须不同形**：
+ *   一份**不完整**的读取若被当成完整，会让"没读到"读成"没变"。
+ * ★ 本任务(S1)只**记录**这些缺口，**不用**它们做裁决（那是 S3）。
+ */
+export interface ArtifactScopeGap {
+    /** 没能完成的那一部分（一个路径或一个模式）。 */
+    readonly ref: string;
+    /** 为什么没能完成。 */
+    readonly why: string;
+}
+export interface ReviewedArtifact {
+    /** workspace 相对路径（POSIX）。 */
+    readonly path: string;
+    /** `sha256` 的 hex。★ 摘要的是**内容**，与 git 的修订标识无关。 */
+    readonly digest: string;
+}
 export declare const REVIEW_VERDICTS: readonly ReviewVerdict[];
 /** Finding severity used by review / requirements output. */
 export type FindingSeverity = 'low' | 'medium' | 'high' | 'blocker';
@@ -612,6 +681,41 @@ export interface TeamTask {
     executions?: TaskExecution[];
     reviewedTaskId?: string;
     reviewedAttempt?: number;
+    /**
+     * ── ★★★ t97（吸收上游 #161 的 **S1**）：这份判决**绑定到了哪些字节** ──────────────
+     *
+     * 上游 #161 的原始缺陷（逐字）：
+     * > 「A **passing review was not bound to the revision it judged**……
+     * >   it advertised "all gates passed" over **bytes that had since been edited or deleted**.」
+     *
+     * MEASURED（t97 开工实测）：本仓此前有 `baseRevision`，而它是**git 对象名**
+     *   （`tools.ts` 的注释逐字：「base 是一个 git 对象名」）——
+     *   ★ **它回答不了"漂了没有"**：`cherry-pick` / `rebase` 会改那个名字，
+     *     而字节没变 ⇒ 用它当摘要会**在两个方向上误判**。
+     *   ★★ 它还**只在** `recordBaseRevision` 那一处被写，与判决无关。
+     *
+     * ⇒ 这一格记的是**内容**摘要：`(路径, sha256(文件字节))`。
+     *
+     * ── ★★★ 而它会让【所有历史判决】立刻落 `unauditable gap` —— 那【是正确行为】──
+     *
+     * ```
+     * 今天盘上的判决【都没有这一格】（本字段是本次新加的）
+     * ⇒ 它们无法回答"我判的是哪批字节"
+     * ⇒ 按上游的口径，它们必须被报成「早于内容绑定」（unauditable gap），
+     *   ★ 【而不是】被读成"对当前字节的一次通过"。
+     * ```
+     * ★★ 那**不是副作用，是 ③ 的正确行为** —— 上游逐字：
+     * > 「A verdict that **predates content binding** is reported as an
+     * >   **unauditable gap** rather than being read as a pass over the current bytes.」
+     * ★★ **别把"判据突然变严"当 bug**：它变严是因为此前它在**读一个它没有的信息**。
+     *
+     * ★ 缺席的语义（三态之一）：**没有这一格 = 早于内容绑定**。
+     *   ★ 与"有这一格但是空数组"**不同形**：后者是"判过了、且它没绑定任何文件"。
+     *
+     * ★★ **本任务只做 S1**：记下来，并能回答那三个问题（无摘要 / 漂了 / 没漂）。
+     *   判据逻辑（`verdictDrift` / `bindsRecordedRevision`）与 blocker/warning 分级是 S3/S4。
+     */
+    reviewedArtifacts?: readonly ReviewedArtifact[];
     /**
      * ── ★★★ t2：那份「已审查」的盖章 —— 而它**可选**，且缺席是正常状态 ────────────
      *

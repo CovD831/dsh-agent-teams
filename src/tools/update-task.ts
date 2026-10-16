@@ -116,10 +116,12 @@ function requiredGateIdsFor(kind: string | undefined): readonly string[] | undef
   return requirement.requiredGates
 }
 import { registry } from '../gates/index.ts'
+/** ★ t97：工作区字节身份（S1 —— 判决落盘时记下它绑定了哪些字节）。 */
+import { snapshotReviewedArtifacts } from '../artifacts.ts'
 import { gitChangedPaths, observeWorkspaces, observedChangedPaths } from '../harness-compat.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
-import { appendTaskEvidence, repairCompletionVerdict, traceEvidenceConsumer } from '../quality-gates.ts'
-import { TERMINAL_TASK_STATUSES, appendExecution } from '../types.ts'
+import { appendTaskEvidence, repairCompletionVerdict, taskKindOf, traceEvidenceConsumer } from '../quality-gates.ts'
+import { TERMINAL_TASK_STATUSES, VERDICT_KINDS, appendExecution } from '../types.ts'
 /**
  * ★ `needsWorktreeFor`：判"这条任务**应当**有隔离树吗" —— 用来把
  *   「本来就不建树」与「该建树而没建成」分开（后者是一个真缺陷）。
@@ -1812,6 +1814,57 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           }
           if (args.output !== undefined) task.output = args.output
           if (args.verdict !== undefined) task.verdict = args.verdict as ReviewVerdict
+          /**
+           * ── ★★★ t97（吸收上游 #161 的 **S1**）：判决落盘时记下**它绑定了哪些字节** ────────
+           *
+           * 上游 #161 的原始缺陷（逐字）：
+           * > 「A **passing review was not bound to the revision it judged**……
+           * >   it advertised "all gates passed" over **bytes that had since been edited
+           * >   or deleted**.」
+           *
+           * ★★ 为什么**必须**在这里做，而不是事后补：判决落盘的那一刻是**唯一**能知道
+           *   "它当时看的是哪批字节"的时刻。事后任何时候再读盘，读到的都是**另一批**
+           *   （这正是 f-0014 那条纪律：「记录必须在卡点发生时做，事后补是补不上的」）。
+           *
+           * ── ★ 只对 `VERDICT_KINDS` 那几类记 ─────────────────────────────────────────
+           *
+           * 只有 review / requirements / verification 的"完成"是**关于某个修订的判决**
+           * （它们的结论说"这批字节行不行"）。
+           * ★ 而 `implementation` / `repair` / `integration` 的完成是"我把活干了"，
+           *   `work` 是"我做完了研究" —— 它们**不判决任何字节**，
+           *   给它们也记一份契约绑定是**造一个不存在的语义**。
+           *
+           * ── ★★★ 后果（用户已批准）：**所有历史判决立刻落 `unauditable gap`** ────────────
+           *
+           * 今天盘上的判决**都没有** `reviewedArtifacts`（本格是本次新加）
+           * ⇒ 它们无法回答"我判的是哪批字节"
+           * ⇒ 按上游口径必须被报成「**早于内容绑定**」，**而不是**"对当前字节的一次通过"。
+           * ★★ **那【是正确行为】，不是 bug** —— 它变严，是因为此前它在**读一个它没有的信息**。
+           * ★ 别在事后把这条判据说成"突然变严"：它只是**第一次说真话**。
+           *
+           * ★ 失败/读不完整 **不阻塞**这一次更新：本格是**记录**，不是裁决
+           *   （与 `gateEvaluation` / `recordFriction` 同一条纪律：先软后硬）。
+           *   ★★ 而"读不完整"这件事**另外记着**（`reviewedArtifacts` 只含真的读到的那些）
+           *     —— 一份被静默截断的清单会让清单外的改动通过"未变"检查。
+           */
+          if (args.verdict !== undefined && VERDICT_KINDS.includes(taskKindOf(task))) {
+            try {
+              /**
+               * ★ 绑定的是**这条任务声明的范围**（`inScope`）——
+               *   那正是"它对哪些字节负责"。★ 缺席则退化为 `changedPaths`（它实际动了什么）。
+               */
+              const scopePaths = (task.inScope ?? task.changedPaths ?? []).slice()
+              const snapshot = await snapshotReviewedArtifacts(workspace, scopePaths)
+              task.reviewedArtifacts = snapshot.reviewedArtifacts
+            } catch (reason) {
+              /**
+               * ★★ 采集失败 **不**让这次更新失败（它是记录，不是裁决）。
+               *   而**也不写一个空数组** —— 空数组会说"它没绑定任何字节"，
+               *   而真相是"我们没能读出来" ⇒ ★ 两者补救动作相反（后者要去查读失败的原因）。
+               */
+              ctx.logger.warn(`agent-teams: could not snapshot reviewed artifacts for ${task.id} (recorded, not thrown): ${String(reason)}`)
+            }
+          }
           if (findings !== undefined) task.findings = findings
           if (input.changedPaths !== undefined) task.changedPaths = input.changedPaths
           if (acceptanceResults !== undefined) task.acceptanceResults = acceptanceResults

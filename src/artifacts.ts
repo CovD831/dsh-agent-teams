@@ -1,0 +1,246 @@
+/**
+ * ── ★★★ t97（吸收上游 #161 的 S1）：**工作区字节身份** ──────────────────────────────
+ *
+ * 本文件是插件里**唯一**从磁盘读产物字节的模块。
+ *
+ * ── 为什么需要它（上游 #161 逐字）──────────────────────────────────────────────
+ *
+ * > 「A **passing review was not bound to the revision it judged**……
+ * >   it advertised "all gates passed" over **bytes that had since been edited
+ * >   or deleted**.」
+ *
+ * MEASURED（t97 开工实测）：本仓此前有 `baseRevision`，而它是**git 对象名**
+ *   （`tools.ts` 注释逐字：「base 是一个 git 对象名」）——
+ *   ★ 它**回答不了"漂了没有"**：`cherry-pick` / `rebase` 会改那个名字而**字节没变**
+ *     （T7 的教训），于是它在两个方向上都可能误判。
+ * ⇒ 所以这里算的是**内容**摘要（`sha256` of the file bytes）。
+ *
+ * ── ★★ 安全规则（**一条都不许丢**）────────────────────────────────────────────
+ *
+ *   ① **目录遍历不跟符号链接**，而每一个**显式点名**的路径都用 `realpath` 解析，
+ *      一旦**逃出工作区**就拒绝 —— 符号链接不得变成"读宿主机任意文件"，
+ *      符号链接**环**也不得变成无限遍历；
+ *   ② 一次**没能完整枚举**的读取（上限、读不了的目录/文件、非法路径）
+ *      产出一条**显式的** {@link ArtifactScopeGap}，
+ *      ★★ **而不是一份"看起来完整"的短清单**；
+ *   ③ 「读不出来」与「不存在」**分开记**；
+ *   ④ 插件状态与密钥**不得**因为一个宽范围而意外进入。
+ *
+ * ── ★★ 而判据层仍然是纯的 ────────────────────────────────────────────────────
+ *
+ * 本模块把 {@link ArtifactDigest} **值**交给判据层，而判据层**从不碰文件系统**
+ * （`mutation-guard.ts` 是同一条先例：「读文件、跑 git、算指纹全部由调用方注入」）。
+ *
+ * ── ★ 本任务（S1）的边界 ────────────────────────────────────────────────────
+ *
+ * 只做：算摘要 + 记下来 + 能回答那三个问题。
+ * ★ **不做**：`verdictDrift` / blocker-warning 分级 / blob 级 diff（那是 S3/S4）。
+ */
+
+import { createHash } from 'node:crypto'
+import { readFile, readdir, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, join, relative, sep } from 'node:path'
+import type { ArtifactDigest, ArtifactScopeGap } from './types.ts'
+
+/**
+ * 从**一个范围**展开出来的文件数上限。
+ *
+ * ★ 与上游同一个理由：判决是关于**一个修订**的，而对一棵大树做**无界**遍历
+ *   会让每次关门都很慢 ⇒ 到这里停 —— **并且说出来**（产出一条 gap），
+ *   因为**一份被静默截断的清单**会让清单之外的改动通过"未变"检查。
+ */
+export const MAX_EXPANDED_ARTIFACTS = 200
+
+/** 一次范围读取的结果：读到了什么，以及什么没能读完。 */
+export interface ArtifactScopeRead {
+  readonly artifacts: ArtifactDigest[]
+  readonly gaps: ArtifactScopeGap[]
+}
+
+/** `absolute`（已解析）在工作区根里吗？ */
+function isInsideRoot(root: string, absolute: string): boolean {
+  const rel = relative(root, absolute)
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/**
+ * ★ `true` ⇒ 在里面；`false` ⇒ 逃出工作区；`undefined` ⇒ 解析不出来。
+ * ★★ 三态而异形：`realpath` 抛错（不存在/坏链接）与"确实在外面"是**两件事** ——
+ *   前者可能是**还没生成**（那是正常的），后者是**越界**（那必须拒）。
+ */
+async function resolveInsideRoot(root: string, candidate: string): Promise<boolean | undefined> {
+  try {
+    const real = await realpath(candidate)
+    return isInsideRoot(root, real)
+  } catch {
+    return undefined
+  }
+}
+
+/** `sha256` 的 hex。★ 内容摘要 —— 与 git 修订标识无关。 */
+function digestOf(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+/**
+ * ── ★★★ 把工作区里的**具体路径**算成摘要（上游 `digestWorkspacePaths`）──────────────
+ *
+ * @param workspace - 工作区根（**由调用方给**，不猜）。
+ * @param paths - workspace 相对路径（POSIX）。
+ *
+ * ★★ 「读不出来」与「不存在」**分开记**：
+ *   · 不存在（`ENOENT`）⇒ **不报 gap**，也不产出 digest。
+ *     ★ 理由：一个**还没生成**的产物是正常状态（"这次还没跑"），
+ *       把它报成"审计不完整"会让**每一次**审计都带缺口 ⇒ 缺口失去信息量。
+ *     ★★ 而它**也不会**被静默当成"已绑定"：判决记的是**它当时读到的那些**
+ *       ⇒ 后来出现了，那个文件**不在** `reviewedArtifacts` 里 ⇒ 由 S3 的
+ *       范围展开去发现（那正是 `expandedScope` 那一格存在的理由）。
+ *   · 别的读失败（权限、是目录、逃出工作区）⇒ **记 gap**（那是真的读不了）。
+ */
+export async function digestWorkspacePaths(
+  workspace: string,
+  paths: readonly string[],
+): Promise<ArtifactScopeRead> {
+  let root: string
+  try {
+    root = await realpath(workspace)
+  } catch {
+    /** ★ 连工作区都解析不出来 ⇒ 整次读取都不成立 ⇒ 一条总缺口。 */
+    return { artifacts: [], gaps: [{ ref: workspace, why: 'the workspace root itself could not be resolved' }] }
+  }
+  const artifacts: ArtifactDigest[] = []
+  const gaps: ArtifactScopeGap[] = []
+  for (const path of paths) {
+    const absolute = join(root, path)
+    /** ★ ① 逃出工作区 ⇒ 拒（符号链接不得变成读宿主机任意文件）。 */
+    const inside = await resolveInsideRoot(root, absolute)
+    if (inside === false) {
+      gaps.push({ ref: path, why: 'resolves outside the workspace (a symlink must not become a read of host files)' })
+      continue
+    }
+    if (inside === undefined) {
+      /** ★ 解析不出来 ⇒ 看它到底是不存在，还是别的原因（**分开记**）。 */
+      try {
+        await stat(absolute)
+      } catch (reason) {
+        const code = (reason as { code?: unknown } | undefined)?.code
+        if (code === 'ENOENT') continue   // ★ 还没生成 —— 正常，不报 gap
+        gaps.push({ ref: path, why: `could not be read: ${String((reason as { message?: unknown })?.message ?? reason)}` })
+        continue
+      }
+      gaps.push({ ref: path, why: 'could not be resolved inside the workspace' })
+      continue
+    }
+    try {
+      const bytes = await readFile(absolute)
+      artifacts.push({ path, digest: digestOf(bytes) })
+    } catch (reason) {
+      const code = (reason as { code?: unknown } | undefined)?.code
+      /** ★ `EISDIR` 等：点名了一个目录 ⇒ 那是**调用方**的问题，如实说。 */
+      if (code === 'ENOENT') continue
+      gaps.push({ ref: path, why: `could not be read: ${String((reason as { message?: unknown })?.message ?? reason)}` })
+    }
+  }
+  return { artifacts, gaps }
+}
+
+/**
+ * ── ★★ 把范围**模式**展开成它们**当前**覆盖的具体文件（上游 `expandScopePaths`）──────
+ *
+ * ★ 支持两种形态（与 `pathMatchesScope` 同族）：
+ *   · 一个具体文件（`src/a.ts`）⇒ 它自己；
+ *   · 一个**目录**（以 `/` 结尾，或它确实是个目录）⇒ **递归**它的文件。
+ * ★★ 而递归**不跟符号链接**（`withFileTypes` + `isSymbolicLink()` 直接跳过）——
+ *   否则符号链接环会变成无限遍历，而那是一条**安全**规则，不是性能优化。
+ * ★ 超过 {@link MAX_EXPANDED_ARTIFACTS} ⇒ **停止并记一条 gap**（不静默截断）。
+ */
+export async function expandScopePaths(workspace: string, patterns: readonly string[]): Promise<ArtifactScopeRead> {
+  let root: string
+  try {
+    root = await realpath(workspace)
+  } catch {
+    return { artifacts: [], gaps: [{ ref: workspace, why: 'the workspace root itself could not be resolved' }] }
+  }
+  const paths: string[] = []
+  const gaps: ArtifactScopeGap[] = []
+
+  const walk = async (absolute: string, display: string): Promise<boolean> => {
+    let entries
+    try {
+      entries = await readdir(absolute, { withFileTypes: true })
+    } catch (reason) {
+      const code = (reason as { code?: unknown } | undefined)?.code
+      if (code === 'ENOENT') return true          // ★ 还没生成 ⇒ 不报 gap
+      gaps.push({ ref: display, why: `could not be enumerated: ${String((reason as { message?: unknown })?.message ?? reason)}` })
+      return true
+    }
+    for (const entry of entries) {
+      if (paths.length >= MAX_EXPANDED_ARTIFACTS) {
+        gaps.push({
+          ref: display,
+          why: `expansion stopped at the ${MAX_EXPANDED_ARTIFACTS}-file cap; the list below is NOT complete,`
+            + ' so a change outside it must not read as "unchanged"',
+        })
+        return false
+      }
+      /** ★★ ① 不跟符号链接（安全规则，不是优化）。 */
+      if (entry.isSymbolicLink()) continue
+      const child = join(absolute, entry.name)
+      const childDisplay = `${display.replace(/\/$/, '')}/${entry.name}`
+      if (entry.isDirectory()) {
+        if (!await walk(child, childDisplay)) return false
+      } else if (entry.isFile()) {
+        paths.push(childDisplay)
+      }
+    }
+    return true
+  }
+
+  for (const pattern of patterns) {
+    if (paths.length >= MAX_EXPANDED_ARTIFACTS) break
+    const trimmed = pattern.replace(/\/$/, '')
+    if (trimmed === '' || trimmed.startsWith('/') || trimmed.startsWith('..')) {
+      gaps.push({ ref: pattern, why: 'not a workspace-relative path' })
+      continue
+    }
+    const absolute = join(root, trimmed)
+    const inside = await resolveInsideRoot(root, absolute)
+    if (inside === false) {
+      gaps.push({ ref: pattern, why: 'resolves outside the workspace' })
+      continue
+    }
+    if (inside === undefined) {
+      /** ★ 不存在 ⇒ 正常（还没生成），不报 gap。 */
+      continue
+    }
+    let info
+    try {
+      info = await stat(absolute)
+    } catch { continue }
+    if (info.isDirectory()) {
+      if (!await walk(absolute, trimmed)) break
+    } else if (info.isFile()) {
+      paths.push(trimmed)
+    }
+  }
+  const read = await digestWorkspacePaths(workspace, [...new Set(paths)])
+  return { artifacts: read.artifacts, gaps: [...gaps, ...read.gaps] }
+}
+
+/**
+ * ── ★★★ S1 的**落点**：把一次判决**绑定**到当前范围 ────────────────────────────────
+ *
+ * 上游逐字：
+ * > 「Reviews/requirements/verification now **snapshot their scope at claim**,
+ * >   record the reviewed attempt, **the real digests** and the scope they bound at close」
+ *
+ * @returns `{ reviewedArtifacts, gaps }` —— ★ 而 `reviewedArtifacts` 的**在场/缺席**
+ *   是那三个问题里第一个的答案（缺席 ⇒ 早于内容绑定）。
+ */
+export async function snapshotReviewedArtifacts(
+  workspace: string,
+  patterns: readonly string[],
+): Promise<{ readonly reviewedArtifacts: readonly ArtifactDigest[]; readonly gaps: readonly ArtifactScopeGap[] }> {
+  const read = await expandScopePaths(workspace, patterns)
+  return { reviewedArtifacts: read.artifacts, gaps: read.gaps }
+}

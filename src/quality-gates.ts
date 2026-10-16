@@ -34,6 +34,8 @@ import {
   isDefaultExcludedPath,
 } from './quality-gates/predicates.ts'
 import type { PathClassification } from './quality-gates/predicates.ts'
+import { VERDICT_KINDS } from './types.ts'
+import type { ArtifactDigest, ArtifactScopeGap, ReviewedArtifact } from './types.ts'
 
 /**
  * ★ 本模块【也】把 QG-A 原样再导出 —— 于是 `src/quality-gates.ts` 的导出面
@@ -260,9 +262,129 @@ export interface CoverageRow {
   evidence?: string
 }
 
+/**
+ * ── ★★★ t97（S1）：一份判决**与当前字节**的关系 —— ★ **三态，不是两态** ──────────────
+ *
+ * 上游 #161 逐字：
+ * > 「A verdict that **predates content binding** is reported as an **unauditable gap**
+ * >   rather than being read as a pass over the current bytes.」
+ *
+ * ★★ 三态**必须不同形**（本仓最久的形态是「没找到」与「确实没有」合流）：
+ *
+ * | 取值 | 什么情况 | 补救动作 |
+ * |---|---|---|
+ * | `bound` | ★ 有摘要，且**当前字节与它一致** | 无需动作（判决仍有效） |
+ * | `drifted` | ★ 有摘要，而**字节已变** | 重判 —— 那次判决说的是**另一批字节** |
+ * | `unbound` | ★ **根本没有摘要**（早于内容绑定） | ★ **不能读成通过** —— 它判的是不可知的东西 |
+ *
+ * ★★★ 而 `unbound` **不是**"drifted 的一个特例"：
+ *   drifted 说"我判过那批字节，而它们变了"（**知道**）；
+ *   unbound 说"我不知道它判的是什么"（**不知道**）。
+ *   ⇒ 把后者塞进前者会**造出一个没发生过的绑定**。
+ */
+export type ArtifactBinding = 'bound' | 'drifted' | 'unbound'
+
+/**
+ * 一份"绑定了哪些字节"的摘要集合（workspace 相对路径 → sha256 hex）。
+ * ★ 由**调用方**算并注入（本仓同一条纪律：这里不做 I/O）。
+ */
+export type ArtifactDigestMap = Readonly<Record<string, string>>
+
+/**
+ * ── ★★★ t97（S1）：回答那**三个问题** ──────────────────────────────────────────────
+ *
+ * @param reviewed - 判决落盘时记下的摘要（`TeamTask.reviewedArtifacts`）。
+ *   ★ **缺席或空** ⇒ `unbound`（那个判决早于内容绑定）。
+ * @param current - **当前**这些路径的摘要。★ 由调用方算（这里不做 I/O）。
+ *   ★★ 一个路径在 `reviewed` 里而**不在** `current` 里 ⇒ 那个文件**已被删除** ⇒ `drifted`
+ *     （上游逐字点名了"**edited or deleted**"两种）。
+ *
+ * ── ★★ 反向半边 C 是本函数最容易做错的地方 ────────────────────────────────────
+ *
+ * "有摘要就报 drifted" 是最省事的写法，而那是**恒报** ——
+ * ★ 它与「什么都判不了」在补救动作上同形（都会让人去重做一次本来没问题的活）。
+ * ⇒ 所以字节**一致**时必须报 `bound`。本函数**逐条比对**，不是"有就报"。
+ */
+export function artifactBindingOf(
+  reviewed: readonly ReviewedArtifact[] | undefined,
+  current: ArtifactDigestMap,
+): ArtifactBinding {
+  /**
+   * ★ 缺席 **或** 空 ⇒ `unbound`。
+   *   ★★ 为什么空数组也算：`reviewedArtifacts: []` 说"这次判决没有绑定任何字节" ——
+   *     而那**回答不了**"它判的是哪批字节"这个问题 ⇒ 与"没有这一格"同一种**不可判**。
+   *     ★ 它与"没有这一格"在**落盘形状**上仍不同形（在场 vs 缺席），
+   *       但**在这个问题上**两者都是 `unbound`（这不是合流，是同一个答案）。
+   */
+  if (reviewed === undefined || reviewed.length === 0) return 'unbound'
+  for (const artifact of reviewed) {
+    const now = current[artifact.path]
+    /** ★ 不在当前摘要里 ⇒ 文件**已被删除**（上游逐字含 "deleted"）⇒ drifted。 */
+    if (now === undefined) return 'drifted'
+    if (now !== artifact.digest) return 'drifted'
+  }
+  return 'bound'
+}
+
+/**
+ * ── ★★★ t97（S1）：审计的**输入面** —— 「**当前**这些路径是什么字节」 ──────────────────
+ *
+ * 上游逐字：
+ * > 「Current bytes of the paths recorded by verdicts and work orders.」
+ *
+ * ★★ 为什么它必须由**调用方**给、而不是在这里读盘：
+ *   判据层是**纯**的（`src/gates/**` 有一条臂逐字钉住"caller injects I/O"）。
+ *   本文件虽已 import `node:fs`（它做契约校验），但**审计**这条路上
+ *   仍按同一条纪律走：**值**由调用方算好传进来。
+ *
+ * ★★★ 而 `artifacts` 与 `gaps` 是**两件事**，不许合流：
+ *   · `artifacts` —— 读到了的（**当前**字节）
+ *   · `gaps`      —— **没能读完**的那部分
+ *   ⇒ 一份**不完整**的读取若被当成完整，会让"没读到"读成"没变"。
+ *     ★ 上游逐字：「a non-empty list means the audit itself is incomplete,
+ *       so **no verdict may be confirmed from it**」。
+ *
+ * ★ 本任务（S1）**只**把它作为输入面引入并转发；★ 用不用它做裁决是 S3 的事。
+ */
+export interface DeliveryAudit {
+  /** ★ 判决与工单记下的那些路径的**当前**字节。 */
+  readonly artifacts?: readonly ArtifactDigest[]
+  /**
+   * ★ 这次读取**没能完成**的部分（上限、读不了的目录/文件、非法模式）。
+   * ★★ 非空 ⇒ **审计本身不完整** ⇒ 不许据它确认任何判决。
+   */
+  readonly gaps?: readonly ArtifactScopeGap[]
+}
+
 export interface DeliveryResult {
   ok: boolean
   blockers: string[]
+  /**
+   * ── ★★★ t97（S1）：每条**判决类**任务的绑定读数（"它判的是哪批字节"）─────────────
+   *
+   * ★★ 三态（见 {@link ArtifactBinding}）：`bound` / `drifted` / `unbound`。
+   * ★ 只有在**传了 `audit`** 时才有这一格 —— 缺席（`undefined`）= "这次没做审计"，
+   *   而**不是**"审计过了、全部有效"。★ 两者补救动作相反。
+   * ★★ 本任务（S1）**只报读数，不改 `ok`** —— 拿它去拦交付是 S3/S4 的事
+   *   （那会改既有交付语义，而本任务的硬纪律是"不许改既有判据的 verdict 语义"）。
+   */
+  verdictBindings?: readonly VerdictBindingReading[]
+}
+
+/**
+ * ── ★★★ t97（S1）：一条判决**与当前字节**的关系读数 ────────────────────────────────
+ *
+ * ★ 它就是那三个问题的答案，逐条可读：
+ *   · `unbound` —— **早于内容绑定**（没有 `reviewedArtifacts`）
+ *   · `drifted` —— 绑过，而**字节已变**（含"文件已被删除"）
+ *   · `bound`   —— 绑过，且**字节未变** ⇒ 仍然有效
+ */
+export interface VerdictBindingReading {
+  readonly taskId: string
+  readonly kind: string
+  readonly binding: ArtifactBinding
+  /** 这条判决记下的绑定数（0 表示没有可核的绑定）。 */
+  readonly bound: number
 }
 
 export interface ResumeTeamResult {
@@ -2112,7 +2234,7 @@ export function buildCoverageMatrix(goalItems: readonly string[], tasks: readonl
   })
 }
 
-export function canDeclareDelivery(team: TeamState): DeliveryResult {
+export function canDeclareDelivery(team: TeamState, audit?: DeliveryAudit): DeliveryResult {
   const blockers: string[] = []
   if (team.phase === 'staged') blockers.push('team plan is awaiting approval')
   if (team.halted === true) blockers.push('team is halted')
@@ -2170,7 +2292,38 @@ export function canDeclareDelivery(team: TeamState): DeliveryResult {
     }
   }
 
-  return { ok: blockers.length === 0, blockers }
+  /**
+   * ── ★★★ t97（S1）：把每条**判决类**任务的绑定读数报出来 ────────────────────────────
+   *
+   * ★ 只在**传了 `audit`** 时算：缺席 ⇒ `verdictBindings` **缺席**
+   *   （"这次没审计"与"审计了、全有效"必须不同形）。
+   *
+   * ★★ 而本函数**不用它改 `ok`**：S1 只"回答那三个问题"。
+   *   拿它拦交付是 S3/S4 —— 那会改既有交付语义，超出本任务边界。
+   */
+  const verdictBindings = audit === undefined
+    ? undefined
+    : team.tasks
+        .filter((item) => item.status === 'completed' && VERDICT_KINDS.includes(taskKindOf(item)))
+        .map((item) => {
+          /** ★ 当前摘要：只取这条判决**自己**绑过的那些路径（别人绑的不算它的）。 */
+          const current: Record<string, string> = {}
+          for (const artifact of item.reviewedArtifacts ?? []) {
+            const now = (audit.artifacts ?? []).find((candidate) => candidate.path === artifact.path)
+            if (now !== undefined) current[artifact.path] = now.digest
+          }
+          return {
+            taskId: item.id,
+            kind: taskKindOf(item),
+            binding: artifactBindingOf(item.reviewedArtifacts, current),
+            bound: (item.reviewedArtifacts ?? []).length,
+          }
+        })
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    ...verdictBindings === undefined ? {} : { verdictBindings },
+  }
 }
 
 export function resumeTeamState(team: TeamState, reason: string): ResumeTeamResult {
