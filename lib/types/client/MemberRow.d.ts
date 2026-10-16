@@ -65,6 +65,18 @@ export interface MemberDotContext {
     readonly stopped?: boolean;
     readonly staged?: boolean;
     readonly historic?: boolean;
+    /**
+     * ── ★★★ t82：该成员名下**还有没有活开着** ──────────────────────────────────
+     *
+     * ★ 这一格存在的理由：下面那段注释（与 `ActivityPanel.module.css:2053`）**逐字**
+     *   说的是「**死会话 + 活还开着**」才有琥珀 —— 而改前**没有任何字段能承载
+     *   "活还开着"**，于是那个条件在实现里根本表达不出来，`not-live` 只能无条件
+     *   给琥珀。⇒ 一个刚成功交付、会话被正常回收的成员被画成"需要你处理"。
+     *
+     * ★ **缺省＝按"有活"处理**（`memberHasOpenWork(undefined) === true`），理由见
+     *   那个函数的注释：误判成琥珀只是多看一眼，误判成 idle 会**藏起一个真卡点**。
+     */
+    readonly openWork?: boolean;
 }
 /**
  * The tone of one member's status dot.
@@ -74,6 +86,20 @@ export interface MemberDotContext {
  *   session dies, so a dead member would keep a "running" dot forever — the
  *   residual reading task t4 exists to remove. A member whose session is gone
  *   while its work is still open therefore reads `stalled` (amber), not `running`.
+ *
+ * ── ★★★ t82：上面那句的「**while its work is still open**」现在真的被实现了 ──────
+ *
+ * MEASURED（用户截图：「目前已完成为什么是琥珀色的」）：改前这一格是
+ * `if (liveness === 'not-live') return 'stalled'` —— **无条件**。于是
+ * `ui-engineer`（刚成功交付 t79、名下未完成任务数 = **0**、会话被正常回收）
+ * 被画成琥珀。而琥珀是本仓**唯一**的"待处理"色（CSS 注释逐字「a thing to act on」）
+ * ⇒ "干完了"与"卡住了"**同色** ⇒ 那个色不再是信号，而两者的处置**相反**。
+ *
+ * ⇒ 现在 `not-live` **分两格**：
+ *   · `openWork === true`  ⇒ `'stalled'`（琥珀）—— ★ 注释说的那一格（死会话 + 活还开着）
+ *   · `openWork === false` ⇒ `'idle'`            —— ★ 它已收工，会话被回收是【正常的】
+ *
+ * ★ **只改了"何时用琥珀"，没改 CSS 的颜色规则**（琥珀仍是 warn 色）。
  *
  * ★ When the host publishes no liveness field, this falls back to `activity`
  *   exactly as before rather than inferring a state nobody measured.
