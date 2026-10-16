@@ -1389,11 +1389,27 @@ export function memberGateVerdict(evaluation: GateEvaluationView): MemberGateVer
  *   把"我没读"画成"读到了"正是本仓记账最久的形态。
  * ───────────────────────────────────────────────────────────────────────────── */
 
-/** The six insertion points, in flow order. Mirrors the host's `INSERTION_POINTS`. */
-export const FLOW_STAGES = ['admission', 'contract', 'dispatch', 'completion', 'delivery', 'runtime'] as const
-
-/** One flow stage. */
-export type FlowStage = typeof FLOW_STAGES[number]
+/**
+ * ★★★ t100：这里本来是一份**手抄**的 `FLOW_STAGES` 清单，注释逐字写着
+ *   「Mirrors the host's `INSERTION_POINTS`」。
+ *
+ * ── 它为什么被删掉（MEASURED，队长实测）──────────────────────────────────────────
+ *
+ * · 主机加第七个位置 `collection` 时，它**没跟着加** ⇒ ★ 两份分叉
+ * · ★★ 而**没有任何东西会红** —— 它是 `as const` 数组，不是类型错误
+ * · ★★★ 后果：`MemberRow` 用它当**白名单**，于是主机交上来的 `collection` 段
+ *   裁决被**静默丢掉** —— 而"丢掉了"与"主机没交"在界面上同形
+ *
+ * ── 现在的位置清单从哪来 ──────────────────────────────────────────────────────────
+ *
+ * ★ `snapshot.ts` 的 `gateCatalogForUi()` 按 `INSERTION_POINTS.map(...)` 生成，
+ *   而那份 catalog **每份快照都带**（`TeamActivitySnapshot.gateCatalog`）。
+ * ⇒ ★★ 所以客户端【不需要】一份自己的清单：它读主机给的那份。
+ *
+ * ★ 而 `FlowStage` 仍保留为**字符串别名**：它是"主机给的某个位置名"，
+ *   不再是"这六个之一"。★ 这样主机加位置时，这里【不需要改】。
+ */
+export type FlowStage = string
 
 /**
  * Which stage a task is in, **derived from its status** (spec §4).

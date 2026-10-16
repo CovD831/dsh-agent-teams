@@ -47,7 +47,6 @@ import {
   segmentAbsence,
   subagentTone,
   taskStage,
-  FLOW_STAGES,
   type ClockTask,
   type FlowStage,
   type GateRowView,
@@ -314,7 +313,7 @@ export function stageGroups(
   evaluations?: unknown,
 ): StageGroupView[] {
   const evaluationView = readEvaluationView(evaluation)
-  const byPoint = readEvaluationsByPoint(evaluations)
+  const byPoint = readEvaluationsByPoint(evaluations, catalog.map((entry) => entry.point))
   /**
    * ★★ 「走到了吗」的**机械依据**：落盘里**有这一段的键**，或这一段的层级是任务级
    *   而任务当前正处在它**或更后面**的段。
@@ -323,7 +322,24 @@ export function stageGroups(
    *   （★ 反向半边 A：不许把"还没到"说成"没读数"）。
    *   ⇒ 所以用"**当前段之后**"这一点来区分：当前段**之前或就是**它 ⇒ 走到过。
    */
-  const stageIndex = stage === undefined ? -1 : FLOW_STAGES.indexOf(stage)
+  /**
+   * ★★★ t100：**顺序来自 `catalog`，不再来自手抄的 `FLOW_STAGES`**。
+   *
+   * ── 为什么必须这样（MEASURED，队长实测）────────────────────────────────────
+   *
+   * `FLOW_STAGES` 的注释逐字写着「Mirrors the host's `INSERTION_POINTS`」，
+   * ★ 而它【手抄】了六个，主机已经有七个（`collection` 是后加的）
+   * ⇒ 那次分叉【没有任何东西会红】。
+   *
+   * ★★★ 而 `catalog` 是**主机派生**的（`snapshot.ts` 的 `gateCatalogForUi()`
+   *   按 `INSERTION_POINTS.map(...)` 生成）⇒ ★ 它是**唯一真值**，
+   *   而手抄那份【结构上不可能与它保持一致】。
+   *
+   * ★ 顺序：`catalog` 的元素顺序**就是**主机的 `INSERTION_POINTS` 顺序
+   *   （那正是它的生成方式）⇒ 所以下面 `indexOf` 换成在 catalog 里找下标。
+   */
+  const orderedPoints = catalog.map((entry) => entry.point as FlowStage)
+  const stageIndex = stage === undefined ? -1 : orderedPoints.indexOf(stage)
   return catalog.map((point) => {
     const here = point.point as FlowStage
     const stageVerdicts = byPoint.get(here)
@@ -345,7 +361,7 @@ export function stageGroups(
           here,
           point.gates.length,
           /** ★ "走到过"= 这一段的键在落盘里，或任务当前段已经**越过**它。 */
-          byPoint.has(here) || (stageIndex >= 0 && stageIndex >= FLOW_STAGES.indexOf(here)),
+          byPoint.has(here) || (stageIndex >= 0 && stageIndex >= orderedPoints.indexOf(here)),
         )
     return { stage: here, state, hasVerdicts, absence, rows }
   })
@@ -444,11 +460,28 @@ function readEvaluationView(raw: unknown): Parameters<typeof stageGroupState>[2]
  *
  * @param raw - the raw `gateEvaluations` field off the task, when the wire carried it.
  */
-function readEvaluationsByPoint(raw: unknown): ReadonlyMap<FlowStage, Parameters<typeof stageGroupState>[3] & object> {
+function readEvaluationsByPoint(
+  raw: unknown,
+  /**
+   * ★★★ t100：**白名单来自主机**，不再来自手抄的 `FLOW_STAGES`。
+   *
+   * ── 为什么这一格最危险（MEASURED）────────────────────────────────────────────────
+   *
+   * 这个 filter 是**丢弃**语义：不在名单里的键**静默跳过**。
+   * ★ 而手抄那份少了 `collection`（主机已有七个、它写了六个）
+   * ⇒ ★★ 主机交上来的 `collection` 段的裁决会被【静默丢掉】，
+   *    而"丢掉了"与"主机没交"在界面上**同形** —— 本仓记账最久的形态。
+   *
+   * ★ 而 `catalog` 逐点来自主机的 `INSERTION_POINTS` ⇒ 用它做白名单，
+   *   主机加一个位置 ⇒ 这里**自动**认它。
+   */
+  knownPoints: readonly string[],
+): ReadonlyMap<FlowStage, Parameters<typeof stageGroupState>[3] & object> {
   const out = new Map<FlowStage, NonNullable<Parameters<typeof stageGroupState>[3]>>()
   if (raw === undefined || raw === null || typeof raw !== 'object') return out
+  const allowed = new Set(knownPoints)
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!(FLOW_STAGES as readonly string[]).includes(key)) continue
+    if (!allowed.has(key)) continue
     const view = readEvaluationView(value)
     if (view !== undefined) out.set(key as FlowStage, view)
   }
