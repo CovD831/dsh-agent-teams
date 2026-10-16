@@ -161,3 +161,94 @@ Session 主会话  ⇒ ★ 已有的 captain + agent team（★ 完全现成）
 ---
 
 *本文只写 `docs/`。未改动 `src/`、`scripts/`、`lib/`。*
+
+---
+
+# ★★★ 追加：最小实验②的读数（2026-10-17，t104）
+
+> **做法**：**只读探针** —— 直接调两个既有导出（`readTeam` / `collectTeamsActivity`），
+> 用 `mkdtempSync` 在 `/tmp` 造临时区，跑完删掉。★ **未改任何真实区的任何文件**（连 stamp 都没碰）。
+> **判据**：**没有跑真实浏览器 / 真实会话**，读数全部来自库层直调。
+
+## ① 跨区**读**：✅ **通**
+
+```
+readTeam(<另一个工作区的 stateRoot>, '<teamId>')  ⇒ ★ 读到了那个队
+```
+★ 原因（比"能读"更重要）：**`readTeam(stateRoot, teamId)` 读的是
+`<stateRoot>/<teamId>/team.json`** —— ★ **它本来就接受任意 stateRoot**，
+**与 `workspaceOf(caller)` 无关**。
+⇒ ★★ 所以"读别区"在**库这一层**不需要任何新能力；**§0 那条不对称在读取层不存在**。
+
+## ② ★★★ 反向半边 A：**做不到** —— 而根因是**错误码在同一层合流**
+
+```
+readTeam(<不存在的区>,      'tX')          ⇒ undefined
+readTeam(<存在的区>,        '<没有的队>')  ⇒ undefined
+★★★ 两者【同形】
+```
+
+**根因（逐字回源，两处都在 `ENOENT` 上合流）：**
+```ts
+// src/state.ts:640  —— readTeam
+catch (error) {
+  if (code === 'ENOENT') return undefined      // ★「目录不存在」与「team.json 不存在」都是 ENOENT
+  throw error
+}
+```
+```ts
+// src/snapshot.ts:831  —— collectTeamsActivity
+catch (error) { if (code === 'ENOENT') continue }   // ★ 不存在的区【静默消失】
+```
+
+⇒ ★★★ **即：「那个区不存在」与「那个区里没有那个队」在【错误码这一层】就已经合流了** ——
+不是返回值写得不好，而是**信息在更上游就丢了**。
+
+## ③ `/state` 那条路**同样**静默跳过不存在的区
+
+```
+collectTeamsActivity(ctx, [有效 root, 不存在的 root])  ⇒ 快照数 = 1
+★ 不存在的那个【静默消失】 ⇒ 与"那个区里没有队"同形（两者都不产出快照）
+```
+★ 而 §0 说"读那侧已经遍历所有已注册的工作区"**是对的** ——
+★★ 但"遍历到"不等于"**读不到时说得出来**"。
+
+## ④ 三态的现实（★ 而"做不到"是**设计决策**，不是缺陷）
+
+| 情形 | 库这一层给出 | 与谁同形 |
+|---|---|---|
+| 读到了 | `TeamState` | —— |
+| 那个区**没有队** | `undefined` | ★ **与下一行同形** |
+| 那个区**读不到** | `undefined` | ★ **与上一行同形** |
+
+★★ **它有两条补救路，而选哪条要人定**（所以这是**决策**，不是 bug）：
+```
+(甲) 调用方先探目录    —— statSync(stateRoot) 分"区在不在"，不改库
+(乙) 给读取函数加返回  —— 让它回"为什么是空的"（区不存在 / 区里没队 / 读不了）
+```
+★ **本实验到此为止**：选哪条会改变夹具的验收标准，
+⇒ **所以夹具（`gate-cross-workspace-read.test.mjs`）等这条决策定了再派。**
+
+## ⑤ ★ 锁：两个锁键都按 `stateRoot` 分 ⇒ 跨区**写**要拿**别的区**的锁
+
+```ts
+// src/tools/shared/entities.ts:1135
+export function teamLockKey(stateRoot, teamId) { return `team:${stateRoot}:${teamId}` }
+export function captainLockKey(stateRoot, captainId) { /* ★ 同形 */ }
+```
+★ **本实验只读、未取任何锁** ⇒ ★★ **"跨区取锁能不能成"未验证**（那要写，越界）。
+★ 如实标注：这一条是**观察**，不是实测。
+
+## ⑥ ★ 一条预警（由 ② 直接推出来）
+
+```
+★★ 跨区写时把区名【拼错】⇒ 表现成「那个区没有队」
+   —— ★ 而不是「你指错了区」
+```
+★ 理由：② 已经证明「区不存在」在读取层就是 `undefined`。
+⇒ ★★ 所以**跨区写的第一步不是写，而是让"指错了区"这件事说得出来** ——
+否则权限越大的入口，**越难发现它操作错了对象**（与 §3「能力与审计要一起上」同一条纪律）。
+
+---
+
+*本节只追加 `docs/AGGREGATE-CAPTAIN.md`。★ 未改 `src/`、`scripts/`、`lib/`，未创建夹具（等决策）。*
