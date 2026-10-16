@@ -275,6 +275,29 @@ import * as contractVerifyCommand from './contract/verify-command.ts'
  */
 
 /**
+ * ── T5 ——— 已接：`admission` 位置的三条判据（★ 本位置此前**一条都没有**）───────────
+ *
+ * ★ 这一行由 t85 落。**本位置是空的，而那不是缺陷** —— t5 只加位置、不加判据，
+ *   而 `index.ts` 顶部那两段注释**逐字预告了今天这一步**：
+ *     · 「t6/t7/t8 会往里挂判据（审查检查点 / 吸收痕迹 / 成团闸门）；
+ *        任何夹具都不许把"admission 现在没有判据"写成断言：
+ *        接上第一条判据的那一刻它就会**按设计变红**」
+ *   ⇒ 于是有四个夹具**自己声明了它们该在这一刻被改**（见 `docs/ADMISSION-WIRING.md`）。
+ *     本行的提交把那句预告执行掉。
+ *
+ * ★ 顺序 = `absorb`（吸收痕迹）→ `checkpoint`（审查检查点）→ `convene`（成团闸门）。
+ *   理由与别处一致：**先问"该记的记了吗"与"该审的审了吗"，最后才问"能不能开会"** ——
+ *   前面两步没过时，第三步的结论没有意义（而三条各自 `appliesTo` 不同，
+ *   实际不会互相屏蔽；这个顺序只决定 blocker 的排列）。
+ *
+ * ★ id = 'admission.absorb' / 'admission.checkpoint' / 'admission.convene'，
+ *   三条的 `point` 都是 `'admission'`（见各自文件的 `export const point`）。
+ */
+import * as admissionAbsorb from './admission/absorb.ts'
+import * as admissionCheckpoint from './admission/checkpoint.ts'
+import * as admissionConvene from './admission/convene.ts'
+
+/**
  * 一个判据模块必须交出的四个名字（+ 可选的 `appliesTo`）。
  *
  * ★ 为什么把它写成类型而不是只写在注释里：`import * as` 拿到的是一个 unknown 袋子，
@@ -396,6 +419,22 @@ const ALL_GATES = [
    * ★★ 而它与 P2 的 `dispatch.plan-reviewed` 是**同一条**：t8 出本体、t10 出接线。
    */
   dispatchPlanReviewed,
+  /**
+   * ── T5 ——— 已接：`admission` 位置的三条判据（★ 由 t85 接线）───────────────────────
+   *
+   * ★ 只加自己这三行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   *
+   * ★★ **这是五个位置里最后被接上的一个** —— 在此之前 `admission` 的
+   *   `registered === 0`，而那是**正常情形**（契约 §9.1：空位置 ⇒ `ok`）。
+   *   ⇒ 于是"写了但没接线"这句话在本仓**再也没有实例**了（t6 那条教训的收口：
+   *     "一条判据进 `ALL_GATES` 才叫接上了；盘上有文件不算"）。
+   *
+   * ★ 顺序 = absorb（吸收痕迹）→ checkpoint（审查检查点）→ convene（成团闸门）：
+   *   先问"该记的记了吗"与"该审的审了吗"，最后才问"能不能开会"。
+   */
+  admissionAbsorb,
+  admissionCheckpoint,
+  admissionConvene,
 ] as const
 
 /**
