@@ -8,7 +8,7 @@ import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
-import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
+import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, gateEvaluationRecordOf, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TERMINAL_TASK_STATUSES, TaskKind, TeamTask } from '../types.ts'
 import { registry } from '../gates/index.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
@@ -761,6 +761,24 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              */
             loadRules: () => loadVerifyCommandRules(workspace),
           })
+
+          /**
+           * ── ★★★ t81：把**契约段**的判据裁决落盘到这条任务 ────────────────────────────
+           *
+           * ★ 在此之前这句裁决**从不离开** `rejectOnContractGates`（t81 开工勘查实测：
+           *   它只用于当场裁决 / 措辞 / 台账，**通过路径上被丢弃** —— 本仓自记 F3 的形态）。
+           *   ⇒ `rejectOnContractGates` 现在把它随 `gates` 带出来（本文件上一行的返回值里）。
+           *
+           * ★★ 只在**真的求值过**时才写（`contractGateSurface === undefined` ⇒ 不写）：
+           *   与 `gateEvaluation` 那条注释同一条纪律 —— 「落盘只在真的求值过时发生」。
+           *   ★ 一个恒在场的空记录会让「这一步没被检查」与「检查了且没事」同形。
+           *
+           * ★ 落点在 `writeTeam`(:782)**之前** ⇒ 写进 `task` 就随之持久化。
+           * ★ 与 `gateEvaluation` 并存（那一格是 S1 的 completion 单段形状，既有读者依赖它）。
+           */
+          if (contractGateSurface !== undefined) {
+            ;(task.gateEvaluations ??= {}).contract = gateEvaluationRecordOf(contractGateSurface.gates)
+          }
           /**
            * ── ★★★ t14：绑定的回读 + **传播读数**（在落盘之前算，读的是刚写下的那一条）──
            *
@@ -853,6 +871,29 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             registry: registry as unknown as DispatchWiringInput['registry'],
           })
           const dispatchGates = dispatchWiring.gates
+
+          /**
+           * ── ★★★ t81：把**派发段**的判据裁决落盘到这条任务 ──────────────────────────
+           *
+           * ★ 为什么这里需要**第二次** `writeTeam`：
+           *   `wireDispatch` 刻意求值在**锁内、且在第一处 `writeTeam`（:800）之后** ——
+           *   因为"派发前"就是**这一刻**（紧接着的锁外 `kickTeam` 才把它交给成员），
+           *   而判据读的 `ctx.task.reviewed` 必须是**刚落盘的这一条**（见下面 t39 那段注释）。
+           *   ⇒ 它的裁决在第一次落盘之后才存在 ⇒ 想持久化只能**再写一次**。
+           *
+           * ★ 只在**真的求值过**时才写 —— 与契约段、与 `gateEvaluation` 同一条纪律。
+           * ★ 与 `gateEvaluation`（S1 的单段字段）**并存**：那一格只有 completion 段，
+           *   本条是 `gateEvaluations.dispatch`。
+           */
+          ;(task.gateEvaluations ??= {}).dispatch = gateEvaluationRecordOf(dispatchGates)
+          /**
+           * ★★ t81：第二次落盘 —— 只为把上一行那句裁决持久化。
+           *   ★ 位置在这里是**必须的**（dispatch 求值在锁内、且在第一次 writeTeam 之后）；
+           *     而"第二次写"本身是安全的：`fresh` 是同一个活对象，
+           *     两次之间**没有任何地方重读盘上文件**（t81 实测确认），
+           *     所以第二写不会用陈旧快照覆盖第一写。
+           */
+          await writeTeam(stateRoot, fresh)
           /**
            * ── ★★★ t24：判据读到的那一份 ctx —— **必须由接线交出**，不在这里重造 ──────────
            *
@@ -976,7 +1017,21 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              *   在返回值上同形。★ 三态：齐（`incomplete: 0`）/ 有缺格（`N` + `missing`）/
              *   这个位置没判据（**字段不出现**，不是 `ok`）。
              */
-            ...contractGateSurface === undefined ? {} : contractGateSurface,
+            /**
+             * ── ★★ t81 修正：只 spread **schema 声明过的那一格** ─────────────────────────
+             *
+             * MEASURED（t81 实测打红 `gate-task-model-binding.test.mjs` 臂 8）：
+             *   本处此前 spread **整个** `contractGateSurface`。而 t81 给那个返回值
+             *   **新增了 `gates` 一格**（为了让契约裁决能落盘）⇒ 它会**原样漏进工具返回值**
+             *   ⇒ 撞上 `additionalProperties: false`：
+             *   `'"value.gates" is not a declared property'`。
+             *
+             * ★★ 这是**真缺陷**、不是夹具过严：`gates` 是**内部实现细节**
+             *   （给落盘用的），**不是**这个工具的对外契约 ⇒ 不该出现在 output 里。
+             * ★ 修法：**显式只取声明过的那一格**，而不是 spread 整个对象 ——
+             *   以后返回值再加内部字段也不会自动漏出去。
+             */
+            ...contractGateSurface === undefined ? {} : { input_surface: contractGateSurface.input_surface },
             ...task.assignee !== undefined ? { assignee: task.assignee } : {},
             ...contractRuntimeRecord === undefined ? {} : { runtime_gates: contractRuntimeRecord },
             /**

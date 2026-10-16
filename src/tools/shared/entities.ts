@@ -38,6 +38,8 @@ import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
+/** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
+import type { GateEvaluation } from '../../gates/registry.ts'
 import type { GatePoint } from '../../gates/index.ts'
 import { installMemberSelectionRuntime, resolveMemberLlmSelection, validateMemberLlmSelections } from '../../members.ts'
 import { resolveTeamProfile } from '../../profiles.ts'
@@ -4268,7 +4270,28 @@ export async function rejectOnContractGates(
   /** ★ t22：这个团队自己的 stateRoot（台账落点）。**不许用进程级单值**，见 recordFriction。 */
   stateRoot: string,
   inject: Record<string, unknown> = {},
-): Promise<{ input_surface: ReturnType<typeof inputSurfaceOf> } | undefined> {
+): Promise<
+  | {
+      input_surface: ReturnType<typeof inputSurfaceOf>
+      /**
+       * ── ★★ t81：契约段的判据裁决 —— ★ **它此前从不离开这个函数** ──────────────
+       *
+       * MEASURED（t81 开工勘查，逐行核过）：本函数在 `const gates = await registry.evaluate('contract', …)`
+       * 求出裁决后，`gates` 只用于三件**当场**的事：裁决（`gates.ok === false` ⇒ 抛错）、
+       * 拼拒绝措辞、以及写进卡点台账的 `mechanismState`。
+       * ★ 而它**唯一的 `return`（本函数末行）只带 `input_surface`** ⇒ 通过路径上
+       *   那句判据裁决**被丢弃**（本仓自记 F3：「`ran[]` 产出即被丢弃，零消费」）。
+       *
+       * ⇒ 新增这一格把它**带出去**，好让调用方落到 `TeamTask.gateEvaluations.contract`。
+       * ★ 与 `input_surface` **并列**而不是替换 —— 既有调用方 spread 这个对象
+       *   （`create-task.ts:979` / `amend-task.ts:107`），撤掉那一格会打断它们。
+       * ★ 而**只有真的求值过**才在场（见下面的 return）：这与
+       *   `gateEvaluation` 的注释同一条纪律 —— 「落盘只在真的求值过时发生」。
+       */
+      gates: GateEvaluation
+    }
+  | undefined
+> {
   /**
    * ★ 输入面核对（t10）：**求值之前**，按每条判据声明的 `requires` 核对这份真实 ctx。
    *   ★ 它是**旁路数据**：下面的拒绝逻辑一个字都不看它 —— 核对报缺时流程照常走完
@@ -4508,7 +4531,11 @@ export async function rejectOnContractGates(
    *     ② 台账      —— `couldNotObserve: [原文]`
    *     ③ 抛出侧    —— `throwWithSurface(…, unmeasuredAtContract)`，随工具错误面到调用方
    */
-  return inputSurface === undefined ? undefined : { input_surface: inputSurface }
+  /**
+   * ★★ t81：`gates` 现在**随返回值离开**（此前只留在本地变量里，通过路径上被丢弃）。
+   * ★ `inputSurface === undefined` ⇒ 连输入面都没构造出来 ⇒ **都缺席**（不猜）。
+   */
+  return inputSurface === undefined ? undefined : { input_surface: inputSurface, gates }
 }
 export function throwWithSurface(
   message: string,

@@ -11,6 +11,8 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools';
  */
 import { type RulesLoad } from '../../gates/contract/verify-command.ts';
 import { type FlywheelVerdict, type UsageTally } from '../../confidence.ts';
+/** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
+import type { GateEvaluation } from '../../gates/registry.ts';
 import type { GatePoint } from '../../gates/index.ts';
 import { installMemberSelectionRuntime } from '../../members.ts';
 import type { AcceptanceResult, ReviewFinding } from '../../types.ts';
@@ -1750,6 +1752,22 @@ export declare function rejectOnContractGates(ctx: Context, context: Record<stri
 /** ★ t22：这个团队自己的 stateRoot（台账落点）。**不许用进程级单值**，见 recordFriction。 */
 stateRoot: string, inject?: Record<string, unknown>): Promise<{
     input_surface: ReturnType<typeof inputSurfaceOf>;
+    /**
+     * ── ★★ t81：契约段的判据裁决 —— ★ **它此前从不离开这个函数** ──────────────
+     *
+     * MEASURED（t81 开工勘查，逐行核过）：本函数在 `const gates = await registry.evaluate('contract', …)`
+     * 求出裁决后，`gates` 只用于三件**当场**的事：裁决（`gates.ok === false` ⇒ 抛错）、
+     * 拼拒绝措辞、以及写进卡点台账的 `mechanismState`。
+     * ★ 而它**唯一的 `return`（本函数末行）只带 `input_surface`** ⇒ 通过路径上
+     *   那句判据裁决**被丢弃**（本仓自记 F3：「`ran[]` 产出即被丢弃，零消费」）。
+     *
+     * ⇒ 新增这一格把它**带出去**，好让调用方落到 `TeamTask.gateEvaluations.contract`。
+     * ★ 与 `input_surface` **并列**而不是替换 —— 既有调用方 spread 这个对象
+     *   （`create-task.ts:979` / `amend-task.ts:107`），撤掉那一格会打断它们。
+     * ★ 而**只有真的求值过**才在场（见下面的 return）：这与
+     *   `gateEvaluation` 的注释同一条纪律 —— 「落盘只在真的求值过时发生」。
+     */
+    gates: GateEvaluation;
 } | undefined>;
 export declare function throwWithSurface(message: string, surface: ReturnType<typeof inputSurfaceOf>, 
 /**

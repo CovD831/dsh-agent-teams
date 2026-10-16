@@ -1839,7 +1839,19 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            *     而"上一代判据说了什么"只在**当场日志**里 —— 那是刻意的取舍
            *     （与 `output` / `verdict` 同一代际策略）。
            */
+          /**
+           * ★ S1 的**单段**字段（既有读者 `snapshot.ts` / `status.ts` 依赖它）—— 原样保留。
+           */
           task.gateEvaluation = gateEvaluationRecordOf(completionGates)
+          /**
+           * ── ★★ t81：**同时**进按段字段的 `completion` 那一格 ──────────────────────────
+           *
+           * ★ 两格在 completion 段上**冗余但一致**（与 `auto.gate` / `auto.gates` 同一取舍）：
+           *   旧格保留是因为既有读者在读它；新格是 UI 的**首选**读法（它与 contract/dispatch
+           *   两段同住一个字段，UI 才能一次遍历六段）。
+           * ★ 只在**真的求值过**时才写 —— 这里本来就只在求值路径上，与 S1 同一条前提。
+           */
+          ;(task.gateEvaluations ??= {}).completion = task.gateEvaluation
           task.updatedAt = Date.now()
           const priorDependencies = new Map(fresh.tasks.map(item => [item.id, [...item.dependencies]]))
           const followUp = (task.status === 'failed' && (task.verdict === 'needs_revision' || task.verdict === 'reject'))

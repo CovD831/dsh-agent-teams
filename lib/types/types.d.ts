@@ -219,6 +219,64 @@ export type FailureKindName = 'failed_delivery' | 'failed_context' | 'inconclusi
 /** 上述取值的运行期清单（与 `state.ts` 的 `FAILURE_KINDS` 同源，由夹具逐字比对）。 */
 export declare const FAILURE_KIND_NAMES: readonly FailureKindName[];
 /**
+ * ── ★★ t81：判据**插入点**的取值 —— 与 `gates/registry.ts` 的 `INSERTION_POINTS` 同源 ──
+ *
+ * ★ 为什么不 `import type { InsertionPoint } from './gates/registry.ts'`：
+ *   **本文件是一个零 import 的叶子**（t24 立的规矩，且有**两条**臂逐字钉住它：
+ *   `gate-runtime-stall.test.mjs` 的"零 import"臂与 `gate-stall-leaf-home.test.mjs` 的
+ *   臂 4"前提臂"）。⇒ 一旦这里 import 了 gates，叶子就变成图上的一个节点 ——
+ *   ★ 而**这是真的环**：实测 `src/gates/index.ts` **可达** `src/types.ts`
+ *   （`gate-run-entry` / `GateRunEntry` 那条引用），所以反向 import 会成环。
+ *
+ * ★★ 与 `FailureKindName` **逐字同一条先例**（就在上面）：
+ *   "不 import"的代价是**这里多一份字面量** ⇒ 它必须有一条**机械的**保障，
+ *   而不是靠"记得同步"。
+ *   ⇒ 由 `scripts/` 里的一条臂**逐字比对**本清单与 `INSERTION_POINTS` 相等
+ *     （★ 且那条臂**已注册进 `test:gates` 的跑者** —— 不在跑者里的判据等于没有）。
+ *
+ * ★ 它是**顺序敏感**的：`GATE_INSERTION_POINTS` 的次序**必须**与 `INSERTION_POINTS` 一致，
+ *   因为读取端（UI 的六段遍历、`stageGroupState`）按它铺开。⇒ 逐字比对是**含序**的比对。
+ */
+export type GateInsertionPoint = 'admission' | 'contract' | 'dispatch' | 'completion' | 'delivery' | 'runtime';
+/**
+ * 上述取值的运行期清单（与 `gates/registry.ts` 的 `INSERTION_POINTS` **同源同序**，
+ * 由一条夹具逐字比对；★ 该夹具已注册进 `test:gates`）。
+ */
+export declare const GATE_INSERTION_POINTS: readonly GateInsertionPoint[];
+/**
+ * ── ★★ t81：按**段**落盘的判据裁决（`TeamTask.gateEvaluations`）────────────────────
+ *
+ * ★ 为什么需要它（而 `gateEvaluation` 不够）：
+ *   `gateEvaluation` 是**单段**的（S1 只落 `completion`）。若 `dispatch` 也写它，
+ *   就会**覆盖** completion ⇒ 两段互相踩。⇒ 按段存。
+ *
+ * ★★ 只有**三个**段会出现在这里 —— 因为它们才是**任务级**的事实：
+ *
+ * | 段 | 层级 | 会落盘吗 |
+ * |---|---|---|
+ * | `contract` · `dispatch` · `completion` | ★ **任务级** | ✅ **会** |
+ * | `delivery` | ⚠️ 团队级（`delivery.ts`：整个团队的交付，不是某条任务） | ❌ **永不** |
+ * | `runtime` | ⚠️ 事件级（`evaluateRuntimeGates`：跨步骤的过程约束） | ❌ **永不** |
+ * | `admission` | ★ **空段**：三条判据存在但**未注册**（`gates/admission/*.ts`） | ❌（真的 0 条） |
+ *
+ * ⇒ ★★ **不许为了"凑齐六段"而给 delivery/runtime 编一个 per-task 裁决** ——
+ *   那会造出一个**错误的事实**。UI 必须把它们显示成"团队级/事件级，不在任务上"。
+ *
+ * ★★ 而"没有裁决"的**四种成因必须不同形**（这是 t81 的最终目的）：
+ *   · 段**真的没判据**（`admission`）      ⇒ 显示 `0 条`
+ *   · 段**不是任务级事实**（`delivery`/`runtime`）⇒ 显示 `团队级`
+ *   · 任务**还没走到**该段                ⇒ 显示 `未开始`
+ *   · 走了、但**这一代没记**（retry 清过）  ⇒ 显示 `未落盘`
+ *   ★ 四者混成一个 `○` 就是本仓记账最久的形态。
+ *
+ * ★ 与 `gateEvaluation` 的关系：**并存**，不是替代。
+ *   · `gateEvaluation` —— S1 的形状，**既有读者仍在依赖**（`snapshot.ts`、`status.ts`），
+ *     且它就是 `completion` 段那一格（UI 侧作为**兼容来源**读它）。
+ *   · `gateEvaluations` —— 按段的新字段；UI **优先**读它。
+ *   ⇒ 两格在 completion 段上**冗余但一致**（与 `auto.gate` / `auto.gates` 同一取舍）。
+ */
+export type GateEvaluationByPoint = Partial<Record<GateInsertionPoint, GateEvaluationRecord>>;
+/**
  * ── ★★★ t19：一次执行的**历史元素**（`TaskExecution`）────────────────────────────
  *
  * 一条 = **一次尝试走到了终态**。`TeamTask.executions[]` 按发生顺序装它们。
@@ -506,6 +564,15 @@ export interface TeamTask {
      *   两者必须能各自读出来。
      */
     gateEvaluation?: GateEvaluationRecord;
+    /**
+     * ── ★★ t81：按**段**落盘的判据裁决（见 {@link GateEvaluationByPoint}）──────────────
+     *
+     * ★ `gateEvaluation` **原样保留**（S1 的既有读者依赖它）；本字段是**并存**的按段版本。
+     * ★ 只有任务级的三个段（`contract` / `dispatch` / `completion`）会出现；
+     *   `delivery` / `runtime` **永不出现**（团队级/事件级），`admission` 是空段。
+     * ★ 三种"缺席"**不同形**：键不在（没走到 / 不是任务级）vs 值在但 `ran: []`（走了、没判据跑）。
+     */
+    gateEvaluations?: GateEvaluationByPoint;
     /** Supplemental observations, attributed to their original execution generation. */
     supplementalEvidence?: TaskEvidence[];
     /**

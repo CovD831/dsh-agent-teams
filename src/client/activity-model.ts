@@ -1399,6 +1399,79 @@ export function taskStage(status: string, hasEvaluation: boolean): FlowStage | u
  */
 export type GateState = 'passed' | 'skipped' | 'running' | 'registered' | 'pending' | 'observed'
 
+/**
+ * ── ★★★ t81：一段"**没有裁决**"的成因 —— ★ **四种必须不同形** ──────────────────────
+ *
+ * 本仓记账最久的形态是「**没找到**」与「**确实没有**」合流。而在判据分段这件事上，
+ * 「这一段没有裁决」有**四种成因**，它们的补救动作**完全不同**：
+ *
+ * | 成因 | 什么情况 | 补救动作 |
+ * |---|---|---|
+ * | {@link SegmentAbsence.noGate} | ★ **该段真的没有判据**（`admission` 是空段） | 判据自己该接线（或删掉）—— **不是**任务的问题 |
+ * | {@link SegmentAbsence.teamLevel} | ★ **不是任务级事实**（`delivery` 团队级 / `runtime` 事件级） | 去团队级/事件级的读数里看 —— **永远**不会出现在任务上 |
+ * | {@link SegmentAbsence.notReached} | 任务**还没走到**那一段 | 等 —— 它会自己出现 |
+ * | {@link SegmentAbsence.notRecorded} | 走了，但**这一代没记**（retry 清过） | ★ 想知道上一代说了什么 ⇒ 看**历史**（`executions[]`） |
+ *
+ * ★★ 四者混成同一个 `○` 就是那个最久的形态。⇒ 本类型是**送进渲染层**的判别面，
+ *   而 `GateState`（`○`/`⊘`/`✓`…）只回答"形状"，不回答"为什么"。
+ */
+export type SegmentAbsence =
+  /** ★ 该段**真的没有判据**（`registered === 0`）—— `admission` 是唯一确定的一例。 */
+  | 'noGate'
+  /** ★ 该段不是**任务级**事实 —— `delivery`（团队级）/ `runtime`（事件级）。**永不落盘**。 */
+  | 'teamLevel'
+  /** ★ 任务**还没走到**这一段。 */
+  | 'notReached'
+  /** ★ 走到了，但**这一代没记**（`clearAttemptResult` 清过）—— ★ 与"没走到"不同形。 */
+  | 'notRecorded'
+
+/**
+ * ── ★★★ t81：段落的**层级** —— 决定它能不能出现在任务上 ──────────────────────────
+ *
+ * ★★ `delivery` / `runtime` **永不落盘到 task**（团队级 / 事件级）：
+ *   · `delivery` —— `src/tools/delivery.ts`：**整个团队**宣布交付，不是某条任务的事实；
+ *   · `runtime`  —— `evaluateRuntimeGates`：**跨步骤**的过程约束（告警，不直接拒任务）。
+ *   ⇒ ★ **不许为了"凑齐六段"给它们编一个 per-task 裁决** —— 那会造出一个**错误的事实**。
+ *     这与 `admission` 的"真的 0 条"是**两件不同的事**（一个是没判据，一个是不属于任务）。
+ */
+export function segmentLevel(stage: FlowStage): 'task' | 'team' | 'event' | 'empty' {
+  if (stage === 'delivery') return 'team'
+  if (stage === 'runtime') return 'event'
+  /** ★ `admission` 目前是空段（三条判据未注册）—— 由 `registered === 0` 动态判，不写死。 */
+  return 'task'
+}
+
+/**
+ * 判定一段"没有裁决"的**成因**。
+ *
+ * ★ 调用前提：调用方已经确定**这一段没有裁决**（拿不到 `evaluation`）。
+ *   ⇒ 本函数只回答"**为什么没有**"，不回答"有没有"。
+ *
+ * @param stage - 是哪一段。
+ * @param registered - 这一段**注册了**几条判据（来自 `catalog`，是静态清单）。
+ * @param reached - 这条任务**走到过**这一段吗（由落盘字段/状态推）。
+ */
+export function segmentAbsence(
+  stage: FlowStage,
+  registered: number,
+  reached: boolean,
+): SegmentAbsence {
+  /**
+   * ★ 顺序是刻意的：**层级**先判 —— 因为它与"走到没走到"**无关**。
+   *   `delivery`/`runtime` 哪怕任务明明走到了那一步（交付、运行中），
+   *   它们的裁决也**不在任务上** ⇒ 报"团队级"，而不是"还没走到"。
+   *   ★ 这正是反向半边 C：不许说"还没到"，也不许编一个裁决。
+   */
+  const level = segmentLevel(stage)
+  if (level === 'team' || level === 'event') return 'teamLevel'
+  /** ★ 真的没判据（空段）—— 与"没走到"不同形。 */
+  if (registered === 0) return 'noGate'
+  /** ★ 有判据、但这条任务还没走到那一段。 */
+  if (!reached) return 'notReached'
+  /** ★ 走到了、有判据，而这一代没记（retry 清过 / 求值路径没落）。 */
+  return 'notRecorded'
+}
+
 /** The single glyph for each state. ★ 每个都不一样 —— 这是本模块存在的理由。 */
 export const GATE_GLYPH: Readonly<Record<GateState, string>> = {
   passed: '✓',
@@ -1423,8 +1496,22 @@ export interface StageGroupView {
   readonly stage: FlowStage
   /** How the stage as a whole reads, for its own glyph. */
   readonly state: GateState
-  /** ★ 该段有没有**真的**逐条裁决（甲方案：只有 completion 有）。 */
+  /**
+   * ★ 该段有没有**真的**逐条裁决。
+   * ★★ t81：**不再是"只有 completion"** —— 现在 contract / dispatch / completion
+   *   三个任务级段都可能真的有（它们在服务端落盘）。
+   */
   readonly hasVerdicts: boolean
+  /**
+   * ── ★★★ t81：这段**没有裁决**的成因（有裁决时缺席）─────────────────────────────
+   *
+   * ★★ 四者**不同形**（见 {@link SegmentAbsence}）：`noGate`（真的没判据）/
+   *   `teamLevel`（不是任务级事实）/ `notReached`（还没走到）/ `notRecorded`（这一代没记）。
+   *   ★ 混成一个 `○` 就是本仓记账最久的形态。
+   * ★ `state === 'pending'`（空段，`rows` 为空）时也**给** `absence`：
+   *   空段的成因（`noGate` vs `teamLevel`）恰恰是读的人最需要知道的。
+   */
+  readonly absence?: SegmentAbsence
   readonly rows: readonly GateRowView[]
 }
 
@@ -1450,9 +1537,27 @@ export function stageGateRows(
   stage: FlowStage,
   catalog: readonly { readonly id: string; readonly description: string; readonly observing: boolean }[],
   evaluation: GateEvaluationView | undefined,
+  /**
+   * ── ★★ t81：该段的**按段落盘裁决**（`gateEvaluations[stage]`）────────────────────
+   *
+   * ★ 传入前的**优先级**（由 `stageGroups` 定）：按段字段优先，`evaluation`
+   *   （S1 的单段 `gateEvaluation`）只作 **completion 段的兼容来源**。
+   * ★ 缺席 ⇒ 该段这一代没有裁决（成因由 {@link segmentAbsence} 再细分）。
+   */
+  stageVerdicts?: GateEvaluationView,
 ): GateRowView[] {
-  /** ★ 只有 completion 段有落盘裁决；其余段**不读** evaluation（见上面的边界）。 */
-  const verdicts = stage === 'completion' ? evaluation : undefined
+  /**
+   * ★★ t81：**不再是** `stage === 'completion' ? evaluation : undefined`。
+   *   现在三个任务级段（contract / dispatch / completion）都可能**真的**有裁决
+   *   （它们在服务端落盘，见 `TeamTask.gateEvaluations`）。
+   *   ★ 而 `delivery` / `runtime` **仍然永远没有** —— 那**不是**因为"没走到"，
+   *     而是因为它们**不是任务级事实**。见 {@link segmentLevel}。
+   *   ★ 这里**不**为它们编一个裁决：`stageVerdicts` 对面那两段恒为 `undefined`，
+   *     调用方也会用 {@link segmentAbsence} 把它们显示成「团队级」。
+   */
+  const verdicts = segmentLevel(stage) === 'task'
+    ? (stageVerdicts ?? (stage === 'completion' ? evaluation : undefined))
+    : undefined
   if (verdicts === undefined) {
     return catalog.map((gate) => ({ id: gate.id, description: gate.description, state: 'registered', observing: gate.observing }))
   }
@@ -1501,9 +1606,13 @@ export function stageGroupState(
   stage: FlowStage,
   rows: readonly GateRowView[],
   evaluation: GateEvaluationView | undefined,
+  /** ★★ t81：该段的按段落盘裁决（与 `stageGateRows` 同一入参、同一优先级）。 */
+  stageVerdicts?: GateEvaluationView,
 ): GateState {
   if (rows.length === 0) return 'pending'
-  const verdicts = stage === 'completion' ? evaluation : undefined
+  const verdicts = segmentLevel(stage) === 'task'
+    ? (stageVerdicts ?? (stage === 'completion' ? evaluation : undefined))
+    : undefined
   if (verdicts === undefined) return 'registered'
   if (typeof verdicts.skippedAll === 'string' && verdicts.skippedAll !== '') return 'skipped'
   /** ★ 一段里有任何一条不是"通过"，整段就不是"通过" —— 优先报最需要人看的那个。 */

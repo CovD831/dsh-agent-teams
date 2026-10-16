@@ -89,6 +89,33 @@ function clearAttemptResult(task: TeamTask): void {
    *   而 `executions[]`（历史）不受影响 —— 那是有意保留的过去。
    */
   task.gateEvaluation = undefined
+  /**
+   * ── ★★ t81：按段字段的**代际纪律** —— ★ 两类段的性质不同，清法也不同 ──────────────
+   *
+   * MEASURED / 裁定（t81 队长复核）：`contract` 段**只在 `create_task` / `amend_task`
+   *   求值**，`update-task` **根本不走它**。⇒ 于是两类段的性质不同：
+   *
+   * | 段 | 性质 | retry 时 |
+   * |---|---|---|
+   * | **`contract`** | ★ **该任务历史上求值过的事实** —— 一次成立，长期为真 | ★ **保留** |
+   * | **`dispatch` / `completion`** | ★ **"这一代"的读数** —— 换一代就不再代表现在 | ✅ **清** |
+   *
+   * ★★ 为什么 `contract` 必须**保留**（不是漏清）：若 retry 把它也清掉，
+   *   那么"一个只跑到 dispatch 段的任务"在 **retry 过之后**就无法再显示
+   *   「contract 有裁决」⇒ ★ **t81 的反向半边 A 会不成立**。
+   *   （A：contract+dispatch 有裁决、completion 没有 ⇒ 不许把"还没到"说成"没读数"。）
+   *
+   * ★ 而 `dispatch` / `completion` 必须清，理由与 `gateEvaluation` 逐字相同：
+   *   留着它会让「上一次的判据结论」与「这一次还没跑」在读取端**同形**。
+   *
+   * ★ 写法上刻意**只删两个键、保留其余**（而不是把整个 `gateEvaluations` 置 undefined）：
+   *   后者会连 `contract` 一起清掉 —— 那正是上表第一行要避免的。
+   *   ★ 若将来某段改变性质，**改这一处**，别在两处各写一遍（本仓反复记账的形态）。
+   */
+  if (task.gateEvaluations !== undefined) {
+    const { dispatch: _dispatch, completion: _completion, ...kept } = task.gateEvaluations
+    task.gateEvaluations = Object.keys(kept).length === 0 ? undefined : kept
+  }
 }
 
 /**

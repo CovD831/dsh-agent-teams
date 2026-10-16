@@ -159,7 +159,15 @@ export declare function stageGroups(stage: FlowStage | undefined, catalog: reado
         readonly description: string;
         readonly observing: boolean;
     }[];
-}[], evaluation: unknown): StageGroupView[];
+}[], evaluation: unknown, 
+/**
+ * ── ★★ t81：按**段**的落盘裁决（`TeamTask.gateEvaluations`）──────────────────────
+ *
+ * ★ **首选**读它；`evaluation`（S1 的单段 `gateEvaluation`）降级为
+ *   **completion 段的兼容来源** —— 服务端两格在 completion 段上冗余但一致。
+ * ★ `reached`：这条任务**走到过**哪些段。由 `stage`（现在在哪一段）+ 落盘事实推。
+ */
+evaluations?: unknown): StageGroupView[];
 /**
  * What this member is doing right now, in one line.
  *

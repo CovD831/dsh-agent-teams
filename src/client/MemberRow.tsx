@@ -41,8 +41,10 @@ import {
   memberRouteLabel,
   stageGateRows,
   stageGroupState,
+  segmentAbsence,
   subagentTone,
   taskStage,
+  FLOW_STAGES,
   type ClockTask,
   type FlowStage,
   type GateRowView,
@@ -51,6 +53,7 @@ import {
   type LoopTone,
   type MemberGateReadout,
   type MemberSubagent,
+  type SegmentAbsence,
   type StageGroupView,
 } from './activity-model.ts'
 import { MemberClock } from './MemberClock.tsx'
@@ -266,18 +269,69 @@ export function stageGroups(
   stage: FlowStage | undefined,
   catalog: readonly { readonly point: string; readonly gates: readonly { readonly id: string; readonly description: string; readonly observing: boolean }[] }[],
   evaluation: unknown,
+  /**
+   * ── ★★ t81：按**段**的落盘裁决（`TeamTask.gateEvaluations`）──────────────────────
+   *
+   * ★ **首选**读它；`evaluation`（S1 的单段 `gateEvaluation`）降级为
+   *   **completion 段的兼容来源** —— 服务端两格在 completion 段上冗余但一致。
+   * ★ `reached`：这条任务**走到过**哪些段。由 `stage`（现在在哪一段）+ 落盘事实推。
+   */
+  evaluations?: unknown,
 ): StageGroupView[] {
   const evaluationView = readEvaluationView(evaluation)
+  const byPoint = readEvaluationsByPoint(evaluations)
+  /**
+   * ★★ 「走到了吗」的**机械依据**：落盘里**有这一段的键**，或这一段的层级是任务级
+   *   而任务当前正处在它**或更后面**的段。
+   * ★ 而这里刻意**不**用"有键"单一判据：`contract` 段在 `create_task` 时就落了，
+   *   而一个只跑到 `dispatch` 的任务，它的 `completion` **没有键** ⇒ 应报 `notReached`
+   *   （★ 反向半边 A：不许把"还没到"说成"没读数"）。
+   *   ⇒ 所以用"**当前段之后**"这一点来区分：当前段**之前或就是**它 ⇒ 走到过。
+   */
+  const stageIndex = stage === undefined ? -1 : FLOW_STAGES.indexOf(stage)
   return catalog.map((point) => {
-    const rows = stageGateRows(point.point as FlowStage, point.gates, evaluationView)
-    return {
-      stage: point.point as FlowStage,
-      state: stageGroupState(point.point as FlowStage, rows, evaluationView),
-      /** ★ 只有 completion 段**真的**有逐条裁决；其余段如实说"没有"。 */
-      hasVerdicts: point.point === 'completion' && evaluationView !== undefined,
-      rows,
-    }
+    const here = point.point as FlowStage
+    const stageVerdicts = byPoint.get(here)
+      /** ★ completion 段的兼容来源：S1 的单段字段。 */
+      ?? (here === 'completion' ? evaluationView : undefined)
+    const rows = stageGateRows(here, point.gates, evaluationView, stageVerdicts)
+    const state = stageGroupState(here, rows, evaluationView, stageVerdicts)
+    /**
+     * ★ 该段**有没有**裁决：按段字段在场，或 completion 的兼容来源在场。
+     */
+    const hasVerdicts = stageVerdicts !== undefined
+    /**
+     * ★★ t81：没有裁决时，给出**成因**（四者不同形）。
+     *   ★ 只在该段**没有**裁决时才算 —— 有裁决就不该报"为什么没有"。
+     */
+    const absence = hasVerdicts
+      ? undefined
+      : segmentAbsence(
+          here,
+          point.gates.length,
+          /** ★ "走到过"= 这一段的键在落盘里，或任务当前段已经**越过**它。 */
+          byPoint.has(here) || (stageIndex >= 0 && stageIndex >= FLOW_STAGES.indexOf(here)),
+        )
+    return { stage: here, state, hasVerdicts, absence, rows }
   })
+}
+
+/**
+ * ── ★★★ t81：一段"没有裁决"的成因 → **它该说哪句话** ─────────────────────────────
+ *
+ * ★ 四者**不同句**（而不是四者同印一个 ○）：补救动作不同 ⇒ 措辞不许同形。
+ *   · `noGate`     ⇒ 判据自己该接线（或删掉）—— **不是**任务的问题
+ *   · `teamLevel`  ⇒ 去团队级/事件级的读数里看 —— **永远**不会出现在任务上
+ *   · `notReached` ⇒ 等 —— 它会自己出现
+ *   · `notRecorded`⇒ 想知道上一代说了什么 ⇒ 看**历史**（`executions[]`）
+ * ★ 类型是 `Record<SegmentAbsence, …>` ⇒ 将来加第五种成因时，**这里编译期就红**
+ *   （而不是印出一个空字符串）。
+ */
+const ABSENCE_LOCALE_KEY: Readonly<Record<SegmentAbsence, AgentTeamsLocaleKey>> = {
+  noGate: 'member.gates.absence.noGate',
+  teamLevel: 'member.gates.absence.teamLevel',
+  notReached: 'member.gates.absence.notReached',
+  notRecorded: 'member.gates.absence.notRecorded',
 }
 
 /** The glyph for one row, from the single table in activity-model. */
@@ -339,6 +393,31 @@ function readEvaluationView(raw: unknown): Parameters<typeof stageGroupState>[2]
   const readout = memberGateReadouts([{ id: 'probe', gateEvaluation: raw }]).get('probe')
   if (readout === undefined || readout.state !== 'verdict') return undefined
   return readout.evaluation
+}
+
+/**
+ * ── ★★ t81：把按段字段（`gateEvaluations`）解析成 `段 -> 裁决视图` ─────────────────
+ *
+ * ★ **逐段解析、逐段独立**：某一段解析失败**只影响那一段**（它退回"没有裁决"），
+ *   而**不许**让一整条任务的六段一起塌掉 —— 那会把"这一段坏了"读成"全都没跑"。
+ *
+ * ★★ 缺席与空**不同形**：
+ *   · 键**不在** ⇒ 该段**没有落盘**（成因由 `segmentAbsence` 再细分）；
+ *   · 键在、而值是空/坏 ⇒ 解析不出视图 ⇒ **同样算"没有裁决"**（不编一个 `ok`）。
+ *   ★ 两者在这里**合流成"没有裁决"是对的** —— 因为本函数只回答"有没有可渲染的裁决"，
+ *     而"为什么没有"由 `segmentAbsence` 单独回答（那是**另一个问题**，见它的注释）。
+ *
+ * @param raw - the raw `gateEvaluations` field off the task, when the wire carried it.
+ */
+function readEvaluationsByPoint(raw: unknown): ReadonlyMap<FlowStage, Parameters<typeof stageGroupState>[3] & object> {
+  const out = new Map<FlowStage, NonNullable<Parameters<typeof stageGroupState>[3]>>()
+  if (raw === undefined || raw === null || typeof raw !== 'object') return out
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!(FLOW_STAGES as readonly string[]).includes(key)) continue
+    const view = readEvaluationView(value)
+    if (view !== undefined) out.set(key as FlowStage, view)
+  }
+  return out
 }
 
 /**
@@ -567,7 +646,13 @@ export function MemberRow({
    * ★ 候选按优先级排好（先省"测试"，再省"阶段"），渲染层取第一个放得下的。
    */
   const stage = currentStage(current, owned)
-  const groups = stageGroups(stage, catalog, current?.gateEvaluation)
+  const groups = stageGroups(
+    stage,
+    catalog,
+    current?.gateEvaluation,
+    /** ★★ t81：按段字段（首选读法）。 */
+    (current as { readonly gateEvaluations?: unknown } | undefined)?.gateEvaluations,
+  )
   const stageGroup = stage === undefined ? undefined : groups.find((group) => group.stage === stage)
   const testLabel = stageGroup === undefined ? '' : testLabelOf(stageGroup)
   /**
@@ -851,12 +936,31 @@ export function MemberRow({
                       data-member-stage-state={group.state}
                       data-stage-state={group.state}
                       data-stage-has-verdicts={group.hasVerdicts ? 'true' : 'false'}
+                      /**
+                       * ── ★★★ t81：一段"**没有裁决**"的**成因**（四者不同形）────────────────
+                       *
+                       * ★ `absence` 只在**没有裁决**时在场（有裁决 ⇒ 不报"为什么没有"）。
+                       * ★★ 这一格是**可机读**的判别面 —— 与 `data-member-gate-state` 同一条纪律：
+                       *   读取端不该靠措辞去猜这段属于哪一种"没有"。
+                       *   ★ 而这正是本仓记账最久的形态的**落点**：
+                       *     没有这一格时，「真的没判据」「不是任务级」「还没走到」「这一代没记」
+                       *     **在 DOM 上同形**（都是一个 ○）。
+                       */
+                      data-stage-absence={group.absence ?? 'none'}
                     >
                       <span className={css.memberStageHead}>
                         <span className={css.memberStageMark} data-stage-mark={group.state}>{GATE_GLYPH[group.state]}</span>
                         <span className={css.memberStageName}>{group.stage}</span>
                         <span className={css.memberStageCount}>
-                          {t('member.gates.count', { count: String(group.rows.length) })}
+                          {/**
+                            * ★★ t81：**没有裁决**时，显示的是**成因**，不是"N 条判据" ——
+                            *   因为"这一段有几条判据"与"为什么它没有裁决"是**两个问题**，
+                            *   而后者才是读者此刻要的。
+                            * ★ 有裁决 ⇒ 照旧报条数（`member.gates.count`）。
+                            */}
+                          {group.absence === undefined
+                            ? t('member.gates.count', { count: String(group.rows.length) })
+                            : t(ABSENCE_LOCALE_KEY[group.absence])}
                         </span>
                       </span>
                       <StageRows rows={group.rows} />

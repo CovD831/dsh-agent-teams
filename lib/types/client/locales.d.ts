@@ -57,6 +57,20 @@ export declare const zh: {
      */
     'member.gates.ranSummary': string;
     'member.gates.silentSummary': string;
+    /**
+     * ── ★★★ t81：一段"**没有裁决**"的**四种成因** —— ★ 四者必须**不同形** ─────────────
+     *
+     * 本仓记账最久的形态是「**没找到**」与「**确实没有**」合流。这一组键就是把它们分开：
+     *   · `noGate`      —— 该段**真的没有判据**（`admission` 是空段）
+     *   · `teamLevel`   —— 该段**不是任务级事实**（`delivery` 团队级 / `runtime` 事件级）
+     *   · `notReached`  —— 任务**还没走到**这一段
+     *   · `notRecorded` —— 走了，但**这一代没记**（retry 清过）
+     * ★ 四句话的**补救动作各不相同** ⇒ 措辞也不许同形。
+     */
+    'member.gates.absence.noGate': string;
+    'member.gates.absence.teamLevel': string;
+    'member.gates.absence.notReached': string;
+    'member.gates.absence.notRecorded': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;
@@ -269,6 +283,10 @@ export declare const en: {
     'member.gates.noVerdicts': string;
     'member.gates.ranSummary': string;
     'member.gates.silentSummary': string;
+    'member.gates.absence.noGate': string;
+    'member.gates.absence.teamLevel': string;
+    'member.gates.absence.notReached': string;
+    'member.gates.absence.notRecorded': string;
     'round.tone.converging': string;
     'round.tone.failed': string;
     'round.tone.unmeasured': string;
