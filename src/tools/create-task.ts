@@ -11,6 +11,8 @@ import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMess
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, gateEvaluationRecordOf, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TERMINAL_TASK_STATUSES, TaskKind, TeamTask } from '../types.ts'
 import { registry } from '../gates/index.ts'
+/** ★ t87：采集层（汇合点 C 的调用方）。 */
+import { observe } from '../evolution/collect.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
 import { AgentTeamsRuntime } from './shared/entities.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -585,7 +587,37 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             resume: input.resume,
             resumeReason: input.resumeReason,
           })
-          if (!gate.ok) throw new Error(gate.error ?? 'create_task rejected by quality gates')
+          /**
+           * ── ★★★ t87 · 汇合点 C：**契约类拒绝**（规格 §1 的表）─────────────────────
+           *
+           * ★ 为什么在这里而不是在 `validateCreateTask` 内部：
+           *   `validateCreateTask`（`quality-gates.ts:843`）是一个**纯函数** ——
+           *   它**返回** `{ ok: false, error }` 而**不抛**，且**没有 `ctx`/`stateRoot`**
+           *   （t87 实测：那一整个函数里没有 `await`、没有 `node:` import、没有任何 ctx）。
+           *   ⇒ ★ 它**结构上无法**调采集（那需要 stateRoot 与一个写盘）。
+           *   ★★ 而把 I/O 塞进一个纯函数会破坏"判据层零 I/O"那条载荷级不变量
+           *     （`src/gates/runtime/stall.ts` 的注释逐字：「那条纯度是载荷,不是风格」）。
+           *   ⇒ 所以采集落在**调用方**（这里有 ctx 与 stateRoot）——那也正是"不侵入"的落点。
+           *
+           * ★★ 时序：`void observe(...)` **不 await**，然后**原样抛** ——
+           *   采集是旁路，**不许**把一次拒绝变成一次等待（反向半边 C）。
+           */
+          if (!gate.ok) {
+            const contractMessage = gate.error ?? 'create_task rejected by quality gates'
+            void observe({
+              stateRoot,
+              where: 'validateCreateTask',
+              message: contractMessage,
+              kind: ['unwired'],
+              component: 'contract',
+              tool: 'agent_teams_create_task',
+              now: Date.now(),
+              evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
+                registry.evaluate('collection' as never, context) as never,
+              warn: (note: string) => ctx.logger.warn(note),
+            })
+            throw new Error(contractMessage)
+          }
           /**
            * ── ★★★ t26：作用域的一致性检查（**建任务的那一刻**）────────────────────────
            *
@@ -974,6 +1006,8 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             const frictionMessage = `create_task rejected: ${dispatchGates.blockers.join('; ')}`
             void recordFriction({
               stateRoot,
+              /** ★ t87：采集层写失败的告警出口（旁路；见 FrictionCapture.warn）。 */
+              warn: (message: string) => ctx.logger.warn(message),
               point: 'dispatch',
               message: frictionMessage,
               context: dispatchContext,

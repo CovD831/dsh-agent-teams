@@ -1512,6 +1512,8 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             await writeTeam(stateRoot, fresh)
             void recordFriction({
               stateRoot,
+              /** ★ t87：采集层写失败的告警出口（旁路；见 FrictionCapture.warn）。 */
+              warn: (message: string) => ctx.logger.warn(message),
               point: 'completion',
               message: frictionMessage,
               context: completionContext,

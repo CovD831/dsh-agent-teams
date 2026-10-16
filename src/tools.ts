@@ -59,6 +59,8 @@ import {
 } from './state.ts'
 import { appendTaskEvidence, repairCompletionVerdict } from './quality-gates.ts'
 import { gateModuleViews, registry } from './gates/index.ts'
+/** ★ t87：采集层（汇合点 B 的调用方；形状的唯一实现在那边）。 */
+import { observe } from './evolution/collect.ts'
 import { auditRequires } from './gates/requires.ts'
 import type { GatePoint } from './gates/index.ts'
 import { gitChangedPaths, observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
@@ -2075,9 +2077,60 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     })
   }
 
+  /**
+   * ── ★★★ t87 · 汇合点 B：**闸门拒绝**（非判据）也进台账 ──────────────────────────
+   *
+   * ★★★ 为什么这一半最有价值（t87 开工实测）：
+   *   本会话 **7 次契约被推翻，其中 5 次是【闸门拒绝】**（inScope 形状错、越界那类）
+   *   —— 而它们**一条都没进台账**：
+   *   ```
+   *   384 条里最新是 2026-10-14；★ 10-16（本会话）有 0 条
+   *   ```
+   *   ⇒ 判据拒绝有记录（汇合点 A），**闸门拒绝没有** —— 而后者才是本会话里真正发生的那类。
+   *
+   * ── ★ 为什么包在 `updatePlanBatch` 上，而不是逐个改那 8 处 `throw` ──────────────
+   *   逐个改 ⇒ 8 份"先采集再抛"的逻辑 ⇒ **它们会分叉**（本仓记账最贵的那类缺陷）。
+   *   ⇒ 在**唯一入口**上包一层 try/catch：**它一条 throw 都不改**（行为零变化），
+   *     只在异常**向上穿出**时补一条旁路采集。
+   *   ★ 而 `updatePlanBatch` 是 `edit_plan` 的唯一入口（`register_edit_plan(ctx, …, updatePlanBatch, …)`）
+   *     ⇒ 那些闸门拒绝**全部**从这里出去。
+   *
+   * ── ★★ 时序（反向半边 C 的同一条纪律）────────────────────────────────────────────
+   *   `catch` 里**先记台账再抛**会让拒绝等一次写盘 ⇒ ★ **改变可观测的时序**。
+   *   ⇒ 用 `void observe(...)`（旁路：不 await、不抛），**然后原样 rethrow**。
+   *   ★ 而 `observe` 自己也不抛 ⇒ 即使采集坏了，这次拒绝的行为**仍然原样**。
+   */
+  const updatePlanBatchTraced = async (
+    captain: Agent, teamId: string, mutations: readonly StagedPlanMutation[], signal?: AbortSignal,
+    allowPendingEdits = false,
+  ): Promise<TeamState> => {
+    try {
+      return await updatePlanBatch(captain, teamId, mutations, signal, allowPendingEdits)
+    } catch (reason) {
+      const workspace = workspaceOf(captain)
+      const stateRoot = stateRootOf(workspace, config)
+      const message = reason instanceof Error ? reason.message : String(reason)
+      /**
+       * ★ 采一次 —— 而**不改这次拒绝的任何行为**：下面原样 rethrow。
+       * ★ `where` 用 `edit_plan`（那是这条路径对外的名字）。
+       */
+      void observe({
+        stateRoot,
+        where: 'edit_plan',
+        message,
+        kind: ['unwired'],
+        now: Date.now(),
+        evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
+          registry.evaluate('collection' as never, context) as never,
+        warn: (note: string) => ctx.logger.warn(note),
+      })
+      throw reason
+    }
+  }
+
   // Browser review controls retain their staged-only contract.
   const updateStagedPlanBatch: AgentTeamsRuntime['updateStagedPlanBatch'] = (captain, teamId, mutations, signal) => (
-    updatePlanBatch(captain, teamId, mutations, signal)
+    updatePlanBatchTraced(captain, teamId, mutations, signal)
   )
 
   const updateStagedPlan: AgentTeamsRuntime['updateStagedPlan'] = async (captain, teamId, mutation, signal) => (
@@ -2228,7 +2281,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
    * ★ 共享实体由这里注入，而不是让子模块 import 本文件 —— 否则会成环。
    */
   register_create(ctx, memberSelections, scheduler, config)
-  register_edit_plan(ctx, scheduler, updatePlanBatch, config)
+  register_edit_plan(ctx, scheduler, updatePlanBatchTraced, config)
   register_approve(ctx, approveStagedTeam, runtime, config)
   register_members(ctx, scheduler, config)
   register_create_task(ctx, clock, runtime, scheduler, config)

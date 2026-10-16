@@ -38,6 +38,8 @@ import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
+/** ★ t87：采集层（采集形状的唯一实现；本文件是它的**调用方**）。 */
+import { observe } from '../../evolution/collect.ts'
 /** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
 import type { GateEvaluation } from '../../gates/registry.ts'
 import type { GatePoint } from '../../gates/index.ts'
@@ -2760,6 +2762,18 @@ export interface FrictionCapture {
    *     多记一条 rejection 不会误导人，少记一条真卡点才会。
    */
   stall?: StallObservation
+  /**
+   * ── ★★ t87：采集层写失败时的**告警出口**（旁路，不参与裁决）────────────────────
+   *
+   * ★ 为什么由**调用方**给，而不是在 `recordFriction` 里现取一个 logger：
+   *   与 `stateRoot` / `stall` **同一条纪律** —— 调用方手里本来就有 `ctx`，
+   *   而 `recordFriction` **自己没有任何 logger**（t87 实测：它从不 log）。
+   *
+   * ★★ 而它是**可选**的：缺席 ⇒ 采集失败就**安静地不记**（不抛）。
+   *   ★ 错的那一侧选"安静" —— 本函数在**拒绝路径**上，而那条路径的行为
+   *     是本任务反向半边 C 要保的：**不许因为写台账慢/失败而改变一次拒绝的时序**。
+   */
+  warn?: (message: string) => void
 }
 
 /**
@@ -4081,6 +4095,48 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
       },
     }
     await writeFile(join(frictionDir, `${id}.json`), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
+    /**
+     * ── ★★★ t87 · 汇合点 A：**所有判据拒绝**都在这里汇合（规格 §1 的表）────────────
+     *
+     * ★ 本任务之前：`evaluate('collection', …)` 在生产路径上**零调用**（t87 实测）
+     *   ⇒ 四条 `collection` 判据装好了却从不被求值（本仓记账最久的形态 `unwired`）。
+     *
+     * ★★ **旁路，不参与裁决** —— 与本文件既有那条逐字同一条纪律：
+     *   · 用 `void …` 起头 ⇒ **拒绝路径立刻返回**，不因写台账而等待；
+     *   · `observe()` **自己也不抛**（它 catch 一切）⇒ 采集坏了**不会**改变这次拒绝的时序；
+     *   · 失败只写一条 `warn`（不是裁决）。
+     *
+     * ★ `registry` 是**本文件已有**的 import（`../../gates/index.ts`）⇒ 零新依赖、
+     *   且方向是 `entities → evolution`（**单向**），不构成"模块互相侵入"。
+     *
+     * ★ `evaluateCollection` 把 `registry.evaluate('collection', …)` 包成一个回调传下去 ——
+     *   ★ 这样 `evolution/` **不依赖** `src/gates/**`（那是规格 §1 原则的落点）。
+     */
+    void observe({
+      stateRoot: root,
+      where: capture.point,
+      message: capture.message,
+      kind: ['unwired'],
+      component: capture.point,
+      ...capture.tool === undefined ? {} : { tool: capture.tool },
+      ...capture.auto?.gate === undefined ? {} : { gateId: capture.auto.gate },
+      /**
+       * ★★ 机制活动 —— **转发**这一轮判据的 `ran[]`，**不重算**（规格 §2 硬约束 3）。
+       *   ★ 能转发就转发（那正是"记录必须带机制活动"那条要求的落点）；
+       *     拿不到 ⇒ **缺席**（不猜、也不编一个空数组）。
+       */
+      ...Array.isArray((capture.mechanismState as { gates?: unknown })?.gates)
+        ? {
+            mechanisms: (((capture.mechanismState as { gates: { ran?: readonly { id: string; verdict: string }[] } }).gates.ran) ?? [])
+              .map((entry) => ({ gateId: entry.id, verdict: entry.verdict })),
+          }
+        : {},
+      now: Date.now(),
+      evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
+        registry.evaluate('collection' as never, context) as never,
+      /** ★ 由调用方给的告警出口；缺席 ⇒ 安静（见 `FrictionCapture.warn` 的注释）。 */
+      warn: capture.warn ?? (() => {}),
+    })
     return id
   } catch {
     /** ★ 记不下 ⇒ `undefined`（不是"没有卡点"）。 */
@@ -4391,6 +4447,8 @@ export async function rejectOnContractGates(
     )
     void recordFriction({
       stateRoot,
+      /** ★ t87：采集层写失败的告警出口（旁路；见 FrictionCapture.warn）。 */
+      warn: (message: string) => ctx.logger.warn(message),
       point: 'contract',
       message: frictionMessage,
       context: { ...context, ...inject },
