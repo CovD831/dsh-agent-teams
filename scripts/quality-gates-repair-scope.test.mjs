@@ -16,7 +16,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { classifyChangedPath, checkTaskPremises, evaluateQualityCompletion, planQualityFollowUp, repairScopeFromFindings, validateCreateTask } from '../lib/quality-gates.js'
+import { classifyChangedPath, checkTaskPremises, evaluateQualityCompletion, planQualityFollowUp, repairScopeFromFindings, stripLineAnchors, validateCreateTask } from '../lib/quality-gates.js'
 
 function finding(extra = {}) {
   return { id: 'F1', severity: 'medium', problem: 'problem', requiredFix: 'fix it', ...extra }
@@ -124,7 +124,37 @@ for (const [label, source, findings, expectedScope, expectedExclusions] of [
     assert.deepEqual(repair.inScope, expectedScope)
     assert.deepEqual(repair.outOfScope, expectedExclusions)
     assert.deepEqual(state, original, 'source contract must remain untouched')
-    assert.deepEqual(repair.acceptance, findings.map((item) => item.requiredFix))
+    /**
+     * ── ★★★ t96（上游 #174 的一半）：这条断言在 t96 被【更新了形状】，强度不减 ─────────
+     *
+     * 旧断言（#174 之前）钉的是【逐字透传】：
+     *   `assert.deepEqual(repair.acceptance, findings.map((item) => item.requiredFix))`
+     *   —— 它钉的是"requiredFix 原样进 acceptance"。
+     *
+     * 而上游 #174 明确改掉了那个行为：acceptance【失去行号锚点】（它们活不过编辑）
+     * 且【追加"插件未验证这些发现"的声明】。⇒ 旧断言在 t96 之后必然红 ——
+     * 那不是回归，是**行为被改了**。
+     *
+     * ★★ 新断言钉的是 #174 之后的行为，**同等强度、依旧可证伪**（不许退化成"非空"）：
+     *   ① 每条 requiredFix 经 `stripLineAnchors`（剥离对不对，逐字可比）；
+     *   ② 末尾恰好多一条**声明**，且**内容**被点名（不是随便一条字符串）。
+     * ⇒ "剥离错了"与"声明丢了"两件事在这条 deepEqual 下**各自可见**。
+     */
+    /**
+     * ★★ t96 新断言，两半各自可证伪（不许合成一个 deepEqual 用被测函数自算期望值）：
+     *   ① 【前 n-1 条】= 每条 requiredFix 的**字面**期望（本夹具的三条 case 都不含行号锚点
+     *      ⇒ 字面 = 原文；若将来某条 case 带锚点，这里必须写**剥完的**字面量，
+     *      而**不许**调 `stripLineAnchors` 自算 —— 用同一个函数算期望，函数坏了期望跟着坏，
+     *      断言就恒真了，那正是裁定 ③ 要防的形态）；
+     *   ② 【末条】= 未验证声明，其**内容**在下面单独点名。
+     */
+    const requiredFixPart = repair.acceptance.slice(0, findings.length)
+    assert.deepEqual(requiredFixPart, findings.map((item) => item.requiredFix),
+      '★ t96：requiredFix 的正文照抄进 acceptance（本三条 case 无行号锚点，剥离不改写它们）')
+    const disclaimer = repair.acceptance[repair.acceptance.length - 1]
+    assert.match(disclaimer, /NOT verified these findings' claims/i, '★ 未验证声明必须点名"插件没有验证过这些发现"（上游 #174 逐字）')
+    assert.match(disclaimer, /verify each against the current (code|requirements text)/i, '★ 声明要给出补救动作（先核对再修）')
+    assert.equal(repair.acceptance.length, findings.length + 1, '★ 恰好多出一条（声明）—— 不许有别的夹带')
     for (const path of expectedScope) {
       const concretePath = path.endsWith('/') ? `${path}fixed.ts` : path
       assert.equal(classifyChangedPath(concretePath, repair.inScope, repair.outOfScope), 'in_scope')

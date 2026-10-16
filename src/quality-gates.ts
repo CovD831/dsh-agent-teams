@@ -1658,6 +1658,47 @@ const REPAIR_SCOPE_PATH_PATTERN = /(?:[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+|[\
 const REPAIR_SCOPE_LINE_SUFFIX = /:\d+$/
 
 /**
+ * ── ★★★ t96（上游 #174 的一半）：**行号锚点在编辑后无法存活** ───────────────────────
+ *
+ * Root cause (upstream #174, verbatim): "Auto-generated repair work orders were
+ * frozen at finding-generation time." A finding carries `file + line` (and its
+ * `requiredFix` text often spells `file.ts:42` or `foo.go:503-505`). The moment
+ * ANY edit lands above that line, every downstream line number shifts — and the
+ * acceptance text then points at code that is no longer the finding. The anchor
+ * that DOES survive an edit is the file path plus the fix's own wording: a
+ * content anchor. So generated contract text loses the line suffix and keeps
+ * everything else.
+ *
+ * ★★ 为什么"剥得准"是本函数全部的难点（反向半边 B/C 的落点）：
+ * ```
+ *   ✅ 该剥：  src/a.ts:42 · foo.go:503-505 · lib/x.ts:12      ← 路径 + 行号
+ *   ❌ 不该剥：12:30（时间）· https://x（URL）· v1:2（版本段）
+ * ```
+ * 判据（三条 lookbehind，缺一不可 —— 不是一刀切）：
+ *   1. **锚点之前必须有一个"带点的路径形态"的词**（lookbehind：
+ *      `[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_./\\-]*` —— 词内**必须含一个点**）——
+ *      这一条排掉 `12:30`（裸数字无点）、`3:1`（比分）、`v1:2`（版本段的 `v1` 无点）；
+ *   2. **前面不能是 `//`**（`(?<!\/\/)`）—— URL 的 scheme；
+ *   3. **前面那段路径不能以 `//` 开头**（`(?<!\/\/[A-Za-z0-9_./\\-]*)`，词类含 `/` 可左伸）——
+ *      排掉 `http://localhost:3000` / `http://example.com:8080` 这类**主机带端口**的 URL
+ *      （`localhost` 与 `example.com` 本身就"带点形态"，第 1 条拦不住它，必须靠这条）。
+ * ★ 上游用的是同一条思路（lookbehind + 路径字符前缀）；本仓的反向半边 B/C 更严
+ *   （要保住 `http://host:port`），所以比上游多第 3 条。
+ */
+const LINE_ANCHOR_PATTERN = /(?<!\/\/)(?<!\/\/[A-Za-z0-9_./\\-]*)(?<=[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_./\\-]*):\d+(?:-\d+)?\b/gu
+
+/**
+ * Remove drifting line anchors from generated contract text.
+ *
+ * 纯函数：输入文本 ⇒ 输出文本；不改写其余任何内容（时间、URL、版本号原样保留）。
+ * ★ 落点：repair/requirements 轮次的 `acceptance` 直接取 `finding.requiredFix`
+ *   （那里面常带 `file.ts:42`）⇒ 生成契约前过一遍本函数（上游 #174 的落点）。
+ */
+export function stripLineAnchors(text: string): string {
+  return text.replace(LINE_ANCHOR_PATTERN, '')
+}
+
+/**
  * Derive the repair round's inScope from the findings that caused it.
  *
  * `finding.file` records where the problem was OBSERVED, but the fix often
@@ -1939,7 +1980,17 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
       dependencies: [],
       round: nextRound,
       objective: sanitizeReviewObjective(closed.objective, 'Converge remaining open questions'),
-      acceptance: sanitizeReviewAcceptance(unresolvedFindings(closed).map((finding) => finding.requiredFix)),
+      /**
+       * ★ t96：requirements 轮次的 acceptance **同样**取自 requiredFix ⇒ 同样过剥离
+       *   （同一根因：行号锚点在这里一样活不过编辑）。★ 未验证声明在 requirements
+       *   轮次同样成立 —— 那些是审查员对需求文本的判断，插件同样没验证过。
+       *   ★ 它放在 sanitize **之后**追加（sanitize 会把空清单换成缺省，
+       *     若在其前面追加会被那张缺省表淹没——而声明必须恒在场）。
+       */
+      acceptance: [
+        ...sanitizeReviewAcceptance(unresolvedFindings(closed).map((finding) => stripLineAnchors(finding.requiredFix))),
+        'the plugin has NOT verified these findings\' claims - verify each against the current requirements text before fixing',
+      ],
     }
     return { created: [next], tasks: [next] }
   }
@@ -1998,7 +2049,22 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
     inScope: repairScope,
     outOfScope: withoutScopeConflicts(source?.outOfScope, repairScope),
     verify: source?.verify,
-    acceptance: findings.map((finding) => finding.requiredFix),
+    /**
+     * ── ★★★ t96（上游 #174 的落点）：acceptance 的两处生成时**都过一遍**剥离 ─────────
+     *
+     * ① `stripLineAnchors` —— `requiredFix` 常带 `file.ts:42` 形态的行号锚点，
+     *    而锚点在编辑后无法存活（见 `LINE_ANCHOR_PATTERN` 的根因注释）。
+     *    ★ 文件路径保留（那是能活过编辑的内容锚点的一部分）。
+     * ② **未验证声明** —— 上游逐字："states that the plugin did not verify the
+     *    finding's claims"。审查 finding 是**人/模型的判断**，本插件生成修复任务时
+     *    **没有**独立验证过它说的是不是事实（那正是修复任务要去做的事）。
+     *    ★★ 【未验证的不许读成已验证】：不写这句，成员会把 acceptance 文本
+     *      当成"已被证实的问题清单"；写了这句，第一件事是**先核再修**。
+     */
+    acceptance: [
+      ...findings.map((finding) => stripLineAnchors(finding.requiredFix)),
+      'the plugin has NOT verified these findings\' claims - verify each against the current code before fixing (finding line numbers may have drifted)',
+    ],
     sourceTaskId: sourceId,
     sourceFindingIds: findingIds,
   }

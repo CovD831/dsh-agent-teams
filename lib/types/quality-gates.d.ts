@@ -449,6 +449,14 @@ export declare function readContractGateVerdict(gates: {
 }): ContractGateReading;
 export declare function evaluateQualityCompletion(task: TeamTask, update: QualityCompletionUpdate): QualityCompletionResult;
 /**
+ * Remove drifting line anchors from generated contract text.
+ *
+ * 纯函数：输入文本 ⇒ 输出文本；不改写其余任何内容（时间、URL、版本号原样保留）。
+ * ★ 落点：repair/requirements 轮次的 `acceptance` 直接取 `finding.requiredFix`
+ *   （那里面常带 `file.ts:42`）⇒ 生成契约前过一遍本函数（上游 #174 的落点）。
+ */
+export declare function stripLineAnchors(text: string): string;
+/**
  * Derive the repair round's inScope from the findings that caused it.
  *
  * `finding.file` records where the problem was OBSERVED, but the fix often
