@@ -11,6 +11,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type MemberLiveness, type StrandedWorktrees, type MemberSubagents, type LiveSubagent } from './members.ts';
 import { type GateEvaluationRecord, type MemberStatus, type TeamState } from './types.ts';
 import type { FailureKind, VisualTaskState } from './state.ts';
+import type { CollectionHealth } from './evolution/types.ts';
+import type { SignalsHealthRead } from './evolution/read.ts';
 /**
  * Visual task state for the activity panel.
  *
@@ -251,6 +253,34 @@ export interface TeamActivitySnapshot {
     readonly unattributedSubagents: readonly LiveSubagent[];
     readonly messageCount: number;
     readonly captainInbox: readonly TeamActivityMessage[];
+    /**
+     * ── ★★★ t101：采集健康读数（health.ts 的第一个生产消费者）────────────────────────
+     *
+     * ★ 它是 `collectionHealthOf`（`src/evolution/health.ts`）第一次被生产路径调用 ——
+     *   在此之前该函数**零消费者**（`EVOLUTION-WIRING-GAP.md` §1 逐字）。
+     *
+     * ★★ 三态（`SignalsHealthRead` + `CollectionHealth` 各自承载一半）：
+     *   · `collectionHealth: undefined`        —— 文件缺席（`file-absent`）＝ 采集流水线**还没开过**。
+     *     ★ **不是**空读数：空读数会让"没开过"与"开了没采到"同形。
+     *   · `collectionHealth` 在场 + `readout.records: []`
+     *                                          —— 文件在、零条记录（**与缺席不同形**）。
+     *   · `collectionHealth` 在场 + 有 records —— 正常读数（redundancy/coverage/buckets）。
+     *
+     * ★ `refused`（被 collection 判据拒掉的条数）从**每条信号自带的** `collection.verdicts`
+     *   里数（`ok` 之外的裁决），**不重跑判据**（与 t87 那条"转发裁决，不重算"同纪律）。
+     */
+    readonly collectionHealth?: {
+        /** `collectionHealthOf` 的产出（buckets/redundancy/coverage/refused）。 */
+        readonly health: CollectionHealth;
+        /** 读文件层的读数（三态 + 坏行计数 —— `skippedMalformed` 在场 = 有行被跳过）。 */
+        readonly readout: SignalsHealthRead;
+    };
+    /**
+     * ★★ t101：读数**算不了**时的原因（只在真的算不了时在场 —— 缺席 = 算出来了）。
+     * ★ 与 `collectionHealth: undefined`（文件缺席，正常态）**不同形**：这一格是**异常**
+     *   （读文件抛了非 ENOENT 的错等）。
+     */
+    readonly collectionHealthUnmeasurable?: string;
     /**
      * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
      *

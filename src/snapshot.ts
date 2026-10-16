@@ -21,6 +21,17 @@ import {
 import { TERMINAL_TASK_STATUSES, type GateEvaluationRecord, type MemberStatus, type TeamMessage, type TeamState, type TeamTask } from './types.ts'
 import type { FailureKind, VisualTaskState } from './state.ts'
 import { registry, INSERTION_POINTS } from './gates/index.ts'
+/**
+ * ── ★★★ t101：采集健康读数（health.ts 的**第一个生产消费者**）────────────────────────
+ *
+ * 背景（`EVOLUTION-WIRING-GAP.md` §1）：`collectionHealthOf` 能算但从**没有任何生产路径
+ * 算过它**（health.ts 零消费者）⇒ "把采集读数画到界面上"在那之前是**不可能的** ——
+ * 读数从未存在过。本模块把「读 `signals.jsonl` → `collectionHealthOf` → 快照」接成一条线。
+ */
+import { collectionHealthOf } from './evolution/health.ts'
+import { readSignalsHealth } from './evolution/read.ts'
+import type { CollectionHealth } from './evolution/types.ts'
+import type { SignalsHealthRead } from './evolution/read.ts'
 
 /**
  * Visual task state for the activity panel.
@@ -269,6 +280,34 @@ export interface TeamActivitySnapshot {
   readonly unattributedSubagents: readonly LiveSubagent[]
   readonly messageCount: number
   readonly captainInbox: readonly TeamActivityMessage[]
+  /**
+   * ── ★★★ t101：采集健康读数（health.ts 的第一个生产消费者）────────────────────────
+   *
+   * ★ 它是 `collectionHealthOf`（`src/evolution/health.ts`）第一次被生产路径调用 ——
+   *   在此之前该函数**零消费者**（`EVOLUTION-WIRING-GAP.md` §1 逐字）。
+   *
+   * ★★ 三态（`SignalsHealthRead` + `CollectionHealth` 各自承载一半）：
+   *   · `collectionHealth: undefined`        —— 文件缺席（`file-absent`）＝ 采集流水线**还没开过**。
+   *     ★ **不是**空读数：空读数会让"没开过"与"开了没采到"同形。
+   *   · `collectionHealth` 在场 + `readout.records: []`
+   *                                          —— 文件在、零条记录（**与缺席不同形**）。
+   *   · `collectionHealth` 在场 + 有 records —— 正常读数（redundancy/coverage/buckets）。
+   *
+   * ★ `refused`（被 collection 判据拒掉的条数）从**每条信号自带的** `collection.verdicts`
+   *   里数（`ok` 之外的裁决），**不重跑判据**（与 t87 那条"转发裁决，不重算"同纪律）。
+   */
+  readonly collectionHealth?: {
+    /** `collectionHealthOf` 的产出（buckets/redundancy/coverage/refused）。 */
+    readonly health: CollectionHealth
+    /** 读文件层的读数（三态 + 坏行计数 —— `skippedMalformed` 在场 = 有行被跳过）。 */
+    readonly readout: SignalsHealthRead
+  }
+  /**
+   * ★★ t101：读数**算不了**时的原因（只在真的算不了时在场 —— 缺席 = 算出来了）。
+   * ★ 与 `collectionHealth: undefined`（文件缺席，正常态）**不同形**：这一格是**异常**
+   *   （读文件抛了非 ENOENT 的错等）。
+   */
+  readonly collectionHealthUnmeasurable?: string
   /**
    * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
    *
@@ -559,6 +598,43 @@ export async function assembleTeamSnapshot(
      */
     captainInboxUnreadable = String((error as { message?: unknown })?.message ?? error)
   }
+  /**
+   * ── ★★★ t101：算采集健康读数（health.ts 的第一个生产消费者）──────────────────────
+   *
+   * ★ 落点在**快照组装**（`/state` 路由经 `collectTeamsActivity` 走到这里）——
+   *   那是 UI **真读**的通道；接在这里之后，`collectionHealthOf` 在 `src/` 里
+   *   第一次有了【非测试】调用方（判据：grep 可核）。
+   *
+   * ★ 归档团队（`historic`）**不算**：归档团队的 `stateRoot` 指向 archive 树，
+   *   其 signals.jsonl 不是"采集流水线"的现役读数 —— 读了会把历史树混进现役面板
+   *   （与 `historic` 对活会话的同一条口径，见上面的 `projection`）。
+   */
+  let collectionHealth: TeamActivitySnapshot['collectionHealth']
+  let collectionHealthUnmeasurable: string | undefined
+  if (options.historic === true) {
+    collectionHealthUnmeasurable = 'archived team: the collection pipeline readout is only computed for live teams'
+  } else {
+    try {
+      const readout = await readSignalsHealth(stateRoot, async (path, encoding) => {
+        const { readFile } = await import('node:fs/promises')
+        return readFile(path, encoding)
+      })
+      if (readout.status === 'unmeasured') {
+        /** ★ 文件缺席（`file-absent`）＝ 流水线没开过 ⇒ `collectionHealth` 整格缺席（**不是**空读数）。 */
+        collectionHealth = undefined
+      } else {
+        /**
+         * ★ `refused`：从**每条信号自带**的 `collection.verdicts` 数（`ok` 之外的裁决）——
+         *   **转发**已有裁决，**不重跑判据**（t87 的硬约束 3 同一条）。
+         *   ★ 坏行/无该格的行 ⇒ 它们没有 refused 可言，照实不数（不补 0）。
+         */
+        collectionHealth = { health: collectionHealthOf(readout.records, readout.refused), readout }
+      }
+    } catch (error: unknown) {
+      /** ★ 算不了是**异常**（读文件抛了 ENOENT 之外的错等）—— 与"文件缺席"不同形。 */
+      collectionHealthUnmeasurable = String((error as { message?: unknown })?.message ?? error)
+    }
+  }
   return {
     workspace,
     teamId: state.id,
@@ -721,6 +797,16 @@ export async function assembleTeamSnapshot(
      *   所以它每份快照都带同一份 —— 这正是"可插拔"成立的前提（换判据 ⇒ UI 自动变）。
      */
     gateCatalog: gateCatalogForUi(),
+    /**
+     * ── ★★★ t101：采集健康读数（只【算出来】时在场）───────────────────────────────
+     *
+     * · `collectionHealth` **缺席** = 文件缺席（`file-absent`，流水线没开过）——
+     *   ★ **不是**空读数：空读数会把"没开过"读成"开了没采到"。
+     *   ★ 在场时自带两半：`health`（collectionHealthOf 的产出）+ `readout`（三态 + 坏行计数）。
+     * · `collectionHealthUnmeasurable` **在场** = 真的算不了（异常）—— 与缺席**不同形**。
+     */
+    ...collectionHealth === undefined ? {} : { collectionHealth },
+    ...collectionHealthUnmeasurable === undefined ? {} : { collectionHealthUnmeasurable },
   }
 }
 
