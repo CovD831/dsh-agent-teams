@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
 import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, describeStrandedWorktrees } from '../members.ts'
 import { sessionLeadsTeam } from '../lineage.ts'
+import { deliveryAuditFor } from '../artifacts.ts'
 import { identityOfTeam, liveRefsOf } from '../members.ts'
 /**
  * ★★ t84：检出那一支的读数（t80 建的），接到 `deployment.worktree`。
@@ -893,7 +894,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           status: row.status,
           ...row.evidence === undefined ? {} : { evidence: row.evidence },
         }))
-        const deliveryCheck = canDeclareDelivery(team)
+        const deliveryCheck = canDeclareDelivery(team, await deliveryAuditFor(workspace, team))
         /**
          * ── ★ delivery 位置：**报告**在这里，**拒绝**在 declare_delivery（t18/B2）────
          *

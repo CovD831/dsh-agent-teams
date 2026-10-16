@@ -6,6 +6,7 @@
 
 import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { registry } from '../gates/index.ts'
+import { deliveryAuditFor } from '../artifacts.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, observeMemberConvergence, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf } from './shared/entities.ts'
@@ -58,7 +59,7 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
           [...new Set(team.tasks.flatMap((item) => item.coverageOf ?? []))],
           team.tasks,
         )
-        const deliveryCheck = canDeclareDelivery(team)
+        const deliveryCheck = canDeclareDelivery(team, await deliveryAuditFor(workspace, team))
         const memberConvergence = observeMemberConvergence(ctx, team)
         const deliveryContext = {
           team,

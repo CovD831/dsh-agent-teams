@@ -40,7 +40,9 @@
 import { createHash } from 'node:crypto'
 import { readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
-import type { ArtifactDigest, ArtifactScopeGap } from './types.ts'
+import type { ArtifactDigest, ArtifactScopeGap, TeamState, TeamTask } from './types.ts'
+import { VERDICT_KINDS, type TaskKind } from './types.ts'
+import type { DeliveryAudit } from './quality-gates.ts'
 
 /**
  * 从**一个范围**展开出来的文件数上限。
@@ -243,4 +245,66 @@ export async function snapshotReviewedArtifacts(
 ): Promise<{ readonly reviewedArtifacts: readonly ArtifactDigest[]; readonly gaps: readonly ArtifactScopeGap[] }> {
   const read = await expandScopePaths(workspace, patterns)
   return { reviewedArtifacts: read.artifacts, gaps: read.gaps }
+}
+
+/**
+ * ── ★★★ t99（S1 接线）：为**交付那一刻**构造一份审计 ──────────────────────────────
+ *
+ * ── 它补的是哪一根断线（t97 自己报的原文）────────────────────────────────────────
+ *
+ * > 「★★ `DeliveryResult.verdictBindings`【只在传了 `audit` 时出现】，
+ * >   而【当前没有任何生产调用方传它】…… ⇒ ★ **S1 交了"能回答"的能力，
+ * >   但那条线还没接上**，而同 t87 记过的形态一样：**机制建好了 ≠ 接线了**。」
+ *
+ * ★ 实测（t99 开工）：**三处**调用点（`status.ts` · `delivery.ts` · `quality-gates.ts:2600`）
+ *   全都写的是 `canDeclareDelivery(team)` —— ★ **一个都不传 `audit`**。
+ *
+ * ── ★★ 审计读的是**哪批字节**：判决自己绑过的那批（不是全仓）──────────────────────
+ *
+ * ★ 判据是"**它对哪些字节负责**"，而那正是每条判决任务落盘时记下的
+ *   `reviewedArtifacts[].path`（`update-task.ts` 在判决落盘那一刻用
+ *   `snapshotReviewedArtifacts` 拍的）。
+ * ⇒ 所以这里的输入是**那些路径的并集**，而**不是** `inScope` 或 `changedPaths`：
+ *   ★ 读多了会把**没人审过的字节**算进审计（于是 drifted/unbound 都失真）；
+ *   ★ 读少了会让**绑过的字节**读不到 ⇒ 落到 `drifted`（假警报）。
+ *
+ * ── ★ 为什么"没有判决绑定过任何路径" ⇒ 返回 `undefined` 而不是空审计 ──────────────
+ *
+ * ★ 空审计（`{artifacts: [], gaps: []}`）会被 `canDeclareDelivery` 当成**做过审计**，
+ *   于是它会给每条判决算出 `unbound` —— 而真相是**这次没有可审的对象**。
+ * ⇒ ★ 两者不同形：`undefined` = "**这次没做审计**"（`verdictBindings` 整格缺席），
+ *   空审计 = "审计了、但一条都没读到"。
+ * ★ 依据：`quality-gates.ts:2298` 的逐字注释 ——
+ *   「缺席 ⇒ `verdictBindings` **缺席**（"这次没审计"与"审计了、全有效"必须不同形）」。
+ *
+ * @param workspace - 工作区根（审计的边界；逃出它的路径由 `digestWorkspacePaths` 拒并记 gap）。
+ * @param team - 要审计的队（读它那些判决任务绑过的路径）。
+ * @returns 一份 `DeliveryAudit`；**没有任何判决绑过路径** ⇒ `undefined`。
+ */
+export async function deliveryAuditFor(workspace: string, team: TeamState): Promise<DeliveryAudit | undefined> {
+  /**
+   * ★ 只收**判决类任务**（`VERDICT_KINDS`）的绑定 —— 与 `canDeclareDelivery` 里
+   *   算 `verdictBindings` 的那个 filter **同源**（`status === 'completed'` + 同类）。
+   *   ★★ 两处若不同源，会出现"审计读了 A 的路径、而读数在问 B 的路径"
+   *     ⇒ 每条都会报 `drifted`（而那是假的）。
+   */
+  const boundPaths = new Set<string>()
+  for (const item of team.tasks) {
+    if (item.status !== 'completed') continue
+    if (!VERDICT_KINDS.includes(taskKindOf(item))) continue
+    for (const artifact of item.reviewedArtifacts ?? []) boundPaths.add(artifact.path)
+  }
+  /** ★ 没有任何判决绑过路径 ⇒ **这次没有可审的对象** ⇒ 整格缺席（见上面那段）。 */
+  if (boundPaths.size === 0) return undefined
+  /**
+   * ★ 读的是**当前**字节（"交付那一刻工作区长什么样"）—— 与判决落盘时拍的那份比。
+   *   ★ 这就是 S1 的全部内容：`artifactBindingOf(绑过的摘要, 现在的摘要)` 三态。
+   */
+  const read = await digestWorkspacePaths(workspace, [...boundPaths])
+  return { artifacts: read.artifacts, gaps: read.gaps }
+}
+
+/** ★ 任务类别（与 `quality-gates.ts` 的 `taskKindOf` 同口径；本文件只需它一格）。 */
+function taskKindOf(task: TeamTask): TaskKind {
+  return task.kind ?? 'work'
 }
