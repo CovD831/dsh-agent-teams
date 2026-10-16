@@ -79,8 +79,8 @@
 <text x="44" y="496" class="t">confidence.ts 双计数</text>
 <text x="340" y="496" class="dim">算得出来，但零调用方</text>
 <text x="32" y="522" class="dim">·</text>
-<text x="44" y="522" class="t">poolForRescue</text>
-<text x="340" y="522" class="dim">指标备好了，.pool 零读者</text>
+<text x="44" y="522" class="t">（无）poolForRescue</text>
+<text x="340" y="522" class="dim">★ 更正：它【已接线】—— 写进卡点台账 resolution.pool</text>
 <text x="32" y="548" class="dim">·</text>
 <text x="44" y="548" class="t">admission.* 三条判据</text>
 <text x="340" y="548" class="dim">文件在，注册表从不注册</text>

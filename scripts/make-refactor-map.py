@@ -78,7 +78,7 @@ for i, (_, name, desc, note) in enumerate(caps):
 b.append(t(24, 472, '④ 已建但【未接线】的机制（如实记账）', 'h2'))
 parked = [
     ('confidence.ts 双计数', '算得出来，但零调用方'),
-    ('poolForRescue',       '指标备好了，.pool 零读者'),
+    ('（无）poolForRescue',  '★ 更正：它【已接线】—— 写进卡点台账 resolution.pool'),
     ('admission.* 三条判据', '文件在，注册表从不注册'),
     ('deliverable-return',  '工具可用，但没做成闸门'),
     ('U 线参数化',          '5 行耦合，产品决策待定'),
