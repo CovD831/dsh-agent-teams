@@ -322,3 +322,110 @@ export const inject = ['uiConversation','slots','sessions','locale','modelDirect
 ```
 
 ★ **而那正是下一个最小实验该测的。**
+
+---
+
+# R9 · 最小实验①b：调 `selectPanel` 之后，那个 main key **真的被渲染**（t105）
+
+> 基线：HEAD `6977a97`（`git merge-base --is-ancestor 71790be HEAD` ⇒ **成功**）。
+> 探针：`src/client/folders-probe.tsx`；接线：`src/client/index.tsx`；夹具：`scripts/gate-main-key-probe.test.mjs`（**12 臂**）。
+
+## R9.1 ★★★ 结论：**通了** —— 调 `selectPanel` 之后我们的 key 真的被选中并渲染
+
+t103 停在「注册成功但**默认不被选中**」。t105 补上**最后一跳**，实测 **✅ 成立**。
+
+**真链条（每一环都从官方源码逐字核实，不是推断）：**
+
+| 步 | 官方出处 | 逐字 |
+|---|---|---|
+| ① | `layout/lib/client.js:462` | `selectPanel(panelId) { if (panelId !== null && !this.hasMainPanel(panelId)) throw …; this.panels.selectPanel(panelId) }` |
+| ② | `layout/lib/client.js:401` | `selectPanel: (d, panelId) => { d.panelInfo.activePanelId = panelId }` |
+| ③ | `layout/lib/client.js:118` | `entryKey = usePanelInfo((info) => info.activePanelId) ?? "conversation"` |
+| ④ | `renderer/lib/client.js:1154` | `entriesOfSlot(slotKey).find((e) => e.options.key === opts?.entryKey)` |
+
+⇒ ★★ **`selectPanel(我们的 key)` ⇒ `activePanelId` 被写上 ⇒ `entryKey` 解析成我们的 key ⇒ keyed 槽把它选出来渲染。**
+
+**实测读数**（真 `SlotCore` + 真动作/守卫 + 产品代码的 `resolveEntryKey`）：
+```
+不调          ⇒ activePanelId = null          ⇒ rendered = "conversation"
+调了(我们的)  ⇒ activePanelId = "agent-teams/folders" ⇒ rendered = "agent-teams/folders"  ★
+调未注册的    ⇒ 抛 layout.selectPanel: main panel "no/such/panel" is not registered
+```
+
+★ **所以 R1 的 (b) 结论**（"要退到 `shell.overlay`"）**需要重新评估**：
+`main` 的路是**通的**，只是**必须先选择**。⇒ 两条路都可行，取舍交给队长/用户。
+
+## R9.2 ★★ 两条反向半边（方向不同，都成立）
+
+| 半边 | 要求 | 实测 |
+|---|---|---|
+| **A** | ★ **不调** ⇒ 渲染计数必须是 0 | ✅ 不调 ⇒ `rendered === "conversation"`，**不是我们**。★ 这条其实在守「**我的接线没有意外改掉那个默认**」—— t103 实测的默认是 `conversation`，它必须**仍然成立** |
+| **B** | ★ 传**未注册**的 id ⇒ 必须抛 | ✅ 抛，且报文**逐字等于**官方那条（`client.js:463`） |
+
+★ **B 为什么特别重要**：它证明**我们调的是真那个函数**。光看"渲染了"无法区分
+"我们选中的"与"某个'什么都渲染'的实现"—— **守卫的报文**能区分。
+
+## R9.3 ★ 三态不同形（各自可达）
+
+```
+注册了 + 选了   ⇒ renders   （★ 最后一跳通了）
+注册了 + 没选   ⇒ hidden    （t103 实测的那个默认）
+未注册 + 选了   ⇒ throws    （selectPanel 自己的守卫）
+```
+★ 三者的**结论完全不同**，尤其 (b)/(c)：`hidden` 是"我们没事，只是没被选"（**补救：把选择做出来**）；
+`throws` 是"你给了一个不存在的 panel"（**补救：先注册**）。
+
+## R9.4 ★ 一处类型层的处置：`MainPanelId` 是**品牌类型**
+
+编译期实测：`selectPanel` 收的是 `MainPanelId`（`= string & { readonly [BRAND]: 'MainPanelId' }`），
+**裸 `string` 会被拒**（`Argument of type 'string' is not assignable to MainPanelId`）。
+
+★ 官方构造器是 `brandString<T>()`（`@deepseek-ai/dsh-brand`），但实测**从本包 `require.resolve` 解析失败**
+（它不是本插件的依赖）⇒ 而本任务**零新依赖** ⇒ **不引它**。
+⇒ 改用**类型层**断言补品牌（**运行期零成本**，品牌只存在于类型里）：
+```ts
+const probePanelId = FOLDERS_MAIN_KEY as unknown as MainPanelId
+```
+★ 这不弱化安全性：品牌在这里的唯一作用是挡住"随手传一个错 id"，
+而这个 id 与 `slots.register` 用的是**同一个常量** ⇒ **不可能漂移**。
+
+## R9.5 ★★★ 我自己的两条测试缺陷（**由突变测试查出，不是靠推想**）
+
+第一版 12 臂**全绿**，但突变测试抓出**两条臂是假的**：
+
+| 突变 | 第一版 | 为什么漏掉 | 修法 | 修后 |
+|---|---|---|---|---|
+| **M1** 把 `ctx.layout.selectPanel(...)` **整行删掉** | **pass 12 / fail 0** ★漏 | 臂 11 的正则 `/ctx\.layout\.selectPanel\(/` **在注释里也命中**（本文件的 doc 注释逐字写着那行）⇒ **代码删了它照样绿** | **先剥注释**（块注释 + 行注释）再匹配 | **臂 11 红** ✅ |
+| **M3** 改掉守卫的报文 | **pass 12 / fail 0** ★漏 | 臂 9 拿 `unregisteredPanelMessage(bogus)` 当**期望值**，而 harness **自己就调那个函数**拼报文 ⇒ **两边一起变，恒真** | 期望值改为**官方逐字写死的字符串**（独立于被测函数） | **臂 9 红** ✅ |
+
+★★ **这两条是本轮最有价值的产出**，因为它们**都是"绿色的假判据"**：
+- M1 的形态是「**检查到了注释**」——"检查了"与"检查了但匹配的是注释"**同形**；
+- M3 的形态是「**期望值与被测物同源**」——自证式断言，**改坏了也不会红**。
+
+★ 而这与本仓记过的 **t82/M6 形状**是同一族：**只测一层会漏**。
+⇒ 修完重跑：**M1 ✓ M2 ✓ M3 ✓ M4 ✓ 全部被检出**，还原后 **12/12 绿**。
+
+★ 另记一条**勘误**：我第一轮做 M3/M5 时 `fail=0`，一度以为"漏检" —— 查下来是**我的替换没落在真代码上**
+（M3 的 pattern 先命中了**注释**；M5 的守卫**根本在夹具里、不在产品源码里**）⇒ **那两次是无效突变，不是漏检**。
+★ 教训：**"突变后没红"必须先确认"突变真的发生了"**，否则会把"没改到"读成"判据无效"。
+
+## R9.6 硬验收与净变化
+
+| 项 | 读数 |
+|---|---|
+| `tsc -p tsconfig.json` | **exit=0** |
+| `tsc -p tsconfig.client.json` | **exit=0** |
+| `pnpm build` | **exit=0** |
+| 夹具 | **12 pass / 0 fail** |
+| 零新依赖 | `package.json` **未改** |
+
+**净新失败 = 0（臂级失败【集合】+ 对照跑）**：改后 **13** vs 对照（`git stash --include-untracked` + 重建，`build=0`）**13**，`diff` **无输出**。
+
+## R9.7 本节**没有**做的（如实留白）
+
+1. ★ **没有画界面**：探针仍只吐一个可辨识字符串标记。
+2. ★★ **没有跑真实浏览器** —— 判据落在**真 `SlotCore` + 官方动作/守卫逐字复刻 + 产品代码的选择规则**上，
+   但**没有**经过「真浏览器 → React → AppFrame → MainPanel」那一次真实渲染。
+   ⇒ ★ 所以 R9.1 的结论是**"按官方链条推定的 ✅"**，而"我们的 key 在真浏览器里被画出来"**仍未实测**。
+3. **没有裁定 v5 走 `main` 还是 `shell.overlay`** —— 两条都可行（R9.1 末），**取舍由队长/用户定**。
+4. **没有改 `src/snapshot.ts` / `src/gates` / `src/evolution` / `src/evaluator`**（不在 inScope）。
