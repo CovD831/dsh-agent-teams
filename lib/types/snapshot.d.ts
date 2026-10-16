@@ -130,10 +130,58 @@ export interface TeamActivityTask {
      */
     readonly gateEvaluation?: GateEvaluationRecord;
 }
-/** One captain-inbox preview row. */
+/**
+ * ── ★★★ t100：一封信箱消息的**完整投影**（九格）────────────────────────────────────
+ *
+ * MEASURED（t100 开工实测）：本接口此前**只有两格**（`from` / `content`），
+ * 而信箱的 jsonl 里有**十个**字段：
+ * ```
+ * ['content','deliveredAt','deliveredAt','from','id','readAt',
+ *  'sourceAttemptId','sourceTaskId','sourceTaskStatus','to','ts']
+ * ```
+ * ⇒ ★★ 那时**丢掉八个**（`id` · `to` · `ts` · `readAt` · `sourceAttemptId` ·
+ *   `sourceTaskId` · `sourceTaskStatus` · `deliveredAt`）。
+ *
+ * ── ★★★ 而"丢掉的字段"里有两个是**做不了别的事**的原因 ──────────────────────────
+ *
+ *   · **`taskId`**（← `sourceTaskId`）—— ★ **一条对话线程的分组键**。
+ *     实测：同一 `sourceTaskId` 有多条的**有 9 个任务** ⇒
+ *     ★ "一条线程" = **一组共享 `sourceTaskId` 的消息**，
+ *     而"成员来的=提问 / captain 来的=裁决"**天然成对**。
+ *     没有这一格，UI **只能**把消息摊成一条时间线，**分不出**哪些是同一件事的往返。
+ *   · **`ts`** —— 排序与显示都要它。★ 没有它，"谁先谁后"只能靠**数组序**猜，
+ *     而数组序是**投影顺序**，不是**时间顺序**（两者在截断后会分叉）。
+ *
+ * ★ 与 `TeamMessage` 的关系：**投影**，不是替代。
+ *   ★★ 几格是**缺席可能**的（`taskId?` / `attemptId?` / `taskStatus?`）——
+ *     它们**真的可能没有**（一封非"按任务"的消息），而**缺席 ≠ 空串**：
+ *     前者是"这封信不属于任何任务"，后者是"它属于一个名字为空的任务"。
+ */
+/**
+ * ── ★★ t100：快照里最多投影几封 captain 信箱的消息 ────────────────────────────────
+ *
+ * ★ 上限必须有：`/state` 是**每次轮询**都要传的载荷，而信箱实测 108 条、正文可能很长。
+ * ★★ 而超过它时**必须报出截了多少条**（见 `TeamActivitySnapshot.captainInboxOmitted`）——
+ *   静默截断会让"被截掉"与"没发过"同形。
+ *
+ * ★ 为什么取 5：与改造前的 `slice(-5)` **同一个数** ——
+ *   本轮改的是"**投影几格**"与"**读哪些**"，**不是**"投影多少条"。
+ *   把条数一起改大，会让"字段变多"与"载荷变大"这两个读数混在一起、无法归因。
+ */
+export declare const MAILBOX_PROJECTION_LIMIT = 5;
 export interface TeamActivityMessage {
+    readonly id: string;
     readonly from: string;
+    readonly to: string;
     readonly content: string;
+    /** ★ 时刻（排序与显示）。★ 不是数组下标 —— 那个在截断后会与它分叉。 */
+    readonly ts: number;
+    /** ★★ `sourceTaskId` —— **一条对话线程的分组键**（见上面的长注释）。 */
+    readonly taskId?: string;
+    readonly attemptId?: string;
+    readonly taskStatus?: string;
+    /** ★ `readAt` 在场 ⇒ 已读。★★ 已读的消息**仍然**在投影里（见下面的读法注释）。 */
+    readonly read: boolean;
 }
 /**
  * One registered criterion, as the **UI** needs it (window v4 / t78-shaped hop).
@@ -203,6 +251,29 @@ export interface TeamActivitySnapshot {
     readonly unattributedSubagents: readonly LiveSubagent[];
     readonly messageCount: number;
     readonly captainInbox: readonly TeamActivityMessage[];
+    /**
+     * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
+     *
+     * ★★ 只在**真的截了**时在场（缺席 = 没截）。
+     *   ★ 它存在的唯一理由：**静默截断会让"被截掉"与"没发过"同形**。
+     */
+    readonly captainInboxOmitted?: number;
+    /** ★ 截断前的总条数（与 `captainInboxOmitted` 一起读才完整）。 */
+    readonly captainInboxTotal?: number;
+    /**
+     * ── ★★★ t100（反向半边 C）：**读不到**信箱时的原因 ─────────────────────────────
+     *
+     * ★★ 三态**互不同形**：
+     * ```
+     * captainInbox: []  且  这一格【缺席】   ⇒ ★ 读到了，确实没有信
+     * captainInbox: []  且  这一格【在场】   ⇒ ★ 没读到（"没能测量"，不是"没有"）
+     * captainInbox: [...]（非空）            ⇒ 读到了，有信
+     * ```
+     * ★ 为什么必须有它：没有它，一次读失败会让**整支队伍从快照列表里消失**
+     *   （`collectTeamsActivity` 的 `catch` 吞掉），于是
+     *   「**这支队读不到**」与「**这支队不存在**」在面板上同形。
+     */
+    readonly captainInboxUnreadable?: string;
     /**
      * ── ★★★ v4：判据**清单**（registry.list() 的转发，与 t78 同构）──────────────────
      *
