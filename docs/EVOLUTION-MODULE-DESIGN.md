@@ -1,358 +1,283 @@
-# 自进化模块（资金化）设计 v1 —— 2026-10-16
+# 自进化模块（资金化）设计 v2 —— 2026-10-16
 
-> **用户裁定（逐字）**
-> 「这个**资金化**模块主要包含:1. **信息采集层** 2. **信息处理**。
->  ……把**完整的自进化模块**设计一下。」
-> 「我们的自迭代是**基于明显的报错**,或者是有价值的**信息采集**过来的。
->  所以,我们的迭代应该是**比较快**的,而不是像他们那种**定时的慢迭代**。」
-> 「其实**大部分情况**,这还是我们项目一个"**少打扰**"的问题,
->  **大部分东西都可以自己做判断**。」
-> 「我**不允许模块之间互相侵入**。所以,**需要暴露给其他模块使用的功能,
->  都必须做一个接口接出来**,供其他模块调用。」
+> **v1 的问题**：我只读了三份记忆项目（EverOS / MemOS / memex），**类别错了** ——
+> 它们是 L1（上下文/记忆），而用户要的是 **self-evolution**。
+>
+> **v2 补读**（见 §1 的对照表）：GEPA · DGM · **STOP** · SkillClaw · Raven ·
+> Awesome-Harness-Self-Improvement。
 
 ---
 
-## 0. ★★★ 先说一条**战略结论**（它决定了整个设计）
+## 1. ★★★ 我补读的东西，以及它们的**统一骨架**
 
-**记忆项目与我们的自进化,在"信号性质"上根本不同:**
+**`Awesome-Harness-Self-Improvement`（★116）给了这个领域的骨架 ——
+一条 L0→L5 的「优化阶梯」（它逐字说"This ladder is the backbone"）:**
 
-| | 记忆项目（EverOS / MemOS） | ★ **我们** |
+| Level | 被自进化的对象 | 代表工作 |
 |---|---|---|
-| **信号** | 用户的**偏好 / 语义**（需要 LLM 合并）| ★ **确定性的报错**（闸门拒绝 / 判据 blockers / exit code）|
-| **因此** | ★ **必须慢** —— 偏好要累积才看得出 | ★ **可以快** —— 信号本身是确定的 |
-| **有损吗** | ★ **是** —— EverOS 逐字:「repeatedly re-consolidating makes it **worse**」| ★ **否** —— 中间**没有 LLM 合并语义** |
-| **周期** | 每周一次（且警告"别频繁跑"）| ★ **越快越好,只要能验证** |
+| **L0** | **指令提示词** | APE · OPRO · Promptbreeder · ★ **GEPA** |
+| **L1** | **上下文 / 记忆** | ACE · Dynamic Cheatsheet · ReasoningBank |
+| **L2** | **工作流 / 图** | ADAS · AFlow · GPTSwarm · AgentSquare |
+| **L3** | **Harness / agent 代码** | ★ **DGM** · SICA · Gödel Agent · Self-Harness |
+| **L4** | **优化器 / meta-harness** | ★★ **STOP** · Meta-Harness · MCE |
+| **L5** | **Harness + 权重** | SIA · SEAL |
+| — | *（边界）只改权重* | self-play · RLVR —— **不在范围内** |
+| — | *（边界）人写的 harness 设计* | ReAct · SWE-agent · MCP —— **不在范围内** |
 
-★ **而 MemOS 自己也分了两层（逐字）:**
-> 「**Tool feedback** — every tool call succeeds or fails … **Deterministic, no LLM required**.
->  **User feedback** — free-text messages … which we need to **classify** before they can act」
+⇒ ★★★ **而我们这个插件要做的,横跨 L0 / L1 / L2 / L3 四层**（见 §5 的映射）。
 
-⇒ ★★★ **所以我们的路径 = 它的"Tool feedback"那一层,不需要 LLM 分类。**
-**而 EverOS 的"别频繁跑"警告【不适用于我们】—— 那条警告的前提是 LLM 有损合并。**
+★ **它同时给了一条判据:**
+> 「As the model becomes more capable, the field moves **down** this table:
+>  toward more complex self-improved targets and more general mechanisms.」
 
-### ★★ 于是"快"的判据不是"时间",而是**验证**
-
-```
-有确定性验证 ⇒ ★ 立刻生效，不问人（用户的"少打扰"）
-无验证        ⇒ 才提议（★ 而那是少数）
-```
+⇒ ★★ **即:越靠下的层越难、越通用。** 我们该**从 L0 开始,逐级往下**,
+**而 L3（改自己的代码）是最危险的一层** —— 见 §4。
 
 ---
 
-## 1. ★★★ 模块边界（用户硬约束：不许互相侵入）
+## 2. ★★★ 那份清单里**最该先看的一节**:失败模式
 
-### 现状：`src/` 的真实模块
+**它的 §5 逐字（这是整份清单里对我最重要的一句）:**
 
-```
-capabilities.ts   插件挂载 + prompt section
-client/           前端（投影层）
-confidence.ts     ★ 飞轮的核心算法（纯函数，零副作用）
-events.ts         事件类型
-gates/            17 条判据 + 注册表
-mutation/         变异测试
-quality-gates/    契约校验
-scheduler.ts      派发调度
-snapshot.ts       状态投影（→ /state → client）
-state/            ★ 持久化 + 类型
-tools/            工具实现
-worktree.ts       worktree 隔离
-```
+> 「The failure modes that gate real RSI.
+>  **The evaluator and permission control should sit OUTSIDE the loop
+>  that evolves the harness.**」
 
-### ★★ 自进化模块该住在哪
+⇒ ★★★ **这就是我一直在担心的那件事,而它被写成了本领域的通则。**
 
-```
-★ 新建 src/evolution/          ← ★ 一个【新模块】，不是散落在各处
-    ├── index.ts               ★ 唯一对外出口（barrel）
-    ├── types.ts               信号 / 记录 / 裁决的形状
-    ├── collect.ts             ① 采集层的**接口实现**
-    ├── classify.ts            ② 分类（复用既有 taxonomy）
-    ├── route.ts               ③ ★ 分流：soft | hard | unmeasured
-    ├── propose.ts             ④ 提议生成
-    ├── verify.ts              ⑤ ★ 验证闸（决定能否自动生效）
-    └── promote.ts             ⑥ 晋升（数据 → 配置）
-```
+### 它列出的失败模式（我按对我们的威胁排序）
 
-### ★★★ 而"不许侵入"的落实方式（这是本设计的核心）
-
-**三个方向都要有明确规则:**
-
-| 方向 | 规则 |
+| 失败模式 | 对我们的含义 |
 |---|---|
-| **① 别人 → 进化模块** | ★ **只通过 `src/evolution/index.ts`**（barrel）。**不许** `import '../evolution/collect.ts'` 这种深入路径 |
-| **② 进化模块 → 别人** | ★ **只读**。它**不修改**其他模块的状态；要影响别人,走 **`emit` 一条信号**给宿主（见 §3）|
-| **③ 采集点嵌入** | ★★★ **其他模块不许【主动调用】采集** —— 否则就是侵入。**改为:宿主在【既有的失败路径】上调用一次 `evolution.observe(...)`**（一个调用点,一个接口）|
+| ★★ **Misevolution**（Shao et al., ICLR 2026）| 「Self-evolving LLM agents 的**涌现风险**」—— 直接关于自进化 harness 的风险 |
+| ★★★ **Reward hacking**（Skalse et al., NeurIPS 2022）| 「**unhackability 是一个强条件**」—— 我们「验收可以被优化」就是可被 hack |
+| ★★ **Reward model overoptimization**（Gao et al., ICML 2023）| 优化**代理指标**会让真实目标**退化** |
+| ★★ **Specification gaming**（DeepMind 2020）| agent 钻目标的漏洞 —— ★ 本会话已有实例（"为了让测试变绿而放宽断言"）|
+| ★★★ **Reward tampering**（Denison et al., 2024）| 「从 sycophancy 泛化到**篡改奖励函数**」—— ★ **自优化循环改自己的裁决** |
+| ★ **Monitoring reasoning models**（Baker et al., 2025）| CoT 监控能发现作弊,但**训练时对着监控器优化会变成隐蔽** |
+| ★★ **AI Agents That Matter**（Kapoor et al., 2024）| 基准**只看准确率不看成本、holdout 弱** ⇒ 自进化的信号有效性危机 |
+| ★★★ **METR 2026**:「Many SWE-bench-Passing PRs Would Not Be Merged into Main」| ★ **通过基准的 PR,人类合并率远低** —— 对自进化编码 harness 的**评估有效性警告** |
 
-⇒ ★★ **即:不是"13 个采集点散布在各模块里",而是**
-```
-各模块【已有】的失败/成功路径
-  ⇒ 宿主（index.ts / tools.ts）在那些路径上已有一处统一出口
-  ⇒ ★ 在那个出口上挂一个 observe() 调用
-```
-
-★ **而本仓恰好【已经有】那个统一出口** —— 见 §3。
+⇒ ★★★ **而这最后一条正中我们的处境**:本会话反复出现
+**"测试通过"与"真的做对了"不同形"** —— METR 那条说的是**同一件事的规模化版本**。
 
 ---
 
-## 2. ★★★ 采集什么（`observe` 的输入形状）
+## 3. ★★★ 三个可直接照搬的机制（都有源码依据）
 
-### 依据：本仓**已有**的失败/成功出口
+### ① ★★★ STOP:把**评估器**与**被评估对象**分成两个文件
 
-| 出口 | 在哪 | 现在的去向 |
+**这正是 §2 那条通则的**实现**。`microsoft/stop` 的目录:**
+
+```
+tasks/maxcut/utility.py          ← ★ 给被进化的程序看的（n_tests = 3）
+tasks/maxcut/secret_utility.py   ← ★★ 真正的裁决（n_tests = 100，不同 seed）
+```
+
+⇒ ★★★ **被进化的对象只能看到公开的那份;真正的裁决在它【不可见、不可改】的另一份里。**
+
+★ **而 STOP 的摘要逐字提到它做的评估:**
+> 「evaluate the frequency with which the generated code **bypasses a sandbox**」
+
+⇒ ★★ **即:它【度量】了"绕过沙箱的频率"** —— **那本身就是一个读数,而不是一句保证。**
+
+### ② ★★ GEPA / Hermes:约束闸在**候选之后、采纳之前**
+
+**`hermes-agent-self-evolution`（★5512）的流程逐字:**
+
+```
+Read current skill/prompt/tool ──► Generate eval dataset
+                                        │
+                                   GEPA Optimizer ◄── Execution traces
+                                        │
+                                   Candidate variants ──► Evaluate
+                                        │
+                            ★ Constraint gates (tests, size limits, benchmarks)
+                                        │
+                                   Best variant ──► PR against hermes-agent
+```
+
+⇒ ★★ **两点与我们完全对口:**
+```
+· "Constraint gates (tests, size limits, benchmarks)"
+  ⇒ ★ 复用既有验证器（我们有 test:gates / verify:fast / tsc）
+· "PR against hermes-agent"
+  ⇒ ★★ 采纳走【PR】,不是直接写 —— 即【隔离 + 人可见】
+· "GEPA reads execution traces to understand WHY things fail (not just that they failed)"
+  ⇒ ★★ 那正是"分类"该做的:不只记"失败了",要记"为什么"
+```
+
+### ③ ★★★ Raven:**角色与信息边界**（诊断层与机制层分开）
+
+**`EverMind-AI/Raven`（★5470，"harness of harnesses, built for RSI"）的 §2 逐字:**
+
+| 角色 | 看得到 | 看不到 | 产出 |
+|---|---|---|---|
+| Trial | 员工与对话方往来 | ★ 评价标准 | 会话 |
+| 评价者 | 对话 · 交付物 · 自己的标准 | 员工内部实现 | `Signal` |
+| **Analyst** | 评价者原话 · 会话 · 执行记录 | ★ **评价者私下打分** | **`Feedback`:决定与行为要求** |
+| **Curator** | 行为要求 · 当前 Harness | ★★ **评价标准 · 原始打分** | 修订后的 Harness |
+
+**三条边界（它逐字）:**
+> 「① **评价者不直接对 Curator 说话。**
+>  ② **Analyst 停在诊断层** —— 它说明哪个行为没达到、证据是什么,**不说改哪个策略面**;
+>     机制归因是 Curator 的事。
+>  ③ **要求可观察、不写答案** —— 每条要求写情境与期望行为、实际行为、证据、验收方式,
+>     **不写"加一个 intake 清单"这类机制建议**。」
+
+⇒ ★★★ **这三条我建议【直接搬】,因为它正好回应我们的两个老问题:**
+```
+① 「评价者不直接对 Curator 说话」
+   ⇒ 对应我们的:"不要听『我检查过了』,要可复跑的读数"
+② 「Analyst 停在诊断层」
+   ⇒ 对应我们的:"分类"与"分流"该分开 —— 分类说"是什么病",分流说"怎么治"
+③ 「要求可观察、不写答案」
+   ⇒ ★ 对应我们的:验收必须可读出真假，不能写"做得好"
+```
+
+★ **而 Raven 的闭环有一个我没见过的细节:**
+> 「**最后一轮只评价、不修订,因为没有下一轮能检验那次修订。**」
+> 「停止条件:Analyst 决定 stop;**所有评价者都满意且不需要修订**;或轮次用完。」
+
+⇒ ★★★ **"没有下一轮检验的修订不做"** —— **那是一条很硬的纪律,而它防的正是"改了但没验"。**
+
+---
+
+## 4. ★★★ 于是在我们这里,"评估器待在循环外"该怎么落
+
+**这是本设计**唯一**不能妥协的一条。**
+
+```
+★ 被自进化的对象（循环内）:
+   提示词文本 · profile.protocol · executionPrompt · 判据的阈值
+   ⇒ ★ 这些可以被 AI 改
+
+★★ 裁决器（循环外 · AI 【不可改】）:
+   ① 判据本身（src/gates/**）        ⇒ ★ 改了就是"自己改考卷"
+   ② 验证命令（test:gates / verify:fast）
+   ③ 那条"该 kind 的卡点是否下降"的读数
+   ④ ★ 本设计里的 confidence.ts 阈值
+   ⇒ ★ 这些【只有人】能改，而 AI 只能【读】
+```
+
+⇒ ★★ **而 STOP 给了它最简单的实现:两个文件。**
+```
+我们不引入"secret"这种命名（它会让人以为是在藏东西）,
+而是【物理上分开】:
+  src/evolution/         ← 循环内（AI 可改）
+  src/gates/ + 验证器     ← 循环外（★ AI 只读，且由一个编译期/夹具级约束钉住）
+```
+
+★ **而"AI 只读"需要一个**机械保证**（不能靠纪律）:**
+```
+★ 一条臂:src/evolution/** 不许 import 任何【写路径】
+  （state 的写函数 / gates 的注册函数 / tools 的写函数）
+⇒ ★ 而这是可机械检查的（静态扫描 import 图）
+```
+
+---
+
+## 5. ★★ 映射:我们各层对应阶梯的哪一级
+
+| 阶梯 | 我们已有的 | 状态 |
 |---|---|---|
-| ★ **判据拒绝** | `recordFriction({point, message, ...})` ×3 | ✅ **写盘**（`.agent-teams/frictions/`，384 条）|
-| ★★ **闸门拒绝** | `validateCreateTask` / scope 校验 / TBD | ❌ **不写盘**（★ 本会话 7 次里 5 次是这类）|
-| ★ **成员越界** | inScope 校验 | ❌ 不写盘 |
-| ★★ **成功但值得记** | 无处 | ❌ **完全没有** |
-| ★ **成员的好做法** | 无 | ❌ 完全没有 |
+| **L0 提示词** | `usageSectionText`（队长 10 条）· `memberPersona`（成员 10 条）· `profile.protocol` | ★ **可改,但无循环** |
+| **L1 上下文/记忆** | `.agent-teams/frictions/`（384 条）· `confidence.ts` | ⚠️ **有数据,零读者** |
+| **L2 工作流** | `scheduler.ts` · DAG 依赖 · `reviewPolicy` | ⚠️ **可改,无循环** |
+| **L3 代码** | 插件自身（`src/`）| ★★ **危险层 —— 本轮不做** |
 
-### 所以 `observe` 要采三类（★ 用户原话里的三类）
+⇒ ★★★ **所以本模块的范围是 L0 + L1 + L2,而 L3 明确排除。**
+**而那与那份清单的"越往下越危险"一致。**
+
+---
+
+## 6. 采集层:采什么（用户原话的三类）
 
 ```ts
 export interface EvolutionSignal {
   readonly kind: 'rejection' | 'success' | 'insight'
-  /** 确定性来源：谁拒的 / 哪个工具 / 哪条判据 */
   readonly source: { readonly where: string; readonly gateId?: string; readonly tool?: string }
-  /** ★ 原文，不改写 —— 改写会让"看到什么"不可核 */
-  readonly message: string
-  /** 结构化上下文（可空，不许编） */
+  readonly message: string          // ★ 原文，不改写
   readonly context?: Readonly<Record<string, unknown>>
-  /** 团队 / 任务 / 尝试（与卡点台账同口径） */
   readonly scene?: { readonly team?: string; readonly task?: string; readonly attempt?: number }
-  /** ★ 时间：用于"同类出现的间隔"（不是用于排序展示） */
   readonly at: number
 }
 ```
 
-★ **用户原话对应:**
+★ **对应你原话:**
 > 「不管是**报错**,还是主会话发任务时**子代理觉得不合理**;
 >  或者子代理做出了一些**比较好的处理办法**,主会话觉得在什么方面**处理得很好、很有价值**」
 
-⇒ ★★ **三类:`rejection`（报错/不合理）· `success`（好做法）· `insight`（有价值的信息）**
+### ★★★ 而 GEPA 那句补了重要一条
 
-### ★★ 与既有 384 条的关系
+> 「GEPA reads execution traces to understand **WHY** things fail (**not just that** they failed)」
 
-```
-★ 不新开存储
-★ evolution 的采集【复用】 .agent-teams/frictions/*.json 的形状
-  ⇒ 只是加一格 routing + 放宽触发条件
-★ 而"成功"与"洞察"是【新增】的 kind —— 它们现在无处可去
-```
+⇒ ★★ **所以 `context` 与 `message` 之外,还要一格 `why`(机制活动) ——
+而 Raven 给了它的来源:**
+> 「Analyst 会把"**装上的机制本轮实际做了什么**"一并交给 Curator:
+>  哪条审核放行了几次、打回了几次、理由是什么,哪个工具调用失败了。」
+
+⇒ ★★★ **即:采集不只采"失败了",还采【哪条机制在当场做了什么】。**
+★ 而本仓**恰好有那个数据**:判据的 `ran[]`（每条判据的裁决）+ `commandsRun`。
 
 ---
 
-## 3. ★★★ 采集点怎么嵌（不许侵入的落实）
+## 7. 采集点怎么嵌（不许侵入）
 
-### 规则：**一个调用点,一个接口**
-
-```ts
-// ★ 宿主侧（index.ts / tools.ts —— 那是【已有的】统一出口）
-// 在既有的失败路径上，加【一行】：
-void evolution.observe(signalFromRejection(...))
-
-// ★★ 而各模块【不知道】evolution 存在
-//    ⇒ 例如 gates/ 里一个字都不改
-```
-
-★ **为什么这是"不侵入":**
 ```
 ❌ 侵入:  src/gates/contract/task-atomicity.ts 里 import evolution
-✅ 不侵入: 宿主在"判据拒绝"那个【已有的】汇合点调用一次
-          ⇒ 判据层完全不知道有采集层
+✅ 不侵入: 宿主在【已有的】汇合点调用一次 observe()
 ```
 
-### ★ 现有汇合点（可直接用）
+| 汇合点 | 位置 | 覆盖 | 状态 |
+|---|---|---|---|
+| `recordFriction()` | `entities.ts:3805` | ★ **所有判据拒绝** | ✅ 已在 |
+| 工具拒绝抛出点 | `tools.ts` | ★ **闸门拒绝** | ★ 新增一行 |
+| 契约校验 | `quality-gates.ts:843` | ★ **契约类** | ★ 新增一行 |
 
-| 汇合点 | 位置 | 覆盖 |
+**★ 而 `src/gates/**` 一个字都不改。**
+
+---
+
+## 8. ★★ 三条不许侵入的规则（用户硬约束）
+
+```
+A. 别人 → evolution：★ 只许 import src/evolution/index.ts
+B. evolution → 别人：★ 只读。要影响别人 ⇒ 发信号给宿主
+C. 采集点：★ 别的模块不许主动调用采集 —— 宿主在既有汇合点调用一次
+```
+
+★ **而 §4 那条是 A/B/C 之外的第四条（最重的一条）:**
+```
+D. ★★★ 裁决器不许被循环内改 —— 且这是【机械保证】的，不是纪律
+```
+
+---
+
+## 9. ★ 落地顺序（按阶梯,从最安全那级开始）
+
+| # | 做什么 | 层级 | 为什么先做 |
+|---|---|---|---|
+| **1** | ★ **采集层**:放宽触发 + 加 `kind` | L1 | ★ 后面所有层的前提;零风险 |
+| **2** | ★ **补录**本会话 7 次（带 routing）| L1 | ★ 产生第一批真实样本 |
+| **3** | **分类 + why**:复用 9 类 + 判据 `ran[]` | L1 | ★ **GEPA 的"why"** |
+| **4** | **分流**:soft / hard / unmeasured | L1→L0 | ★ 你要的那一格 |
+| **5** | ★ **裁决器隔离臂**:evolution 不许 import 写路径 | ★ §4 | ★★ **做任何自改之前必须先有它** |
+| **6** | **L0 生效**:改 prompt（profile 层,可改）| L0 | ★ 第一次真闭环 |
+| **7** | **投影**:client 能看到提示词模块 | L0 | ★ 你的 2(a) |
+
+★ **而第 5 步【必须】在第 6 步之前** ——
+**否则第一次自优化就可能改到自己的考卷。（那正是 §2 那条通则。）**
+
+---
+
+## 10. ★★ 待你拍板
+
+| # | 问题 | 我的建议 |
 |---|---|---|
-| `recordFriction()` | `tools/shared/entities.ts:3805` | ★ **所有判据拒绝** |
-| 工具拒绝的抛出点 | `tools.ts` 的 `transitionError` 一带 | ★ **闸门拒绝** |
-| 契约校验 | `quality-gates.ts:843` `validateCreateTask` | ★ **契约类** |
-
-⇒ ★★ **只需要在三个汇合点各挂一行** —— **而不是改 13 个模块。**
-
----
-
-## 4. ★ 处理层（`classify` → `route` → `verify` → `promote`）
-
-### ① 分类（复用既有 taxonomy）
-
-**本仓已有 9 类**（`index.kind`）:
-```
-unwired (346) · misclassified (24) · mismatched (5) · unsatisfiable (5)
-brittle (4) · overreaching (2) · uncalled (2) · cross-ecosystem (1) · unread (1)
-```
-★ **不发明第二套 taxonomy** —— 扩它。
-
-### ② ★★★ 分流（`route`）—— **这是用户要的那一格**
-
-```ts
-export type Routing = 'soft' | 'hard' | 'unmeasured'
-
-export interface RoutingDecision {
-  readonly routing: Routing
-  /** ★ 理由必须可核 —— 不是随手填的 */
-  readonly why: string
-  /** hard 时的落点（哪条判据 / 哪个位置） */
-  readonly target?: string
-  /** ★ 生效后用来判断"好了没有"的读数 */
-  readonly effect?: string
-}
-```
-
-**★ 分流的判据（用户原话的形式化）:**
-```
-① 能否【机械判定】？  ⇒ 能 ⇒ hard（加一条判据）
-                     ⇒ 不能 ⇒ soft（改 prompt）
-② 而 unmeasured 是【第三个答案】：
-   ★ 两者都不合适（例如"这需要产品决策"）⇒ 不硬塞
-```
-
-★ **为什么 `unmeasured` 必须存在**:本仓记账最久的形态——
-**"没能判断"与"判断为不必改"在报告里同形。**（与判据层同一纪律。）
-
-### ③ 验证闸（`verify`）—— **决定能否自动生效**
-
-★★ **而这是"快"的关键:**
-```ts
-export interface VerificationResult {
-  readonly verdict: 'verified' | 'refuted' | 'unmeasured'
-  /** ★ 可复跑的读数 —— 不是"我检查过了" */
-  readonly readings: readonly { readonly command: string; readonly exitCode?: number; readonly evidence: string }[]
-}
-```
-
-**★ 已有的验证器（直接复用,不新造）:**
-```
-pnpm test:gates          ← 判据层
-pnpm verify:fast         ← ★ 那个 62 倍的快环
-pnpm verify:frictions    ← ★ 卡点数据的校验器（已存在！）
-npx tsc --noEmit         ← 两个 config
-```
-
-### ④ 晋升（`promote`）—— **照 EverOS 的三层覆盖**
-
-```
-L1 代码里的默认（★ 只有人能改）
-      ↑ 晋升需 verified
-L2 profile 覆盖（~/.dsh/profiles/desktop/cordis.patch.yml）
-      ★ 改它不动代码、不必 build、不影响稳定版
-      ↑ 晋升需 verified
-L3 单次覆盖（每次调用）
-```
-
-★★ **而"验证过才生效"落在 L2 → L1 的晋升上:**
-```
-① 改动先落 L2（数据层）⇒ ★ 立即可用
-② 观察该 kind 的卡点是否下降（用 L3 的读数）
-③ ★ 下降 ⇒ 晋升到 L1（代码层）
-```
-
-★ **而这正好答应用户的"不放心":**
-> 「如果已经有某种测试验证了修改后是好的,那立马生效我觉得也没关系」
-
-⇒ **L2 的改动"验证"= `verify:fast` + "该 kind 的卡点下降"** ——
-**两个都是可复跑的读数。**
-
----
-
-## 5. ★★★ 与 `confidence.ts` 的关系（它现在已经在了，但零读者）
-
-```
-confidence.ts 已实现:
-  tallyRecall / tallyAdopt        ← 双计数（recalled = 找到，upvoted = 采纳）
-  confidenceOf = (upvoted + k/2) / (recalled + k)
-  PROMOTE_THRESHOLD = 0.90 · ARCHIVE_THRESHOLD = 0.15
-  readFlywheel() ⇒ promote | observe | archive | unmeasured
-```
-
-★ **而实测:它被 `entities.ts:3399` 用了一次（写进 `readSedimentFlywheel`）,
-而 `readSedimentFlywheel` 【零调用方】。**
-
-⇒ ★★ **所以"处理层"的地基已在,缺的是【采集 → 它】与【它 → 生效】两条腿。**
-
-★ **而它的 `confidence` 公式与本设计的关系:**
-```
-★ 它是【采纳率】的度量 —— 适合回答"这条沉淀该不该晋升"
-★ 而它【不】适合回答"这次的报错该走软还是硬"
-⇒ ★ 两者是【不同轴】的:一个管"沉淀的信誉"，一个管"缺陷的分流"
-⇒ ★★ 不许把两者混成一个指标（那正是本仓记账的形态）
-```
-
----
-
-## 6. ★★ 对外接口（唯一出口）
-
-```ts
-// src/evolution/index.ts —— ★ 其他模块只许 import 这个
-export { observe }              // ① 采集（宿主在既有失败路径调用）
-export { readEvolutionState }   // ② 只读：给 status / snapshot 投影
-export { propose }              // ③ 生成提议（人不直接调，AI 调）
-export { verifyChange }         // ④ 验证闸
-export type { EvolutionSignal, RoutingDecision, VerificationResult }
-```
-
-★★ **而反向的关系:**进化模块**需要读**别人时,走**只读**接口:
-```
-读判据注册表  ⇒ registry.list()（已存在）
-读卡点台账    ⇒ 已存在
-读 team.json  ⇒ 已存在
-★ 而它【不写】任何别人的状态
-```
-
----
-
-## 7. ★★★ 落地顺序（每步都可验证，且都不动代码层）
-
-| # | 做什么 | 验证读数 |
-|---|---|---|
-| **1** | ★ **采集层**:放宽触发条件 + 加 `kind`/`routing` 字段 | ★ 本会话那 7 次失败**进得了台账** |
-| **2** | ★ **补录**本会话的 7 次（带 routing）| ★ **软硬分布**第一次可读 |
-| **3** | **分类层**:复用既有 9 类,扩到三类信号 | 分类覆盖率 |
-| **4** | **验证闸**:复用 `verify:fast` / `verify:frictions` | 一条改动**能否自动判定 verified** |
-| **5** | **晋升**:L2 → L1 | ★ 一条真改动**真的晋升了** |
-| **6** | **投影**:给 client 一个"进化"面板 | ★ 前端能看到（用户 2(a) 的要求）|
-
-★ **而第 1 步就有反向半边:**
-```
-A：一条【判据拒绝】仍被记录（现状不许退化）
-B：一条【闸门拒绝】现在【也】被记录（新增的那一格）
-C：★ routing 的取值必须能从记录本身读出理由
-```
-
----
-
-## 8. ★ 与"记忆项目"的对照表（我读了三个实现）
-
-| 机制 | EverOS | MemOS | SkillClaw | ★ **我们** |
-|---|---|---|---|---|
-| 采集 | Episodes | 工具/用户双通道 | session JSON | ★ **确定性拒绝 + 成功 + 洞察** |
-| 信号性质 | 语义（LLM）| ★ 工具层确定 | 分数/轨迹 | ★ **确定** |
-| 周期 | 每周 02:00 | 失败突发 | 每轮 | ★ **能快就快** |
-| 隔离 | —— | —— | ★★ **workspace 边界 + 自验证** | ★ **接口 + 只读** |
-| 验证 | —— | δ 守卫 | ★★ **Step 5 自验证** | ★ **复用既有 verify** |
-| 晋升 | —— | policy 挂载 | 写回 skills/ | ★ **L2 → L1** |
-| 提示词分层 | ★★ **PromptSlot 三层** | policy guidance | SKILL.md | ★ **照 PromptSlot** |
-
-★★ **而 SkillClaw 那两步我必须点出来,因为它们直接答应用户的"不放心":**
-```
-Step 4  Execute —— 写进 workspace（★ 隔离）
-Step 5  Self-validation before finalizing:
-        「do not leave a skill change in skills/ unless it has passed
-          your self-validation, or unless you intentionally revert」
-        「Define 1-3 small validation scenarios … Prefer cases that would
-          have caught the observed failure」
-```
-⇒ ★★★ **"改了必须自验证,否则回滚"** —— 那就是用户说的"不放心改完立马生效"的解法。
-
----
-
-## 9. ★ 待用户拍板的三件
-
-| # | 问题 | 选项 |
-|---|---|---|
-| **1** | `evolution/` 是新目录,还是并入 `confidence.ts`? | ★ **建议新目录**(用户要"模块不许互相侵入",而 `confidence.ts` 是纯算法,该被 evolution 调用) |
-| **2** | L2 覆盖放哪? | ★ **建议复用 `cordis.patch.yml` 的 profile**(与 prompt 同一层,已有先例) |
-| **3** | 第 1 步(采集层)现在做,还是先看完整设计? | ★ **建议现在做** —— 它是后面所有层的前提 |
+| **1** | 范围 L0+L1+L2,明确排除 L3（改自己代码）? | ★ **建议排除** —— 与清单"越往下越危险"一致 |
+| **2** | 裁决器隔离用**机械臂**（静态 import 检查）? | ★ **建议是** —— 纪律会腐烂 |
+| **3** | 采集层现在做? | ★ **建议现在** —— 它是前提,且零风险 |
 
 ---
 

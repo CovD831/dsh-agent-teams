@@ -118,6 +118,7 @@ rules = [
     'A. 别人 → evolution：★ 只许 import src/evolution/index.ts（不许深入 collect.ts 这类路径）',
     'B. evolution → 别人：★ 只读。要影响别人 ⇒ 发信号给宿主，不直接改',
     'C. 采集点：★ 别的模块【不许】主动调用采集 —— 由宿主在【既有汇合点】调用一次',
+    'D. ★★★ 裁决器（gates/ + 验证命令 + 阈值）【AI 只读】—— 而且这是机械臂钉住的，不是纪律',
 ]
 for i, r in enumerate(rules):
     b.append(t(32, 848 + i * 20, r, 'note'))

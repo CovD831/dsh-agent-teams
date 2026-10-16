@@ -122,5 +122,6 @@
 <text x="32" y="848" class="note">A. 别人 → evolution：★ 只许 import src/evolution/index.ts（不许深入 collect.ts 这类路径）</text>
 <text x="32" y="868" class="note">B. evolution → 别人：★ 只读。要影响别人 ⇒ 发信号给宿主，不直接改</text>
 <text x="32" y="888" class="note">C. 采集点：★ 别的模块【不许】主动调用采集 —— 由宿主在【既有汇合点】调用一次</text>
+<text x="32" y="908" class="note">D. ★★★ 裁决器（gates/ + 验证命令 + 阈值）【AI 只读】—— 而且这是机械臂钉住的，不是纪律</text>
 <text x="24" y="916" class="dim">★ 而 confidence.ts（飞轮公式 · 双计数 · 三阈值）保持纯算法，被 evolution 调用 —— 它现在零读者</text>
 </svg>
