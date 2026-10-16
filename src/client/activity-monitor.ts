@@ -121,10 +121,34 @@ export interface ActivityTask {
   readonly updatedAt?: number
 }
 
-/** One captain-inbox preview row. */
+/**
+ * One captain-inbox row, mirroring the host `TeamActivityMessage`
+ * (`src/snapshot.ts`) field for field, in the same order.
+ *
+ * ★★ t102：这是**九格**，此前只有 `{from, content}` 两格 —— 而服务端在
+ *   t100 已经扩到九格。两边**分叉**过一次（与 `FLOW_STAGES` 那次同形）：
+ *   数据一直在载荷里，**类型只让调用方看见两格**。
+ *   ⇒ 顺序与命名**必须**与服务端一致，否则下一个人要对着两份定义比。
+ *
+ * ★ 为什么 `id` / `ts` / `read` 不省略：
+ *   · `id` —— 没有它，两行**同文**的消息无法区分（"同一条"与"两条一样的"同形）；
+ *   · `ts` —— 排序键。★ 不是数组下标：截断之后下标会与时刻**分叉**；
+ *   · `read` —— 「已读」是**一条事实**。★ 已读的消息**仍然在**投影里
+ *     （t100 特意从 `readUnreadMailbox` 换成 `readMailbox`），
+ *     否则线程会自己变短，而"消息没了"与"从来没发过"同形。
+ */
 export interface ActivityMessage {
+  readonly id: string
   readonly from: string
+  readonly to: string
   readonly content: string
+  readonly ts: number
+  /** ★★ `sourceTaskId` —— **一条对话线程的分组键**。 */
+  readonly taskId?: string
+  readonly attemptId?: string
+  readonly taskStatus?: string
+  /** ★ `readAt` 在场 ⇒ 已读。★★ 已读的消息**仍然**在投影里。 */
+  readonly read: boolean
 }
 
 /** One team snapshot (mirrors the host TeamActivitySnapshot). */
@@ -141,9 +165,130 @@ export interface ActivityTeam {
   readonly tasks: readonly ActivityTask[]
   readonly messageCount: number
   readonly captainInbox: readonly ActivityMessage[]
+  /**
+   * ── ★★★ t102：`captainInbox` 的**三态**（与那两格消息**并列**，不替换）──────
+   *
+   *     'absent'  —— 服务端**没给**（字段缺席 / 非数组）⇒ "读不到"
+   *     'empty'   —— 服务端**给了空数组** ⇒ "确实没有"
+   *     'present' —— 给了 N 条
+   *
+   * ★ 为什么它必须存在：没有它，「读不到」与「确实没有」在类型上**同形**，
+   *   而补救动作相反（前者查服务端，后者什么都不用做）。
+   */
+  readonly captainInboxState: 'absent' | 'empty' | 'present'
+  /** ★ 形状不对、读不出来的条目数 —— **不静默丢**（丢一条与"没有它"同形）。 */
+  readonly captainInboxUnreadable: number
+}
+
+/**
+ * ── ★★★ t102：`captainInbox` 的第一个消费者 ──────────────────────────────────────
+ *
+ * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+ *
+ * 改前全仓 `captainInbox` 只有两处（`grep -rn "captainInbox" src/client/`）：
+ *
+ *     activity-monitor.ts:143   readonly captainInbox: readonly ActivityMessage[]   ← 只有声明
+ *     ActivityPanel.tsx:362     captainInbox: [],                                   ← 硬编码空
+ *
+ * 而**活的那条路**（`body.teams as readonly ActivityTeam[]`）是**纯类型断言**：
+ * 服务端给什么就是什么 ⇒ `captainInbox` **没有任何东西保证它存在**。
+ * ⇒ 服务端**没给**时 `team.captainInbox` 是 `undefined`，而类型说它是数组 ——
+ *   ★ **「没给」与「给了空数组」在类型上同形**，而那正是本仓记账最久的形状。
+ *
+ * ── ★★ 三态（本函数的全部意义）─────────────────────────────────────────────────
+ *
+ *     'absent'    —— 服务端**没给**这个字段（字段缺席 / 不是数组 / `null`）
+ *                    ★ 与"给了空数组"**不同形**：前者是"读不到"，后者是"确实没有"
+ *     'empty'     —— 服务端**给了**，而且是空数组（真的没有消息）
+ *     'present'   —— 服务端给了 N 条
+ *
+ * ★ 为什么 `'absent'` 不熔进 `'empty'`：那会让「**这支队读不到消息**」与
+ *   「**这支队没有消息**」变成同一句话 —— 而补救动作相反（前者要查服务端，后者什么都不用做）。
+ *
+ * ── 为什么在**这里**做，而不是在渲染处 ──────────────────────────────────────────
+ *
+ * 渲染是形态决策（队长在等用户定 A/B/C），本任务边界是**让数据可读**。
+ * ⇒ 这里只保证"读得到且三态可分"，不决定画在哪。
+ *
+ * @param raw - the raw payload field, of unknown shape.
+ * @returns the readout, plus the rows themselves (empty unless present).
+ */
+export function readCaptainInbox(raw: unknown): {
+  readonly state: 'absent' | 'empty' | 'present'
+  readonly messages: readonly ActivityMessage[]
+  /** ★ 只读得到形状、读不到的条目数：**不静默丢掉**（丢一条会让"少了一条"与"没有它"同形）。 */
+  readonly unreadable: number
+} {
+  if (!Array.isArray(raw)) return { state: 'absent', messages: [], unreadable: 0 }
+  const messages: ActivityMessage[] = []
+  let unreadable = 0
+  for (const entry of raw) {
+    const row = entry as Partial<ActivityMessage> | null | undefined
+    /**
+     * ★ 只要求**形状的最小必需集**：`from` / `content`。
+     *   其余格（`id` / `to` / `ts` / `read`）在旧载荷里可能缺席 ——
+     *   按缺席给**保守默认**，但**不猜成"已读"**（那会让没读过的看起来读过了）。
+     */
+    if (row === null || row === undefined || typeof row.from !== 'string' || typeof row.content !== 'string') {
+      unreadable += 1
+      continue
+    }
+    messages.push({
+      id: typeof row.id === 'string' ? row.id : '',
+      from: row.from,
+      to: typeof row.to === 'string' ? row.to : '',
+      content: row.content,
+      ts: typeof row.ts === 'number' ? row.ts : 0,
+      ...row.taskId === undefined ? {} : { taskId: row.taskId },
+      ...row.attemptId === undefined ? {} : { attemptId: row.attemptId },
+      ...row.taskStatus === undefined ? {} : { taskStatus: row.taskStatus },
+      /** ★ 只认字面 `true`：缺省 ⇒ **未读**（保守），而不是"已读"。 */
+      read: row.read === true,
+    })
+  }
+  return messages.length === 0
+    ? { state: 'empty', messages: [], unreadable }
+    : { state: 'present', messages, unreadable }
 }
 
 /** A successfully-created conversation card that currently needs updates. */
+/**
+ * ── ★★★ t102：把 `/state` 的原始 team 行过一遍 `captainInbox` 校验 ────────────────
+ *
+ * 改前那一行是**纯类型断言**（`body.teams as readonly ActivityTeam[]`）——
+ * 于是 `captainInbox` **从来没有被读过**：服务端给没给，客户端都只是"信类型"。
+ *
+ * ★ 这里**只**补 `captainInbox` 一格，**不动**其它格：
+ *   其余格的校验属于各自的改动，一起做会让"我改了哪一格"在回归里**同形**。
+ * ★ 且它**不抛**：读不到就把状态如实报出来（`absent` / `empty` / `present`）。
+ *   抛出去会被外层的 `catch` 吞掉，而那条路会让**整支队从列表里消失** ——
+ *   "这支队读不到"与"这支队不存在"同形（t100 记过同一形状）。
+ */
+function withCaptainInbox(raw: unknown): ActivityTeam | undefined {
+  if (raw === null || typeof raw !== 'object') return undefined
+  const team = raw as ActivityTeam
+  const inbox = readCaptainInbox((team as { captainInbox?: unknown }).captainInbox)
+  return {
+    ...team,
+    captainInbox: inbox.messages,
+    captainInboxState: inbox.state,
+    captainInboxUnreadable: inbox.unreadable,
+  }
+}
+
+/**
+ * Project the raw `/state` teams through {@link withCaptainInbox}, dropping
+ * rows that are not objects at all (those are unreadable, not empty).
+ */
+function projectTeams(raw: readonly unknown[]): readonly ActivityTeam[] {
+  const out: ActivityTeam[] = []
+  for (const entry of raw) {
+    const projected = withCaptainInbox(entry)
+    if (projected !== undefined) out.push(projected)
+  }
+  return out
+}
+
 export interface ActivityMonitorTarget {
   readonly key: string
   readonly sessionId: string
@@ -477,7 +622,12 @@ export function startActivityPolling(
       if (cancelled) return
       if (!Array.isArray(body.teams)) throw new Error('Invalid activity response')
       runtime.onStatus?.('ready')
-      const liveTeams = body.teams as readonly ActivityTeam[]
+      /**
+       * ★★★ t102：**这一行**以前是纯断言（`as readonly ActivityTeam[]`）⇒
+       *   `captainInbox` 从未被读过。现在它过一次校验，三态（absent/empty/present）
+       *   随行带出，下游可以区分「服务端没给」与「服务端给了空」。
+       */
+      const liveTeams = projectTeams(body.teams)
       publishSnapshots({ teams: liveTeams })
       const previousDiscoveredKeys = discoveredLiveKeys
       discoveredLiveKeys = new Set(discoverySessionId === undefined || discoverySessionId === ''

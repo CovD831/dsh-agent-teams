@@ -359,7 +359,32 @@ export function historicCardTeam(data: AgentTeamsCardData, owner: string): Activ
     })),
     tasks: [],
     messageCount: 0,
+    /**
+     * ── ★★★ t102：这一格**为什么是空的**（判据在下面，不是"顺手留空"）────────────
+     *
+     * 任务书问我：这是"服务端没给时的兜底"，还是"客户端还需要"的占位？
+     *
+     * MEASURED 判定 —— **两者都不是**，它是**结构必需的空**：
+     *
+     *   1. 本函数（`historicCardTeam`）是**归档卡片的合成器** ——
+     *      它把 `AgentTeamsCardData` 拼成一个 `ActivityTeam` 交给同一个面板渲染。
+     *   2. 而 `AgentTeamsCardData`（`agent-teams-card-definition.ts`）**没有任何消息字段**：
+     *      `awk '/interface AgentTeamsCardData/,/^}/' … | grep -ciE "inbox|message"` ⇒ **0**。
+     *   3. ⇒ 归档卡片**物理上**拿不到消息 ⇒ 这里**只能**是 `[]`。
+     *
+     * ★ 所以它不是缺陷 —— **缺陷在【活的那条路】**：
+     *   `activity-monitor.ts` 的 `body.teams as readonly ActivityTeam[]` 是**纯断言**，
+     *   `captainInbox` 从未被读过。那条路现在由 `readCaptainInbox` 守（见该函数的注释）。
+     *
+     * ★ 但**留空仍要与"读不到"不同形**：归档卡片是"**确实没有消息**"（`'empty'`），
+     *   不是"**读不到消息**"（`'absent'`）。
+     *   ⇒ 所以这里**显式**声明 `'empty'`，而不是让它落进 `'absent'`。
+     *   ★ 若省掉这一行，两种情形在读数上会**同形** —— 而补救动作相反
+     *     （前者什么都不用做，后者要查服务端）。
+     */
     captainInbox: [],
+    captainInboxState: 'empty',
+    captainInboxUnreadable: 0,
   }
 }
 

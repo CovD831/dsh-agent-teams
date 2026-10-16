@@ -92,10 +92,34 @@ export interface ActivityTask {
     /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
     readonly updatedAt?: number;
 }
-/** One captain-inbox preview row. */
+/**
+ * One captain-inbox row, mirroring the host `TeamActivityMessage`
+ * (`src/snapshot.ts`) field for field, in the same order.
+ *
+ * ★★ t102：这是**九格**，此前只有 `{from, content}` 两格 —— 而服务端在
+ *   t100 已经扩到九格。两边**分叉**过一次（与 `FLOW_STAGES` 那次同形）：
+ *   数据一直在载荷里，**类型只让调用方看见两格**。
+ *   ⇒ 顺序与命名**必须**与服务端一致，否则下一个人要对着两份定义比。
+ *
+ * ★ 为什么 `id` / `ts` / `read` 不省略：
+ *   · `id` —— 没有它，两行**同文**的消息无法区分（"同一条"与"两条一样的"同形）；
+ *   · `ts` —— 排序键。★ 不是数组下标：截断之后下标会与时刻**分叉**；
+ *   · `read` —— 「已读」是**一条事实**。★ 已读的消息**仍然在**投影里
+ *     （t100 特意从 `readUnreadMailbox` 换成 `readMailbox`），
+ *     否则线程会自己变短，而"消息没了"与"从来没发过"同形。
+ */
 export interface ActivityMessage {
+    readonly id: string;
     readonly from: string;
+    readonly to: string;
     readonly content: string;
+    readonly ts: number;
+    /** ★★ `sourceTaskId` —— **一条对话线程的分组键**。 */
+    readonly taskId?: string;
+    readonly attemptId?: string;
+    readonly taskStatus?: string;
+    /** ★ `readAt` 在场 ⇒ 已读。★★ 已读的消息**仍然**在投影里。 */
+    readonly read: boolean;
 }
 /** One team snapshot (mirrors the host TeamActivitySnapshot). */
 export interface ActivityTeam {
@@ -111,8 +135,59 @@ export interface ActivityTeam {
     readonly tasks: readonly ActivityTask[];
     readonly messageCount: number;
     readonly captainInbox: readonly ActivityMessage[];
+    /**
+     * ── ★★★ t102：`captainInbox` 的**三态**（与那两格消息**并列**，不替换）──────
+     *
+     *     'absent'  —— 服务端**没给**（字段缺席 / 非数组）⇒ "读不到"
+     *     'empty'   —— 服务端**给了空数组** ⇒ "确实没有"
+     *     'present' —— 给了 N 条
+     *
+     * ★ 为什么它必须存在：没有它，「读不到」与「确实没有」在类型上**同形**，
+     *   而补救动作相反（前者查服务端，后者什么都不用做）。
+     */
+    readonly captainInboxState: 'absent' | 'empty' | 'present';
+    /** ★ 形状不对、读不出来的条目数 —— **不静默丢**（丢一条与"没有它"同形）。 */
+    readonly captainInboxUnreadable: number;
 }
-/** A successfully-created conversation card that currently needs updates. */
+/**
+ * ── ★★★ t102：`captainInbox` 的第一个消费者 ──────────────────────────────────────
+ *
+ * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+ *
+ * 改前全仓 `captainInbox` 只有两处（`grep -rn "captainInbox" src/client/`）：
+ *
+ *     activity-monitor.ts:143   readonly captainInbox: readonly ActivityMessage[]   ← 只有声明
+ *     ActivityPanel.tsx:362     captainInbox: [],                                   ← 硬编码空
+ *
+ * 而**活的那条路**（`body.teams as readonly ActivityTeam[]`）是**纯类型断言**：
+ * 服务端给什么就是什么 ⇒ `captainInbox` **没有任何东西保证它存在**。
+ * ⇒ 服务端**没给**时 `team.captainInbox` 是 `undefined`，而类型说它是数组 ——
+ *   ★ **「没给」与「给了空数组」在类型上同形**，而那正是本仓记账最久的形状。
+ *
+ * ── ★★ 三态（本函数的全部意义）─────────────────────────────────────────────────
+ *
+ *     'absent'    —— 服务端**没给**这个字段（字段缺席 / 不是数组 / `null`）
+ *                    ★ 与"给了空数组"**不同形**：前者是"读不到"，后者是"确实没有"
+ *     'empty'     —— 服务端**给了**，而且是空数组（真的没有消息）
+ *     'present'   —— 服务端给了 N 条
+ *
+ * ★ 为什么 `'absent'` 不熔进 `'empty'`：那会让「**这支队读不到消息**」与
+ *   「**这支队没有消息**」变成同一句话 —— 而补救动作相反（前者要查服务端，后者什么都不用做）。
+ *
+ * ── 为什么在**这里**做，而不是在渲染处 ──────────────────────────────────────────
+ *
+ * 渲染是形态决策（队长在等用户定 A/B/C），本任务边界是**让数据可读**。
+ * ⇒ 这里只保证"读得到且三态可分"，不决定画在哪。
+ *
+ * @param raw - the raw payload field, of unknown shape.
+ * @returns the readout, plus the rows themselves (empty unless present).
+ */
+export declare function readCaptainInbox(raw: unknown): {
+    readonly state: 'absent' | 'empty' | 'present';
+    readonly messages: readonly ActivityMessage[];
+    /** ★ 只读得到形状、读不到的条目数：**不静默丢掉**（丢一条会让"少了一条"与"没有它"同形）。 */
+    readonly unreadable: number;
+};
 export interface ActivityMonitorTarget {
     readonly key: string;
     readonly sessionId: string;
