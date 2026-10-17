@@ -331,6 +331,61 @@ export declare function createTeamDir(stateRoot: string, state: TeamState): Prom
  */
 export declare function readTeam(stateRoot: string, teamId: string): Promise<TeamState | undefined>;
 /**
+ * ── ★★★ t108：读一个队 —— **三态**，区分「区不在」与「区在但没这个队」 ─────────────
+ *
+ * ── 它存在的理由（`docs/RULING-READ-PATH-THREE-STATES.md` 的裁定"甲"）──────────────
+ *
+ * `readTeam` 把**两件不同的事**压成同一个 `undefined`：
+ * ```
+ *   ① 区（`stateRoot` 这个目录）**根本不存在**
+ *   ② 区在，但**里面没有这个队**
+ * ```
+ * ★ 而它们的补救动作**相反**：① 是"你连地方都找错了"（配置 / 工作区选错），
+ *   ② 是"那个队确实不在了"（被归档 / 从没建过）。
+ * ⇒ 合成 `undefined` 之后，**读的人分不出该去查哪个** —— 那是本仓记账最久的形态。
+ *
+ * ── ★★★ 为什么不改 `readTeam` 的签名（裁定"甲"，有实测依据）────────────────────────
+ *
+ * 实测：`readTeam` 有 **28 处**调用，而那 28 处的**区全部是确定的**
+ * （`workspaceOf(caller)` / `workspaceRegistry.list()` / `root` 传下来）
+ * ⇒ ★★ "区不存在"在**实际路径里不会发生**。
+ * ⇒ 若改签名，28 处 + 11 处类型声明会被迫回答一个其中 **27 处不可能被问到**的问题
+ *   —— ★ 那是**过度设计**，而 `readTeam` 保持一字不动。
+ *
+ * ── ★★ 坑①：不能靠 `catch` 的 ENOENT 来源分辨（t104/t107 实测，本任务复验）────────
+ *
+ * ```
+ *   A 区不存在        ⇒ readFile("<root>/NO-REGION/team.json") ⇒ code ENOENT
+ *   B team.json 不存在 ⇒ readFile("<root>/REGION/team.json")   ⇒ code ENOENT
+ *   ★★ 两者 code 相同 ⇒ 靠 code 分辨不出来
+ * ```
+ * ⇒ 所以本函数**先判区在不在**（`stat` 那个**目录**），**再**调 `readTeam`。
+ *
+ * ── ★★ 坑②：那个判断**自己失败** ⇒ 报 `no-region`，**不是** `no-team` ────────────────
+ *
+ * ★ 判据说不出区在不在时，"区在但没这个队"**没有被建立** ⇒ 只能报 `no-region`。
+ *   ⇒ 而"权限不足"与"真不存在"在这一格**同归宿**，因为对**调用方**而言
+ *     两者都是"这个区我读不了"（它们要做的动作相同：去查权限/去查路径）。
+ *   ★ 而它们**不**与 `no-team` 同归宿 —— 那才是本任务要分开的那一对。
+ *
+ * @param stateRoot - 已解析的绝对 state root（**区**的根）。
+ * @param teamId - 队的 sanitized id。
+ * @returns 三态之一；**不抛**（除既有 `readTeam` 对"读到了但内容非法"照旧抛）。
+ */
+export type ReadTeamResult = {
+    readonly kind: 'found';
+    readonly team: TeamState;
+}
+/** ★ 区在，但**里面没有这个队**。 */
+ | {
+    readonly kind: 'no-team';
+}
+/** ★ **区本身不在**（或判不出在不在）。 */
+ | {
+    readonly kind: 'no-region';
+};
+export declare function readTeamEx(stateRoot: string, teamId: string): Promise<ReadTeamResult>;
+/**
  * Synchronously read one team record while a continuable child is being
  * composed. Harness requires child setup contributions to be synchronous;
  * this narrow boundary lets a cold-resumed member restore its durable model
