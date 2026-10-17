@@ -252,3 +252,60 @@ export function captainLockKey(stateRoot, captainId) { /* ★ 同形 */ }
 ---
 
 *本节只追加 `docs/AGGREGATE-CAPTAIN.md`。★ 未改 `src/`、`scripts/`、`lib/`，未创建夹具（等决策）。*
+
+---
+
+# ★★★ 追加：最小实验③的读数（2026-10-17，t107）
+
+> **做法**：**写探针** —— `mkdtempSync` 造**两个**临时 stateRoot（A/B），用库层真导出
+> （`teamLockKey` / `withTeamLock` / `createTeamDir` / `writeTeam` / `readTeam`）在 A 建"本会话"的队，
+> 然后对 **B** 取锁并完成一次写。跑完删干净。★ **未碰任何真实区**；判据全部可编程。
+> 夹具：`scripts/gate-cross-workspace-write.test.mjs`（6 臂全绿）。
+
+## ① 跨区【写】：✅ **通** —— 但完整链比"一把锁一次写"多一步
+
+```
+createTeamDir(<B 的 stateRoot>, …)   ← ★ 先建队目录（生产链本来就有的一步）
+withTeamLock(teamLockKey(<B 的 stateRoot>, 't-cross'), …)   ← ★ 别区的锁【取到了】
+writeTeam(<B 的 stateRoot>, …)       ← ★ 在锁内写成了
+readTeam(<B 的 stateRoot>, 't-cross') ⇒ 读得回（含写进去的自定义格）
+```
+
+## ② ★★ 实测出的**新读数**：`writeTeam` **不**自动建队目录
+
+```
+对【存在但空白】的 stateRoot 直接 writeTeam（不经 createTeamDir）
+  ⇒ ENOENT（atomicWriteText 直接 open <stateRoot>/<teamId>/team.json.tmp… 失败）
+```
+⇒ ★ **跨区写的完整前置 = createTeamDir**；锁与写本身都不建目录。
+★ 这进聚合入口的实现清单：锁内写之前必须有"确保队目录"那一步，否则对没有队的新区静默失败。
+
+## ③ ★★ 两条反向半边都成立（方向相反，各带变异体实测）
+
+| 半边 | 断言 | 变异体实测 |
+|---|---|---|
+| **A** | 两个不同 stateRoot ⇒ `teamLockKey`/`captainLockKey` 都**不同**（键含 stateRoot） | 把键里的 stateRoot 删掉 ⇒ **2 臂红**（臂 2 + 互斥行为臂） |
+| **B** | 同一 stateRoot 同一 teamId ⇒ 键**相同**；同区不同队 ⇒ 键不同（粒度=队） | 把键里的 teamId 删掉 ⇒ **1 臂红** |
+| — | ★ 互斥的**行为级**验证：同键两次取锁排队 ⇒ `first:enter → first:exit → second:enter → second:exit`（不重叠） | — |
+
+## ④ ★ t104 预警实测：**读侧与写侧不对称** —— 写侧反而**可读**
+
+| 情形 | 读侧（`readTeam`） | 写侧（`writeTeam`） |
+|---|---|---|
+| 区不存在 | `undefined` | **抛 ENOENT** |
+| 凭空子路径 | `undefined` | **抛 ENOENT** |
+| 区在但没那个队 | `undefined` | （先 createTeamDir 才有"队"可言） |
+
+⇒ ★★★ **t104 预警在【读侧】实锤**：拼错的区名、凭空的路径、"区在没队"——**三者同形**（都是
+`undefined`，ENOENT 在 `state.ts` 的 catch 合流）。**但【写侧】是可读的**：拼错区名 = 抛 ENOENT
+（夹具用 `assert.rejects` 钉死这个方向——将来 `writeTeam` 若改成自动建目录，当场红 =
+【静默建出新区】的回归必须有人看见）。
+⇒ **聚合入口的启示**：写路径自己会说"指错了区"；**读路径需要裁定**（t104 的甲 statSync /
+乙改返回）才能分辨"区不存在"与"区里没队"。
+
+## ⑤ 边界与局限
+
+★ 未实现"显式 workspace 参数"（任务书边界：只验库层通不通）；★ 全部临时区，跑完删除；
+★ 夹具臂 0 = 先决条件自检（PRECONDITION-DISCIPLINE：建区/写/读任何一步不成立 ⇒ 后续臂全部
+`t.skip`，**不输出假读数**）。★ `withTeamLock` 是**进程内**锁（`state.ts` 的 Map）—— 跨进程互斥
+不在本实验范围（那从来不是它承诺的）。
