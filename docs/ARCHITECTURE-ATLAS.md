@@ -319,8 +319,13 @@ if (input.source?.kind === 'subagent-settled' && redundantSettlements.has(input.
 
 落盘
   .agent-teams/evolution/signals.jsonl     appendSignalClaimingId() 进程内互斥
-  .agent-teams/{team,member,task}/          内容寻址，靠 substructure 去重（4.92 MB → 0.75 MB）
-  .agent-teams/frictions/f-*.json           386 条 · 15.1 MB · 平均 38 KB（★ 旧的，不迁移）
+  ★ 而现场【只有】两个文件：index.json（920 B）· signals.jsonl（16 行 / 20.6 KB）
+
+设计上还打算做内容寻址（把成员/任务子结构按 sha 存块），而实测那个粒度是对的：
+  · 整块哈希只省 1%（4.92 → 4.88 MB）—— ★ 这是最初测错的口径
+  · 成员/任务【子结构】省 70%（2.32 → 0.69 MB）
+  ⇒ 但 [.agent-teams/evolution/] 里【没有 blocks/ 目录】—— 这一层还没落地
+  .agent-teams/frictions/f-*.json           ★ 旧的台账，386 个文件 · 15 MB · 冻结不迁移
 ```
 
 ### 3.2 采集健康度：两个元指标
@@ -331,8 +336,9 @@ if (input.source?.kind === 'subagent-settled' && redundantSettlements.has(input.
 - **`redundancy`** —— 唯一对数 / 总记录数
 
 ★★ **口径陷阱（实测踩过）**：必须按「`(component, 单个 kind)` 对」算，不能按「kind 集合桶」算。
-两者差 18 条多 kind 记录（如 `f-0078 · [unwired, cross-ecosystem]`）：
-按对算 **54**，按桶算 **38**。同一份数据两个读数 —— 而只有前者回答"覆盖了多少种"。
+两者差 16（按对 **54** / 按桶 **38**），成因是台账里 **18 条记录带多个 `kind`**
+（如 `contract.verify-command · ["unwired","misclassified"]` ⇒ 算 1 个桶、2 个对）。
+同一份数据两个读数 —— 而只有前者回答"覆盖了多少种"。
 
 ### 3.3 现在的真实状态：★ 采集在跑，但只有 3 个导出有消费者
 
@@ -340,9 +346,9 @@ if (input.source?.kind === 'subagent-settled' && redundantSettlements.has(input.
 
 | export | 调用点 |
 |---|---:|
-| `observe` | 4（`shared/entities.ts:4503` · `create-task.ts:607` · `tools.ts:2117` · `evolution/collect.ts:372` 注释例外） |
-| `collectionHealthOf` | 2（`snapshot.ts:31`） |
-| `readSignalsHealth` | 2（`snapshot.ts:32`） |
+| `observe` | **3**（`shared/entities.ts:4503` · `create-task.ts:607` · `tools.ts:2117`） |
+| `collectionHealthOf` | 1（`snapshot.ts:631`） |
+| `readSignalsHealth` | 1（`snapshot.ts:618`） |
 
 而 **`src/evaluator/`（422 行 / 3 文件 / 13 个 export）在被引用上是 0**——
 `grep -rn "evaluator" src/ | grep -v "^src/evaluator/"` = 零命中，**连夹具都不 import**。
