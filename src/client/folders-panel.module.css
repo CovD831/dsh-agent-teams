@@ -1,0 +1,153 @@
+/**
+ * ── ★★★ v5 第一层：文件夹面板的**像素风**样式（`docs/UI-V5-SINGLE-ENTRY.md` §2）────
+ *
+ * 用户裁定：「风格可以往**像素风**上做（因为像素风比较好做）,有点像**游戏界面**」。
+ *
+ * ── ★ 像素风的实现边界（B0.6 那套成本论证同样适用）──────────────────────────────
+ *
+ *   ✅ 纯 CSS 的 **border / box-shadow** 做像素边角（硬边、无圆角、无模糊）
+ *   ✅ 内联 SVG 的**几个矩形**画文件夹图标（组件里，见 `folders-panel.tsx`）
+ *   ❌ **不引位图 sprite**（体积进 `lib/client.js` + 版权）
+ *   ❌ **不加任何依赖**
+ *
+ * ★ "像素味"来自三条纪律，而不是素材：
+ *   ① **无圆角**（`border-radius: 0`）—— 圆角是平滑世界的东西
+ *   ② **硬阴影**（`box-shadow` 不带 blur，用整像素偏移）
+ *   ③ **等宽字体 + 整数间距** —— 字符网格与像素网格对齐
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* ★ 整块面板：一个"游戏画面"的边框，用 4 条 border 而不是 box-shadow 拼，边角才是直角。 */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 100%;
+  padding: 20px 24px;
+  /* ★ 硬边配色：只用宿主语义 token，不引第二套调色板（本仓既有纪律）。 */
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* ★ 整数像素的背景格：像素画的"纸"。1px 网格 + 两层错位的点。 */
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--dsw-alias-border-l2) 40%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--dsw-alias-border-l2) 40%, transparent) 1px, transparent 1px);
+  background-size: 8px 8px;
+  image-rendering: pixelated;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  /* ★ 标题下一条 2px 硬线 —— 游戏 UI 的分区线。 */
+  border-bottom: 2px solid var(--dsw-alias-border-l2);
+  padding-bottom: 8px;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.count {
+  margin-left: auto;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  /* ★ 无圆角 + 2px 硬边（不是药丸、不是阴影）。 */
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-radius: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ── 文件夹网格 ─────────────────────────────────────────────────────────────── */
+
+.grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* ★ 一个文件夹 = 图标 + 名字 + 计数，竖排；**没有圆角、没有模糊阴影**。 */
+.folder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 132px;
+  min-width: 0;
+  padding: 12px 8px 10px;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-radius: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  /* ★ 硬阴影：整像素偏移 + 0 blur ⇒ 像素风的"凸起"。 */
+  box-shadow: 3px 3px 0 0 color-mix(in srgb, var(--dsw-alias-bg-mask-3) 55%, transparent);
+}
+
+/* ★ 方块不许被压扁：像素画缩放到非整数倍会"歪"。 */
+.folderGlyph {
+  flex: none;
+  image-rendering: pixelated;
+  shape-rendering: crispEdges;
+}
+
+/* ★ 图标两层色：本体用业务色，高光用更亮的层 ⇒ 仍然是"两三个方块"。 */
+.folderBody {
+  fill: var(--dsw-alias-state-business-primary);
+}
+
+.folderHighlight {
+  fill: color-mix(in srgb, var(--dsw-alias-bg-base) 70%, transparent);
+}
+
+.folderName {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.folderMeta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── 空态 ───────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★★ 空态**必须看得见**（反向半边 C）：白屏与"读不到数据"同形。
+ * ★ 这里用一条虚线框 + 一句话 —— 虚线在像素风里也成立（它是 1px 的整数段）。
+ */
+.empty {
+  margin: 0;
+  padding: 18px 20px;
+  border: 2px dashed var(--dsw-alias-border-l2);
+  border-radius: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ★ 减少动效偏好下不引入任何动画（本面板本来就没有动画，这条只是把纪律写明）。 */
+@media (prefers-reduced-motion: reduce) {
+  .folder,
+  .folderGlyph {
+    transition: none;
+    animation: none;
+  }
+}
