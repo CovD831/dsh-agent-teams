@@ -801,7 +801,12 @@
     "kind": null,
     "description": "Captain-only delivery declaration: asks the delivery insertion point whether this team may be reported to the user as delivered, and REFUSES when it may not (uncovered goals, members that never converged, unfinished quality gates). Use it right before telling the user the work is done. agent_teams_status only REPORTS the same verdict without refusing, so reading team state never blocks.",
     "parameters": {
-      "properties": {},
+      "properties": {
+        "workspace": {
+          "description": "Optional. A registered workspace path or title to read delivery state from, instead of your own workspace. An unregistered name is REJECTED (it does not silently fall back to your own workspace). Omit to keep the previous behaviour.",
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "output": {
@@ -847,6 +852,48 @@
           },
           "team_id": {
             "type": "string"
+          },
+          "workspace_audit": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "enum": [
+                    "read-delivery"
+                  ],
+                  "type": "string"
+                },
+                "actor": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "number"
+                },
+                "callerWorkspace": {
+                  "type": "string"
+                },
+                "targetTitle": {
+                  "type": "string"
+                },
+                "targetWorkspace": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at",
+                "actor",
+                "callerWorkspace",
+                "targetWorkspace",
+                "targetTitle",
+                "tool",
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           }
         },
         "required": [

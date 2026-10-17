@@ -104,6 +104,61 @@ export interface AgentTeamsRuntime {
 }
 export declare function requireCaptain(exec: ToolRunContext): Agent;
 export declare function workspaceOf(agent: Agent): string;
+/**
+ * ── ★★★ t109：一个工具能【点名】的、**已注册**的工作区 ──────────────────────────────
+ *
+ * 用户裁定（逐字）：「我需要一个**权限非常大的主会话**，它可以**操纵不同的工作区**。」
+ *
+ * ── ★★ 而「能操作任何区」与「不知道它操作了哪个」是【两件事】 ────────────────────
+ *
+ * 前者是**能力**，后者是**缺陷** —— ⇒ 所以本函数与审计**一起上**
+ * （见 `src/tools/delivery.ts` 的 `agent-teams/workspace-audited`）。
+ *
+ * ── ★★★ 三态，而它们必须【不同形】 ─────────────────────────────────────────────
+ *
+ * ```
+ *   不传            ⇒ ★ 与改动前【逐字相同】：workspaceOf(caller)（调用者自己那个）
+ *   传了已注册的     ⇒ ★ 用那个（★ 哪怕它 === 自己那个 ⇒ 与"不传"同形，见 C）
+ *   传了未注册的     ⇒ ★★ 拒绝并给理由 —— ★ 【不许静默落到自己那个】
+ * ```
+ *
+ * ★★ 最后一条是本函数的**存在理由**：若未注册时静默回退到调用者自己那个，
+ *   那么「**点错了一个区**」与「**没点名**」在读端**完全同形** ——
+ *   而前者在"权限很大的主会话"上是**最容易发生**的错误（跨区操作打错一个字）。
+ *
+ * ★ 与 `workspaceOf` 的分工：那个**只回答自己那个**（隐式落点，5 处仍在用，默认行为不变）；
+ *   本函数**只回答被点名的那个**，而"没点名"时**委托**给它 ⇒ 默认路径只有一处实现。
+ *
+ * @param ctx - 插件上下文（用于取 workspace 注册表）。
+ * @param caller - 调用者（其 `session.header.cwd` 是缺省落点）。
+ * @param requested - 显式点名的工作区路径（缺席 ⇒ 用调用者自己那个）。
+ * @returns 落点工作区路径，以及**它是不是被显式点名的**。
+ * @throws 点名的工作区**未注册**时 —— ★ 绝不静默回退。
+ */
+export declare function resolveTargetWorkspace(ctx: Context, caller: Agent, requested: string | undefined): {
+    readonly workspace: string;
+    readonly explicit: boolean;
+    readonly title: string;
+};
+/**
+ * ── ★ t109：取 workspace 注册表（与 `src/index.ts` **同一组候选键**）──────────────
+ *
+ * ★ 为什么不各写一份键名：`src/index.ts` 早已用 `['workspaceRegistry', 'workspace']`
+ *   这两个候选（宿主版本不同、服务名不同）。★ 再写一份就等于**两个口径** ——
+ *   而两处一旦分叉，"HTTP 路由能读到的工作区"与"工具能点名的工作区"会不一致。
+ * ★ 这里**不复用 index.ts 的常量**，因为它是模块私有的；★ 但**键序与名字逐字相同**，
+ *   并把这条同源要求写在这里（注释即是契约）。
+ */
+/**
+ * ── ★ t109：取一个**已注册**工作区的显示名（给审计用）────────────────────────────
+ *
+ * ★ 为什么不并进 `resolveTargetWorkspace`：那会让**落点解析**依赖 `ctx.get`，
+ *   而"不传参数"那条老路径**必须不碰 ctx**（实测：碰了会让 4 个既有夹具红）。
+ * ★★ 所以显示名是**审计侧**的事 —— 那里 `ctx` 本来就在手，且**必然**已经解析成功。
+ *
+ * @returns 注册名；该路径不在册（或注册表不可用）⇒ `undefined`。
+ */
+export declare function registeredWorkspaceTitle(ctx: Context, workspace: string): string | undefined;
 export declare const VERIFY_COMMAND_TIMEOUT_MS = 120000;
 /**
  * ── ★★★ 规则表的**运行时**读取（t53）────────────────────────────────────────────
@@ -1765,6 +1820,68 @@ export declare function noteStall(task: TeamTask, point: string, gate: string | 
  *   刚被改过"，而那会让"它什么时候真的动过"这条读数失去分辨力。
  */
 export declare function clearStall(task: TeamTask): void;
+/**
+ * ── ★★★ t109：一条**跨工作区操作**的审计记录（落盘那份）────────────────────────────
+ *
+ * ★★ 字段与 event 版（`AgentTeamsWorkspaceAuditedData`）**逐字一致** ——
+ *   ★ 两个出口（磁盘 / 事件流）读的是**同一份事实**，不允许两套口径。
+ */
+export interface WorkspaceAuditRecord {
+    /** ★ 写这条记录的**机器时刻**（★ 事件流那条用宿主时间戳，这里用 ours：两者**不许**混读）。 */
+    readonly at: number;
+    /** ★ 调用者身份（`captain` 或成员名）。 */
+    readonly actor: string;
+    /** ★ 调用者**自己**所在的工作区（发起方）。 */
+    readonly callerWorkspace: string;
+    /** ★★★ **目标区标识** —— 没有它，「操作了哪个区」无从回答。 */
+    readonly targetWorkspace: string;
+    /** ★ 目标区的显示名。 */
+    readonly targetTitle: string;
+    /** ★ 用了什么工具。 */
+    readonly tool: string;
+    /** ★★ 什么动作 —— ★ **单件事**（当前只有 `'read-delivery'`）。 */
+    readonly action: 'read-delivery';
+}
+/**
+ * ── ★★★ t109（裁定甲）：审计**必须落盘** —— 因为事件流那条今天【不产生任何记录】──
+ *
+ * MEASURED（队长实测）：宿主的 `KNOWN_SESSION_EVENT_TYPES` **59 个类型里 `agent-teams` 一个都没有**
+ * ⇒ `appendTeamEvent` 对**全部** agent-teams 事件**静默 return**（`events.ts:50`）。
+ * ★★ 而那**不是缺陷**，是刻意的（`events.ts:33-38` 逐字：
+ *   「Out-of-repo events are not in the harness's generated vocabulary today……
+ *     **Disk state remains the authoritative source**」）。
+ *
+ * ⇒ ★★★ **所以"审计"这个名字今天只有在这里才是真的**：
+ *   若只写事件流，一次跨区操作**不留下任何东西** ——
+ *   而那正是"**能操作任何区**"与"**不知道它操作了哪个**"同形。
+ *
+ * ── ★★ 落点与形状（沿用本仓已有的一族）──────────────────────────────────────────
+ *
+ * ```
+ * .agent-teams/audit/workspace.jsonl     ← 每条一行（append-only 语义）
+ * ```
+ * ★ 与 `.agent-teams/frictions/`（卡点台账）**同一族**：jsonl + 原子写。
+ * ★★ 原子性走 {@link writeFileAtomic}（t89 那条路由）：
+ *   读旧内容 → 拼接 → **整份原子替换**。★ 与 `appendMailbox` 同形（那是本仓既有的 jsonl 追加写法）。
+ *
+ * ★ 为什么不用 `appendFile`：它的**追加**在 POSIX 上对小写是原子的，但
+ *   ★★ "写到一半崩掉"会留下**半行 JSON** —— 而那正是 t89 修过的那个缺陷形态
+ *   （坏文件与"没有这条"在读取端同形）。
+ */
+export declare function appendWorkspaceAuditRecord(stateRoot: string, record: WorkspaceAuditRecord): Promise<void>;
+/**
+ * ── ★★ t109：读回审计记录（**最小出口** —— 否则又是"记了没人看"）────────────────────
+ *
+ * ★ 三条要不同形（与全仓纪律一致）：
+ * ```
+ *   文件不存在  ⇒ []      （★ 确实没有记录）
+ *   读不了      ⇒ 抛错     （★ 没能测量）
+ *   有内容      ⇒ 解析出的记录（★ 坏行**报出**而不是静默跳过 —— 见下）
+ * ```
+ * ★★ 坏行**不许静默跳过**：t89 实测过"坏文件与没有这条在读取端同形"，
+ *   而那个缺陷**没人发现过**，唯一原因是**偶然**。
+ */
+export declare function readWorkspaceAuditRecords(stateRoot: string): Promise<WorkspaceAuditRecord[]>;
 export declare function recordFriction(capture: FrictionCapture): Promise<string | undefined>;
 export declare function evaluateRuntimeGates(ctx: Context, event: string, context: unknown, clock?: () => number): Promise<JsonValue | undefined>;
 export declare function rejectOnContractGates(ctx: Context, context: Record<string, unknown>, what: string, 

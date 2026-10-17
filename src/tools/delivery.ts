@@ -9,12 +9,24 @@ import { registry } from '../gates/index.ts'
 import { deliveryAuditFor } from '../artifacts.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, observeMemberConvergence, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf } from './shared/entities.ts'
+import { diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, observeMemberConvergence, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, appendWorkspaceAuditRecord, readWorkspaceAuditRecords, registeredWorkspaceTitle, resolveTargetWorkspace, type WorkspaceAuditRecord, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf } from './shared/entities.ts'
 import { buildCoverageMatrix, canDeclareDelivery, describeQualityLoop, resumeTeamState, withTeamLock, writeTeam } from '../state.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolsConfig } from './shared/entities.ts'
 
 /** 注册本文件的工具。共享实体由调用方（装配点）注入 —— 它们不是本文件的依赖。 */
+/**
+ * ★ t109：读回审计记录（出口用）。★ 读失败**不抛** —— 见调用点的理由。
+ */
+async function auditTrailFor(ctx: Context, stateRoot: string): Promise<WorkspaceAuditRecord[]> {
+  try {
+    return await readWorkspaceAuditRecords(stateRoot)
+  } catch (error: unknown) {
+    ctx.logger.warn(`agent-teams: could not read the workspace audit trail: ${String(error)}`)
+    return []
+  }
+}
+
 export function register(ctx: Context, clock: any, config: ToolsConfig): void {
     ctx.tools.register(withInputSurfaceOnError(defineTool({
       name: 'agent_teams_declare_delivery',
@@ -29,7 +41,24 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
        * ⇒ 读取（status）随时能发生、只报告；宣告（本工具）才被拒绝。
        */
       description: 'Captain-only delivery declaration: asks the delivery insertion point whether this team may be reported to the user as delivered, and REFUSES when it may not (uncovered goals, members that never converged, unfinished quality gates). Use it right before telling the user the work is done. agent_teams_status only REPORTS the same verdict without refusing, so reading team state never blocks.',
-      parameters: {},
+      parameters: {
+        /**
+         * ── ★★★ t109：**点名一个已注册的工作区**（不传 ⇒ 与改动前逐字相同）──────────
+         *
+         * 用户裁定：「我需要一个**权限非常大**的主会话，它可以**操纵不同的工作区**。」
+         *
+         * ★★ **默认完全不变**：不传这一格时，落点仍由 `workspaceOf(caller)` 决定 ——
+         *   而 `resolveTargetWorkspace` 在"不传"那一支**直接委托**给它，
+         *   并且**完全不碰 `ctx`**（实测：碰了会让 4 个既有夹具红）。
+         *
+         * ★★★ 而**传了未注册的** ⇒ **拒绝并给理由**，★ **绝不静默回退到自己那个** ——
+         *   否则「点错了一个区」与「没点名」在读端**完全同形**。
+         */
+        workspace: {
+          type: 'string',
+          description: 'Optional. A registered workspace path or title to read delivery state from, instead of your own workspace. An unregistered name is REJECTED (it does not silently fall back to your own workspace). Omit to keep the previous behaviour.',
+        },
+      },
       output: {
         schema: {
           type: 'object',
@@ -41,6 +70,32 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
             blockers: { type: 'array', items: { type: 'string' }, required: true },
             gates_evaluated: { type: 'number', required: true },
             loop_state: { type: 'string', required: true },
+            /**
+             * ── ★★★ t109（裁定甲③）：**"必须能从某个出口读到"** ────────────────────────
+             *
+             * ★ 读的是**落盘那份**（`.agent-teams/audit/workspace.jsonl`）——
+             *   因为事件流那条今天不产生任何记录（宿主 59 个已知类型里 `agent-teams` 0 个）。
+             *
+             * ★ 只在**点名了工作区**时在场（`undefined` = 这次没跨区）。
+             *   ★★ 缺席与"空数组"不同形：前者是"没做跨区操作"，后者是"做了、但一条都没记上"。
+             */
+            workspace_audit: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  at: { type: 'number', required: true },
+                  actor: { type: 'string', required: true },
+                  callerWorkspace: { type: 'string', required: true },
+                  targetWorkspace: { type: 'string', required: true },
+                  targetTitle: { type: 'string', required: true },
+                  tool: { type: 'string', required: true },
+                  /** ★ 取值域与 `WorkspaceAuditRecord.action` 逐字一致（单件事）。 */
+                  action: { type: 'string', enum: ['read-delivery'], required: true },
+                },
+              },
+            },
           },
         },
         render: (_args, value) => [{
@@ -50,11 +105,64 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
             : `Delivery refused for team ${value.team_id}: ${value.blockers.join('; ')}`,
         }],
       },
-      async execute(_args, exec) {
+      async execute(args, exec) {
         const caller = requireCaptain(exec)
-        const workspace = workspaceOf(caller)
+        /**
+         * ── ★★★ t109：落点从【隐式】变成【可点名】，而默认逐字不变 ───────────────────
+         * ★ 不传 ⇒ `resolveTargetWorkspace` **委托给 `workspaceOf(caller)`**（同一行）。
+         * ★ 传了未注册的 ⇒ **抛错**；传了已注册的 ⇒ 用它。
+         */
+        const target = resolveTargetWorkspace(ctx, caller, typeof args.workspace === 'string' ? args.workspace : undefined)
+        const workspace = target.workspace
         const stateRoot = stateRootOf(workspace, config)
         const team = await requireCaptainTeam(workspace, config, caller)
+        /**
+         * ── ★★★ t109：审计 —— **与能力一起上**，而且【成功也要记】 ─────────────────────
+         *
+         * ★★ 位置在"**已确认能操作这个区**"之后：若放在 `requireCaptainTeam` 之前，
+         *   一次**点错区**也会留下"跨区操作"的记录，而那次操作**实际没发生** ⇒ 台账比事实多。
+         *
+         * ★★★ 为什么**成功路径**必须记（硬边界③）：
+         *   失败会抛、会被看见；而**成功的跨区操作是静默的** —— 没有别的出口能发现它。
+         *
+         * ★ `action` 只写 `'read-delivery'`（**单件事**）：本工具一次调用**只读**那个区。
+         *   ★★ 将来若加写，**必须是新取值**，不许复用（见 `event-types.ts`）。
+         */
+        if (target.explicit) {
+          const audit = {
+            actor: caller.id,
+            callerWorkspace: workspaceOf(caller),
+            targetWorkspace: workspace,
+            targetTitle: registeredWorkspaceTitle(ctx, workspace) ?? workspace,
+            tool: 'agent_teams_declare_delivery',
+            /** ★ **单件事**：本工具一次调用只**读**那个区，不改它。 */
+            action: 'read-delivery' as const,
+          }
+          /**
+           * ★★★ **落盘那条（主）** —— 裁定甲的理由：
+           *   宿主的已知事件类型里 `agent-teams` **一个都没有**（实测 59 个里 0 个），
+           *   于是 `appendTeamEvent` 会**静默 return** ⇒ 只写事件流的话，
+           *   一次跨区操作**不留任何痕迹** ⇒ "审计"是空的。
+           * ⇒ 所以磁盘是**权威源**（`events.ts:33-38` 逐字也是这么说的）。
+           *
+           * ★ 失败**不阻断**跨区读（先软后硬，与本仓 `recordFriction` 同一纪律）：
+           *   审计写不进去**不该**让一次只读操作失败；
+           *   ★★ 但它**必须被看见** ⇒ 走 `logger.warn`（与 t89 同款）。
+           */
+          try {
+            await appendWorkspaceAuditRecord(stateRoot, { at: Date.now(), ...audit })
+          } catch (error: unknown) {
+            ctx.logger.warn(`agent-teams: could not persist the workspace audit record (the read still happened): ${String(error)}`)
+          }
+          /**
+           * ★★ **事件流那条（次，保留）** —— 宿主将来支持时它自然生效。
+           *   ★ 不为它做什么特殊处理：`appendTeamEvent` 自己就"containing failures"。
+           */
+          appendTeamEvent(ctx, captainSessionOf(ctx, team.captainSessionId, caller.session), 'agent-teams/workspace-audited', {
+            teamId: team.id,
+            ...audit,
+          })
+        }
         const coverage = buildCoverageMatrix(
           [...new Set(team.tasks.flatMap((item) => item.coverageOf ?? []))],
           team.tasks,
@@ -164,6 +272,12 @@ export function register(ctx: Context, clock: any, config: ToolsConfig): void {
            *   三态同前：齐（0）/ 有缺格（N + 名单）/ 这个位置没判据（字段不出现）。
            */
           ...deliveryInputSurface === undefined ? {} : { input_surface: deliveryInputSurface },
+          /**
+           * ★★★ 出口：把**落盘**的审计读回来报告（裁定甲③）。
+           * ★★ 只在这次真的点名了工作区时读 —— "没跨区"与"跨区了但没有记录"必须不同形。
+           * ★ 读失败**不阻断**（那次跨区读已经发生了）：抛会让一次**已经成功**的只读操作看起来失败。
+           */
+          ...target.explicit ? { workspace_audit: await auditTrailFor(ctx, stateRoot) } : {},
         }
       },
     })))
