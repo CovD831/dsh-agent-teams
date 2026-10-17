@@ -162,9 +162,28 @@
 
 .returnEntryHost {
   position: fixed;
-  /* ★ 左上角：不压面板头部（那里有拖拽/折叠），也不压右下角（那里有 resize）。 */
+  /**
+   * ── ★★★ 右上角，不是左上角（MEASURED，2026-10-17，用户截图）──────────────────
+   *
+   * ★ 原来写的是 `top: 10px; left: 12px`，而**那正压在 macOS 的红绿灯上**
+   *   （用户截图里那个按钮与 关闭/最小化/最大化 三个圆点重叠）。
+   *
+   * ★★ 官方对此有明确说法（`shell.leading` 的注释逐字）：
+   *
+   *      While the seat is mounted the frame publishes
+   *      `--dsh-frame-leading-clearance` (the inline inset the seat's band occupies,
+   *      measured from the frame's left edge); a main panel whose content reaches the
+   *      top-left corner **pads by it so nothing lands under the lights or the controls.**
+   *
+   * ⇒ ★★★ 即：**左上角是宿主的地盘**，插件的东西要么 pad 那个变量，要么别去那儿。
+   *   用户的选择是后者 —— 「可以还是在侧边栏，但是靠右」。
+   *
+   * ★ 而右上角为什么不与别的争：本插件的活动面板在右侧栏里（`sidebar.right`），
+   *   而那是【一列】；这个按钮是 frame 级的浮层，`right` 与那一列不冲突
+   *   （★★ 而那一条只有浏览器能确认 —— 见 t112 §尚未验证）。
+   */
   top: 10px;
-  left: 12px;
+  right: 12px;
   z-index: 60;
   display: inline-flex;
   align-items: center;
