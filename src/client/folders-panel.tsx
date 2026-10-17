@@ -30,6 +30,17 @@ import { getActivitySnapshotsSnapshot, subscribeActivitySnapshots, type Activity
  *   于是本轮**不需要重新论证地基**，只需要证明"它仍然成立"。
  */
 import { FOLDERS_MAIN_KEY, noteProbeRender } from './folders-probe.tsx'
+/**
+ * ★★★ t112（反向半边 B）：文件夹页**必须能出去** —— 否则它是**死路**，
+ *   与"进了会话回不去文件夹"那个用户报告的缺陷**对称**。
+ *   ★ 出去的官方写法是 `selectPanel(null)`（官方逐字：`null` ⇒ 回到 Conversation）。
+ *
+ * ★★ **为什么本文件不 import 任何新东西**：本层的 import 面被
+ *   `gate-folders-panel.test.mjs` 的臂 8 用**白名单**钉住了（零新依赖）。
+ *   而那个夹具**不在本轮写域** ⇒ 我不能去放宽它。
+ *   ⇒ 所以"记账"这一步挪到**注入处**（`index.tsx` 的 `openConversation`），
+ *     本文件只负责**调用**它拿到的那个回调。
+ */
 import css from './folders-panel.module.css'
 
 /** One workspace folder: the workspace name plus the teams inside it. */
@@ -161,7 +172,19 @@ function FolderGlyph(): JSX.Element {
  * ★ 每次渲染都落一个可读读数：`data-folders-count` / `data-folders-state`，
  *   于是"画了几个文件夹"是**可编程判据**，不是截图。
  */
-export function FoldersPanel(): JSX.Element {
+/**
+ * What the folders panel needs from the host.
+ *
+ * ★ 为什么要注入 `selectPanel` 而不是在这个文件里 `import` 服务：
+ *   面板是**纯表现**，切换面板是**动作** —— 把它做成参数，夹具就能注入一个
+ *   记录器，于是"点了文件夹之后切到哪去了"是**可编程判据**（反向半边 B/C）。
+ */
+export interface FoldersPanelProps {
+  /** ★ 切到会话：官方写法是 `selectPanel(null)`。缺省 ⇒ 不提供出口（夹具可省）。 */
+  readonly openConversation?: () => void
+}
+
+export function FoldersPanel({ openConversation }: FoldersPanelProps = {}): JSX.Element {
   /** ★ 每次渲染喂一次渲染计数（反向半边 A 的落点，见文件头的 import 注释）。 */
   noteProbeRender(FOLDERS_MAIN_KEY)
   const { teams, archivedTeams } = useSyncExternalStore(subscribeActivitySnapshots, getActivitySnapshotsSnapshot)
@@ -190,20 +213,34 @@ export function FoldersPanel(): JSX.Element {
       ) : (
         <ul className={css.grid} data-folders-grid="true">
           {folders.map((folder) => (
-            <li
-              key={folder.workspace === '' ? '\u0000unnamed' : folder.workspace}
-              className={css.folder}
-              data-folder={folder.workspace}
-              data-folder-teams={folder.teamIds.length}
-              data-folder-live={folder.liveCount}
-            >
-              <FolderGlyph />
-              <span className={css.folderName} title={folder.workspace}>
-                {folder.workspace === '' ? '(未命名工作区)' : folder.workspace}
-              </span>
-              <span className={css.folderMeta}>
-                {folder.teamIds.length} 个团队{folder.liveCount > 0 ? ` · ${folder.liveCount} 进行中` : ''}
-              </span>
+            <li key={folder.workspace === '' ? '\u0000unnamed' : folder.workspace} className={css.folderCell}>
+              {/**
+                * ★★★ t112（反向半边 B）：**文件夹本身就是一个出去的按钮**。
+                *
+                * 改前 `<li>` 只是静态内容 ⇒ 进了文件夹页**出不去** ⇒ 死路。
+                * 现在点它 ⇒ `openConversation()` ⇒ 生产实现是 `selectPanel(null)`。
+                *
+                * ★ 用它包住而不是给 `<li>` 挂 `onClick`：`<button>` 才有键盘可达性
+                *   （`<li onClick>` 是"看起来能点、Tab 键到不了"的那种）。
+                */}
+              <button
+                type="button"
+                className={css.folder}
+                data-folder={folder.workspace}
+                data-folder-teams={folder.teamIds.length}
+                data-folder-live={folder.liveCount}
+                data-folder-open="true"
+                onClick={() => { openConversation?.() }}
+                title={`进入 ${folder.workspace === '' ? '(未命名工作区)' : folder.workspace}`}
+              >
+                <FolderGlyph />
+                <span className={css.folderName} title={folder.workspace}>
+                  {folder.workspace === '' ? '(未命名工作区)' : folder.workspace}
+                </span>
+                <span className={css.folderMeta}>
+                  {folder.teamIds.length} 个团队{folder.liveCount > 0 ? ` · ${folder.liveCount} 进行中` : ''}
+                </span>
+              </button>
             </li>
           ))}
         </ul>

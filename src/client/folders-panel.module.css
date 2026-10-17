@@ -151,3 +151,67 @@
     animation: none;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t112：常驻的「回到工作区」入口（挂在 `shell.overlay`）────────────────────
+ *
+ * 官方逐字：浮层本身是 **click-through**，「entries opt back into pointer events」
+ * ⇒ ★ 本入口必须**自己开** `pointer-events`，否则它看得见、点不着 ——
+ *   而那与"没有这个入口"在用户眼里**完全同形**（用户报告的就是"回不去"）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.returnEntryHost {
+  position: fixed;
+  /* ★ 左上角：不压面板头部（那里有拖拽/折叠），也不压右下角（那里有 resize）。 */
+  top: 10px;
+  left: 12px;
+  z-index: 60;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  /* ★★ 这一行是承重的：浮层缺省 click-through。 */
+  pointer-events: auto;
+}
+
+/* ★ 像素风：无圆角 + 2px 硬边 + 硬阴影（与文件夹同一套纪律）。 */
+.returnEntry {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-radius: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 0 color-mix(in srgb, var(--dsw-alias-bg-mask-3) 55%, transparent);
+}
+
+.returnEntry:hover {
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-label-primary);
+}
+
+.returnEntry:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
+}
+
+/* ★ "点过几次"的读数；0 次时不印东西（不是印一个 0 —— 那是噪音）。 */
+.returnEntryHits {
+  min-width: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+}
+
+/* ★ 文件夹从 `<li>` 变成 `<button>`：去掉按钮的默认外观，保留像素风的硬边。 */
+.folderCell {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+

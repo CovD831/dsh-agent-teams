@@ -72,4 +72,15 @@ export declare function foldersView(teams: readonly ActivityTeam[] | undefined, 
  * ★ 每次渲染都落一个可读读数：`data-folders-count` / `data-folders-state`，
  *   于是"画了几个文件夹"是**可编程判据**，不是截图。
  */
-export declare function FoldersPanel(): JSX.Element;
+/**
+ * What the folders panel needs from the host.
+ *
+ * ★ 为什么要注入 `selectPanel` 而不是在这个文件里 `import` 服务：
+ *   面板是**纯表现**，切换面板是**动作** —— 把它做成参数，夹具就能注入一个
+ *   记录器，于是"点了文件夹之后切到哪去了"是**可编程判据**（反向半边 B/C）。
+ */
+export interface FoldersPanelProps {
+    /** ★ 切到会话：官方写法是 `selectPanel(null)`。缺省 ⇒ 不提供出口（夹具可省）。 */
+    readonly openConversation?: () => void;
+}
+export declare function FoldersPanel({ openConversation }?: FoldersPanelProps): JSX.Element;
