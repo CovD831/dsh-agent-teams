@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 980" font-family="-apple-system, 'PingFang SC', sans-serif">
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#8b94a3"/></marker>
+  <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#6ea8fe"/></marker>
+  <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#e06c75"/></marker>
+  <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#b48ead"/></marker>
+</defs>
+<rect width="1420" height="980" fill="#16191d"/>
+<text x="40" y="46" font-size="21" font-weight="700" fill="#e6e9ee">① 模块契约 · 谁被允许 import 谁</text>
+<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · src/ 共 57,093 行，其中真代码 26,706 行（注释占 49%）· 箭头方向 = import 方向</text>
+<text x="40" y="100" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">接入层 · 宿主只认这一层</text>
+<text x="40" y="304" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">运行层 · 工具调用的实际执行</text>
+<text x="40" y="564" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">判据层 · 12,496 行，零 node: 引用（实测）</text>
+<text x="40" y="794" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">真相层 · 磁盘是唯一权威源</text>
+<rect x="40" y="110" width="428" height="62" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="134" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">index.ts</text>
+<text x="56" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">669 行 · apply() 注册 16 工具 / HTTP / commands</text>
+<rect x="492" y="110" width="428" height="62" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="508" y="134" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">web-routes.ts</text>
+<text x="508" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">298 行 · 单一路径 /plugins/dsh-agent-teams/state</text>
+<rect x="944" y="110" width="428" height="62" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="960" y="134" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">client/index.tsx</text>
+<text x="960" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">397 行 · 11 次 slots.register，6 个槽位名</text>
+<rect x="40" y="318" width="428" height="74" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="344" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">tools.ts</text>
+<text x="56" y="366" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">2,316 行 · 16 个工具的实现装配处</text>
+<text x="56" y="384" font-size="10.5" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">依赖：state / types / lineage / mailbox</text>
+<rect x="476" y="318" width="428" height="74" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="492" y="344" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">scheduler.ts</text>
+<text x="492" y="366" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">1,253 行 · kickTeam / kickMember</text>
+<text x="492" y="384" font-size="10.5" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">依赖：state / types / lineage / mailbox</text>
+<rect x="912" y="318" width="428" height="74" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="928" y="344" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">members.ts</text>
+<text x="928" y="366" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">1,507 行 · startContinuable 子代理</text>
+<text x="928" y="384" font-size="10.5" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">依赖：state / types / lineage / mailbox</text>
+<path d="M254 172 L254 316" fill="none" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arrC)"/>
+<path d="M690 172 L690 316" fill="none" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arrC)"/>
+<path d="M1126 172 L1126 316" fill="none" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arrC)"/>
+<text x="266" y="250" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">ctx.tool() 注册</text>
+<path d="M468 355 L674 355" fill="none" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arrC)"/>
+<path d="M468 355 L1110 355" fill="none" stroke="#6ea8fe" stroke-width="1.8" marker-end="url(#arrC)"/>
+<text x="56" y="412" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">↳ tools 侧 8 处 await scheduler.kickTeam(…) —— 每个写路径末尾都踢一次</text>
+<rect x="40" y="580" width="916" height="186" rx="8" fill="#191d23" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="606" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">src/gates/ · 7 个插入点</text>
+<text x="58" y="628" font-size="11.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">admission → contract → dispatch → completion → delivery → runtime → collection</text>
+<text x="58" y="652" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">每个判据 = 一个纯函数：输入一个上下文对象，吐出三态判决</text>
+<text x="58" y="680" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">· ok      —— 看了，没问题</text>
+<text x="58" y="696" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">· blocked —— 看了，有问题（附 blockers）</text>
+<text x="58" y="712" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">· unmeasured —— 没能测量（★ 绝不等于 ok）</text>
+<path d="M498 580 L498 396" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="508" y="500" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">registry.evaluate(point, ctx) → GateVerdict</text>
+<text x="508" y="518" font-size="10.5" fill="#7dd3a0" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 纯函数：不读盘、不发消息、不改状态</text>
+<rect x="986" y="580" width="394" height="80" rx="8" fill="#1e232a" stroke="#e0a15c" stroke-width="1.4" opacity="1" stroke-dasharray="5 4"/>
+<rect x="986" y="564" width="51.0" height="22" rx="4" fill="#e0a15c" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="995" y="580" font-size="10" fill="#12151a" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">孤儿面</text>
+<text x="1004" y="624" font-size="13" fill="#e0a15c" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">src/evaluator/ · 5 个导出</text>
+<text x="1004" y="646" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">外部引用 0 —— 422 行没有消费者</text>
+<rect x="986" y="676" width="394" height="90" rx="8" fill="#1e232a" stroke="#e0a15c" stroke-width="1.4" opacity="1" stroke-dasharray="5 4"/>
+<text x="1004" y="704" font-size="13" fill="#e0a15c" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">src/evolution/ · 21 个导出</text>
+<text x="1004" y="726" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">有消费者 3 个：</text>
+<text x="1004" y="746" font-size="11" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">observe 49 · collectionHealthOf 8 · readSignalsHealth 2</text>
+<text x="986" y="796" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 隔离做得越彻底，越没人调 ——</text>
+<text x="986" y="814" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">  而&quot;没有被调用&quot;与&quot;没有用&quot;在读数上同形。</text>
+<rect x="40" y="806" width="916" height="32" rx="5" fill="#1b1f26" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="827" font-size="11.5" fill="#b48ead" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">.agent-teams/&lt;teamId&gt;/team.json</text>
+<text x="560" y="827" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">队伍、成员、任务、相位</text>
+<rect x="40" y="846" width="916" height="32" rx="5" fill="#1b1f26" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="867" font-size="11.5" fill="#b48ead" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">inbox/&lt;recipient&gt;.jsonl</text>
+<text x="560" y="867" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">消息，append 原子</text>
+<rect x="40" y="886" width="916" height="32" rx="5" fill="#1b1f26" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="907" font-size="11.5" fill="#b48ead" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">evolution/signals.jsonl</text>
+<text x="560" y="907" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">采集信号</text>
+<rect x="40" y="926" width="916" height="32" rx="5" fill="#1b1f26" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="947" font-size="11.5" fill="#b48ead" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">audit/workspace.jsonl</text>
+<text x="560" y="947" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">跨区读审计</text>
+<path d="M498 766 L498 802" fill="none" stroke="#b48ead" stroke-width="1.8" marker-end="url(#arrP)"/>
+<text x="508" y="790" font-size="10.5" fill="#b48ead" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">readTeam / writeTeam  ·  磁盘是权威源</text>
+<text x="986" y="900" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">── 图例</text>
+<rect x="986" y="912" width="14" height="14" rx="3" fill="#6ea8fe" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="1008" y="924" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">契约（唯一入口）</text>
+<rect x="1140" y="912" width="14" height="14" rx="3" fill="#7dd3a0" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="1162" y="924" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">纯函数（零 I/O）</text>
+<rect x="986" y="938" width="14" height="14" rx="3" fill="#e0a15c" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="1008" y="950" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">孤儿面（无消费者）</text>
+<rect x="1140" y="938" width="14" height="14" rx="3" fill="#b48ead" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="1162" y="950" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">磁盘真相</text>
+</svg>
