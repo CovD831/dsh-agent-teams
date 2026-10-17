@@ -96,7 +96,7 @@ class Sheet:
 def contract_map():
     s = Sheet(
         '① 模块契约 · 谁被允许 import 谁',
-        '实测 2026-10-17 · src/ 共 57,093 行，其中真代码 26,706 行（注释占 49%）· 箭头方向 = import 方向',
+        '实测 2026-10-17 · src/ 共 56,981 行，其中真代码 26,706 行（注释占非空的 51%）· 箭头方向 = import 方向',
     )
 
     # 层带
@@ -113,7 +113,7 @@ def contract_map():
     entry = [
         ('index.ts', '669 行 · apply() 注册 16 工具 / HTTP / commands'),
         ('web-routes.ts', '298 行 · 单一路径 /plugins/dsh-agent-teams/state'),
-        ('client/index.tsx', '397 行 · 11 次 slots.register，6 个槽位名'),
+        ('client/index.tsx', '397 行 · 10 处 slots.register，8 个槽位名'),
     ]
     for i, (n, d) in enumerate(entry):
         x = 40 + i * 452
@@ -162,7 +162,7 @@ def contract_map():
     # ── 孤儿面 ──
     s.rect(986, 580, 394, 80, stroke=ORPHAN, dash='5 4')
     s.label(986, 580, '孤儿面', ORPHAN, size=11)
-    s.text(1004, 624, 'src/evaluator/ · 5 个导出', size=13, weight=700, fill=ORPHAN, mono=True)
+    s.text(1004, 624, 'src/evaluator/ · 13 个导出', size=13, weight=700, fill=ORPHAN, mono=True)
     s.text(1004, 646, '外部引用 0 —— 422 行没有消费者', size=11.5, fill=ORPHAN)
 
     s.rect(986, 676, 394, 90, stroke=ORPHAN, dash='5 4')
@@ -219,7 +219,7 @@ def pipeline_map():
         ('kickTeam()', 'src/scheduler.ts:687', '三个早退：halted · staged · dispatchHeldByReload', CONTRACT),
         ('for each member', '逐成员 kick —— 不是广播', 'serializeMember(queueKey, …) 每人一把锁', CONTRACT),
         ('锁内再读 team', 'readTeam 第二次', '★ 这是防竞态的设计，不是冗余', PURE),
-        ('kickMember()', 'src/scheduler.ts:710', '判成员可用 → 取 prompt → startContinuable', CONTRACT),
+        ('kickMember()', 'src/scheduler.ts:709', '判成员可用 → 取 prompt → startContinuable', CONTRACT),
         ('ctx.subagents.startContinuable', '成员 = 真正的子代理', '★ 上下文独立 —— 因而前缀缓存不共享', PURE),
         ('成员执行 turn', '它能调全部 agent_teams_* 工具', 'claim_task · update_task · send_message', INK),
         ('update_task（成员自报）', '★ 这是唯一的"完成"信号', '没有它 ⇒ 任务永远停在 in_progress', BROKEN),
@@ -248,7 +248,7 @@ def pipeline_map():
     post = [
         ('appendMailbox', 'update-task.ts:2058', '消息落进 inbox/captain.jsonl', STORE),
         ('readCaptainSession', '★ 可能失败', 'inactive context ⇒ 拿不到 agents', BROKEN),
-        ('steerCaptainReport', 'members.ts:147', 'captain.steer(…) —— 唯一唤醒手段', CONTRACT),
+        ('steerCaptainReport', 'members.ts:146', 'captain.steer(…) —— 唯一唤醒手段', CONTRACT),
         ('markMailboxDelivered', 'update-task.ts:2147', '成功才标记已投递', PURE),
     ]
     for i, (n, sub, d, color) in enumerate(post):
@@ -300,16 +300,16 @@ def pipeline_map():
 def collect_map():
     s = Sheet(
         '③ 采集模块 · 从"卡点"到"能用的信号"',
-        '实测 2026-10-17 · 旧 frictions/ 已冻结（384 条 · 12.9 MB · 平均 35 KB，其中 86% 是重复快照）',
+        '实测 2026-10-17 · 旧 frictions/ 已冻结（386 条 · 15.1 MB · 平均 38 KB）',
         h=940,
     )
 
     # ── 左：三个汇合点 ──
     s.text(40, 112, '汇合点（宿主已经在的地方）', size=14, weight=700, fill=INK)
     points = [
-        ('recordFriction()', 'entities.ts:3805', '三处调用：create-task / entities / update-task', '★ 只在【判据拒绝】时触发'),
+        ('recordFriction()', 'entities.ts:4175', '三处调用：create-task / entities / update-task', '★ 只在【判据拒绝】时触发'),
         ('工具拒绝抛出点', 'tools.ts', '参数不合法、越权、状态不允许', '★ 非判据类的拒绝'),
-        ('validateCreateTask', 'quality-gates.ts:843', '建任务的契约校验', '★ 纯函数，只依赖 types.ts'),
+        ('validateCreateTask', 'quality-gates.ts:980', '建任务的契约校验', '★ 纯函数，只依赖 types.ts'),
     ]
     for i, (n, loc, d, tag) in enumerate(points):
         py = 136 + i * 106

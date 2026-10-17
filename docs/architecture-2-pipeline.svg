@@ -30,7 +30,7 @@
 <path d="M320 504 L320 520" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
 <rect x="40" y="520" width="560" height="88" rx="8" fill="#1b2028" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
 <text x="56" y="546" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">kickMember()</text>
-<text x="56" y="568" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">src/scheduler.ts:710</text>
+<text x="56" y="568" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">src/scheduler.ts:709</text>
 <text x="56" y="588" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">判成员可用 → 取 prompt → startContinuable</text>
 <path d="M320 608 L320 624" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
 <rect x="40" y="624" width="560" height="88" rx="8" fill="#1b2028" stroke="#7dd3a0" stroke-width="1.4" opacity="1"/>
@@ -61,7 +61,7 @@
 <path d="M1010 312 L1010 332" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
 <rect x="640" y="332" width="740" height="76" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
 <text x="656" y="358" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">steerCaptainReport</text>
-<text x="980" y="358" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">members.ts:147</text>
+<text x="980" y="358" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">members.ts:146</text>
 <text x="656" y="382" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">captain.steer(…) —— 唯一唤醒手段</text>
 <path d="M1010 408 L1010 428" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
 <rect x="640" y="428" width="740" height="76" rx="8" fill="#1e232a" stroke="#7dd3a0" stroke-width="1.4" opacity="1"/>

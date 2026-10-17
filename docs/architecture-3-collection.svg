@@ -7,11 +7,11 @@
 </defs>
 <rect width="1420" height="940" fill="#16191d"/>
 <text x="40" y="46" font-size="21" font-weight="700" fill="#e6e9ee">③ 采集模块 · 从&quot;卡点&quot;到&quot;能用的信号&quot;</text>
-<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · 旧 frictions/ 已冻结（384 条 · 12.9 MB · 平均 35 KB，其中 86% 是重复快照）</text>
+<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · 旧 frictions/ 已冻结（386 条 · 15.1 MB · 平均 38 KB）</text>
 <text x="40" y="112" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">汇合点（宿主已经在的地方）</text>
 <rect x="40" y="136" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
 <text x="58" y="162" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">recordFriction()</text>
-<text x="300" y="162" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">entities.ts:3805</text>
+<text x="300" y="162" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">entities.ts:4175</text>
 <text x="58" y="186" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">三处调用：create-task / entities / update-task</text>
 <text x="58" y="206" font-size="11" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 只在【判据拒绝】时触发</text>
 <rect x="40" y="242" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
@@ -21,7 +21,7 @@
 <text x="58" y="312" font-size="11" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 非判据类的拒绝</text>
 <rect x="40" y="348" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
 <text x="58" y="374" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">validateCreateTask</text>
-<text x="300" y="374" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">quality-gates.ts:843</text>
+<text x="300" y="374" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">quality-gates.ts:980</text>
 <text x="58" y="398" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">建任务的契约校验</text>
 <text x="58" y="418" font-size="11" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 纯函数，只依赖 types.ts</text>
 <text x="560" y="112" font-size="14" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">collection 插入点 · 4 条判据</text>

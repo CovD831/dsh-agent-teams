@@ -7,7 +7,7 @@
 </defs>
 <rect width="1420" height="980" fill="#16191d"/>
 <text x="40" y="46" font-size="21" font-weight="700" fill="#e6e9ee">① 模块契约 · 谁被允许 import 谁</text>
-<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · src/ 共 57,093 行，其中真代码 26,706 行（注释占 49%）· 箭头方向 = import 方向</text>
+<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · src/ 共 56,981 行，其中真代码 26,706 行（注释占非空的 51%）· 箭头方向 = import 方向</text>
 <text x="40" y="100" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">接入层 · 宿主只认这一层</text>
 <text x="40" y="304" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">运行层 · 工具调用的实际执行</text>
 <text x="40" y="564" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">判据层 · 12,496 行，零 node: 引用（实测）</text>
@@ -20,7 +20,7 @@
 <text x="508" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">298 行 · 单一路径 /plugins/dsh-agent-teams/state</text>
 <rect x="944" y="110" width="428" height="62" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
 <text x="960" y="134" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">client/index.tsx</text>
-<text x="960" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">397 行 · 11 次 slots.register，6 个槽位名</text>
+<text x="960" y="156" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">397 行 · 10 处 slots.register，8 个槽位名</text>
 <rect x="40" y="318" width="428" height="74" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
 <text x="56" y="344" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">tools.ts</text>
 <text x="56" y="366" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">2,316 行 · 16 个工具的实现装配处</text>
@@ -53,7 +53,7 @@
 <rect x="986" y="580" width="394" height="80" rx="8" fill="#1e232a" stroke="#e0a15c" stroke-width="1.4" opacity="1" stroke-dasharray="5 4"/>
 <rect x="986" y="564" width="51.0" height="22" rx="4" fill="#e0a15c" stroke="none" stroke-width="1.4" opacity="1"/>
 <text x="995" y="580" font-size="10" fill="#12151a" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">孤儿面</text>
-<text x="1004" y="624" font-size="13" fill="#e0a15c" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">src/evaluator/ · 5 个导出</text>
+<text x="1004" y="624" font-size="13" fill="#e0a15c" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">src/evaluator/ · 13 个导出</text>
 <text x="1004" y="646" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">外部引用 0 —— 422 行没有消费者</text>
 <rect x="986" y="676" width="394" height="90" rx="8" fill="#1e232a" stroke="#e0a15c" stroke-width="1.4" opacity="1" stroke-dasharray="5 4"/>
 <text x="1004" y="704" font-size="13" fill="#e0a15c" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">src/evolution/ · 21 个导出</text>
