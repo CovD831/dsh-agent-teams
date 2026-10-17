@@ -110,4 +110,82 @@ export async function readTeamEx(
 
 ---
 
-*本文只写 `docs/`。未改动 `src/`、`scripts/`、`lib/`。*
+---
+
+## 7. ★ t108 执行记录：裁定"甲"已落地
+
+**改动**：`src/state.ts` 新增 `readTeamEx` + 新增判据 `scripts/gate-read-team-ex.test.mjs`（7 臂）。
+★ **`readTeam` 一字未动**（实测见 §7.2），**28 处既有调用一处未改**（见 §7.3）。
+
+### 7.1 实现：先判区、再读队（坑①有实测依据）
+
+```ts
+// ① 先问"区在不在"（stat 那个【目录】，与"有没有这个队"无关）
+const stats = await stat(stateRoot)
+if (!stats.isDirectory()) return { kind: 'no-region' }   // ★ 路径写成文件 ⇒ 同归宿
+// （catch 一切 ⇒ no-region —— 坑②：判不出来不是 no-team）
+// ② 区确实在 ⇒ 现在才问"有没有这个队"
+const team = await readTeam(stateRoot, teamId)
+return team === undefined ? { kind: 'no-team' } : { kind: 'found', team }
+```
+
+★★ **坑① 不是照抄，是当场复验的**（本任务开工时实测）：
+
+```
+readFile("<root>/NO-SUCH-REGION/team.json")  ⇒ code ENOENT · path …/NO-SUCH-REGION/team.json
+readFile("<root>/REGION/team.json")          ⇒ code ENOENT · path …/REGION/team.json
+★★ 两者 code 相同 ⇒ 靠 code 分辨不出来 ⇒ 必须先 stat 目录
+```
+
+★ 该读数已固化成**判据臂 1**（不是靠人记得）。
+
+### 7.2 ★★ 硬边界①：`readTeam` 一字不动（机械核过）
+
+```sh
+$ diff <(git show HEAD:src/state.ts | sed -n '/^export async function readTeam(/,/^}/p') \
+       <(sed -n '/^export async function readTeam(/,/^}/p' src/state.ts)
+（无输出） ⇒ ✅ readTeam 函数体【逐字节相同】
+$ grep -n "export async function readTeam(" src/state.ts
+630:export async function readTeam(stateRoot: string, teamId: string): Promise<TeamState | undefined>
+```
+
+★ 而**判据臂 6** 钉住它的**语义形状**：对"区不在"与"队不在"，`readTeam` **仍然**都返回 `undefined`。
+★★ 理由（写进臂 6 的注释）：若有人为了复用把它改成返回判别对象，
+那 28 处 `if (team === undefined)` 会**恒为假** ⇒ **静默地把"没有队"读成"有队"**。
+
+### 7.3 ★★ 硬边界③：28 处调用一处未改
+
+```sh
+$ grep -rn "readTeam(" src/ --include=*.ts | grep -v "readTeamSync|readTeamEx|export async function readTeam(" | wc -l
+29
+$ # ★ 其中 1 处是 readTeamEx 自己内部的调用（src/state.ts:717）
+⇒ 存量 = 28 ✅（与裁定里的计数一致）
+```
+
+### 7.4 三条反向半边（均实测）
+
+| 半边 | 情形 | 必须 | 实测 |
+|---|---|---|---|
+| **A** | 区不存在 | `no-region` | ✅ |
+| **B** | 区在、队不在 | `no-team` | ✅ ★ 且**与 A 不同值** |
+| **C** | 区在、队也在 | `found` + `team` | ✅ ★ 且与 `readTeam` **给同一条记录** |
+
+### 7.5 ★★ 双突变：判据可证伪
+
+```
+突变①  去掉 stat 探针（= 直接 readTeam 再猜）      ⇒ ★ 4/7 红（A、B、5、7）
+突变②  把 no-region 落成 no-team（= 两者同形）    ⇒ ★ 3/7 红（A、B、5）
+```
+★★ 突变②正是**本裁定存在的理由**被推翻的那个方向 —— 而判据**当场红**。
+★ 而臂 4（C）在两个突变下**都绿**，因为"找得到"这一格没被碰 ——
+⇒ 恰好说明 A/B 与 C 是**各自独立**的承担者（C 防的是"加判别把正常路径弄坏"）。
+
+### 7.6 ★ 一处必须点明的取舍（写在这里免得下一个人以为是漏）
+
+★ 坑②的处置：**`stat` 本身失败 ⇒ 一律 `no-region`**，把"权限不足"与"真不存在"**合在一格**。
+★ 理由：对**调用方**而言两者动作相同（去查路径/去查权限），而它们**都**与 `no-team` 不同归宿
+（`no-team` 是"那个队确实不在了"）。⇒ 合成的是**同一类**，**没有**把本裁定要分的那一对合掉。
+★ 另：`stateRoot` 是**文件**（不是目录）⇒ `no-region`（臂 7）。
+这一格若不判，`readTeam` 会拿到 **ENOTDIR**（**不是** ENOENT）而**抛出去** ——
+于是"路径写错了"会变成一次异常，而它与"区不在"是同一类问题。
+
