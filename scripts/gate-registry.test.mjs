@@ -10,10 +10,26 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   createGateRegistry, ok, blocked, unmeasured, INSERTION_POINTS,
 } from '../lib/gates/registry.js'
+/**
+ * ★ 落盘那一跳的两个真身（⑱ 组）：
+ *   · `gateEvaluationRecordOf` 从**它自己的模块**取 —— 被钉的正是那个白名单；
+ *   · `createTeamDir` / `readTeam` 走真实 `team.json` 读写（不是"看函数的返回值"）。
+ */
+import { gateEvaluationRecordOf } from '../lib/state/tasks.js'
+import { createTeamDir, readTeam } from '../lib/state.js'
+
+/** 临时目录登记处：进程退出时无论成败都删掉（与仓里其它夹具同形）。 */
+const cleanups = []
+process.on('exit', () => {
+  for (const dir of cleanups) { try { rmSync(dir, { recursive: true, force: true }) } catch {} }
+})
 
 /** 一个最小的注册表，带一条指定裁决的判据。 */
 function withGate(point, verdict, extra = {}) {
@@ -651,4 +667,235 @@ test('⑰ 臂 10 ★ 控制台读得到观察状态（一条"开火了却不拦"
   assert.equal(r.isObserving('shiny'), false, '★ 注销连带撤掉观察标记')
   r.register({ id: 'shiny', point: 'completion', description: 're-registered', gate: () => blocked('x') })
   assert.equal(r.isObserving('shiny'), false, '★ 重新注册不许继承上一代的观察期（缺省一律有否决权）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑱ 「为什么没测成」必须能从【落盘数据】读出来（可诊断性先于行为）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★ 这组臂防的是什么失效 ──────────────────────────────────────────────────────
+ *
+ * 落盘条目（`GateRunEntryRecord`）此前只有 `id / verdict / count / produced / observed`：
+ * 一条 `unmeasured` 读回来就只剩 `verdict: 'unmeasured'` —— **"为什么没测成"还要去
+ * grep 位置级日志字符串**（而那条日志只在当场有）。
+ *
+ * ⇒ 本组的核心臂（臂 1）**不做字符串断言**，它走完一整条：
+ *
+ *     喂进一条带成因的注册表裁决  →  `gateEvaluationRecordOf`（落盘投影）
+ *     → 真的 `writeFile` 成 `team.json`  → 真的 `readTeam` 读回
+ *     → 成因**仍在**
+ *
+ * ★ 为什么必须经过 `writeFile`/`readTeam`（而不是只看投影函数的返回值）：
+ *   `gateEvaluationRecordOf` 的 `ran[]` 是**白名单投影**（逐条 `{...}` 抄写），
+ *   不补这一格 ⇒ 字段在**这一跳就被静默丢掉**，而投影函数的返回值看起来完全正常。
+ *   只断言投影结果的话，臂会绿，而异构的生产路径仍然是瞎的。
+ *
+ * ── 三条臂各自的靶子（契约第 4 条：不许把三者合成一条 required 规则）──────────
+ *
+ *   臂 1  unmeasured **必带**成因，且**穿过落盘投影**读得回来   ← 硬的
+ *   臂 2  blocked **允许**缺席（与臂 1 是两条独立判定，不是同一条规则的两个例子）
+ *   臂 3  旧条目（历史 `team.json`）**没有**这一格 ⇒ 读的时候不抛错、不编一个
+ */
+
+/** 一个只有一条 `unmeasured` 判据的注册表。 */
+function unmeasuredRegistry(reason = 'no executor was injected') {
+  const r = createGateRegistry()
+  r.register({ id: 'u', point: 'completion', description: 'd', gate: () => unmeasured(reason) })
+  return r
+}
+
+/** 一个只有一条 `blocked` 判据的注册表。 */
+function blockedRegistry(...blockers) {
+  const r = createGateRegistry()
+  r.register({ id: 'b', point: 'completion', description: 'd', gate: () => blocked(...blockers) })
+  return r
+}
+
+const fakeRequires = (checks = []) => ({
+  checked: checks.length, incomplete: 0, skipped: 0, notApplicable: 0,
+  inputSurfaceAbsent: 0, missing: [], gateCellsUndeclared: [], checks,
+})
+
+/** 把一个位置级裁决喂给落盘投影（与三个生产调用点用的是**同一个**函数）。 */
+function project(evaluation) {
+  return gateEvaluationRecordOf({
+    ...evaluation,
+    outputs: evaluation.outputs ?? {},
+    evaluated: evaluation.evaluated,
+    skipped: evaluation.skipped,
+    registered: evaluation.registered,
+    observed: evaluation.observed,
+    requires: fakeRequires(evaluation.requires?.checks ?? []),
+  })
+}
+
+/** 落盘 → 读回：一个最小的合法 `TeamState`，把 `gateEvaluation` 真的写进 `team.json`。 */
+async function roundTripThroughDisk(record) {
+  const root = mkdtempSync(join(tmpdir(), 'gate-reason-'))
+  cleanups.push(root)
+  const teamId = 'team-reason'
+  /** ★ 字段按 `isTeamTask` / `isTeamState` 的要求给全 —— 否则读不回来是因为**别的**原因。 */
+  await createTeamDir(root, {
+    id: teamId,
+    name: 'Reason Round Trip',
+    captainSessionId: 'captain-session-0001',
+    createdAt: 1,
+    taskSeq: 1,
+    members: [],
+    tasks: [{
+      id: 't1', subject: 'probe', status: 'completed',
+      dependencies: [], createdAt: 1, updatedAt: 2,
+      kind: 'implementation', acceptances: undefined,
+      gateEvaluation: record,
+    }],
+  })
+  return await readTeam(root, teamId)
+}
+
+test('⑱ 臂 1 ★ unmeasured 的成因必须【穿过落盘投影】并且读得回来', async () => {
+  const evaluation = await unmeasuredRegistry('the executor returned exit 125 — nothing was re-run').evaluate('completion', {})
+
+  /**
+   * ★ ① 位置级裁决里先要求它**在**（成因不是空的，也不是编的 —— 它就是判据那句话）。
+   */
+  assert.equal(evaluation.ran[0].verdict, 'unmeasured')
+  assert.equal(evaluation.ran[0].reason, '[u] the executor returned exit 125 — nothing was re-run',
+    '★ 注册表必须把 unmeasured 的成因写进逐条条目（否则后面两跳无从谈起）')
+
+  /**
+   * ★★ ② 穿过 `gateEvaluationRecordOf` 的**白名单**：这是本任务的核心失效点。
+   *   白名单只透传 `id/verdict/count/produced/observed` ⇒ 不补 `reason`，
+   *   它在这一跳**静默消失**，而函数的返回形状看起来完全正常。
+   */
+  const record = project(evaluation)
+  assert.equal(record.ran[0].reason, '[u] the executor returned exit 125 — nothing was re-run',
+    '★ `gateEvaluationRecordOf` 是白名单投影：`reason` 不在白名单里就会在这里被安静丢掉')
+
+  /**
+   * ★★★ ③ **真的落盘、真的读回** —— `team.json` 是持久文件，投影函数的返回值不是它。
+   */
+  const team = await roundTripThroughDisk(record)
+  assert.ok(team !== undefined, '★ 带 `reason` 的记录必须能被 `readTeam` 读回（不是"写到盘上就没人能读"）')
+  const readBack = team.tasks[0].gateEvaluation
+  assert.equal(readBack.ran[0].verdict, 'unmeasured')
+  assert.equal(readBack.ran[0].reason, '[u] the executor returned exit 125 — nothing was re-run',
+    '★★★ 落盘 → 读回之后，成因必须**仍在**：这就是"不必去 grep 位置级日志"那件事')
+
+  /**
+   * ★ ④ 落盘形状里 `ok:false` 且 `unmeasured` 在场 —— 与既有口径一字不变（臂 5 会把
+   *   这一条与"三态行为一个都没变"拴在一起）。
+   */
+  assert.equal(readBack.ok, false)
+  assert.match(readBack.unmeasured, /\[u\] the executor returned exit 125/)
+})
+
+test('⑱ 臂 1b ★ 观察模式下的 unmeasured 也带成因（放过的是裁决，不是成因）', async () => {
+  const r = unmeasuredRegistry('no executor was injected')
+  r.observe('u')
+  const evaluation = await r.evaluate('completion', {})
+  assert.equal(evaluation.ok, true, '★ 观察模式照旧不拦（既有 ⑰ 臂 3b 的口径）')
+  assert.equal(evaluation.ran[0].observed, true)
+  assert.equal(evaluation.ran[0].reason, '[u] no executor was injected',
+    '★ `observed` 与 `reason` 回答的是两件事：放过与否 / 为什么没测成 —— 必须都读得到')
+  const record = project(evaluation)
+  assert.equal(record.ran[0].reason, '[u] no executor was injected', '★ 观察条目同样要穿过白名单')
+})
+
+test('⑱ 臂 2 ★ blocked 的成因【允许缺席】—— 与 unmeasured 是两条独立判定，不是同一条规则', async () => {
+  /**
+   * ★ 契约第 4 条逐字禁止把 unmeasured / blocked / skipped 合成一条 required 规则。
+   *   本臂是那条禁令的**反向半边**：把 blocked 也强制成"必带成因" ⇒ 本臂红。
+   *
+   * ★ 为什么 blocked 不该被迫带成因：它的理由**已经**完整落在 `blockers[]`
+   *   （每条带 `[gate.id]` 前缀，而且可能有多条）。在这里再抄一遍 = 造第二个来源，
+   *   而本仓反复记账的正是"同一件事有两个来源，分叉之后在日志里同形"。
+   */
+  const evaluation = await blockedRegistry('the killer suite reported no verdict').evaluate('completion', {})
+  assert.equal(evaluation.ran[0].verdict, 'blocked')
+  assert.equal(evaluation.ran[0].reason, undefined,
+    '★ blocked 条目**不带** `reason`（它的理由在位置级 `blockers[]` 里）')
+  assert.deepEqual(evaluation.blockers, ['[b] the killer suite reported no verdict'],
+    '★ 而理由确实读得到 —— 只是它**不在**这一格')
+
+  const record = project(evaluation)
+  assert.equal(record.ran[0].reason, undefined, '★ 投影也不该给它编一个')
+  assert.equal('reason' in record.ran[0], false,
+    '★ **键不出现**，而不是带着空串 —— "没有成因"与"成因是空"不许同形')
+
+  const team = await roundTripThroughDisk(record)
+  const readBack = team.tasks[0].gateEvaluation
+  assert.equal(readBack.ran[0].verdict, 'blocked')
+  assert.equal('reason' in readBack.ran[0], false, '★ 落盘 → 读回之后它仍然缺席')
+  assert.deepEqual(readBack.blockers, ['[b] the killer suite reported no verdict'])
+})
+
+test('⑱ 臂 2b ★ skipped 的成因同样可缺席（它属于 `requires` 那一面，不搬进逐条 `ran[]`）', async () => {
+  const r = createGateRegistry()
+  r.register({ id: 's', point: 'completion', description: 'd', appliesTo: () => false, gate: () => ok() })
+  const evaluation = await r.evaluate('completion', {})
+  assert.equal(evaluation.ran[0].verdict, 'skipped')
+  assert.equal(evaluation.ran[0].reason, undefined, '★ skipped 不许被拉进这条 required 规则')
+  const record = project(evaluation)
+  assert.equal('reason' in record.ran[0], false)
+})
+
+test('⑱ 臂 3 ★ 旧条目（历史 `team.json` 里没有这一格）必须仍能解析，不抛错', async () => {
+  /**
+   * ★ 反半边：`<workspace>/.agent-teams/` 下的 `team.json` 是**历史文件** ——
+   *   本任务落盘的那些条目**没有** `reason` 这个键。若读侧对"缺这一格"挑错
+   *   （或反过来给它编一个），旧记录就会把整个队读坏 / 读出假读数。
+   *
+   * ★ 本臂伪造一份**逐字旧形状**的记录（只有 `id`/`verdict`/`count`/`produced`），
+   *   真的写进 `team.json`，再真的读回来。
+   */
+  const root = mkdtempSync(join(tmpdir(), 'gate-reason-legacy-'))
+  cleanups.push(root)
+  const teamId = 'team-legacy'
+  await createTeamDir(root, {
+    id: teamId,
+    name: 'Legacy Reason',
+    captainSessionId: 'captain-session-0001',
+    createdAt: 1,
+    taskSeq: 1,
+    members: [],
+    tasks: [{
+      id: 't-old', subject: 'legacy record', status: 'completed',
+      dependencies: [], createdAt: 1, updatedAt: 2,
+      kind: 'implementation',
+      /** ★ 逐字 = 本任务**之前**的落盘形状（没有 `reason`）。 */
+      gateEvaluation: {
+        ok: false,
+        blockers: ['[b] something was wrong'],
+        unmeasured: '[u] the executor said nothing',
+        ran: [
+          { id: 'u', verdict: 'unmeasured' },
+          { id: 'b', verdict: 'blocked', count: 1 },
+          { id: 'o', verdict: 'ok', produced: true },
+          { id: 's', verdict: 'skipped' },
+        ],
+        outputs: {},
+        evaluated: 3,
+        skipped: 1,
+        registered: 4,
+        observed: { blockers: [], unmeasured: [] },
+        requires: {
+          checked: 3, incomplete: 0, skipped: 1, notApplicable: 1,
+          inputSurfaceAbsent: 0, missing: [], gateCellsUndeclared: [],
+        },
+      },
+    }],
+  })
+
+  const team = await readTeam(root, teamId)
+  assert.ok(team !== undefined, '★ 旧记录必须**仍能读回** —— 缺一个诊断字段不许 brick 整个队')
+  const ran = team.tasks[0].gateEvaluation.ran
+  assert.deepEqual(ran.map((entry) => entry.verdict), ['unmeasured', 'blocked', 'ok', 'skipped'],
+    '★ 旧条目的三态一个都没变')
+  for (const entry of ran) {
+    assert.equal('reason' in entry, false,
+      `★ 旧条目里没有这一格 ⇒ 读回来也**不许**冒出这一格（"没有成因"≠"成因是空串"）：${entry.id}`)
+  }
+  assert.equal(team.tasks[0].gateEvaluation.unmeasured, '[u] the executor said nothing',
+    '★ 位置级 `unmeasured` 原文照旧（旧记录的可读性不许因此有一点损失）')
 })

@@ -480,6 +480,21 @@ export interface GateRunEntryRecord {
     produced?: boolean;
     /** 「开火了、裁决被观察模式放过」；缺席 = 不是这个情形（不许用 false 冒充缺席）。 */
     observed?: boolean;
+    /**
+     * ── ★ 这一步【为什么没测成】（结构与 `registry.ts` 的 `GateRunEntry.reason` 逐字相同）──
+     *
+     * 它表示：这条判据**跑过了**，而它（或框架替它）给出的「没测成」成因原文。
+     *
+     * ★ 缺席的三态（刻意不合成一条 required 规则）：
+     *   `verdict: 'unmeasured'` ⇒ **必在场且非空** · `blocked` / `skipped` ⇒ 允许缺席。
+     *
+     * ★ 与 `produced` 差在哪：`produced` 是关于**产物**的布尔（"交出了东西吗"）；
+     *   这里回答的是"**为什么没交出**读数"。★ 与 `observed` 差在哪：`observed`
+     *   回答"裁决**有没有被采纳**"（观察模式），与"为什么没测成"是两件事。
+     *
+     * ★ 旧记录没有这一格 ⇒ 读侧**必须**当它缺席，不许抛错（`team.json` 是历史文件）。
+     */
+    reason?: string;
 }
 /**
  * ── ★★★ 那份「已审查」的**逐条读数**（而不是一句"审过了"）────────────────────────
