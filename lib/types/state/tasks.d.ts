@@ -47,6 +47,7 @@ export declare function gateEvaluationRecordOf(evaluation: {
         count?: number;
         produced?: boolean;
         observed?: boolean;
+        reason?: string;
     }[];
     outputs: Record<string, Record<string, unknown>>;
     evaluated: number;
