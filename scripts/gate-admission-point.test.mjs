@@ -63,9 +63,34 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { registry, buildRegistry } from '../lib/gates/index.js'
 import { createGateRegistry, INSERTION_POINTS, ok, blocked } from '../lib/gates/registry.js'
+
+/**
+ * ── ★★ 下半场：接线普查的夹具臂（t4）─────────────────────────────────────────────
+ *
+ * 本文件上半场三臂测的是**位置自身**的形状（能被求值到 / 空位置放行 / 互不影响）。
+ * 从第 4 臂起，同一个 `admission` 位置被换到**另一个问题**上看：
+ *
+ *     它到底有没有被**任何** `src/` 代码求值？
+ *
+ * ★ 为什么要合进这一个文件而不是新开一份：两条验收指向的其实是同一个位置的
+ *   两半 —— "位置在注册表里是好的"（上半场）与"位置在流程里**真的被调用**"
+ *   （下半场）。分成两个文件，第一半绿、第二半红时，读日志的人要先猜该看哪一份。
+ *
+ * ★★ 而它们**不是**同一件事（这是本组臂存在的理由）：
+ *   一个位置可以在 `INSERTION_POINTS` 里、`buildRegistry().list()` 里有它的键、
+ *   `evaluate('admission', {})` 也能跑 —— 而**全仓没有一个调用点**。
+ *   那时"它永远不会跑"与"它跑了且通过了"在日志里**同形**。
+ */
+const CENSUS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const CENSUS_SCRIPT = join(CENSUS_ROOT, 'scripts', 'gate-wiring-census.mjs')
 
 /** 位置的名字本身就是本任务的一条验收：判的是**准入**，不是契约合法性。 */
 const POINT = 'admission'
@@ -308,4 +333,480 @@ test('臂 3 ★ 隔离臂：admission 与 contract 各开各的火 —— 两个
     '★ 摘掉 contract 的判据不许改 admission 的裁决 —— 两个位置的判据集合是各自独立的',
   )
   assert.deepEqual((await r.evaluate('contract', {})).blockers, [], '★ 而 contract 那边确实回到了空位置')
+})
+
+/** 跑一次普查；`env` 用于臂 6（默认清掉继承来的 root，免得夹具受宿主环境影响）。 */
+function runCensus({ root, extraArgs = [], env = {}, registryRoot = CENSUS_ROOT } = {}) {
+  /**
+   * ★ 夹具树只提供**源码树**，注册表仍取本仓的真实注册表（`--registry ROOT`）。
+   *   两件事分开摆是本文件的口径：被测的是"给定注册表 × 给定源码树 ⇒ 什么接线读数"，
+   *   不是"这条命令能不能把本仓注册表载进来"。
+   */
+  const args = [CENSUS_SCRIPT, '--registry', registryRoot, ...(root === undefined ? [] : ['--root', root]), ...extraArgs]
+  const baseEnv = { ...process.env }
+  delete baseEnv.GATE_WIRING_CENSUS_ROOT
+  delete baseEnv.GATE_WIRING_CENSUS_REGISTRY
+  const result = spawnSync(process.execPath, args, {
+    cwd: CENSUS_ROOT,
+    encoding: 'utf8',
+    env: { ...baseEnv, ...env },
+  })
+  return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', code: result.status }
+}
+
+/** 跑 `--json` 并解析；没跑成时直接失败（那是夹具自己的错误，不是被测结论）。 */
+function runCensusJson(options) {
+  const run = runCensus({ ...options, extraArgs: ['--json', ...(options?.extraArgs ?? [])] })
+  assert.equal(run.code, 0, `★ 夹具树应当跑成。退码=${run.code} stdout=${run.stdout} stderr=${run.stderr}`)
+  return JSON.parse(run.stdout)
+}
+
+/** 建一棵临时源码树；`files` 是 `相对路径 -> 内容`。返回清理函数与根目录。 */
+function makeTree(files) {
+  const root = mkdtempSync(join(tmpdir(), 'gate-wiring-census-'))
+  for (const [relativePath, content] of Object.entries(files)) {
+    const absolute = join(root, relativePath)
+    mkdirSync(dirname(absolute), { recursive: true })
+    writeFileSync(absolute, content)
+  }
+  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+/**
+ * 合成的 `src/tools/status.ts`：状态视图的四格各一个位置。
+ *
+ *   `delivery`  ← 直接 `.evaluate('delivery', …)`                    ⇒ shown
+ *   `runtime`   ← 只经由 `evaluateHelperGates`（import 自本仓另一个文件）⇒ shown
+ *   `contract`  ← 不求值，且**声明**在 `NOT_EVALUATED_IN_STATUS`      ⇒ not-shown (declared)
+ *   `dispatch`  ← 不求值，且**没有**声明                              ⇒ not-shown (undeclared)
+ *
+ * ★ 用**真实注册表里的位置名**是刻意的：夹具树只替换源码面（`src/`），
+ *   注册表仍是本仓那一份。若用 `wired-a` 这类合成名字，读数只会全落进
+ *   `unknownPointCalls`，于是本文件就测不到任何真实形状。
+ */
+const STATUS_FIXTURE = `import { evaluateHelperGates } from './shared/entities.ts'
+
+const NOT_EVALUATED_IN_STATUS = ['contract'] as const
+
+export async function buildStatus(registry: any) {
+  const recorded = await registry.evaluate('delivery', {})
+  const viaHelper = await evaluateHelperGates(registry, ctx => ctx)
+  return { recorded, viaHelper, notEvaluated: NOT_EVALUATED_IN_STATUS }
+}
+`
+
+const ENTITIES_FIXTURE = `/**
+ * ★ 注释里也有一个 .evaluate('runtime', …) —— 但那一次是被人写在文档里的
+ *   示例，不是调用点（臂 3 用同一形状钉住"注释不算接线"）。
+ */
+export const NOTE = 'evaluate'
+
+export async function evaluateHelperGates(registry: any, contextOf: (input: any) => any) {
+  return registry.evaluate('runtime', contextOf({}))
+}
+`
+
+/**
+ * 合成的 `src/index.ts`：真调用点 + 三种**假调用点**（各一）。
+ *
+ *   真：`contract`、`dispatch`、`delivery`（后者在 status.ts 也有一个）
+ *   注释里：`admission`            ⇒ 仍须落在 zero
+ *   字符串里：`collection`          ⇒ 仍须落在 zero
+ *   动态位置名：`completion`        ⇒ 仍须落在 zero，且进 `dynamicCalls`
+ */
+const SRC_FIXTURE = `import { buildStatus } from './tools/status.ts'
+
+export async function boot(registry: any) {
+  await registry.evaluate('contract', {})
+  await registry.evaluate('dispatch', {})
+  // registry.evaluate('admission', {})
+  const label = "registry.evaluate('collection', {})"
+  const point = 'completion'
+  await registry.evaluate(point, {})
+  return { label, status: await buildStatus(registry) }
+}
+`
+
+/**
+ * 合成树的标准内容。三态与四格的分配（位置名全部取自**真实注册表**）：
+ *
+ *   wired  (4)  contract  dispatch  delivery  runtime
+ *   zero   (3)  admission（零调用点）· collection（只在字符串里）· completion（只有动态调用）
+ *   vacant (0)  真实注册表里每个位置都至少有一条判据 ⇒ 合成树里造不出 vacant
+ *
+ * ★ `vacant` 在这一臂里**读数为 0 本身是要被断言的**：它证明"空位置"这一格
+ *   不是靠"没有位置"来凑数的（若扫描器把 vacant 并进 zero，zero 会变成 4）。
+ */
+function standardTree(extraFiles = {}) {
+  return makeTree({
+    'src/index.ts': SRC_FIXTURE,
+    'src/tools/status.ts': STATUS_FIXTURE,
+    'src/tools/shared/entities.ts': ENTITIES_FIXTURE,
+    ...extraFiles,
+  })
+}
+
+/** 合成树里每个位置应当落到哪一格 —— 臂 1/2/3 共用的唯一真值。 */
+const EXPECTED = Object.freeze({
+  wired: ['contract', 'dispatch', 'delivery', 'runtime'],
+  zero: ['admission', 'collection', 'completion'],
+  vacant: [],
+  shown: ['delivery', 'runtime'],
+  declared: ['contract'],
+  undeclared: ['dispatch'],
+})
+
+/** 每个臂共用的一行"这个位置在哪"—— 读数里要指名文件与行号。 */
+function siteLabels(entry) {
+  return entry.sites.map((site) => `${site.file}:${site.line}`)
+}
+
+// ── 臂 1 ──────────────────────────────────────────────────────────────────────
+
+test('臂 4 ★ 三态互斥：wired / zero / vacant 各归其位，三桶两两不相交、并集是全集', () => {
+  const tree = standardTree()
+  try {
+    const census = runCensusJson({ root: tree.root })
+    assert.equal(census.status, 'ran')
+    assert.equal(census.exitCode, 0)
+
+    /** ★ 注册表里的**每个**位置都必须落进且只落进一格。 */
+    const buckets = {
+      wired: census.states.wired.points,
+      zero: census.states.zero.points,
+      vacant: census.states.vacant.points,
+    }
+    const all = [...buckets.wired, ...buckets.zero, ...buckets.vacant]
+    assert.equal(new Set(all).size, all.length, `★ 有位置同时落进两格：${all.join(', ')}`)
+    assert.deepEqual(
+      [...all].sort(), [...census.registry.insertionPoints].sort(),
+      '★ 三桶的并集必须是注册表的全集 —— 漏掉一格就等于那个位置不可见',
+    )
+
+    assert.deepEqual([...buckets.wired].sort(), [...EXPECTED.wired].sort(), `实测：${JSON.stringify(buckets.wired)}`)
+    assert.deepEqual([...buckets.zero].sort(), [...EXPECTED.zero].sort(), `实测：${JSON.stringify(buckets.zero)}`)
+    assert.deepEqual(buckets.vacant, EXPECTED.vacant, `实测：${JSON.stringify(buckets.vacant)}`)
+
+    /**
+     * ★★ 这一臂的**核心**：`已接线` 的读数不能是"位置总数"的别名。
+     *   把所有位置都算成已接线，是这类普查最经典的自欺（它**永远绿**）。
+     */
+    assert.notEqual(
+      census.states.wired.count, census.registry.points,
+      '★ 「已接线」不许等于「位置总数」—— 那会让普查永远报平安',
+    )
+
+    /**
+     * ★ 零求值那一格必须带上"被空转的判据条数"，否则读表的人只看见
+     *   3 个位置名，看不见那背后有几条判据在空转。
+     */
+    const zeroGates = census.gates.filter((gate) => gate.state === 'zero')
+    assert.equal(census.states.zero.gates, zeroGates.length)
+    assert.ok(census.states.zero.gates > 0, '★ 零求值的位置上必须真的有判据 —— 否则它该落进 vacant')
+
+    /**
+     * ★ 反向半边：**每条**判据都必须挂在自己位置上（`zero` 位置上的判据
+     *   不许因为是"全局第一个"就被算到别的桶里）。
+     */
+    for (const gate of zeroGates) {
+      assert.ok(EXPECTED.zero.includes(gate.point), `实测：${JSON.stringify(gate)}`)
+    }
+  } finally {
+    tree.cleanup()
+  }
+})
+
+// ── 臂 2 ──────────────────────────────────────────────────────────────────────
+
+test('臂 5 ★ 状态视图子读数：直接 / helper / 声明过 / 没声明 —— 四格各一，不互相粘连', () => {
+  const tree = standardTree()
+  try {
+    const census = runCensusJson({ root: tree.root })
+    assert.equal(census.statusView.available, true)
+
+    const viewOf = (point) => census.points.find((entry) => entry.point === point)?.statusView
+
+    assert.equal(viewOf('delivery'), 'shown', '★ 直接调用的位置必须算"显示"')
+    /**
+     * ★★ 这一格是本臂最贵的：`runtime` 在合成 `status.ts` 里**一个字都没有**，
+     *   它只经过 `evaluateHelperGates`。若解析只做一层 grep，它会被读成
+     *   `not-shown` —— 而那会把一个真的会开火的判据记成"控制台看不见"。
+     */
+    assert.equal(
+      viewOf('runtime'), 'shown',
+      `★ 经 helper 求值的位置也必须算"显示"。实测：${JSON.stringify(census.statusView.viaHelpers)}`,
+    )
+    assert.deepEqual(census.statusView.viaHelpers.map((helper) => helper.binding), ['evaluateHelperGates'])
+
+    assert.equal(
+      viewOf('contract'), 'not-shown (declared)',
+      '★ 状态视图不求值、但自己声明过不懂这个位置 ⇒ declared',
+    )
+    assert.equal(
+      viewOf('dispatch'), 'not-shown (undeclared)',
+      '★ 没声明也求值不到 ⇒ undeclared（这一格是**独立的读数缺口**，不许并进 declared）',
+    )
+
+    /**
+     * ★ 声明面必须被**逐字**读出来：`contract` 在清单里、`dispatch` 不在。
+     *   若把整份 `NOT_EVALUATED_IN_STATUS` 读成"所有不求值的位置都已声明"，
+     *   `dispatch` 那一点读数缺口就会被静默销账。
+     */
+    assert.deepEqual(census.statusView.declaredNotEvaluated, ['contract'])
+
+    /** ★ 两个子读数之和 = 已接线总数；而 `已接线` 本身**不等于** `已接线且显示`。 */
+    const { wiredShown, wiredNotShown, wired } = census.states
+    assert.equal(wiredShown.count + wiredNotShown.count, wired.count, '★ 子读数必须刚好分完已接线这一格')
+    assert.deepEqual([...wiredShown.points].sort(), [...EXPECTED.shown].sort(), `实测：${JSON.stringify(wiredShown)}`)
+    assert.deepEqual(
+      [...wiredNotShown.points].sort(), [...EXPECTED.declared, ...EXPECTED.undeclared].sort(),
+      `实测：${JSON.stringify(wiredNotShown)}`,
+    )
+    assert.notEqual(wiredShown.count, wired.count, '★ 「显示」不许等于「已接线」')
+
+    /**
+     * ★ 而状态视图这一格**只对已接线位置有意义**：零求值 / 空位置一律 `null`，
+     *   不许被读成 `not-shown`（那是把一个"没人调用"的位置说成"状态视图不显示它"）。
+     */
+    for (const entry of census.points) {
+      if (entry.state === 'wired') continue
+      assert.equal(entry.statusView, null, `★ 非已接线位置不许带状态视图读数。实测：${JSON.stringify(entry)}`)
+    }
+  } finally {
+    tree.cleanup()
+  }
+})
+
+// ── 臂 3 ──────────────────────────────────────────────────────────────────────
+
+test('臂 6 ★ 注释 / 字符串 / 动态位置名都不算接线 —— 只有代码里的字面量调用点算', () => {
+  const tree = standardTree()
+  try {
+    const census = runCensusJson({ root: tree.root })
+    const wired = census.states.wired.points
+
+    /**
+     * ★★ 这三条是本文件存在的理由。本仓注释里到处是
+     *   `registry.evaluate('admission', …)`；一个 grep 口径的扫描器会把
+     *   "零求值"读成"已接线"，而那是一条**永远绿**的读数。
+     *
+     *   夹具树把它们三个**都**摆在 `src/index.ts` 里，而 `admission` 在真实
+     *   注册表里确有判据 ⇒ 一旦扫描器吃下注释里的那行，`admission` 就会从
+     *   `zero` 跳进 `wired`，下面臂 1 的 `EXPECTED.zero` 也会一起变红。
+     */
+    assert.ok(!wired.includes('admission'), `★ 注释里的调用点不算接线。实测 wired=${JSON.stringify(wired)}`)
+    assert.ok(!wired.includes('collection'), `★ 字符串字面量里的那一段文字不算接线。实测 wired=${JSON.stringify(wired)}`)
+    assert.ok(!wired.includes('completion'), `★ 动态位置名不算接线。实测 wired=${JSON.stringify(wired)}`)
+
+    /**
+     * ★ 认不出 ≠ 接了线：`.evaluate(point, …)` 无法被证明接到哪个位置，
+     *   于是它进 `dynamicCalls` 而不是 `wired` —— 而且**要能被指名**，
+     *   否则读日志的人不知道是哪一行没认出来。
+     */
+    assert.equal(census.dynamicCalls.length, 1, `实测：${JSON.stringify(census.dynamicCalls)}`)
+    assert.equal(census.dynamicCalls[0].file, 'src/index.ts')
+    assert.ok(
+      census.dynamicCalls[0].text.includes('.evaluate(point'),
+      `★ 动态调用点要能在读数里被指名。实测：${census.dynamicCalls[0].text}`,
+    )
+
+    /** ★ 三条假调用点不许在读数里留下别的痕迹（它们本来就不是调用点）。 */
+    assert.deepEqual(
+      census.unknownPointCalls, [],
+      `★ 假调用点不许被读成"指向未注册位置的调用"。实测：${JSON.stringify(census.unknownPointCalls)}`,
+    )
+
+    /**
+     * ★ 真调用点仍然要指名**文件与行号**：`contract` 在 `src/index.ts` 第 4 行
+     *   （`SRC_FIXTURE` 里第 1 行是 import，第 3 行是函数头）。行号错了，
+     *   下一个人按读数去改代码会改到别处。
+     */
+    const contract = census.points.find((entry) => entry.point === 'contract')
+    assert.deepEqual(siteLabels(contract), ['src/index.ts:4'], `实测：${JSON.stringify(contract.sites)}`)
+
+    /**
+     * ★ 反向半边：`entities.ts` 的注释里也写着 `evaluate('runtime', …)`，
+     *   而那个位置**真的**也有调用点 ⇒ 它必须仍在 wired 里。
+     *   注释既不加分（臂 3 上半）也不减分（这一条）。
+     */
+    assert.ok(wired.includes('runtime'))
+  } finally {
+    tree.cleanup()
+  }
+})
+
+// ── 臂 7 ──────────────────────────────────────────────────────────────────────
+
+test('臂 7 ★ 没跑成 ≠ 零求值：源树认不出时退码 2、说明原因，且一个接线读数都不输出', () => {
+  /**
+   * ★★ 本臂钉住的是**缺席**的形状。三条"没跑成"各一例：
+   *   ① 根目录根本不存在；② 有 `src/` 但里面没有源码；③ 没有 `src/`。
+   */
+  const missingRoot = join(tmpdir(), `gate-wiring-census-does-not-exist-${process.pid}-${Date.now()}`)
+  const emptyTree = makeTree({ 'src/.keep': '' })
+  const noSrcTree = makeTree({ 'lib/index.js': 'export const x = 1\n' })
+  try {
+    for (const [label, root] of [
+      ['根目录不存在', missingRoot],
+      ['src 里没有源码', emptyTree.root],
+      ['没有 src', noSrcTree.root],
+    ]) {
+      const run = runCensus({ root, extraArgs: ['--json'] })
+      assert.equal(run.code, 2, `★ ${label} 必须报「没跑成」而不是跑出一张空表。stdout=${run.stdout}`)
+      const payload = JSON.parse(run.stdout)
+      assert.equal(payload.status, 'not-run', `★ ${label} 的 status 必须是 not-run`)
+      assert.equal(payload.exitCode, 2)
+      assert.equal(typeof payload.reason, 'string')
+      assert.ok(payload.reason.length > 0, `★ ${label} 的「没跑成」必须说明原因（空原因＝下一个人只能猜）`)
+      /**
+       * ★★ 最关键的半边：没跑成时**不许**带 `states` —— 一张全是 0 的两态表
+       *   会被读成"普查跑了、全都没接线"，或者更糟："全都没事"。
+       */
+      assert.equal(payload.states, undefined, `★ ${label} 的输出不许带 states（缺席不是 0）。实测：${JSON.stringify(Object.keys(payload))}`)
+      assert.equal(payload.points, undefined, `★ ${label} 的输出不许带 points`)
+
+      /** ★ 人读的输出也必须把"没跑成"写在脸上，而不是打一张空表。 */
+      const human = runCensus({ root })
+      assert.equal(human.code, 2)
+      assert.match(human.stdout, /没跑成/, `★ 人读口径也要报「没跑成」。实测：${human.stdout}`)
+      assert.match(human.stdout, /reason:/, '★ 而且要给出原因')
+      assert.doesNotMatch(human.stdout, /已接线 \(wired\):\s+\d+ point/, '★ 人读口径不许顺带打出两态表')
+    }
+
+    /**
+     * ★ 参数错误也是"没跑成"（不是"跑出来全员已接线"）。而 `--json` 在这里
+     *   也要给出机器可读的形状，否则调用方只能靠 stderr 判错。
+     */
+    const badArg = runCensus({ extraArgs: ['--nonsense'] })
+    assert.equal(badArg.code, 2)
+    assert.match(badArg.stdout, /没跑成/)
+    assert.match(badArg.stdout, /unknown argument: --nonsense/)
+  } finally {
+    emptyTree.cleanup()
+    noSrcTree.cleanup()
+  }
+})
+
+// ── 臂 5 ──────────────────────────────────────────────────────────────────────
+
+test('臂 8 ★ 真实仓库对照臂：三条读数自洽，且「已接线」不是「位置总数」的别名', () => {
+  const census = runCensusJson({})
+  assert.equal(census.status, 'ran')
+  assert.equal(census.exitCode, 0)
+  assert.ok(census.src.sourceFiles > 0, '★ 真实 src/ 必须扫到源码')
+
+  const { wired, zero, vacant, wiredShown, wiredNotShown } = census.states
+  assert.equal(
+    wired.count + zero.count + vacant.count, census.registry.points,
+    '★ 三态之和必须等于注册表位置数（否则有位置凭空消失）',
+  )
+  assert.equal(wiredShown.count + wiredNotShown.count, wired.count)
+  assert.ok(wired.count > 0, '★ 真实仓库里必须**至少有一个**已接线位置 —— 否则读数表本身没在测东西')
+  assert.ok(wired.count < census.registry.points, '★ 也不许把全部位置都读成已接线')
+  /**
+   * ★ 真实仓库的**当前**读数（本任务只出读数，不接线）：`admission` 零求值。
+   *   写死它是刻意的 —— 它不是不变量，而是「这条读数确实测到了东西」的对照；
+   *   谁把它接上线，这条就会变红**并且应当变红**（那时请把这一格改成新的实况）。
+   */
+  assert.ok(zero.points.includes('admission'), `实测 zero=${JSON.stringify(zero.points)}`)
+  assert.ok(zero.gates > 0, '★ 零求值那一格必须带上被空转的判据条数（0 条就没东西可空转了）')
+})
+
+// ── 臂 6 ──────────────────────────────────────────────────────────────────────
+
+test('臂 9 ★ --root 覆盖 GATE_WIRING_CENSUS_ROOT，且 --json 是机器可读的', () => {
+  const first = standardTree()
+  const second = standardTree({ 'src/extra.ts': "export const onlyHere = 1\n" })
+  try {
+    /**
+     * ★ 两棵树都能跑成 —— 先用读数证明"两棵树**确实不同**"，
+     *   否则下面的"命令行优先"可能只是两次都读了同一个默认地点。
+     */
+    const viaFirst = runCensusJson({ root: first.root })
+    const viaSecond = runCensusJson({ root: second.root })
+    assert.equal(viaFirst.src.sourceFiles + 1, viaSecond.src.sourceFiles, '★ 第二棵树必须多一个源文件')
+
+    /** ★ 环境变量指向第一棵、命令行指向第二棵 ⇒ 必须读第二棵（命令行优先）。 */
+    const precedence = runCensus({ root: second.root, extraArgs: ['--json'], env: { GATE_WIRING_CENSUS_ROOT: first.root } })
+    assert.equal(precedence.code, 0)
+    assert.equal(
+      JSON.parse(precedence.stdout).src.sourceFiles, viaSecond.src.sourceFiles,
+      '★ --root 必须压过环境变量（否则夹具会被宿主环境影响而随机变红）',
+    )
+
+    /** ★ 只用环境变量也能跑（没有 --root 时的另一条入口）。 */
+    const envOnly = runCensus({ extraArgs: ['--json'], env: { GATE_WIRING_CENSUS_ROOT: first.root } })
+    assert.equal(envOnly.code, 0)
+    assert.equal(JSON.parse(envOnly.stdout).src.sourceFiles, viaFirst.src.sourceFiles)
+
+    /**
+     * ★ `--json` 的输出必须是**能被机器读完的**：一次 `JSON.parse` 就要成，
+     *   而且关键读数都在（不是把给人看的表塞进 JSON 字符串里）。
+     */
+    for (const key of ['status', 'exitCode', 'registry', 'states', 'points', 'gates']) {
+      assert.ok(Object.hasOwn(viaFirst, key), `★ JSON 里缺 ${key}`)
+    }
+    assert.equal(typeof viaFirst.states.zero.count, 'number')
+  } finally {
+    first.cleanup()
+    second.cleanup()
+  }
+})
+
+// ── 臂 10 ─────────────────────────────────────────────────────────────────────
+
+test('臂 10 ★ 空位置（vacant）不许并进零求值 —— 用一份合成注册表把这一格真的造出来', () => {
+  /**
+   * ── ★★ 这一臂为什么必须存在（它是被一次**变异存活**逼出来的）────────────────────
+   *
+   * 真实注册表里**每个**插入点都至少挂着一条判据 ⇒ 合成源码树上 `vacant` 恒为 0，
+   * 于是"扫描器把空位置并进零求值"这样一个改动，在上面所有臂下**全绿通过**。
+   * 那正是本队记账的形态：**一格读数因为造不出来，就等于没人守**。
+   *
+   * ⇒ 这一臂用 `--registry` 把注册表本身也换成合成的一份：位置 `vacant-point`
+   *   上一条判据都没有，位置 `zero-point` 上有一条、而 `src/` 里没有调用点。
+   *   两格读出来必须**不同** —— 否则"这里本来就没判据"会污染缺陷读数。
+   */
+  const registryTree = makeTree({
+    'lib/gates/registry.js': [
+      "export const INSERTION_POINTS = ['zero-point', 'vacant-point']",
+      '',
+      'export function createGateRegistry() {',
+      '  const points = new Map(INSERTION_POINTS.map((point) => [point, []]))',
+      '  return {',
+      '    register(entry) { points.get(entry.point).push(entry) },',
+      '  }',
+      '}',
+      '',
+    ].join('\n'),
+    'lib/gates/index.js': [
+      "import { INSERTION_POINTS } from './registry.js'",
+      '',
+      'export function buildRegistry() {',
+      '  const list = Object.fromEntries(INSERTION_POINTS.map((point) => [point, []]))',
+      "  list['zero-point'].push({ id: 'zero-point.only', point: 'zero-point', description: 'never evaluated' })",
+      '  return { list: () => list }',
+      '}',
+      '',
+    ].join('\n'),
+  })
+  const sourceTree = makeTree({
+    'src/index.ts': 'export const nothing = 1\n',
+  })
+  try {
+    const run = runCensus({ root: sourceTree.root, extraArgs: ['--json'], registryRoot: registryTree.root })
+    assert.equal(run.code, 0, `★ 合成注册表也必须跑成。退码=${run.code} ${run.stdout}`)
+    const census = JSON.parse(run.stdout)
+    assert.deepEqual([...census.states.zero.points], ['zero-point'], `实测：${JSON.stringify(census.states.zero)}`)
+    assert.deepEqual(
+      [...census.states.vacant.points], ['vacant-point'],
+      '★ 一条判据都没有的位置必须落进 vacant；把它并进 zero 会让缺陷读数被"这里本来就没判据"污染',
+    )
+    assert.equal(census.states.zero.count, 1)
+    assert.equal(census.states.vacant.count, 1)
+    assert.equal(census.states.vacant.gates, 0, '★ 空位置上"被空转的判据条数"必须是 0')
+  } finally {
+    registryTree.cleanup()
+    sourceTree.cleanup()
+  }
 })
