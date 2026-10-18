@@ -22,7 +22,7 @@ import { join } from 'node:path'
 import { guardSubagentCreation, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMember, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents, usesManagedActivations, type MemberStartSpec, type MemberToolFilter } from './harness-compat.ts'
 import { markMailboxDelivered, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from './state.ts'
 import { mailboxPrompt } from './mailbox.ts'
-import { appendTeamEvent, captainSessionOf } from './events.ts'
+import { appendTeamEvent, captainSessionOf, liveAgentOf } from './events.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
 /**
  * ── ★★★ #176（乙）：lead 身份收口（t98）───────────────────────────────────────────
@@ -198,7 +198,7 @@ export async function failMemberOpenAttempt(
       task.output = summary
       task.updatedAt = Date.now()
     }
-    if (ctx.agents.get(brandedSessionId(member.id))?.status !== 'running') member.status = 'idle'
+    if (liveAgentOf(ctx, member.id)?.status !== 'running') member.status = 'idle'
     const message = {
       ...createMessage(memberName, CAPTAIN_KEY, task === undefined
         ? `Member "${memberName}" hit an unrecoverable turn failure: ${summary}. No open attempt was owned.`
@@ -225,7 +225,7 @@ export async function failMemberOpenAttempt(
   if (prepared === undefined) return false
   // Use the same lease/acknowledgment contract as send_message, outside the
   // team lock: steering can synchronously start another agent turn.
-  const captain = ctx.agents.get(brandedSessionId(prepared.captainSessionId))
+  const captain = liveAgentOf(ctx, prepared.captainSessionId)
   const delivered = captain !== undefined && steerCaptainReport(captain, memberName, prepared.message.content, mailboxPrompt(teamId, CAPTAIN_KEY, [prepared.message]))
   await withTeamLock(lockKey, () => delivered
     ? markMailboxDelivered(stateRoot, teamId, CAPTAIN_KEY, [prepared.message.id])
@@ -805,7 +805,7 @@ export async function deliverToMemberDetailed(
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
     const content = [{ type: 'text' as const, text }]
-    if (mode === 'steer') await steerMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), content, signal, ctx.agents.get(brandedSessionId(childId)))
+    if (mode === 'steer') await steerMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), content, signal, liveAgentOf(ctx, childId))
     else await queueMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), content, signal)
     return { ok: true }
   } catch (error: unknown) {
@@ -876,7 +876,7 @@ export function installMemberDelegationGuard(ctx: Context, stateDir: string, max
         return
       }
       const parentId: SessionId | undefined = ancestor.session.header.parentSession
-      ancestor = parentId === undefined ? undefined : ctx.agents.get(parentId)
+      ancestor = parentId === undefined ? undefined : liveAgentOf(ctx, parentId)
       depth++
     }
   }
@@ -905,7 +905,7 @@ export function memberActivity(
   const activity = new Map<string, 'running' | 'idle' | 'ready'>()
   for (const id of memberIds) {
     if (id === '') continue
-    const live = ctx.agents.get(brandedSessionId(id))
+    const live = liveAgentOf(ctx, id)
     activity.set(id, live === undefined ? 'ready' : live.status)
   }
   return activity
@@ -1035,7 +1035,7 @@ export function memberLiveness(
   if (member.id === '') {
     return { state: 'never-spawned', readout: 'never-spawned', rejects: false }
   }
-  const live = ctx.agents.get(brandedSessionId(member.id))
+  const live = liveAgentOf(ctx, member.id)
   /**
    * ★★ 这一支就是 §39 要抓的那一格：驱动不在场。
    *   `ctx.agents.get(id) === undefined` 正是 `deliverToMemberDetailed` 投递失败时

@@ -57,7 +57,7 @@ function describeFailure(value) {
  *   { state: 'not-run', error }     预检没能跑成（必须当「未测到」）
  */
 export function preflight(contract, deps) {
-  const { validateCreateTask, checkTaskPremises } = deps
+  const { validateCreateTask, checkTaskPremises, scopeViolations } = deps
   const reasons = []
 
   let validated
@@ -67,6 +67,37 @@ export function preflight(contract, deps) {
     return { state: 'not-run', error: describeFailure(error) }
   }
   if (validated.ok === false) reasons.push({ tier: 'validate', detail: validated.error })
+
+  /**
+   * ── 文件清单的内部一致性（三条：contradiction / emit / touch）────────────────
+   *
+   * ★ 生产调用点**不按 kind 分支** —— `create-task.ts:646` 那段注释逐字写着
+   *   「`contradiction` 与 `emit` 对任何 kind 都成立（一个 `work` 任务同样可以自相矛盾、
+   *   同样可以漏声明产物）⇒ 三条都对**所有**任务跑 —— 它们是**文件清单的性质**，与 kind 无关」。
+   * ⇒ 这里也必须对所有 kind 跑，否则一个 `work` 任务会预检 clean 而在生产被拒。
+   *
+   * ★ 第一版漏了这一整道检查：R2R3R4 预检报 clean，`create_task` 却因「`src/tools/update-task.ts`
+   *   在写域里，所以构建会产出 `lib/tools/update-task.js`... 而该产物未声明」被拒四条。
+   *   ⇒ 预检的价值**全在**它与生产"读同一份判据"；少复现一道，它就只是一份安慰剂。
+   */
+  if (typeof scopeViolations === 'function') {
+    try {
+      const problems = scopeViolations({
+        inScope: contract.inScope,
+        outOfScope: contract.outOfScope,
+        acceptance: contract.acceptance,
+      })
+      for (const problem of problems) reasons.push({ tier: problem.check, detail: problem.detail })
+    } catch (error) {
+      return { state: 'not-run', error: describeFailure(error) }
+    }
+  } else {
+    /**
+     * ★ 读不到就报 not-run，不许静默跳过 —— 静默跳过会让"没检查"读成"检查通过"，
+     *   而那正是本仓库记录最多的那类错。
+     */
+    return { state: 'not-run', error: 'scopeViolations is not exported by lib/tools/shared/entities.js' }
+  }
 
   /**
    * ★ `checkTaskPremises` 只在**质量类**才有意义（与生产调用点逐字同形）：
@@ -142,8 +173,27 @@ async function main() {
     )
     process.exit(2)
   }
+  /**
+   * ★ `scopeViolations` 与那两个判官**不在同一个模块**里：
+   *   它在 `lib/tools/shared/entities.js`（生产调用点 `create-task.ts:646` 也从那里取）。
+   *   ⇒ 两个模块各 import 一次；任一读不到就退出码 2（「没跑成」），不降级。
+   */
+  try {
+    const entities = await import('../lib/tools/shared/entities.js')
+    deps = { ...deps, scopeViolations: entities.scopeViolations }
+  } catch (error) {
+    process.stderr.write(
+      `preflight: could not load lib/tools/shared/entities.js — ${describeFailure(error)}\n`
+      + '★ 先跑 `pnpm build`；这一条是「预检没跑成」，不是「契约干净」。\n',
+    )
+    process.exit(2)
+  }
   if (typeof deps.validateCreateTask !== 'function' || typeof deps.checkTaskPremises !== 'function') {
     process.stderr.write('preflight: lib/quality-gates.js does not export the two judges; refusing to guess\n')
+    process.exit(2)
+  }
+  if (typeof deps.scopeViolations !== 'function') {
+    process.stderr.write('preflight: lib/tools/shared/entities.js does not export scopeViolations; refusing to guess\n')
     process.exit(2)
   }
 

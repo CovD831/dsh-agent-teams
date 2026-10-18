@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
+import { liveAgentOf } from './events.ts'
 import { deliverToMember, deliverToMemberDetailed } from './members.ts'
 import { sessionLeadsTeam } from './lineage.ts'
 import { identityOfTeam, liveRefsOf } from './members.ts'
@@ -500,11 +501,11 @@ function teamLockKey(stateRoot: string, teamId: string): string {
 
 function liveCaptain(ctx: Context, captainSessionId: string, supplied?: Agent): Agent | undefined {
   if (supplied !== undefined && supplied.id === captainSessionId) return supplied
-  return ctx.agents.get(captainSessionId as SessionId)
+  return liveAgentOf(ctx, captainSessionId)
 }
 
 function liveMember(ctx: Context, member: TeamMember): Agent | undefined {
-  return ctx.agents.get(member.id as SessionId)
+  return liveAgentOf(ctx, member.id)
 }
 
 function isMemberAvailable(ctx: Context, member: TeamMember): boolean {

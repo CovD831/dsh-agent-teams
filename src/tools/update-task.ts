@@ -4,7 +4,7 @@
 // ★ 工具体本身一个字符都没改；变的只是"这些东西从哪来"。
 // ★ 本文件不 import src/tools.ts（会成环）。
 
-import { appendTeamEvent, captainSessionOf } from '../events.ts'
+import { appendTeamEvent, captainSessionOf, liveAgentOf } from '../events.ts'
 
 /**
  * ── ★★★ kind 需求表的**同步**读取（t54）─────────────────────────────────────────
@@ -178,20 +178,12 @@ import { pathToFileURL } from 'node:url'
  */
 function readCaptainSession(ctx: Context, sessionId: string | undefined): Parameters<typeof steerCaptainReport>[0] | undefined {
   if (sessionId === undefined || sessionId === '') return undefined
-  try {
-    const agents = (ctx as unknown as { agents?: { get?: (id: SessionId) => Parameters<typeof steerCaptainReport>[0] | undefined } }).agents
-    return agents?.get?.(sessionId as SessionId)
-  }
-  catch (error) {
-    const message = String((error as { message?: unknown })?.message ?? error)
-    /**
-     * ★ 只吞**这一种**：服务读不到。其余异常照旧往上抛 —— 一个 `catch` 若把
-     *   "读不到队长会话"与"投递逻辑自己坏了"读成同一件事，就是把这一格修成
-     *   一个更宽的盲区。
-     */
-    if (!message.includes('inactive context')) throw error
-    return undefined
-  }
+  /**
+   * ★ 这一层原先在这里有一份**本地**实现（只为了这个文件的一处调用）。
+   *   现统一到 `liveAgentOf`：同一格在本仓出现过三份，而三份各自的宽严不同 ——
+   *   那比一份都没有更坏，因为读起来像已经处理过了。
+   */
+  return liveAgentOf(ctx, sessionId)
 }
 /**
  * ★★ 本文件**不再** import `rmSync`（defect 1 的修法）：

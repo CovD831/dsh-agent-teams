@@ -54,6 +54,7 @@ import { identityOfTeam } from '../../members.ts'
 import type { AcceptanceResult, ReviewFinding, ReviewedStamp, TaskKind } from '../../types.ts'
 import { inScopeOverlap, isQualityKind, planQualityFollowUp, sanitizeReviewAcceptance, sanitizeReviewObjective, WRITE_KINDS } from '../../quality-gates.ts'
 import { auditRequires } from '../../gates/requires.ts'
+import { liveAgentOf } from '../../events.ts'
 import { TERMINAL_TASK_STATUSES } from '../../types.ts'
 /**
  * ★ t20：真值从 `types.ts` 取 —— 与 `scheduler.ts` **同一份**。
@@ -2631,7 +2632,7 @@ export function observeMemberActivity(ctx: Context, memberId: string, attemptId:
   if (attemptId === undefined || memberId === '') return false
   const record = waitRecords.get(attemptId)
   if (record === undefined) return false
-  const live = ctx.agents.get(memberId as SessionId)
+  const live = liveAgentOf(ctx, memberId)
   if (live === undefined) return false
   const key = sessionOutputKey(live.session)
   if (key === undefined) return false
@@ -5361,7 +5362,7 @@ export function observeMemberConvergence(
       })
       continue
     }
-    const live = ctx.agents.get(member.id as SessionId)
+    const live = liveAgentOf(ctx, member.id)
     /**
      * ── ★★ 驱动不在场：不再把整份观察面扔掉（t46）──────────────────────────────
      *

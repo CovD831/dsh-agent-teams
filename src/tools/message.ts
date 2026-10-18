@@ -4,7 +4,7 @@
 // ★ 工具体本身一个字符都没改；变的只是"这些东西从哪来"。
 // ★ 本文件不 import src/tools.ts（会成环）。
 
-import { appendTeamEvent, captainSessionOf } from '../events.ts'
+import { appendTeamEvent, captainSessionOf, liveAgentOf } from '../events.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { memberOpenTask, requireCaptain, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, stateRootOf, teamLockKey, workspaceOf } from './shared/entities.ts'
@@ -107,7 +107,17 @@ export function register(ctx: Context, dispatchMember: any, config: ToolsConfig)
         if (prepared.kind === 'duplicate') return { message_id: prepared.message.id, from: prepared.from, to: prepared.message.to, delivered: 'duplicate' }
         // Resolve the exact live captain only after releasing the state lock.
         // The plugin mailbox is already durable if live delivery cannot proceed.
-        const captain = ctx.agents.get(prepared.fresh.captainSessionId as SessionId)
+        /**
+         * ★★★ 这次读**必须**是尽力而为的（见 `liveAgentOf` 的长注释）。
+         *
+         * 成员汇报队长的**唯一**出口就是这里。一旦它抛
+         * `cannot get required service "agents" in inactive context`，整个
+         * `send_message` 调用失败 —— 而消息**已经 appendMailbox 落盘了**。
+         * ⇒ 「没做」与「做了但回执丢了」在调用方读来同形，成员只能重试，
+         *   重试又成功又失败。这一格在本仓记账十几次，修在 update-task 与
+         *   events 各一次，这里是第三处。
+         */
+        const captain = liveAgentOf(ctx, prepared.fresh.captainSessionId)
         if (prepared.kind === 'captain') {
           let delivered: 'live' | 'mailbox' = 'mailbox'
           if (captain !== undefined && prepared.identity.kind === 'member') {
