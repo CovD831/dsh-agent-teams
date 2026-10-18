@@ -38,6 +38,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { gate, appliesTo, id, point, REVIEW_QUESTION_IDS, PLAN_REVIEWED_GATE_ONLINE_AT } from '../lib/gates/dispatch/plan-reviewed.js'
+import { description } from '../lib/gates/dispatch/plan-reviewed.js'
+import { createGateRegistry, blocked } from '../lib/gates/registry.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => readFileSync(join(ROOT, relative), 'utf8')
@@ -622,3 +624,249 @@ test('★★★ 臂 14：形状坏 + 一年前的戳 ⇒ 仍然是 `unmeasured`�
   assert.equal(repaired.blockedKind, 'reviewed-stamp-impossible', '★★ 两个结论各归各的：记录坏了 ⇒ unmeasured；记录读得出而时间不可能 ⇒ blocked')
 })
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 15–19：★★★ 越界的戳（F1）—— 不可渲染 ≠ 一条裁决
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ── 本节治的是什么（MEASURED 2026-10-19，本任务复现的读数）──────────────────────
+//
+//   守卫当时只挡非有限数（`!Number.isFinite`）。而 `|at| > 8.64e15` 的戳
+//   **是有限数**，却**没有对应的时刻** ⇒ 渲染那一行抛异常：
+//
+//        at = -1e300             => THREW RangeError: Invalid time value
+//        at = -8640000000000001  => THREW RangeError: Invalid time value
+//        at = +8640000000000001  => {"ok":true,...}          ← 而这不是守住了它
+//        at = +1e300             => {"ok":true,...}          ← 是 `at >= 门上线` 先返回
+//        at = NaN                => {"ok":true,...}   (读数里 at 渲染成 null)
+//        at = Infinity           => {"ok":true,...}   (同上)
+//
+//   ☆ 异常不是裁决：它绕过三态判定，穿出 `gate()`，再穿出整条
+//     `evaluate('dispatch', …)` —— 同一次求值里**别的判据**的可读 blocker 一起丢。
+//
+// ── 归到哪一档：跟随 `NaN`（= `undefined`，不判不可能）─────────────────────────
+//
+//   ① 这个值是**读不出来的时刻**，不是"我算了一下发现它做不到" ⇒ 与臂 12/13 同族；
+//   ② 归 `unmeasured` 会在这条判据上新增一个"部分读不出"的档，而臂 13 已经立了
+//      「读不出不得读成拒绝」的口径 ⇒ 两种归法会给出**不同形**的读数，而它们
+//      描述的是同一件事（这个数不是时刻）。
+//   ⇒ ★ 本节的臂把"与 `NaN` 同档"钉成**结构逐字同形**（`deepEqual` 两个裁决），
+//     而不是只断言"没抛" —— 后者在一个返回垃圾字符串的实现上也会绿。
+
+/**
+ * ★ 三个**越界**的时刻：一个巨大负数、两个恰好在可表示范围外一毫秒的数。
+ *   ★ 两侧都要：负向越界曾**实测复现**抛穿，而正向越界**不抛**只是因为比较顺序
+ *     偶然挡住了它 —— 把 `>=` 写成 `>` 就立刻抛。（见下面的读数）
+ */
+const OUT_OF_RANGE_INSTANTS = [
+  ['-1e300（有限数，但不是一个时刻）', -1e300],
+  ['-8640000000000001（负向越界一毫秒）', -8_640_000_000_000_001],
+  ['+8640000000000001（正向越界一毫秒）', 8_640_000_000_000_001],
+]
+
+/**
+ * ★ 越界戳的**期望裁决** = `NaN` 戳的裁决。两次调用同一个 `gate()`，
+ *   一份带越界 `at`、一份带 `NaN`，只差那一个输入 ⇒ 两个读数必须逐字同形。
+ */
+const NAN_VERDICT = await gate({
+  task: { id: 't-nan-baseline', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: Number.NaN }) },
+})
+
+test('臂 15 ★★★ 越界的戳与 `NaN` 同档：不抛、不判不可能，且裁决与 `NaN` **逐字同形**', async () => {
+  /**
+   * ── 三件事一起钉（少一件就有一种实现能蒙过）──────────────────────────────────
+   *   ① **不抛** —— 异常不是裁决（定向突变：把守卫改回只挡非有限数 ⇒ 本臂红成 RangeError）
+   *   ② 不落 `blocked`、不带 `reviewed-stamp-impossible` 记号 —— 不许把"读不出"折成"拒绝"
+   *   ③ ★ 与 `NaN` 那一档 `deepEqual` —— 这才机械地证明越界值**从未**被交给渲染那一行
+   *     （一个"吞掉异常、返回垃圾字符串"的实现会在这里与 `NaN` 档不同形）
+   */
+  for (const [label, at] of OUT_OF_RANGE_INSTANTS) {
+    let verdict
+    try {
+      verdict = await gate({
+        task: { id: `t-oor-${at}`, createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at }) },
+      })
+    } catch (error) {
+      assert.fail(
+        `★★★ \`reviewed.at = ${label}\` **抛了** ${error?.constructor?.name}: ${error?.message} —— `
+        + '异常不是裁决：它绕过三态判定并穿出整条 evaluate，把同一次求值里别的判据一起弄丢。'
+        + '★ 定向突变（把 stampImpossibility 的守卫改回只挡非有限数）⇒ 本条红，且红因正是这个 RangeError',
+      )
+    }
+
+    assert.equal(verdict.ok, true, `★★ ${label} ⇒ 与 \`NaN\` 同档（不判不可能）；定向突变 ⇒ 本断言红`)
+    assert.equal(verdict.blockedKind, undefined, `★ ${label} 不许带"时间不可能"的记号 —— 那不是一条可判定的事实`)
+    assert.equal(verdict.blockers, undefined, `★★ ${label} 不许生成"时间不可能"的措辞（blocked 那支的字段必须缺席）`)
+
+    /**
+     * ③ ★ 结构逐字同形：只差 `at` 一个输入，两个裁决必须 `deepEqual`。
+     *   ★ 比较的是**裁决**（`ok` / `blockers` / `unmeasured` / `blockedKind` + 读数里
+     *     五问各自的 verdict）—— 而那正是三态判定读的那几格。
+     *   ★ `readout.at` 那一格**故意不参与**：它不是裁决，而且 `NaN` 与越界值在它上面
+     *     本来就不同形（`NaN` 那一格只收有限数）。臂 18 单独钉那一格。
+     */
+    const verdictShape = (value) => value.ok === true
+      ? { ok: true, by: value.reviewedReadout?.by, answered: value.reviewedReadout?.answered }
+      : { ok: false, blockers: value.blockers, unmeasured: value.unmeasured, blockedKind: value.blockedKind }
+    assert.deepEqual(
+      verdictShape(verdict), verdictShape(NAN_VERDICT),
+      `★★★ \`at = ${label}\` 的裁决必须与 \`at = NaN\` 的裁决**逐字同形**。\n`
+      + '   两者描述的是同一件事（这个值不是一个时刻）。若它们不同形，说明越界值被交给了渲染那一行，'
+      + '   而它给出的那个字符串既不是时刻、也不是"读不出" —— 那比抛更难归因。\n'
+      + `   越界：${JSON.stringify(verdictShape(verdict))}\n   NaN：${JSON.stringify(verdictShape(NAN_VERDICT))}`,
+    )
+  }
+})
+
+test('臂 16 ★★★ 三个越界输入**各自**一条断言：两侧都不抛（负向 2 条 + 正向 1 条）', async () => {
+  /**
+   * ── 为什么要**逐条**给，而不是循环里一条 `assert` ────────────────────────────────
+   *   原文的缺陷只在**负向**实测复现；正向"不抛"是**偶然**（`at >= 门上线` 先返回）。
+   *   一条循环断言在负向红了之后就不再走正向 ⇒ 正向那条**永远不会被执行到**，
+   *   于是"两侧都不抛"这句话没有任何读数支撑。
+   *   ⇒ 三条断言各自独立，红哪一条就指名哪一条。
+   *
+   * ★ 定向突变（守卫改回只挡非有限数）⇒ 第 1、2 条红（RangeError），第 3 条**仍绿**
+   *   —— 那正是原文漏掉它的方式；而只要有人把比较顺序动一下，第 3 条也会红。
+   */
+
+  // ① 负向：巨大负数（离谱到连"天"都数不清）
+  let negativeHuge
+  try {
+    negativeHuge = await gate({
+      task: { id: 't-oor-neg-huge', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: -1e300 }) },
+    })
+  } catch (error) {
+    assert.fail(`★★★ at = -1e300 ⇒ 抛了 ${error?.constructor?.name}: ${error?.message}（负向越界不许抛）`)
+  }
+  assert.equal(negativeHuge.ok, true, '★ at = -1e300 ⇒ 不判不可能（与 NaN 同档），绝不抛')
+
+  // ② 负向：恰好越界一毫秒（边界是**闭**8.64e15，所以 ±1 已经出界）
+  let negativeEdge
+  try {
+    negativeEdge = await gate({
+      task: { id: 't-oor-neg-edge', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: -8_640_000_000_000_001 }) },
+    })
+  } catch (error) {
+    assert.fail(`★★★ at = -8640000000000001 ⇒ 抛了 ${error?.constructor?.name}: ${error?.message}（负向边界外一毫秒不许抛）`)
+  }
+  assert.equal(negativeEdge.ok, true, '★ at = -8640000000000001 ⇒ 不判不可能（与 NaN 同档），绝不抛')
+
+  // ③ 正向：恰好越界一毫秒（★ 原文这条"不抛"是顺序偶然，必须单独钉住）
+  let positiveEdge
+  try {
+    positiveEdge = await gate({
+      task: { id: 't-oor-pos-edge', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: 8_640_000_000_000_001 }) },
+    })
+  } catch (error) {
+    assert.fail(`★★★ at = +8640000000000001 ⇒ 抛了 ${error?.constructor?.name}: ${error?.message}（正向边界外一毫秒不许抛）`)
+  }
+  assert.equal(positiveEdge.ok, true, '★★ at = +8640000000000001 ⇒ 不判不可能，绝不抛 —— 原文它"不抛"只因为 `at >= 门上线` 先返回，那是偶然')
+
+  /** ★ 而可表示范围的**边界本身**仍然是一个时刻（闭区间）—— 它不许被顺手判成读不出。 */
+  const atBoundary = await gate({
+    task: { id: 't-boundary', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: 8.64e15 }) },
+  })
+  assert.equal(atBoundary.ok, true, '★ at = 8.64e15（边界上，仍可表示）⇒ ok —— 守卫挡的是**越界**，不是这个边界')
+})
+
+test('臂 17 ★★★ 判据边界不外溢：同一次 `evaluate` 里别的判据的可读 blocker 仍在', async () => {
+  /**
+   * ── 这是"异常不是裁决"的**代价读数** ─────────────────────────────────────────────
+   *   一条越界戳此前会让整条 `evaluate('dispatch', …)` 抛 `RangeError`，
+   *   于是同一次求值里**另一条正常的 blocked 判据**给出的成因也一起消失 ——
+   *   修的人看到的是一个异常，而不知道"killer suite 没报裁决"这件事。
+   *
+   * ★ 而本臂**不去改注册表**（`src/gates/registry.ts` 在 outOfScope 里）：
+   *   它证明的是**这个外溢被 plan-reviewed 这一侧治好了** —— 同一份注册表、同一个
+   *   `evaluate`，只要 plan-reviewed 不再抛，那条 blocked 的成因就读得到。
+   *
+   * ── 反半边（必须）────────────────────────────────────────────────────────────────
+   *   若不抛是因为"判据被跳过"（`appliesTo` 假），本臂同样会绿 —— 而那是另一种病。
+   *   ⇒ 下面断言 `ran` 里 plan-reviewed **真的跑了**且裁决是 `ok`，不是 `skipped`。
+   */
+  const registry = createGateRegistry()
+  /** ① 一条**正常的**可读 blocker —— 它必须活下来。 */
+  registry.register({
+    id: 'dispatch.probe.killer-suite',
+    point: 'dispatch',
+    description: 'probe: a plain, readable blocker that must survive a sibling gate',
+    gate: () => blocked('the killer suite reported no verdict'),
+  })
+  /** ② 真的 plan-reviewed（不是探针）—— 带一个**越界**的戳。 */
+  registry.register({ id, point, description, gate, appliesTo })
+
+  let evaluation
+  try {
+    evaluation = await registry.evaluate('dispatch', {
+      task: { id: 't-bleed', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: -1e300 }) },
+    })
+  } catch (error) {
+    assert.fail(
+      `★★★ \`evaluate('dispatch', …)\` 抛了 ${error?.constructor?.name}: ${error?.message} —— `
+      + '一条越界的戳把整条求值带走了：同一次求值里另一条 blocked 的成因**一起丢失**。'
+      + '★ 定向突变（把守卫改回只挡非有限数）⇒ 本条红，红因正是这个 RangeError',
+    )
+  }
+
+  assert.equal(evaluation.blockers.length, 1, `★★ ① 那条 blocker 必须仍在（实际 ${evaluation.blockers.length} 条）：${JSON.stringify(evaluation.blockers)}`)
+  assert.equal(
+    evaluation.blockers[0], '[dispatch.probe.killer-suite] the killer suite reported no verdict',
+    '★★★ 另一条判据的成因必须**逐字**读得到 —— 越界的 plan-reviewed 不许把它带走',
+  )
+
+  /** ★ 反半边：plan-reviewed 必须**真的跑了**（不是被 `appliesTo` 跳过而"恰好没抛"）。 */
+  const ran = evaluation.ran.find((entry) => entry.id === id)
+  assert.notEqual(ran, undefined, `★★ plan-reviewed 必须出现在 ran 里（注册表认得这个 id：${id}）`)
+  assert.equal(ran.verdict, 'ok', `★★ 而且它是**跑出了裁决**的（不是 skipped）：${JSON.stringify(ran)}`)
+})
+
+test('臂 18 ★★ 读数：三个越界输入 + `NaN` 各自的裁决，以及越界值从未交给渲染', async () => {
+  /**
+   * ── 本臂是**读数臂**：它把越界那三条的裁决打印出来，供报告直接引用 ─────────────────
+   *   同时它单独钉住一件臂 15 只用 `deepEqual` 间接钉的事：
+   *   越界值**没有被渲染成任何字符串**（读数的 `at` 那一格与 `NaN` 一样是 `null`）。
+   */
+  const lines = []
+  for (const [label, at] of OUT_OF_RANGE_INSTANTS) {
+    const verdict = await gate({
+      task: { id: `t-read-${at}`, createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at }) },
+    })
+    lines.push(`${label} ⇒ ${verdict.ok ? 'ok' : 'not-ok'} · blockedKind=${String(verdict.blockedKind)} · at=${JSON.stringify(verdict.reviewedReadout?.at)}`)
+    /**
+     * ★ 读数的 `at` 那一格：它只收**有限数**，所以越界值会**逐字**被抄进来
+     *   （`-1e300` 是有限数）—— ★ 而它**没有**被交给渲染那一行，所以既没抛、
+     *   也没变成一个垃圾字符串：裁决整条是 `ok`，`blockers` 缺席（见臂 15）。
+     *   ★ 这一格**不是裁决**，本臂只把它如实报出来 —— 别拿它当"折掉了"的证据。
+     */
+    assert.equal(verdict.reviewedReadout?.at, at, `★ ${label} ⇒ 读数里的 at 如实抄回那个有限数（它不是渲染结果）`)
+  }
+  console.log('★ 越界戳的裁决读数：')
+  for (const line of lines) console.log(`   · ${line}`)
+
+  /** ★ 一条**可表示**的时刻仍然照常进读数 —— 否则上面那三条"都是 null"就失去了区分力。 */
+  const normal = await gate({ task: { id: 't-read-normal', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed() } })
+  assert.equal(normal.reviewedReadout?.at, TRUSTWORTHY_AT, '★ 可信的时刻必须逐字进读数（它不是 null）—— 上面三条才因此有信息量')
+  console.log(`   · 可信的时刻 ⇒ at=${normal.reviewedReadout.at}`)
+})
+
+test('臂 19 ★★★ 判据仍是一条可判定的事实：越界**只在**渲染边界上，不是把时间检查整个关掉', async () => {
+  /**
+   * ── 反半边：治 F1 不能顺手废掉臂 10 那套时间检查 ───────────────────────────────────
+   *   一个"只要 `at` 不在 `[门上线, 8.64e15]` 里就不判不可能"的实现会让越界臂全绿，
+   *   同时**静默地**放行所有早于门上线一年的戳 —— 那是把整台机器关掉。
+   *   ⇒ 本臂在同一份夹具里重新钉一次：越界被折进"读不出"，而**可表示**的早于门
+   *     上线的戳仍然 `blocked` + 带 `reviewed-stamp-impossible` 记号。
+   */
+  const impossible = await gate({
+    task: { id: 't-still-impossible', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: ONE_YEAR_BEFORE_GATE }) },
+  })
+  assert.equal(impossible.ok, false, '★★ 可表示的、早于门上线一年的戳 ⇒ 仍然 blocked（F1 的修法不许把它放过去）')
+  assert.equal(impossible.blockedKind, 'reviewed-stamp-impossible', '★★ 而记号仍在')
+  assert.ok(Array.isArray(impossible.blockers) && impossible.blockers.length > 0, '★ 措辞仍在')
+
+  /** ★ 而它仍然**指名两个时刻与差值**（越界分支的加入不许把这条措辞弄坏）。 */
+  const text = impossible.blockers.join(' ')
+  assert.ok(text.includes(new Date(ONE_YEAR_BEFORE_GATE).toISOString()), `★★ 措辞里仍然要有戳的 ISO 渲染：${text}`)
+  assert.ok(text.includes(new Date(PLAN_REVIEWED_GATE_ONLINE_AT).toISOString()), `★★ 措辞里仍然要有门上线时刻的 ISO 渲染：${text}`)
+})
