@@ -669,7 +669,38 @@ export async function runInDetachedRevision(options: {
    *   —— 于是"预算有界"只对一半，而那一半在日志里看不出来。
    */
   timeoutMs?: number
-}): Promise<number | undefined> {
+  /**
+   * ── ★★★ 要不要把输出也交回去（2026-10-19）──────────────────────────────────────
+   *
+   * MEASURED：本函数此前**只**返回退出码。而 `r5` 判据要按【臂】判 ——
+   *   它需要从 `node --test` 的输出里读出"这个文件里有哪几条臂"，才能分辨
+   *   "这次新增的臂"与"本来就在的臂"。父版本那一路拿不到输出 ⇒
+   *   `parseNodeTestReport('')` 恒 `undefined` ⇒ `newArms` 恒 `undefined`
+   *   ⇒ **永远退回按文件判** ⇒ 任何「父版本绿 + 工作区绿」都被读成"装饰品"。
+   *
+   *   ⇒ 于是 r5 那条「按臂判」的代码**从未生效过**，而它恰好是 t17 花一次任务
+   *     加进来的东西：字段在、分支在、注释在，**注入面没接**。
+   *
+   * ★ 为什么用选项而不是**无条件**捕获：输出最多 256 KiB，而本函数还被
+   *   `baseline` 那一路用着（只要退出码）。把"要不要那 256 KiB"交给调用方，
+   *   是让"我付了这个成本"成为一次显式声明，而不是一个所有人都在付的默认。
+   */
+  captureOutput: true
+}): Promise<{ exitCode: number; output: string } | undefined>
+export async function runInDetachedRevision(options: {
+  workspace: string
+  revision: string
+  command: string
+  timeoutMs?: number
+  captureOutput?: false
+}): Promise<number | undefined>
+export async function runInDetachedRevision(options: {
+  workspace: string
+  revision: string
+  command: string
+  timeoutMs?: number
+  captureOutput?: boolean
+}): Promise<number | { exitCode: number; output: string } | undefined> {
   const { mkdtemp, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const scratch = await mkdtemp(join(tmpdir(), 'agent-teams-rev-'))
@@ -678,7 +709,7 @@ export async function runInDetachedRevision(options: {
    * ★ **清理**这一步（`worktree remove`）刻意**不**受预算约束：预算是"别再干重活"，
    *   而清理是"把已经开出去的临时树收回来"。让一个耗尽的预算把清理也挡掉，
    *   等于用一次超时换一个永久泄漏的 worktree —— 那是本仓 `reclaim` 脚本存在的理由。
-   *   ⇒ 它用缺省的 120 s 单命令上限，与预算无关。
+   *   ⇒ 它用缺省的单命令上限，与预算无关。
    */
   try {
     const added = await runVerifyCommand(
@@ -688,7 +719,17 @@ export async function runInDetachedRevision(options: {
     )
     if (added !== 0) return undefined
     try {
-      return await runVerifyCommand(checkout, options.command, options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
+      const budget = options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }
+      if (options.captureOutput === true) {
+        /**
+         * ★ 捕获那一路：`stderr` 也要拼进来 —— `node --test` 的 spec reporter
+         *   在非 TTY 下把 `✔ / ✖` 行写到 **stdout**，但**汇总**（`ℹ tests 22`）
+         *   与部分错误写到 stderr。只拼 stdout 会让"读得出臂名、读不出总数"。
+         */
+        const captured = await runVerifyCommandCaptured(checkout, options.command, budget)
+        return { exitCode: captured.exitCode, output: `${captured.stdout}\n${captured.stderr}` }
+      }
+      return await runVerifyCommand(checkout, options.command, budget)
     } finally {
       await runVerifyCommand(options.workspace, `git worktree remove --force ${JSON.stringify(checkout)}`)
     }

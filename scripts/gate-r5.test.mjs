@@ -657,3 +657,54 @@ test('臂 20e ★★ 读数：`evidence` 与 `verified` 必须**分别**读出�
   assert.equal(verdict.r5.evidence.length, 1, '★ 而 `evidence` 也只有那条有新增臂的')
   console.log(`★ 两个读数分别读出来（t17）：verified=${JSON.stringify(verdict.r5.verified)} · evidence 的新增臂=${JSON.stringify(verdict.r5.evidence[0].newArms)}`)
 })
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 臂 4（2026-10-19）：注入面必须真的把 `output` 交到判据手上
+ *
+ * ── 这一臂防的是什么 ────────────────────────────────────────────────────────────
+ *
+ * `r5` 的契约一直写着 `runTestOnRevision → { exitCode?, output? }`
+ * （`src/gates/completion/r5.ts:299`），而**生产注入点**此前只交 `exitCode`。
+ * 于是：
+ *
+ *     parseNodeTestReport('')  →  undefined  →  newArms 恒 undefined
+ *     → 永远退回按文件判 → 任何「父版本绿 + 工作区绿」都被读成"装饰品"
+ *
+ * ⇒ 那条按【臂】判的分支（t17 加的）**从未生效过**。而它从未生效这件事，
+ *   在判据自己的夹具里**看不出来** —— 因为夹具一直在喂 `output`（上一行的
+ *   `output: exitCode === 0 ? 'ok' : 'AssertionError'`）。
+ *
+ * ★ 所以本臂**不看判据**，它看**接线**：真去读生产注入点的源码，断言
+ *   `runTestOnRevision` 那一段对**两轮**（父版本 / working-tree）都返回了 `output`。
+ *
+ * ★ 为什么不做成"跑一次真的" —— 那要建 git 仓库、要 build、要 30 秒，而
+ *   本条要钉的是一个**结构事实**：那一行有没有把 output 交出去。
+ *   ★ 而纯源码断言的危险是"文字在、语义不对"：所以下面同时断言
+ *     `runInDetachedRevision` 的调用处带着 `captureOutput: true` ——
+ *     只写 `output:` 而没让执行器捕获，那个字段会是 undefined，与不写同形。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★ 臂 4：生产注入点必须把 output 交到判据手上（两轮都要，且要让执行器真的捕获）', () => {
+  const source = readFileSync(join(ROOT, 'src/tools/update-task/completion.ts'), 'utf8')
+  const start = source.indexOf('runTestOnRevision:')
+  assert.ok(start > 0, '★ 前置：生产注入点必须还在（改名了就要同步改本臂，不许静默失效）')
+  /** 注入点那一段：到下一个注入键为止。 */
+  const nextKey = source.indexOf('\n  readFile:', start)
+  assert.ok(nextKey > start, '★ 前置：注入点的边界必须读得出来')
+  const block = source.slice(start, nextKey)
+
+  assert.match(block, /runVerifyCommandCaptured/,
+    '★ working-tree 那一轮必须用**捕获版**执行器 —— 用 runVerifyCommand 拿不到 stdout，'
+    + 'output 会是空串，与"没交"同形')
+  assert.match(block, /captureOutput:\s*true/,
+    '★ 父版本那一轮必须让 runInDetachedRevision **真的捕获** —— '
+    + '只写 output: 而没开捕获，那个字段会是 undefined')
+  const outputs = block.match(/output:/g) ?? []
+  assert.equal(outputs.length, 2,
+    '★ 两轮（父版本 / working-tree）都必须交 output —— 按臂判是差集，缺一半就恒为空')
+
+  /** ★ 反向半边：判据侧必须**真的读**它（否则交出来也没人用，与本臂要防的同形）。 */
+  const r5 = readFileSync(join(ROOT, 'src/gates/completion/r5.ts'), 'utf8')
+  assert.match(r5, /parseNodeTestReport\(/,
+    '★ 判据侧必须仍在解析输出 —— 否则交出来的 output 没人读')
+})

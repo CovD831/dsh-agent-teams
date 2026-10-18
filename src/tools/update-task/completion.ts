@@ -383,7 +383,12 @@ const baselineExit = async (revision: string): Promise<number | undefined> => {
    */
   const results = await Promise.all(withoutNewTests.map(async (command) => {
     try {
-      return await inBudget(`baseline: ${command}`, async () => await runInDetachedRevision({ workspace, revision, command }))
+      /**
+       * ★ 显式写 `captureOutput: false`：这一段只要退出码（基准取最坏的一条）。
+       *   不写的话它命中的是"捕获输出"那个重载 —— 而那会把 256 KiB 的输出
+       *   白白搬一遍，再被这里丢掉。**付不付这个成本，要在这里看得见。**
+       */
+      return await inBudget(`baseline: ${command}`, async () => await runInDetachedRevision({ workspace, revision, command, captureOutput: false }))
     } catch {
       return undefined
     }
@@ -511,28 +516,40 @@ const completionContext = {
    */
   runTestOnRevision: async (test: string, revision: string) => {
     /**
-     * ★ `'working-tree'` 是 R5 约定的【修复版本】哨兵值 —— 表示"成员现在
-     *   交出来的那份树"，而它**不是**一个 git 引用（`git worktree add`
-     *   对它必然失败）。这是判据与调用方之间的一个约定，不是笔误。
-     *   ⇒ 它跑在【工作区本身】上；只有父版本才需要检出到一个干净副本。
+     * ── ★★★ 两轮**都要交回输出**（2026-10-19）──────────────────────────────────────
+     *
+     * MEASURED：这一格此前**只**交 `exitCode`，而 `r5` 的契约一直写着
+     *   `Promise<{ exitCode?, output? }>`（`src/gates/completion/r5.ts:299`）。
+     *   ⇒ 于是 `parseNodeTestReport('')` 恒 `undefined` ⇒ `newArms` 恒 `undefined`
+     *   ⇒ 判据**永远**退回按文件判 ⇒ 任何「父版本绿 + 工作区绿」都被读成"装饰品"，
+     *     而那条按臂判的分支（t17 花一次任务加的）**从未生效过**。
+     *
+     * ★ 为什么父版本那一路也必须有：按臂判的本质是**差集**
+     *   （工作区的臂 − 父版本的臂）。只交修复版的输出，差集仍然是空 ——
+     *   因为另一半根本不在。
+     *
+     * ★ 为什么修复版（`'working-tree'`）也不能漏：它是差集的**左半边**。
+     *   两端都交，`newArms` 才可能非空；而"两端都交了仍然 newArms 为空"
+     *   才是一条**真**读数（这次真的没加臂），不是"我没接上"。
      */
     if (revision === 'working-tree') {
-      return {
-        exitCode: await inBudget(
-          `r5 working-tree: ${test}`,
-          (timeoutMs) => runVerifyCommand(workspace, `node --test ${test}`, { timeoutMs }),
-        ),
-      }
+      const captured = await inBudget(
+        `r5 working-tree: ${test}`,
+        (timeoutMs) => runVerifyCommandCaptured(workspace, `node --test ${test}`, { timeoutMs }),
+      )
+      return captured === undefined
+        ? {}
+        : { exitCode: captured.exitCode, output: `${captured.stdout}\n${captured.stderr}` }
     }
     /**
      * ★ `timeoutMs` 一路传进 `runInDetachedRevision`：它内部有**三条**命令
      *   （worktree add / 跑测试 / worktree remove），若只包外层，单次调用最多能跑
      *   3 × 120 s —— 预算会被**越过** 240 s 才生效，而"有界"这件事就只对了一半。
      */
-    const exitCode = await inBudget(`r5 ${revision}: ${test}`, (timeoutMs) => runInDetachedRevision({
-      workspace, revision, command: `node --test ${test}`, timeoutMs,
+    const detached = await inBudget(`r5 ${revision}: ${test}`, (timeoutMs) => runInDetachedRevision({
+      workspace, revision, command: `node --test ${test}`, timeoutMs, captureOutput: true,
     }))
-    return exitCode === undefined ? {} : { exitCode }
+    return detached === undefined ? {} : { exitCode: detached.exitCode, output: detached.output }
   },
   // ── mutation：三个执行器 + 只变异改动行
   readFile: (path: string): string => readWorkspaceFileSync(workspace, path),

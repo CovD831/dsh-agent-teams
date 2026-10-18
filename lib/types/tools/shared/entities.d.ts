@@ -257,6 +257,33 @@ export declare function runInDetachedRevision(options: {
      *   —— 于是"预算有界"只对一半，而那一半在日志里看不出来。
      */
     timeoutMs?: number;
+    /**
+     * ── ★★★ 要不要把输出也交回去（2026-10-19）──────────────────────────────────────
+     *
+     * MEASURED：本函数此前**只**返回退出码。而 `r5` 判据要按【臂】判 ——
+     *   它需要从 `node --test` 的输出里读出"这个文件里有哪几条臂"，才能分辨
+     *   "这次新增的臂"与"本来就在的臂"。父版本那一路拿不到输出 ⇒
+     *   `parseNodeTestReport('')` 恒 `undefined` ⇒ `newArms` 恒 `undefined`
+     *   ⇒ **永远退回按文件判** ⇒ 任何「父版本绿 + 工作区绿」都被读成"装饰品"。
+     *
+     *   ⇒ 于是 r5 那条「按臂判」的代码**从未生效过**，而它恰好是 t17 花一次任务
+     *     加进来的东西：字段在、分支在、注释在，**注入面没接**。
+     *
+     * ★ 为什么用选项而不是**无条件**捕获：输出最多 256 KiB，而本函数还被
+     *   `baseline` 那一路用着（只要退出码）。把"要不要那 256 KiB"交给调用方，
+     *   是让"我付了这个成本"成为一次显式声明，而不是一个所有人都在付的默认。
+     */
+    captureOutput: true;
+}): Promise<{
+    exitCode: number;
+    output: string;
+} | undefined>;
+export declare function runInDetachedRevision(options: {
+    workspace: string;
+    revision: string;
+    command: string;
+    timeoutMs?: number;
+    captureOutput?: false;
 }): Promise<number | undefined>;
 export declare function deriveCoverageInput(options: {
     workspace: string;
