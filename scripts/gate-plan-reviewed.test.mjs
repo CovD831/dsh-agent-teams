@@ -20,6 +20,14 @@
  *   c) 加一个 `fs` import（判据不再是纯数据变换）⇒ 臂 5 红
  *   d) 删掉 `appliesTo`（于是它对任何 ctx 都开火，包括没有 task 的）⇒ 臂 6 红
  *   e) 五问名单与 `friction-triage` 的 `REVIEW_CHECKS` 分叉 ⇒ 臂 4 红
+ *
+ * ★★★ 2026-10-19 追加（`reviewed.at` 的时间不可能）—— 定向突变（打红臂 10–14）：
+ *
+ *   f) 删掉 `stampImpossibility` 那一支（`at` 又变回只抄进读数）⇒ 臂 10 红
+ *   g) 让"不可能"变成**恒拒**（不看 `at` 就拒）⇒ 臂 11 红（晚于门的戳被拒）
+ *   h) 把 `at` 读不出（缺席 / 非有限数）折成"不可能"⇒ 臂 12、13 红
+ *   i) 把时间检查挪到形状检查**之前** ⇒ 臂 14 红（形状坏 + 一年前 ⇒ 变成 blocked 而非 unmeasured）
+ *   j) 措辞只说"implausible"而不给两个时刻与差值 ⇒ 臂 10 红（那一条断言里三个读数都在）
  */
 
 import { test } from 'node:test'
@@ -34,10 +42,29 @@ import { gate, appliesTo, id, point, REVIEW_QUESTION_IDS, PLAN_REVIEWED_GATE_ONL
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (relative) => readFileSync(join(ROOT, relative), 'utf8')
 
-/** 一份**完整的** `reviewed`（五问逐条 `pass`）—— 对照臂与正向臂都用它。 */
+/**
+ * ★ 一个**可信**的戳时刻（门上线 + 1 天）—— 本文件里所有"不是在测时间"的夹具都用它。
+ *
+ * ★ 为什么不是随手写个 `1`：一个 `at: 1` 的夹具能通过，**只是因为**时间检查排在
+ *   形状/五问检查**之后**（见臂 14）。于是十几条臂都在**静默依赖一个顺序**——
+ *   哪天有人把时间检查挪前面（那是臂 14 专门要抓的突变），它们才会一起红，
+ *   而红的地方离真正的原因很远。
+ *   ⇒ 用可信的时刻，让"依赖顺序"这件事只剩臂 14 一处**显式**的。
+ */
+const TRUSTWORTHY_AT = PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000
+
+/**
+ * 一份**完整的** `reviewed`（五问逐条 `pass`）—— 对照臂与正向臂都用它。
+ *
+ * ★★★ `at` 必须**不早于**这道门上线（2026-10-19）：判据现在会读 `reviewed.at`，
+ *   一个早于门存在的戳被判"时间上不可能" ⇒ 落 `blocked`。
+ *   本夹具此前写 `1_700_000_000_123`（2023-11-14）—— 它自己就是普查里那 95 个
+ *   不可能戳之一。★ 而这不是"为了让它过而改数字"：一条真的审查**只能**发生在门上线之后，
+ *   早于门的时刻**不可能**是这条路盖出来的。
+ */
 function completeReviewed(overrides = {}) {
   return {
-    at: 1_700_000_000_123,
+    at: TRUSTWORTHY_AT,
     by: 'adversarial',
     checks: REVIEW_QUESTION_IDS.map((questionId) => ({ id: questionId, verdict: 'pass', why: `${questionId} checked` })),
     ...overrides,
@@ -73,7 +100,7 @@ test('臂 1 ★★★ 三态不同形：带且五问无 fail/unmeasured ⇒ ok�
   assert.equal(absent.unmeasured, undefined, '★ 缺席不是 unmeasured —— 那是"读不到"，而这里读得到：那一格确实不在')
   assert.ok(Array.isArray(absent.blockers) && absent.blockers.length > 0, '★ 而它必须说得出**为什么**拦')
 
-  const broken = await gate({ task: { id: 't-broken', reviewed: { at: 1, by: 'x', checks: 'not-an-array' } } })
+  const broken = await gate({ task: { id: 't-broken', reviewed: { at: TRUSTWORTHY_AT, by: 'x', checks: 'not-an-array' } } })
   assert.equal(broken.ok, false, '★★ 形状坏 ⇒ 拦住')
   assert.equal(broken.blockers, undefined, '★★★ 形状坏**不是** blocked —— 那两个字段必须不同形')
   assert.ok(typeof broken.unmeasured === 'string' && broken.unmeasured.length > 0, '★ 而它必须如实说"读不到什么"')
@@ -101,7 +128,7 @@ test('臂 2 ★★★ 五问里有 `unmeasured` ⇒ **不许**放行（"没能�
    */
   const checks = REVIEW_QUESTION_IDS.map((questionId) => ({ id: questionId, verdict: 'pass', why: 'ok' }))
   checks[2] = { id: REVIEW_QUESTION_IDS[2], verdict: 'unmeasured', why: 'no specifics to ask about' }
-  const verdict = await gate({ task: { id: 't-unmeasured', reviewed: { at: 1, by: 'x', checks } } })
+  const verdict = await gate({ task: { id: 't-unmeasured', reviewed: { at: TRUSTWORTHY_AT, by: 'x', checks } } })
 
   assert.equal(verdict.ok, false, '★★★ 五问里有一问 `unmeasured` ⇒ **必须拦住**。定向突变 a ⇒ 本臂红')
   assert.equal(
@@ -116,7 +143,7 @@ test('臂 2 ★★★ 五问里有 `unmeasured` ⇒ **不许**放行（"没能�
 
   /** ★ 反半边：同一份 checks 把那一问改成 `pass` ⇒ 必须放行（否则本臂是"恒拒"） */
   checks[2] = { id: REVIEW_QUESTION_IDS[2], verdict: 'pass', why: 'settled' }
-  const settled = await gate({ task: { id: 't-settled', reviewed: { at: 1, by: 'x', checks } } })
+  const settled = await gate({ task: { id: 't-settled', reviewed: { at: PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000, by: 'x', checks } } })
   assert.equal(settled.ok, true, '★ 反半边：五问全 pass ⇒ 必须放行 —— 否则本臂测的是"它恒拒"')
 })
 
@@ -150,7 +177,7 @@ test('★ 臂 3：`blocked` 的措辞必须**指名它缺哪一问**（不是一
     task: {
       id: 't2',
       reviewed: {
-        at: 1, by: 'x',
+        at: TRUSTWORTHY_AT, by: 'x',
         checks: REVIEW_QUESTION_IDS.slice(0, 3).map((questionId) => ({ id: questionId, verdict: 'pass' })),
       },
     },
@@ -170,7 +197,7 @@ test('★ 臂 3：`blocked` 的措辞必须**指名它缺哪一问**（不是一
   /** ★ 而 `fail` 也要附上**为什么**（一条不说原因的 fail 与"我不知道哪不对"同形）。 */
   const withFail = REVIEW_QUESTION_IDS.map((questionId) => ({ id: questionId, verdict: 'pass' }))
   withFail[0] = { id: REVIEW_QUESTION_IDS[0], verdict: 'fail', why: 'inScope misses two files' }
-  const failed = await gate({ task: { id: 't3', reviewed: { at: 1, by: 'x', checks: withFail } } })
+  const failed = await gate({ task: { id: 't3', reviewed: { at: TRUSTWORTHY_AT, by: 'x', checks: withFail } } })
   assert.equal(failed.ok, false, '★ 有一问 fail ⇒ 拦住')
   assert.ok(
     failed.blockers.join(' ').includes('inScope misses two files'),
@@ -297,7 +324,7 @@ test('★ 臂 7（读数臂）：三种输入上的裁决，逐条给出', async
   const cases = [
     { label: '① 带完整 reviewed（五问全 pass）', input: { task: { id: 'r1', reviewed: completeReviewed() } } },
     { label: '② 没有 reviewed（新任务）', input: { task: { id: 'r2', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } } },
-    { label: '③ reviewed 在场但形状坏（checks 不是数组）', input: { task: { id: 'r3', reviewed: { at: 1, by: 'x', checks: 'nope' } } } },
+    { label: '③ reviewed 在场但形状坏（checks 不是数组）', input: { task: { id: 'r3', reviewed: { at: TRUSTWORTHY_AT, by: 'x', checks: 'nope' } } } },
   ]
   const readouts = []
   for (const item of cases) {
@@ -415,3 +442,183 @@ test('★★★ 臂 9e：闸门上线时刻与 git 对得上（那处单一真�
     '★ 常量与 git 里那次接线对不上 ⇒ 存量/新任务的分界会漂移',
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 10–14：★★★ `reviewed.at` 的【时间不可能】（2026-10-19 补）
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * ── 为什么需要这一组臂 ────────────────────────────────────────────────────────────
+ *
+ * MEASURED（`node scripts/reviewed-stamp-census.mjs`）：盘上带戳任务 **151**，
+ *   其中 **95** 条 `reviewed.at` 早于这道门上线，而那 95 条的任务**全部晚于**这道门
+ *   （合法的"老任务当然没有戳"一条都没有）。
+ *
+ * ★★ 判据此前只读 `checks` 的形状、五问齐不齐、有没有 fail/unmeasured ——
+ *   `at` 被**原样抄进读数**却从不与任何东西比较 ⇒ 一份"五问齐全、why 写得很漂亮、
+ *   `at` 指向一年前"的戳能**一路通过**。门问的是「五问都答了吗」，
+ *   而**不是**「这份记录有可能是真的吗」。
+ *
+ * ★ 方向（已定，不再讨论）：
+ *     `at <  PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ **不可能** ⇒ `blocked`（可判定的事实）
+ *     `at >= PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 可能     ⇒ 原来的通过路径
+ *     `at` 缺席 / 不是有限数                ⇒ ★ **不判不可能**（行为原样不动）
+ * ★ 而**不是** `at < task.createdAt`：`reviewed` 是 `create_task` 的输入 ——
+ *   先审、盖章、再建任务 ⇒ 戳早于任务创建是**这条路的设计**。
+ */
+
+/** 一年前（一个**不可能**的戳时刻）—— 三个不可能臂共用。 */
+const ONE_YEAR_BEFORE_GATE = PLAN_REVIEWED_GATE_ONLINE_AT - 365 * 24 * 60 * 60 * 1000
+
+test('臂 10 ★★★ 早于门上线 ⇒ 时间上不可能 ⇒ blocked（带 kind 记号），且措辞**指名两个时刻与差值**', async () => {
+  /**
+   * ── 本臂钉三件事 ────────────────────────────────────────────────────────────────
+   *   ① 结论：`ok: false` 且落在 `blockers`（★ **不是** `unmeasured`：
+   *      两个数一比就出结论 ⇒ 它是可判定的事实，不是"没能测量"）
+   *   ② 形状：它与"没审"（`blocked` 而另一条措辞）**不同形** ⇒ `blockedKind` 记号
+   *   ③ 措辞：必须**指名 `reviewed.at`、门上线时刻、以及差值**（契约硬要求）
+   *
+   * ★ 定向突变 f（删掉 `stampImpossibility` 那一支）⇒ 本臂红（`ok` 会变成 true）。
+   * ★ 定向突变 j（措辞只说 "implausible" 而不给两个时刻与差值）⇒ 本臂红（下面三条断言）。
+   */
+  const verdict = await gate({
+    task: { id: 't-impossible', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at: ONE_YEAR_BEFORE_GATE }) },
+  })
+
+  assert.equal(verdict.ok, false, '★★★ 早于门上线一年的戳 ⇒ **必须拦住**。定向突变 f ⇒ 本臂红')
+  assert.equal(verdict.unmeasured, undefined, '★★ 而它**不是** unmeasured —— 可判定的事实不得写成"没能测量"')
+  assert.ok(Array.isArray(verdict.blockers) && verdict.blockers.length > 0, '★ 它必须说得出为什么拦（blockers）')
+
+  /** ② 与"没审"不同形：两者都 `ok:false` + `blockers`，靠机械记号分开。 */
+  const absent = await gate({ task: { id: 't-none', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000 } })
+  assert.equal(absent.ok, false, '★ 前置：没审也是 ok:false')
+  assert.notDeepEqual(
+    { kind: verdict.blockedKind, blockers: Array.isArray(verdict.blockers) },
+    { kind: absent.blockedKind, blockers: Array.isArray(absent.blockers) },
+    '★★★ "时间不可能"与"没审"必须**不同形** —— 两者的补救动作不同（重盖 vs 去审），'
+    + '若读数同形，读端只能靠措辞猜。★ 定向突变：去掉 `blockedKind` ⇒ 本断言红',
+  )
+  assert.equal(verdict.blockedKind, 'reviewed-stamp-impossible', '★ "不可能"必须有它自己的机械记号')
+  assert.equal(absent.blockedKind, undefined, '★ 而"没审"不带这个记号（否则两个记号就没有区分力）')
+
+  /** ③ 措辞必须**指名两个时刻与差值**。 */
+  const text = verdict.blockers.join(' ')
+  assert.ok(
+    text.includes(new Date(ONE_YEAR_BEFORE_GATE).toISOString()),
+    `★★★ 措辞必须给出 \`reviewed.at\` 的 ISO 渲染（${new Date(ONE_YEAR_BEFORE_GATE).toISOString()}）：${text}`,
+  )
+  assert.ok(
+    text.includes(new Date(PLAN_REVIEWED_GATE_ONLINE_AT).toISOString()),
+    `★★★ 措辞必须给出**门上线时刻**的 ISO 渲染（${new Date(PLAN_REVIEWED_GATE_ONLINE_AT).toISOString()}）：${text}`,
+  )
+  const delta = PLAN_REVIEWED_GATE_ONLINE_AT - ONE_YEAR_BEFORE_GATE
+  assert.ok(
+    text.includes(String(delta)) || text.includes('365.00 days'),
+    `★★★ 措辞必须给出**差值**（${delta} ms / 365.00 days）—— 只说"不可能"与"我不知道差多远"同形：${text}`,
+  )
+})
+
+test('★★★ 臂 11（反半边）：晚于 / 恰好等于门上线的戳 ⇒ **必须放行**（否则臂 10 是"恒拒"）', async () => {
+  /**
+   * ── 反半边是**必须**的 ────────────────────────────────────────────────────────
+   *   一条"恒拒"的实现会让臂 10 全绿而机制完全没用：它拒掉**所有**戳，
+   *   包括那些真的在门上线之后盖的。
+   *   ★ 边界落在**闭区间**：`at === 门上线时刻` 是可能的（那一刻这条路刚存在）。
+   *
+   * ★ 定向突变 g（不看 `at` 就拒 / 把 `>=` 写成 `>`）⇒ 本臂红。
+   */
+  for (const [label, at] of [
+    ['晚一天', PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000],
+    ['恰好等于门上线时刻', PLAN_REVIEWED_GATE_ONLINE_AT],
+    ['晚一毫秒', PLAN_REVIEWED_GATE_ONLINE_AT + 1],
+  ]) {
+    const verdict = await gate({ task: { id: `t-${at}`, createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at }) } })
+    assert.equal(verdict.ok, true, `★★★ ${label}的戳是**可能**的 ⇒ 必须放行（定向突变 g ⇒ 本臂红）`)
+    assert.equal(verdict.blockedKind, undefined, `★ 放行的裁决不许带"不可能"的记号（${label}）`)
+  }
+})
+
+test('★★ 臂 12：`at` **缺席** ⇒ 不判不可能（不新增拒绝，行为原样不动）', async () => {
+  /**
+   * ── 为什么"缺席"不是"不可能" ───────────────────────────────────────────────────
+   *   "这一格没写完"与"这一格写着一年前"是**两件事**：前者该由补齐记录解决，
+   *   后者是记录**不可能成立**。★ 而本判据此前对缺席的 `at` 是放行的 ——
+   *   不得因为新增了时间检查就把它顺手变成拒绝（那是**超出契约的行为变更**）。
+   *
+   * ★ 定向突变 h（把读不出的 `at` 折成"不可能"）⇒ 本臂红。
+   */
+  const cases = [
+    ['完全没有 at 这一格', { by: 'adversarial', checks: completeReviewed().checks }],
+    ['at 是 undefined', completeReviewed({ at: undefined })],
+    ['at 是 null', completeReviewed({ at: null })],
+  ]
+  for (const [label, reviewed] of cases) {
+    const verdict = await gate({ task: { id: 't-noat', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed } })
+    assert.equal(verdict.ok, true, `★★ ${label} ⇒ 不判不可能（定向突变 h ⇒ 本臂红）`)
+    assert.equal(verdict.blockedKind, undefined, `★ 而不许给它盖上"不可能"的记号（${label}）`)
+  }
+})
+
+test('★★ 臂 13：`at` **不是有限数** ⇒ 不判不可能（"读不出"不得读成"拒绝"）', async () => {
+  /**
+   * ── 五种常见的"读不出" ────────────────────────────────────────────────────────
+   *   少一种，就有一类戳会被静默地判成"不可能"。
+   *   ★ 方向与普查（`scripts/reviewed-stamp-census.mjs`）**不同**：
+   *     普查把它落 `unreadable`（**不是** `plausible`，因为它要回答"这戳真的吗"）；
+   *     而判据这层**不新增拒绝** —— 它只说"我不能据此判不可能"。
+   *     两者不矛盾：一个说"我读不出，别算它可信"，一个说"我读不出，所以不额外拒它"。
+   *
+   * ★ 定向突变 h（把非有限数折成"不可能"）⇒ 本臂红。
+   */
+  const cases = [
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['字符串 \'not a number\'', 'not a number'],
+    ['字符串 \'0\'', '0'],
+  ]
+  for (const [label, at] of cases) {
+    const verdict = await gate({ task: { id: 't-nan', createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000, reviewed: completeReviewed({ at }) } })
+    assert.equal(verdict.ok, true, `★★ at 是 ${label} ⇒ **不判不可能**（定向突变 h ⇒ 本臂红）`)
+    assert.equal(verdict.blockedKind, undefined, `★ 而它也不许带"不可能"的记号（${label}）`)
+  }
+})
+
+test('★★★ 臂 14：形状坏 + 一年前的戳 ⇒ 仍然是 `unmeasured`（★ 时间检查在形状检查**之后**）', async () => {
+  /**
+   * ── 为什么顺序要紧 ──────────────────────────────────────────────────────────────
+   *   一份**连读都读不出**的戳，它上面的 `at` 也是读不出的读数 ——
+   *   拿它的 `at` 去宣判"时间不可能"会把**首要**问题（记录坏了）藏起来，
+   *   让补救的人先去改时间戳，而记录本身仍然不可读。
+   *
+   * ★ 而两种结论的补救动作不同：`unmeasured` ⇒ 去**修记录**；`blocked(不可能)` ⇒ 去**重盖**。
+   *
+   * ★ 定向突变 i（把时间检查挪到形状检查**之前**）⇒ 本臂红。
+   */
+  const verdict = await gate({
+    task: {
+      id: 't-broken-old',
+      createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000,
+      reviewed: { at: ONE_YEAR_BEFORE_GATE, by: 'x', checks: 'not-an-array' },
+    },
+  })
+  assert.equal(verdict.ok, false, '★ 拦住')
+  assert.equal(verdict.blockers, undefined, '★★★ 形状坏 + 一年前 ⇒ **仍然是 unmeasured**，不是 blocked（定向突变 i ⇒ 本臂红）')
+  assert.ok(typeof verdict.unmeasured === 'string' && verdict.unmeasured.length > 0, '★★ 它必须如实说"读不到什么"')
+  assert.equal(verdict.blockedKind, undefined, '★ 而"读不出记录"不许带"时间不可能"的记号 —— 那是另一件事')
+
+  /**
+   * ★ 而**反半边**：同一份记录只把 `checks` 修好（`at` 仍是一年前）⇒ 现在它读得出、
+   *   于是时间检查才轮到它 ⇒ `blocked`。这证明两个结论**各归各的**，而不是一个吞掉另一个。
+   */
+  const repaired = await gate({
+    task: {
+      id: 't-repaired',
+      createdAt: PLAN_REVIEWED_GATE_ONLINE_AT + 60_000,
+      reviewed: completeReviewed({ at: ONE_YEAR_BEFORE_GATE }),
+    },
+  })
+  assert.equal(repaired.ok, false, '★ 修好形状之后，一年前的 at 仍然把它挡住')
+  assert.equal(repaired.unmeasured, undefined, '★ 而这一次不是 unmeasured —— 记录读得出了')
+  assert.equal(repaired.blockedKind, 'reviewed-stamp-impossible', '★★ 两个结论各归各的：记录坏了 ⇒ unmeasured；记录读得出而时间不可能 ⇒ blocked')
+})
+

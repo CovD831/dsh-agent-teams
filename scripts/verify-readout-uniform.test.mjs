@@ -79,6 +79,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { registerAgentTeamsTools } from '../lib/tools.js'
 import { registry, gateModuleViews } from '../lib/gates/index.js'
 import { createTeamDir } from '../lib/state.js'
+// ★ ★★★ `reviewed.at` 现在**必须晚于**这道门上线（判据会读它）——
+//   一个 `at: 1`（1970）的占位戳会被判"时间上不可能" ⇒ `blocked`，
+//   于是本文件那些"只想测出口形状"的调用会先被别的理由拒掉。
+//   ★ 取值从 lib 的单一真值推出来，而不是抄一个魔数。
+import { PLAN_REVIEWED_GATE_ONLINE_AT } from '../lib/gates/dispatch/plan-reviewed.js'
+const TRUSTWORTHY_AT = PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000
 // ★ t39：工具的源码面现在是 src/tools.ts + src/tools/**（见该模块的文件头）
 import { toolsSource } from './tools-source.mjs'
 
@@ -336,7 +342,7 @@ const CALLS = {
   contract: (f) => f.call('agent_teams_create_task', {
     subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
     reviewed: {
-      at: 1, by: 'probe',
+      at: TRUSTWORTHY_AT, by: 'probe',
       checks: [
         { id: 'scope', verdict: 'pass' },
         { id: 'prerequisite', verdict: 'pass' },
@@ -371,7 +377,7 @@ const CALLS = {
   dispatch: (f) => f.call('agent_teams_create_task', {
     subject: 'w-dispatch', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
     reviewed: {
-      at: 1, by: 'probe',
+      at: TRUSTWORTHY_AT, by: 'probe',
       checks: [
         { id: 'scope', verdict: 'pass' },
         { id: 'prerequisite', verdict: 'pass' },
@@ -1096,7 +1102,7 @@ test('★ 臂 3b：三态**两两不同形** —— 在同一个位置、同一�
   const c2 = await fixtureC2.call('agent_teams_create_task', {
     subject: 'w-no-changed-paths', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
     reviewed: {
-      at: 1, by: 'probe',
+      at: TRUSTWORTHY_AT, by: 'probe',
       checks: [
         { id: 'scope', verdict: 'pass' },
         { id: 'prerequisite', verdict: 'pass' },

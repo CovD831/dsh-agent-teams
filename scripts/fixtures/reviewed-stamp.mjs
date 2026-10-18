@@ -29,17 +29,28 @@
  *   用的是同一个来源。改判据 ⇒ 这里自动跟上（或编译期就报错）。
  */
 
-import { REVIEW_QUESTION_IDS } from '../../lib/gates/dispatch/plan-reviewed.js'
+import { REVIEW_QUESTION_IDS, PLAN_REVIEWED_GATE_ONLINE_AT } from '../../lib/gates/dispatch/plan-reviewed.js'
 
 /**
  * 一个**五问全 pass** 的 `reviewed` 戳。
  *
  * @param overrides 可选的覆盖（夹具要测"审不过"的情形时用得上）。
  * @returns 直接可传给 `agent_teams_create_task` 的 `reviewed` 参数。
+ *
+ * ★★★ `at` 必须**晚于**这道门上线的时刻（2026-10-19 补）：判据现在会读
+ *   `reviewed.at`，早于门的戳被判"时间上不可能" ⇒ `blocked`。
+ *
+ *   ★ 这里此前写的是 `1_700_000_000_123`（2023-11-14）—— 它自己就是
+ *     `scripts/reviewed-stamp-census.mjs` 数出来的那 95 个不可能戳之一。
+ *     而它一改，**十个套件的 21 条臂同时变红**，读起来像"十个机制同时坏了"，
+ *     实际是"共用夹具盖了一个不可能的戳"。
+ *
+ *   ★ 加 1 天而不是直接用门上线时刻：让这个夹具离边界有一个可读的距离，
+ *     而不是恰好压在 `>=` 的边界上（那种值在边界改动时会静默翻转）。
  */
 export function reviewedStamp(overrides = {}) {
   return {
-    at: 1_700_000_000_123,
+    at: PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000,
     by: 'adversarial',
     checks: REVIEW_QUESTION_IDS.map((questionId) => ({
       id: questionId,
