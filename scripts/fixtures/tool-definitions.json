@@ -308,6 +308,10 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "executionPrompt": {
+                    "description": "Member-specific execution prompt. It remains editable while staged.",
+                    "type": "string"
+                  },
                   "model": {
                     "type": "string"
                   },

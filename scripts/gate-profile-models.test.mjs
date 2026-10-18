@@ -252,7 +252,7 @@ function pluginFixture(workspace, profiles) {
     stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles, fallback: undefined,
   })
   const call = (name, args) => tools.get(name).execute(args, { agent: captain, signal: new AbortController().signal })
-  return { call }
+  return { call, tools }
 }
 
 test('臂 5 ★ 接线臂：profile 默认真的走到 **member 记录**上（落盘，不只是内存）', async () => {
@@ -354,5 +354,118 @@ test('臂 7b ★：成员级 `provider` 无 `model` 仍然被拒（默认不得�
     () => membersOf({ model: 'gpt-5-codex', members: [{ name: 'a', provider: 'anthropic' }] }),
     /provider without model/,
     '★ 成员写了 provider 却没写 model ⇒ 仍然拒绝，不许被 profile 默认悄悄补上',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 8（形态通路）：内联 plan 的成员必须能携带 executionPrompt
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★★★ 这条臂钉的是一个**真实发生过**的缺口，不是一条假设的语法检查。
+ *
+ * MEASURED（2026-10-18 夜里，我自己踩的）：队长用 `agent_teams_create({plan})` 建队，
+ * 而 `plan.members` 的 schema **只有 name/role/provider/model/reasoning_effort 五格**
+ * —— `executionPrompt` 被挡在门外。于是经这条路径建出来的队，**唯一能表达的形态**
+ * 就是「扁平成员池 + 队长派活」，也就是这个插件更早的那个形态。
+ *
+ * 而「持久记账点 + 每任务拉一对临时 worker/reviewer」那个形态，只存在于
+ * `mutation-quality` 这类团队**手工写进 profile 的 executionPrompt 文本**里
+ * （`ledger` 与 `foreman` 的 prompt 逐字写着"你拉起临时 subagent 去执行实现/修理任务"）。
+ * ⇒ 形态在语料里、在配置里，却**不在建队的 API 里** ⇒ 新队默认退回早期形态。
+ *
+ * ★ 与之对照：`agent_teams_add_member` **一直**有这一格（`src/tools/members.ts:28`）。
+ *   所以这个缺口的准确描述是「**同一条能力，两条路径里只有一条有**」——
+ *   而 `plan` 路径恰恰是"一次建完整队"的那条，也就是最常用于新队的那条。
+ */
+test('臂 8 ★ 形态通路：内联 plan 的成员能带 executionPrompt，且它真的到得了成员记录', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'plan-prompt-'))
+  cleanups.push(workspace)
+  const { call } = pluginFixture(workspace, {})
+
+  const prompt = 'You delegate: spawn a fresh subagent per implementation and a continuable one per review.'
+  const result = await call('agent_teams_create', {
+    name: 'InlinePromptTeam',
+    approval: 'automatic',
+    plan: {
+      members: [
+        { name: 'ledger', role: 'task-ledger', executionPrompt: prompt },
+        { name: 'plain' },
+      ],
+      tasks: [],
+    },
+  })
+
+  /**
+   * ★ 两条腿都要（与臂 5 同一纪律）：
+   *   ① **返回值**里看得见 —— 调用方当场就知道这个形态被接受了；
+   *   ② **盘上的 member 记录**里有 —— 之后 `memberPersona`（`src/members.ts:606`）
+   *      读的是 member 记录，不是调用参数。只断言 ① 会漏掉"参数进来了但没落盘"。
+   */
+  assert.equal(result.members.find((m) => m.member_name === 'ledger') !== undefined, true)
+  const onDisk = readTeamSync(join(workspace, '.agent-teams'), 'inlinepromptteam').members
+  assert.equal(
+    onDisk.find((m) => m.name === 'ledger').executionPrompt,
+    prompt,
+    '★ 形态必须落盘：memberPersona 读的是这一格',
+  )
+
+  /**
+   * ★ 反向半边：**没写的成员不许被塞进一个空串或别人的 prompt**。
+   *   一个"所有人都拿到同一段 prompt"的实现会让「这是 ledger」与「这是普通实现者」
+   *   在读数上同形 —— 而它们的职责正好相反（一个不许写代码，一个只写代码）。
+   */
+  assert.equal('executionPrompt' in onDisk.find((m) => m.name === 'plain'), false, '★ 没写的成员不许凭空多出这一格')
+
+  /**
+   * ★ 定向突变：把 `src/tools/create.ts` 里 `plan.members` 的 `executionPrompt`
+   *   从 schema 删掉 ⇒ 本臂**第一行 create 就被 schema 拒绝**（`additionalProperties: false`），
+   *   于是这条 test 在 create 处抛错 ⇒ 红。
+   */
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 9（对称臂）：同一条能力，三条建成员的路径必须接受同一组字段
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★★★ 臂 8 钉的是**一个具体实例**，这一条钉的是**那类缺陷**。
+ *
+ * MEASURED：`executionPrompt` 在 `agent_teams_add_member`（`src/tools/members.ts:28`）
+ * 与 profile（`src/profiles.ts:23 MEMBER_KEYS`）里**一直**都有，只在
+ * `agent_teams_create({plan})` 的 schema 里缺席。于是"能不能表达成员人格"
+ * 变成一个**取决于队长选了哪条建队路径**的事实 —— 而三条路径的差别
+ * 在用户眼里只是"一次建完 vs 分几次建"。
+ *
+ * ⇒ 这条臂按**源码**比较三份字段清单，而不是逐个字段手抄。
+ *   手抄清单只能证明"我今天记得查这三个"，证明不了"以后不会再分叉"。
+ *
+ * ★ 定向突变：从 `src/tools/create.ts` 的 plan.members 里删掉任一字段 ⇒ 本臂红。
+ */
+test('臂 9 ★ 对称臂：plan.members / add_member / profile 三条路径的成员字段必须同源', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'parity-'))
+  cleanups.push(workspace)
+  const { tools } = pluginFixture(workspace, {})
+
+  /** 三个来源各自"成员能带哪些字段"：两个来自工具 schema，一个来自 profile 归一化。 */
+  const createProps = tools.get('agent_teams_create').parameters.properties
+  const planMemberFields = Object.keys(createProps.plan.properties.members.items.properties).sort()
+  const addMemberFields = Object.keys(
+    tools.get('agent_teams_add_member').parameters.properties,
+  ).sort()
+
+  /**
+   * ★ profile 那一份用**行为**取，不用常量取：`MEMBER_KEYS` 是私有的，
+   *   而"常量和 schema 一致"与"实际接受一样的键"是两件事 —— 后者才是用户看到的。
+   *   这里传一个只有 executionPrompt 的成员，能归一化成功就说明 profile 认这一格。
+   */
+  assert.deepEqual(
+    planMemberFields,
+    addMemberFields,
+    '★ 一次建完与分几次建，成员能带的字段必须是同一组（否则"能不能带人格"取决于走了哪条路）',
+  )
+  assert.doesNotThrow(
+    () => membersOf({ members: [{ name: 'a', executionPrompt: 'delegate' }] }),
+    '★ profile 路径也必须认这一格（三路同源）',
   )
 })
