@@ -25,8 +25,11 @@
  *
  * ── ★★★ 三态（且三者两两不同形）────────────────────────────────────────────────
  *
- *   `ok`          —— 带了 `reviewed`，且**五问里没有一问是 `fail` / `unmeasured`**
+ *   `ok`          —— 带了 `reviewed`，且**五问里没有一问是 `fail` / `unmeasured`**，
+ *                    且戳的 `at` **不早于**这道门上线的时刻（见下面的"第四个问题"）
  *   `blocked`     —— `reviewed` **缺席**（★ 而措辞必须**指名它缺哪一问**）
+ *                    ★ 或者：`ok:false` 的**第二种** —— `at` 早于门上线 ⇒ 时间上不可能
+ *                    （两者都落在 `blockers`，而 `blockedKind` 是分开它们的机械记号）
  *   `unmeasured`  —— `reviewed` **在场而形状坏**（读不出它审了什么）
  *
  * ★★ 为什么"形状坏"是 `unmeasured` 而不是 `blocked`：
@@ -37,6 +40,31 @@
  *
  * ★★ 而 `unmeasured` **绝不并进 `ok`**（全库那条最贵的纪律）：
  *   "我没能把它审明白"与"审过了，没问题"不同形。
+ *
+ * ── ★★★ 第四个问题：这个戳的**时刻**有可能是真的吗？（2026-10-19 补）────────────────
+ *
+ * MEASURED（`node scripts/reviewed-stamp-census.mjs`）：盘上带戳任务 **151**，
+ *   其中 **95** 条的 `reviewed.at` 早于这道门上线的时刻，而那 95 条的任务**全部晚于**
+ *   这道门（合法的"老任务当然没有戳"一条都没有）
+ *   ⇒ 这不是"老数据没清"，是**新任务带着一份比机制更老的戳**。
+ *
+ * ★★ 而本判据此前只读 `checks` 的形状、五问是否齐全、有没有 fail/unmeasured ——
+ *   `at` 被**原样抄进读数**却从不与任何东西比较 ⇒ 一份"五问齐全、why 写得很漂亮、
+ *   `at` 指向一年前"的戳能**一路通过**。门问的是「五问都答了吗」，
+ *   而**不是**「这份记录有可能是真的吗」。
+ *
+ *   `reviewed.at <  PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ ★ **不可能**（可判定的事实）
+ *   `reviewed.at >= PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 可能 ⇒ 走原来的通过路径
+ *   `at` 缺席 / 不是有限数                        ⇒ ★ **不判不可能**（原样不动）
+ *
+ * ★ 为什么"早于门"不可能：`reviewed` 是**先审后建**（`create_task` 的输入参数），
+ *   而"派发前必须审过"这条路在门上线那一刻之前**还不存在** ⇒ 一条早于它存在的戳
+ *   不可能是这条路审出来的，它是**从别处带来的**。
+ * ★ 而**不是** `at < createdAt`：那才是正常形态（先审、再建）——
+ *   拿它当异常会把这条路由的设计本身判成违规。
+ *
+ * ★★ 为什么落 `blocked` 而不是 `unmeasured`：`docs/GATE-REGISTRY.md` 规则一
+ *   ——「可判定的事实」不得写成「没能测量」。两个数一比就出结论。
  *
  * ── ★ 它是**纯数据变换**（契约硬要求）────────────────────────────────────────────
  *
@@ -71,7 +99,9 @@ export const point = 'dispatch'
 export const description =
   '★ 派发前：这份计划**审过了吗**？—— 带 `reviewed` 且五问无 fail/unmeasured ⇒ 放行；'
   + '不带 ⇒ 拦住（★ 而"不带"是正常状态，不是错误：它是"这条路没走自动生成"）；'
-  + '带了而形状坏 ⇒ 读不出它审了什么 ⇒ unmeasured（★ 绝不并进通过）。'
+  + '带了而形状坏 ⇒ 读不出它审了什么 ⇒ unmeasured（★ 绝不并进通过）；'
+  + '带了的戳还必须是**时间上可能**的：`reviewed.at` 早于本判据上线的时刻 ⇒ 不可能（可判定的事实，'
+  + '落拦住而不是"没能测量"）；`at` 缺席或不是有限数 ⇒ 不判不可能（行为原样不动）。'
 
 /**
  * 输入面声明：本判据只读契约上的 `task.reviewed` 这一格。
@@ -94,6 +124,17 @@ export interface PlanReviewedContext {
      */
     createdAt?: unknown
     reviewed?: {
+      /**
+       * ★★★ 【戳的时刻】—— 而它决定"这份记录有可能是真的吗"（见文件头的第四个问题）。
+       *
+       *   `at <  PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 不可能 ⇒ `blocked`（可判定的事实）
+       *   `at >= PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 可能   ⇒ 走原来的通过路径
+       *   缺席 / 不是有限数                    ⇒ ★ 不判不可能（行为原样不动）
+       *
+       * ★ 它与 `createdAt` 的方向**相反**：`createdAt` 早于门 ⇒ 不适用（偏宽）；
+       *   而 `at` 早于门 ⇒ 不可能（偏严）。理由：前者是"这条路当时还不存在"，
+       *   后者是"这条路当时还不存在，所以它不可能盖出这个戳"。
+       */
       at?: unknown
       by?: unknown
       checks?: unknown
@@ -171,6 +212,12 @@ const VERDICT_UNMEASURED = 'unmeasured'
  *   `Task.createdAt` 由 `team.json` 写（墙钟），而本常量来自 git 的提交时刻（另一个墙钟）
  *   ⇒ 边界附近可能误判 ⇒ ★ **宁可偏宽**（不确定时落 `unmeasured`，而不是 `blocked`）——
  *     而那与三态纪律一致：「没能测量」不得读成「拒绝」。
+ *
+ * ★★★ 2026-10-19：它现在被**两个方向**使用，而两个方向**故意相反**：
+ *   · `Task.createdAt <= 本常量` ⇒ 存量 ⇒ `appliesTo` 假（偏宽：不开口）
+ *   · `reviewed.at <  本常量` ⇒ 时间上不可能 ⇒ `gate` 拦住（偏严：可判定的事实）
+ *   ⇒ 不是同一个比较抄了两遍：前者问"这条路在它建的时候存不存在"，
+ *     后者问"这条路有可能盖出这个戳吗"。两问共用一个**历史事实**，所以共用一处常量。
  */
 export const PLAN_REVIEWED_GATE_ONLINE_AT = Date.parse('2026-10-09T09:33:50+08:00')
 
@@ -187,6 +234,57 @@ function predatesThisGate(task: { createdAt?: unknown } | undefined | null): boo
   const createdAt = task?.createdAt
   if (typeof createdAt !== 'number' || !Number.isFinite(createdAt)) return true
   return createdAt <= PLAN_REVIEWED_GATE_ONLINE_AT
+}
+
+/**
+ * 一个时刻的 UTC/ISO 渲染。
+ *
+ * ★ 带参数的构造是**纯换算**：给一个已知毫秒数 → 一个固定字符串，它不读墙钟。
+ *   本文件那条"不读时钟"的臂 ban 的是**零参**的构造，以及两个直接读墙钟的入口
+ *   ——它们让同一次输入两次跑出不同裁决。把一个**已知**毫秒数渲染成人读形式不会。
+ *   ★ 注：本段注释**不写那几个字面**，因为那条臂是拿正则扫源码文本的
+ *     （扫到的第一版就是被自己的注释打红的 —— 记在此处当路标）。
+ */
+function isoInstant(instant: number): string {
+  return new Date(instant).toISOString()
+}
+
+/**
+ * ── ★★★ 一份戳的**时刻**有可能来自这条路由吗？（2026-10-19）────────────────────────
+ *
+ * 返回 `undefined` ⇒ **不判不可能**：可能（`at >= 上线时刻`），**或**读不出
+ * （缺席 / 不是有限数）。两种都走今天原来的那条路 —— 这不是"漏判"，是**故意不动**：
+ *   · `at` 缺席是"这一格没写完"，而它与"这一格写着一年前"是**不同的事**，
+ *     前者该由补齐记录解决，后者是记录不可能成立；
+ *   · `at` 不是有限数 ⇒ 读不出 ⇒ 按本仓那条纪律（「没能测量」不得读成「拒绝」），
+ *     不许把它折成不可能。
+ *
+ * ★★ 而**不是** `at < task.createdAt`：`reviewed` 是 `create_task` 的输入参数，
+ *   审查先发生、盖章、然后才建任务 ⇒ 戳早于任务创建是**这条路的设计**。
+ *   拿 `< createdAt` 当异常会把正常形态判成违规（第一版就这么判反过，记在此处当路标）。
+ *
+ * ★ 方向（已定，不再讨论）：
+ *   `at <  PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 不可能（早于这条路由存在）
+ *   `at >= PLAN_REVIEWED_GATE_ONLINE_AT` ⇒ 可能（原来的通过路径）
+ */
+function stampImpossibility(at: unknown): string | undefined {
+  if (typeof at !== 'number' || !Number.isFinite(at)) return undefined
+  if (at >= PLAN_REVIEWED_GATE_ONLINE_AT) return undefined
+  const delta = PLAN_REVIEWED_GATE_ONLINE_AT - at
+  const days = (delta / 86_400_000).toFixed(2)
+  /**
+   * ★★★ 措辞必须**指名两个时刻与差值**（契约硬要求）。
+   *   一句"这个戳不可能"与"我不知道它为什么不可能"同形 ——
+   *   而读的人要判断"这份记录是不是从别处带来的"，需要知道的正是**差多远**。
+   */
+  return `the \`reviewed\` stamp is timestamped ${isoInstant(at)}, which is ${days} days and ${delta} ms `
+    + `EARLIER than the moment this gate went online (${isoInstant(PLAN_REVIEWED_GATE_ONLINE_AT)}). `
+    + '★ A stamp older than the route that could have produced it cannot have come from that route: '
+    + 'the "review before dispatch" path did not exist yet, so this stamp was brought in from elsewhere. '
+    + '★ This is a decidable fact about the record (two instants compared), not a failure to measure — '
+    + 'so it stops dispatch instead of reading as `unmeasured`. '
+    + '★ The fix is to re-stamp it against the artefacts it actually reviewed; rewriting `at` to a later '
+    + 'instant would be forgery, and re-running the whole review is not the same thing.'
 }
 
 /**
@@ -235,7 +333,7 @@ function readReviewed(reviewed: unknown): { kind: 'absent' } | { kind: 'shaped-w
  * ★★ 而 `blocked` 那一支的措辞必须**指名它缺哪一问**（契约硬要求）——
  *   一句"你该审了"与"我不知道你缺什么"同形，而补救的人需要知道的正是**缺哪一问**。
  */
-export function gate(ctx: PlanReviewedContext): { ok: true; reviewedReadout: Record<string, unknown> } | { ok: false; blockers: string[] } | { ok: false; unmeasured: string } {
+export function gate(ctx: PlanReviewedContext): { ok: true; reviewedReadout: Record<string, unknown> } | { ok: false; blockers: string[]; blockedKind?: string } | { ok: false; unmeasured: string } {
   const read = readReviewed(ctx?.task?.reviewed)
 
   /** ── 第三态：在场而形状坏 ⇒ `unmeasured`（读不出它审了什么）──────────────────── */
@@ -330,6 +428,30 @@ export function gate(ctx: PlanReviewedContext): { ok: true; reviewedReadout: Rec
     return {
       ok: false,
       blockers: failing.map((check) => `the review failed \`${check.id}\`${check.why === undefined ? '' : `: ${check.why}`}`),
+    }
+  }
+
+  /**
+   * ── ★★★ 第四个问题：这份戳的**时刻**有可能是真的吗？（2026-10-19 补）──────────────
+   *
+   * ★ 位置是**故意最后**的：一份戳若已经在"问题答没答全 / 有没有 fail / 有没有
+   *   unmeasured"上出了结论，那一结论才是补救的人第一步要处理的 ——
+   *   而时间不可能是在**表面上完整**的戳上才需要单独说出来的另一件事。
+   *   ★ 这一点由夹具的臂钉住（形状坏 + 一年前 ⇒ 仍然是 `unmeasured`，不是这里的 `blocked`）。
+   *
+   * ★★ 而它落 `blockers`（**不是** `unmeasured`）：两个时刻一比就出结论，它是**可判定的事实**
+   *   —— `docs/GATE-REGISTRY.md` 规则一：「可判定的事实」不得写成「没能测量」。
+   *
+   * ★ 而 `blockedKind` 是"不可能"与"没审"这两个 `ok:false` **不同形**的机械记号：
+   *   两者都落 `blockers`，若不留记号，读端只能靠措辞猜是哪一种 ——
+   *   而它们的补救动作不同（**重盖** vs **去审**）。
+   */
+  const impossibility = stampImpossibility(ctx?.task?.reviewed?.at)
+  if (impossibility !== undefined) {
+    return {
+      ok: false,
+      blockedKind: 'reviewed-stamp-impossible',
+      blockers: [impossibility],
     }
   }
 

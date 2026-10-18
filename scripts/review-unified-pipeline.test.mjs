@@ -56,6 +56,10 @@ import { fileURLToPath } from 'node:url'
 import { recursionFreeEnv, NESTED_TEST_RECURSION_KEYS } from './fixtures/nested-test-env.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+// ★ `reviewed.at` 必须是**可信**的时刻（门上线之后）：判据现在读它，
+//   早于门的戳被判"时间上不可能" ⇒ 本文件的对照臂会被别的理由拒掉。
+import { PLAN_REVIEWED_GATE_ONLINE_AT } from '../lib/gates/dispatch/plan-reviewed.js'
+const TRUSTWORTHY_AT = PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000
 const LIB = join(ROOT, 'lib')
 
 /** 读一个源码文件；读不到 ⇒ `undefined`（调用方据此报 unmeasured，而不是猜）。 */
@@ -287,9 +291,9 @@ test('★★ P2/t11·acc1/acc2/acc3：三态校验 —— 缺席过 / 形状坏�
     try { return validateCreateTask(team, input) } catch (error) { return { ok: false, error: `THREW: ${String(error?.message ?? error)}` } }
   }
   const absent = run({ subject: 's', kind: 'work' })
-  const legal = run({ subject: 's', kind: 'work', reviewed: { at: 1, by: 'reviewer', checks: [{ id: 'scope', verdict: 'pass' }] } })
+  const legal = run({ subject: 's', kind: 'work', reviewed: { at: TRUSTWORTHY_AT, by: 'reviewer', checks: [{ id: 'scope', verdict: 'pass' }] } })
   const wrongShape = run({ subject: 's', kind: 'work', reviewed: 'not-an-object' })
-  const wrongChecks = run({ subject: 's', kind: 'work', reviewed: { at: 1, by: 'r', checks: 'no' } })
+  const wrongChecks = run({ subject: 's', kind: 'work', reviewed: { at: TRUSTWORTHY_AT, by: 'r', checks: 'no' } })
   console.log(`  [t6] 缺席 ⇒ ok=${absent.ok} · 合法 ⇒ ok=${legal.ok} · 形状坏 ⇒ ok=${wrongShape.ok} · checks坏 ⇒ ok=${wrongChecks.ok}`)
 
   /** acc1：不带 `reviewed` 照常成功（它不许变成必填）。 */
@@ -473,7 +477,7 @@ test('★★ P4/P2b·t8·acc1/acc2/acc4：判据本体三态不同形 + 对照�
     return
   }
   const all = ['scope', ...missing]
-  const legal = await evaluate({ ...base, reviewed: { at: 1, by: 'reviewer', checks: all.map((id) => ({ id, verdict: 'pass' })) } })
+  const legal = await evaluate({ ...base, reviewed: { at: TRUSTWORTHY_AT, by: 'reviewer', checks: all.map((id) => ({ id, verdict: 'pass' })) } })
   console.log(`  [t6] 对照臂：五问齐（${all.join(', ')}）⇒ verdict=${legal.gate?.verdict} · blockers=${legal.blockers.length}`)
   assert.equal(legal.blockers.length, 0, '★★ acc2（对照臂）：合法输入必须过 —— 否则它是一条恒拒的判据')
 

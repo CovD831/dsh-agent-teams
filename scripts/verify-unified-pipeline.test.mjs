@@ -37,6 +37,11 @@ import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// ★ `reviewed.at` 现在被判据读：早于门上线的戳 ⇒ "时间上不可能" ⇒ blocked。
+//   ★ 取值从 lib 的单一真值推出来（不抄魔数）。
+import { PLAN_REVIEWED_GATE_ONLINE_AT } from '../lib/gates/dispatch/plan-reviewed.js'
+const TRUSTWORTHY_AT = PLAN_REVIEWED_GATE_ONLINE_AT + 86_400_000
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const LIB = join(ROOT, 'lib')
 
@@ -436,8 +441,16 @@ test('★ 臂 4b（P2 · 判据真的读它）：五问齐 ⇒ 放行；缺一�
    */
   const NEW_TASK_CREATED_AT = Date.now() + 86_400_000
   const base = { id: 'probe-t5-reviewed', kind: 'implementation', inScope: ['src/x.ts'], acceptance: ['a'], verify: ['pnpm typecheck'], createdAt: NEW_TASK_CREATED_AT }
+  /**
+   * ★ ★★★ `at` 必须是**可信**的时刻（门上线之后）—— 判据现在读 `reviewed.at`。
+   *   ★ 本臂此前写 `at: 1`（1970），而它此前能过，**只是因为**时间检查排在
+   *     形状/五问检查之后：一个"缺一问"的戳先被五问那条拦住，于是 `partial > 0`
+   *     成立、`full = 0` 也成立 —— 两条断言都"对"，但对的理由不是它要测的那个。
+   *     一旦时间检查挪到前面（臂 14 专门抓的突变），这里就会变成两条都 > 0。
+   *   ⇒ 用可信时刻，让本臂测的确实是"五问齐不齐"。
+   */
   const stamp = (ids, verdictFor = () => 'pass') => ({
-    at: 1, by: 'probe', checks: ids.map((id) => ({ id, verdict: verdictFor(id) })),
+    at: TRUSTWORTHY_AT, by: 'probe', checks: ids.map((id) => ({ id, verdict: verdictFor(id) })),
   })
   /**
    * ★★ 五个问题名**从判据自己的拒绝措辞里读**（那一次拒绝会点名缺了哪几个）——
