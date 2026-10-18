@@ -161,3 +161,59 @@ t4  commandsRun 自相矛盾      ~:800 schema
 
 ★ 三者都需要一个**能判断"合入了没有"**的读数；而那个读数已经存在于
 `src/worktree.ts:1170` 的 `absorbed` 三元组里 —— 它今天只用于"能不能删"，没有被用于"派活前检查"。
+
+---
+
+## 补充（2026-10-19 05:15，过夜运行实测）
+
+### 第二个面：建过的树**永远不会重新对齐**
+
+`src/worktree.ts:224-232`（`createTaskWorktree`）：
+
+```ts
+// 已经建过 ⇒ 复用（重试一个任务的同一个 attempt 不该炸）
+if (existsSync(join(path, '.git'))) {
+  const base = tryGit(path, ['rev-parse', 'HEAD'])
+  return { ok: true, path, base: base.ok ? base.value.trim() : support.base, ... }
+}
+```
+
+⇒ **一次建树，永不再对齐。** 重派任务时 `git worktree add` 那一步被跳过，
+树的 HEAD 还是**第一次建树时**那个 sha。它的 mtime 会变（复用路径也写文件），
+所以「mtime 比某个提交晚」**不能**证明树含那个提交 —— 这一格骗过了一次排查。
+
+### 实测
+
+| 任务 | 树 HEAD | 建树时刻 | 主干当时 HEAD |
+|---|---|---|---|
+| t1 | `e1ef3b7` | 04:52:10 | 已是 `48d3418`+ |
+| t2 | `e1ef3b7` | 04:10:56 | `e1ef3b7`（当时对） |
+
+⇒ t1 的树**晚于** `c01fdb4`(04:49:31) 被建，却停在 `e1ef3b7`(04:04:37)：
+因为复用路径直接返回旧 HEAD。两个成员各自独立探测到这一点并拒开工 ——
+这个拦截是对的。
+
+### 实害（成员实测，比"树旧了"严重得多）
+
+`git log --oneline e1ef3b7..HEAD -- <t2 七个 inScope 路径>` 只返回 `9720ca9`，
+而它改的正是 t2 inScope 里的 `src/tools/update-task.ts` 与 `lib/tools/update-task.js`：
+
+- 陈旧基 `grep -c liveAgentOf src/tools/update-task.ts` = **0**
+- 主干同文件 = **3**；`git diff --stat e1ef3b7 HEAD -- lib/tools/update-task.js` ⇒ `7 insertions(+), 16 deletions(-)`
+
+⇒ worker 按 inScope 整文件写那个文件，会**静默回退**
+「inactive context 不该读成回合失败」的修复。两个成员都因此拒派 worker。
+
+### 今晚的绕行（队长执行）
+
+两棵树 `git status --porcelain -uall` 均为 0 行后，逐树
+`git checkout --detach $(git rev-parse HEAD)`，核 `merge-base --is-ancestor`
+对 `c01fdb4`、`9720ca9` 均为 YES。⇒ 树在 `0e2fadb` 上，含全部上游改动。
+
+### 应当的修法（没做，需人拍板）
+
+复用分支必须判「树的 HEAD 是不是当前 base 的祖先」，不是就**重建**或
+**FF 到当前 base**。难点是脏树：worker 可能正有未提交改动，
+静默 FF 会盖掉它们 —— 所以三态：`clean-and-behind` ⇒ FF；
+`dirty` ⇒ 拒绝派发并报「树脏、基底落后」；`already-current` ⇒ 直接用。
+把它写成三态而不是一个 `if`，正是本仓反复记过的那条教训。
