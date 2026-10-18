@@ -1352,7 +1352,36 @@ export const AGENT_ENUMERATION_UNAVAILABLE = 'the host exposes no live-session e
  * @returns 三态：读了（可能为空）/ 读不到。
  */
 export function liveSessionRefs(ctx: Context): SubagentProjection {
-  const registry = (ctx as unknown as { agents?: { list?: () => readonly unknown[] } }).agents
+  /**
+   * ── ★★★ 这一次读**必须在 try 里面**（2026-10-19，又一次实测之后）───────────
+   *
+   * MEASURED：`ctx.agents` 这个**属性读取本身**就会抛 —— 不是只有它的 `.get()` 会抛。
+   *   机制在 cordis（`node_modules/@deepseek-ai/cordis/lib/index.js:684-690`）：
+   *   取值器的 proxy trap 沿 fiber 树往上找 `fiber.store[prop]`，找不到时若
+   *   `prop in fiber.inject` ⇒ 当场抛出 `cannot get required service "${prop}"
+   *   in inactive context`，**不再往上找**。本插件在顶层 inject 里声明了 `agents`
+   *   （`src/index.ts:56`）⇒ 任何一棵**已经不在运行**的 fiber 上读 `ctx.agents`
+   *   都会抛，与读哪一个键无关。
+   *
+   * ★ 所以原来把 `const registry = ctx.agents` 放在 try **外面**，等于把一个必然
+   *   会抛的属性访问放在了守卫之外：那个 try 只兜住了 `.list()` 的调用，兜不住
+   *   走到 `.list()` 之前的那一步。⇒ 上一轮把七处 `ctx.agents.get(...)` 收进
+   *   `liveAgentOf` 之后，**这一处成了新的裸奔点**，而它在工具的事件路径上
+   *   （`liveRefsOf` → `scheduler.kickTeam` / `update_task` 的尾巴 / `status`）。
+   *
+   * ★ 三态不变：读不到仍是 `could-not-measure`，绝不圆成 `observed: []`
+   *   （那会让面板永远显示"没有子代理"，与"真的没有"同形 —— 验收第 3 条钉的就是它）。
+   * ★ 其余异常照旧往上抛（`inactive context` 之外的错误不该被这里吞掉）。
+   */
+  let registry: { list?: () => readonly unknown[] } | undefined
+  try {
+    registry = (ctx as unknown as { agents?: { list?: () => readonly unknown[] } }).agents
+  }
+  catch (error: unknown) {
+    const message = String((error as { message?: unknown })?.message ?? error)
+    if (!message.includes('inactive context')) throw error
+    return { status: 'could-not-measure', reason: AGENT_ENUMERATION_UNAVAILABLE }
+  }
   /**
    * ★★ 这一支是本任务的三态要害：**枚举入口不在** ⇒ `could-not-measure`。
    *   圆成 `{ status: 'observed', subagents: [] }` 会让面板**永远**显示"没有

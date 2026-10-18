@@ -559,6 +559,72 @@ test('★ 臂 15（t27 只读臂）：投影**只读** —— 一个碰一下就
     '★ 反向半边：桩必须真的会抛，否则"没碰到"是恒真的')
 })
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 臂 16（2026-10-19）：`ctx.agents` 的**属性读取本身**会抛，不是只有
+ *    `.get()` 会抛 —— 三态必须仍是"读不到"，不许因此把一个工具调用判成失败
+ *
+ * ── 这一格是怎么被发现的 ────────────────────────────────────────────────────────
+ *
+ * 上一轮把七处 `ctx.agents.get(...)` 收进 `liveAgentOf`（它只对这种 message 降级）
+ * 之后，成员回合仍在以 `cannot get required service "agents" in inactive context`
+ * 结束。追到最后一处：`liveSessionRefs` 里的
+ *
+ *     const registry = (ctx as ...).agents      ← 在 try **外面**
+ *
+ * 那个 try 只兜住了 `registry.list()` 的**调用**，兜不住走到它之前的**属性读取**。
+ * 机制在 cordis 的 proxy trap（`lib/index.js:684-690`）：沿 fiber 树找
+ * `fiber.store[prop]`，找不到时若 `prop in fiber.inject` ⇒ 当场抛，不再往上找。
+ * 本插件在顶层 inject 里声明了 `agents`（`src/index.ts:56`）⇒ **任何一棵已经不在
+ * 运行的 fiber 上读 `ctx.agents` 都会抛**，与读哪个键无关。
+ *
+ * ── 三条臂 ─────────────────────────────────────────────────────────────────────
+ *
+ *   臂 16a  属性读取抛 `inactive context` ⇒ `could-not-measure`，**不抛**
+ *   臂 16b  ★ 反向半边：抛的是**别的**错误 ⇒ 照旧往上抛（不许把"记录逻辑坏了"
+ *           也读成"读不到会话" —— 那正是上一轮我自己写进 liveAgentOf 的那条纪律）
+ *   臂 16c  ★ 恒真对照：同一个 ctx 形状、把属性换成一个**不抛**的 ⇒ `observed`
+ *           （证明 16a 的 could-not-measure 来自那次抛出，不是夹具天生就那样）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★ 臂 16a：`ctx.agents` 的属性读取抛 inactive context ⇒ could-not-measure，不抛出去', () => {
+  /**
+   * ★ 用一个 getter 模拟 cordis 的 proxy trap：读 `agents` 这**一格**时就抛，
+   *   而对象本身是可读的（否则 `ctx.agents.get` 那一支会先炸，测的就不是这一格）。
+   */
+  const ctx = {
+    get agents() {
+      const error = new Error('cannot get required service "agents" in inactive context')
+      throw error
+    },
+  }
+  const projection = liveSessionRefs(ctx)
+  assert.equal(projection.status, 'could-not-measure',
+    '★ 读不到枚举入口必须是"没能测量"，不许圆成 observed: []（那与"真的没有"同形）')
+  assert.equal(typeof projection.reason, 'string')
+  assert.ok(projection.reason.length > 0, '★ 读不到时必须有成因，否则这一格无法事后诊断')
+})
+
+test('★ 臂 16b（反向半边）：抛的是**别的**错误 ⇒ 照旧往上抛，不许一起降级', () => {
+  const ctx = {
+    get agents() {
+      throw new Error('some genuinely broken invariant')
+    },
+  }
+  assert.throws(() => liveSessionRefs(ctx), /genuinely broken invariant/,
+    '★ 只有 inactive context 能被降级；否则"记录逻辑自己坏了"会被读成"读不到会话"')
+})
+
+test('★ 臂 16c（恒真对照）：同一个形状但属性不抛 ⇒ observed（证明 16a 的降级来自那次抛出）', () => {
+  const ctx = {
+    agents: { list: () => [liveSession('s1')] },
+  }
+  const projection = liveSessionRefs(ctx)
+  assert.equal(projection.status, 'observed',
+    '★ 若这一臂也给 could-not-measure，则 16a 通过是因为夹具天生如此，什么都没测到')
+  assert.equal(projection.subagents.length, 1)
+})
+
+
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * ── ★★★ t28（R2）：第一屏是**成员中心**的 ──────────────────────────────────────
