@@ -77,6 +77,7 @@ import {
   steerCaptainReport,
   validateMemberLlmSelections,
   type MemberRuntimeConfig,
+  type MemberSelectionRuntime,
 } from './members.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
 import { collectCompletedDependencyOutputs, formatDependencyOutputs, installTeamScheduler } from './scheduler.ts'
@@ -97,7 +98,7 @@ import { register as register_delivery } from './tools/delivery.ts'
 import { register as register_resume } from './tools/resume.ts'
 import { register as register_delete } from './tools/delete.ts'
 import { register as register_restart } from './tools/restart.ts'
-import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf } from './tools/shared/entities.ts'
+import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, makeTask, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf } from './tools/shared/entities.ts'
 // ── ★ t39：对外接口不变 ─────────────────────────────────────────────────────
 // 这两个类型此前【声明在 tools.ts 里】，外部（src/index.ts）从这里 import。
 // 拆分之后它们的家在 tools/shared/entities.ts —— 而【对外接口不许变】，
@@ -1867,9 +1868,6 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       void evaluateRuntimeGates(ctx, 'member-dispatched', event, clock)
     },
   })
-  const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
-    scheduler.kickMember(workspace, teamId, memberName)
-  ))
 
   async function dispatchMember(captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string): Promise<boolean> {
     const root = stateRootOf(workspaceOf(captain), config)
@@ -1901,7 +1899,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         const selection = await resolveMemberLlmSelection(ctx, captain, {
           provider: member.provider, model: member.model, reasoningEffort: member.reasoningEffort, fallback: member.fallback,
         }, signal)
-        await spawnMember(ctx, memberRuntime(config), memberSelections, selection, captain, team, member, config.stateDir, signal, text)
+        await spawnMember(ctx, memberRuntime(config), deferredSelections, selection, captain, team, member, config.stateDir, signal, text)
         orphan = { ...member }
         delete member.spawnError
         await writeTeam(root, team)
@@ -2032,19 +2030,24 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           const subject = mutation.subject.trim()
           if (subject === '') throw new Error('task subject must not be empty')
           fresh.taskSeq += 1
-          const now = Date.now()
-          fresh.tasks.push({
+          /**
+           * ★ t117：构造走**唯一的** `makeTask`（`tools/shared/entities.ts`）。
+           *
+           * ★★ `kind: 'work'` 是**硬编码**的，与改造前逐字一致 —— 本步是纯重构，
+           *   不改行为。★ 但它是本路径的一处**结构性限制**：
+           *   `StagedPlanMutation` 的 `add_task` 没有 `kind` 格，所以经 `edit_plan`
+           *   加进来的任务**永远不是** quality kind，也就永远不需要质量契约。
+           *   这不是本次要修的（见 t117 的下一步），但**必须写下来**，
+           *   否则下一个人会以为"统一构造函数"已经把这条路接进质量闸门了。
+           */
+          fresh.tasks.push(makeTask({
             id: `t${fresh.taskSeq}`,
             subject,
             description: trimmedOptional(mutation.description),
-            status: 'pending',
             assignee: trimmedOptional(mutation.assignee),
             dependencies: [...new Set(mutation.dependencies.map((item) => item.trim()).filter(Boolean))],
-            attempt: 0,
             kind: 'work',
-            createdAt: now,
-            updatedAt: now,
-          })
+          }))
         } else if (mutation.action === 'remove_task') {
           const task = requireTask(fresh, mutation.taskId)
           const dependent = fresh.tasks.find((candidate) => candidate.dependencies.includes(task.id))
@@ -2248,29 +2251,37 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     return { teamId: discarded.teamId }
   }
 
+  /**
+   * ── ★★★ 装配顺序：成员 **hydration 必须在所有工具注册之后** ──────────────────────
+   *
+   * `installMemberSelectionRuntime` 会在安装时就把**已经活着的**成员补一遍 setup
+   * （冷恢复/热重载路径），而那份 setup 会 `childCtx.tools.restrict(savedFilter)`
+   * —— deny 里点名的是本插件自己的队长专用工具。工具还没注册就 restrict，
+   * 宿主会把它当"未知全局工具"拒绝，于是热重载后成员恢复直接报错。
+   * ⇒ 顺序必须是：注册完全部 `agent_teams_*` → 再让 selection runtime 上线。
+   *
+   * ★ 但 `register_create` / `dispatchMember` 在**注册期**就需要这个对象。
+   *   ⇒ 用一个**延迟门面**：注册期拿到的是转发对象，调用发生在运行期，
+   *     那时真正的 runtime 已经装好（同一次同步调用内完成）。
+   */
+  let installedSelections: MemberSelectionRuntime | undefined
+  const deferredSelections: MemberSelectionRuntime = {
+    isPendingMember: agent => installedSelections?.isPendingMember(agent) ?? false,
+    withPending: (parentSessionId, label, selection, operation, setup) => {
+      const runtime = installedSelections
+      if (runtime === undefined) throw new Error('agent-teams: member selection runtime is not installed')
+      return runtime.withPending(parentSessionId, label, selection, operation, setup)
+    },
+  }
+
   const runtime: AgentTeamsRuntime = {
-    isPendingMember: memberSelections.isPendingMember,
+    isPendingMember: deferredSelections.isPendingMember,
     updateStagedPlan,
     updateStagedPlanBatch,
     approveStagedTeam,
     continueStagedPlanning,
     discardStagedTeam,
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   /**
    * ── t39：16 个工具各自注册（一个工具一个文件）────────────────────────────
@@ -2280,7 +2291,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
    *   顺序与原 tools.ts 里 `ctx.tools.register(...)` 的书写顺序【逐条一致】。
    * ★ 共享实体由这里注入，而不是让子模块 import 本文件 —— 否则会成环。
    */
-  register_create(ctx, memberSelections, scheduler, config)
+  register_create(ctx, deferredSelections, scheduler, config)
   register_edit_plan(ctx, scheduler, updatePlanBatchTraced, config)
   register_approve(ctx, approveStagedTeam, runtime, config)
   register_members(ctx, scheduler, config)
@@ -2295,6 +2306,10 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   register_resume(ctx, scheduler, config)
   register_delete(ctx, config)
   register_restart(ctx, config)
+  // Live-member hydration validates saved filters against registered tools.
+  installedSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
+    scheduler.kickMember(workspace, teamId, memberName)
+  ))
   return runtime
 }
 

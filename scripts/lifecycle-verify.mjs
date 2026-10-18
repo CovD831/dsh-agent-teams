@@ -229,6 +229,7 @@ const ctx = {
     return () => listeners.set(name, current.filter(candidate => candidate !== listener))
   },
   agents: {
+    list: () => [],
     get(id) {
       return liveAgents.get(id)
     },

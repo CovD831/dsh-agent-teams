@@ -271,7 +271,7 @@ async function statusFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -438,7 +438,7 @@ async function rejectionFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -872,7 +872,7 @@ test('★ 臂 16（★ schema 对齐臂）：`status` 的 deployment schema 必�
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })

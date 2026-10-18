@@ -250,7 +250,7 @@ test('★★★ 臂 5（真入口臂）：三条检查在 `create_task` 上真�
         getProvider() { return undefined }, list() { return [] },
         sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
       },
-      agents: { get() { return undefined } },
+      agents: { list: () => [], get() { return undefined } },
       on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
     }, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
 

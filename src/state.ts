@@ -1216,6 +1216,26 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+/** Whether a value is a tool-name list: a real array of real strings. */
+function isToolNameList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(name => typeof name === 'string')
+}
+
+/**
+ * Validate one persisted `MemberToolFilter` ({@link MemberToolFilter}).
+ *
+ * `deny` is mandatory (the captain-only deny list is always part of it);
+ * `allow` is optional but, when present, must be a tool-name list. Kept next
+ * to {@link isTeamMember} because it is a durable-record shape, not a policy.
+ */
+function isMemberToolFilter(value: unknown): value is { allow?: string[]; deny: string[] } {
+  if (!isRecord(value)) return false
+  const allow = value['allow']
+  const deny = value['deny']
+  if (allow !== undefined && !isToolNameList(allow)) return false
+  return isToolNameList(deny)
+}
+
 /** Validate one member record at the durable JSON boundary. */
 function isTeamMember(value: unknown): value is TeamMember {
   if (!isRecord(value)) return false
@@ -1233,6 +1253,14 @@ function isTeamMember(value: unknown): value is TeamMember {
     && (value['executionPrompt'] === undefined || typeof value['executionPrompt'] === 'string')
     && (value['fallback'] === undefined || (isRecord(value['fallback']) && typeof value['fallback']['provider'] === 'string' && typeof value['fallback']['model'] === 'string'))
     && (value['fallbackActive'] === undefined || typeof value['fallbackActive'] === 'boolean')
+    /**
+     * ★ managed activation 宿主上成员的限制与角色存在这里（descriptor 不再记录它们）。
+     *   校验口径与 `MemberToolFilter` 一致：`deny` 必填且是字符串数组，
+     *   `allow` 可选、出现时也必须是字符串数组 —— 否则读回来会被当成非法成员记录。
+     */
+    && (value['runtimeSetup'] === undefined || (isRecord(value['runtimeSetup'])
+      && typeof value['runtimeSetup']['persona'] === 'string'
+      && isMemberToolFilter(value['runtimeSetup']['toolFilter'])))
     && isFiniteNumber(value['joinedAt'])
     && (value['status'] === 'idle' || value['status'] === 'working' || value['status'] === 'removed')
 }

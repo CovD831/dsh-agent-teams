@@ -1197,7 +1197,7 @@ const ctx = {
     sendMessage: async () => 'msg-0',
     [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
   },
-  agents: { get() { return undefined } },
+  agents: { list: () => [], get() { return undefined } },
   llm: { async resolveCallConfig(c) { return c }, async listModels() { return [] } },
   on() { return () => {} },
   effect(s) { return s() },

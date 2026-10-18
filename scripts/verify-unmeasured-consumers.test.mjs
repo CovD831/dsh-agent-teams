@@ -115,7 +115,7 @@ async function pluginFixture() {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },

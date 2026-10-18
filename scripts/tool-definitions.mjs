@@ -66,7 +66,8 @@ function minimalContext() {
         sendMessage: async () => 'msg-0',
         [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
       },
-      agents: { get() { return undefined } },
+      // Live-agent hydration lists existing agents; the minimal context has none.
+      agents: { list() { return [] }, get() { return undefined } },
       on() { return () => {} },
       effect(scope) { return scope() },
       inject() { return () => {} },

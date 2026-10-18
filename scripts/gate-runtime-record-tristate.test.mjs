@@ -196,7 +196,7 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     tools: { register(tool) { tools.set(tool.name, tool) } },
     subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'm', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'm' },
-    agents: { get() { return undefined } }, on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+    agents: { list: () => [], get() { return undefined } }, on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
   const call = async (name, args) => (await tools.get(name).execute(args, {

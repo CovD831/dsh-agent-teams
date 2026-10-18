@@ -86,7 +86,7 @@ function toolsUnderTest() {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -724,7 +724,7 @@ async function statusFixture() {
    *
    * ── ★★ t46 修订：诱导方式从「驱动不在」改成「驱动在场但会话日志读不出来」 ────
    *
-   * MEASURED（2026-10-14）：这里原来是 `agents: { get: () => undefined }` + 一个
+   * MEASURED（2026-10-14）：这里原来是 `agents: { list: () => [], get: () => undefined }` + 一个
    * 有会话 id 的成员 ⇒ 注入层整份弃权 ⇒ convergence 报 unmeasured。
    * 而那正是**被修掉的缺陷**：一个做完了的成员被宿主卸掉驱动
    * （`drainContinuableChildren` → `dispose`，这条路不发任何事件）之后，
@@ -753,7 +753,7 @@ async function statusFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get: () => ({ id: 'm1', status: 'idle', session: unreadableSession, steer() {} }) },
+    agents: { list: () => [], get: () => ({ id: 'm1', status: 'idle', session: unreadableSession, steer() {} }) },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -917,7 +917,7 @@ async function failureFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })

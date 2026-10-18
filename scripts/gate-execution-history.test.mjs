@@ -67,7 +67,7 @@ async function fixture({ taskOverrides = {} } = {}) {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     llm: { async resolveCallConfig(config) { return config }, async listModels() { return [] } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }

@@ -148,7 +148,7 @@ function pluginFixture(workspace, { teamId = 'team', liveAgents = new Map() } = 
      *   默认空 ⇒ 拿不到观察 ⇒ 判据 unmeasured（这正是本文件要能构造的一种输入）；
      *   需要"观察到了"的臂用 `liveAgents` 登记一个成员 Agent 桩。
      */
-    agents: { get: (id) => liveAgents.get(id) },
+    agents: { list: () => [], get: (id) => liveAgents.get(id) },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -672,7 +672,7 @@ test('★ 接线臂：成员被真的派发时，runtime 判据在调度器那�
   const captain = { id: 'captain-session', status: 'idle', session: { append() {} }, steer() {} }
   const ctx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
+    agents: { list: () => [], get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -731,7 +731,7 @@ test('★ 接线臂（闸门）：投递【失败】的派发不算"派发过" �
   const captain = { id: 'captain-session', status: 'idle', session: { append() {} }, steer() {} }
   const ctx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
+    agents: { list: () => [], get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -1281,7 +1281,7 @@ test('★ t46 臂 C4（定向突变）：把「驱动不在」改回整份弃权
     members: [{ id: 'member-session-1', name: 'worker', status: 'idle', joinedAt: 1 }],
     tasks: T46_DELIVERABLE_TASKS,
   }
-  const fixed = observeMemberConvergence({ agents: { get: () => undefined } }, disposedTeam)
+  const fixed = observeMemberConvergence({ agents: { list: () => [], get: () => undefined } }, disposedTeam)
 
   /** 旧写法的形状：逐字复刻被改掉的那一支。 */
   const legacy = (() => {

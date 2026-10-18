@@ -327,7 +327,7 @@ test('★★ 臂 5：在**真的 edit_plan 工具**上验证 —— 空契约任
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     llm: { async resolveCallConfig(config) { return config }, async listModels() { return [] } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }

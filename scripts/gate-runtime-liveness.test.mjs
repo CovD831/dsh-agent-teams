@@ -498,7 +498,7 @@ test('★ 输入面的第二条纪律：活动观察在【成员上报那一刻�
           return 'msg-0'
         },
       },
-      agents: { get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
+      agents: { list: () => [], get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
       on() { return () => {} },
       effect(setup) { return setup() },
     }
@@ -710,7 +710,7 @@ test('★ V3-2 回归护栏：换代【不重置】等待窗口 —— 静默成
         getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0',
         [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
       },
-      agents: { get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
+      agents: { list: () => [], get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
       on() { return () => {} }, effect(setup) { return setup() },
     }, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, now: () => t })
     const probe = async () => {
@@ -808,7 +808,7 @@ test('★ V3-2 有界继承：窗口的【陈旧界限】必须钉住 —— 已
         getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0',
         [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
       },
-      agents: { get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
+      agents: { list: () => [], get(id) { return id === worker.id ? worker : id === captain.id ? captain : undefined } },
       on() { return () => {} }, effect(setup) { return setup() },
     }, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, now: () => t })
     const call = (name) => tools.get(name).execute({}, { agent: captain, signal: new AbortController().signal })

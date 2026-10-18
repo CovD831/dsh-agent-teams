@@ -1,0 +1,15 @@
+scripts/gate-baseline-known-failures.test.mjs
+scripts/gate-contract-build-artifacts.test.mjs
+scripts/gate-falsification-pairs.test.mjs
+scripts/gate-input-wiring.test.mjs
+scripts/gate-producer-consumer.test.mjs
+scripts/gate-repair-completion.test.mjs
+scripts/gate-reviewed-passthrough.test.mjs
+scripts/gate-source-reading-convention.test.mjs
+scripts/gate-stale-module.test.mjs
+scripts/gate-t1-completion-probe.test.mjs
+scripts/gate-worktree-arrival.test.mjs
+scripts/verify-admission.test.mjs
+scripts/verify-input-requires.test.mjs
+scripts/verify-runtime-integration.test.mjs
+scripts/verify-unified-pipeline.test.mjs

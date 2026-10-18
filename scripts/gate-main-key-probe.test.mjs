@@ -37,7 +37,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 /** ★ 真实的 slots 服务（不是复刻）—— 判据要落在**真实现**上。 */
 const SLOTS = join(
   HERE, '..', 'node_modules', '.pnpm',
-  '@deepseek-ai+dsh-client-ui-slots@0.2.0-rc.2_@deepseek-ai+cordis@4.0.4',
+  '@deepseek-ai+dsh-client-ui-slots@0.2.1-rc.2_@deepseek-ai+cordis@4.0.5',
   'node_modules', '@deepseek-ai', 'dsh-client-ui-slots', 'lib', 'index.js',
 )
 const INDEX = join(HERE, '..', 'src', 'client', 'index.tsx')

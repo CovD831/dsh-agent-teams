@@ -30,7 +30,7 @@
 
 ## 版本更新
 
-[v0.1.23](./release-notes/v0.1.23.md) 切换到已发布的 Harness `0.2.0-rc.2`，保留无需构建脚本的 Git 安装。本插件正式版使用 npm `latest` 渠道；推荐搭配 Harness `0.2.0-rc.2`（宿主的 `next` 渠道）。精确支持范围见 [compatibility.json](./compatibility.json)。
+[v0.1.23](./release-notes/v0.1.23.md) 切换到已发布的 Harness `0.2.1-rc.2`，保留无需构建脚本的 Git 安装。本插件正式版使用 npm `latest` 渠道；推荐搭配 Harness `0.2.1-rc.2`（宿主的 `next` 渠道）。精确支持范围见 [compatibility.json](./compatibility.json)。
 
 ## 为什么需要 AgentTeams？
 
@@ -48,12 +48,12 @@
 
 ## 安装与版本选择
 
-**推荐组合：DeepSeek Harness `0.2.0-rc.2` + AgentTeams `0.1.23`。宿主仍为 RC 版本。**
+**推荐组合：DeepSeek Harness `0.2.1-rc.2` + AgentTeams `0.1.23`。宿主仍为 RC 版本。**
 
 | 使用场景 | DeepSeek Harness | AgentTeams 插件 |
 | --- | --- | --- |
-| **推荐版本** | **`0.2.0-rc.2`** | **`0.1.23`** |
-| 上一推荐 RC | `0.1.7-rc.2` | `0.1.23` |
+| **推荐版本** | **`0.2.1-rc.2`** | **`0.1.23`** |
+| 上一推荐 RC | `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.23` |
 | 保留旧 RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.23` |
 | 保留旧 RC | `0.1.2-rc.1` | `0.1.23` |
 | 开发者测试 Alpha | `0.1.2-alpha.5` | `0.1.23` |
@@ -69,12 +69,12 @@
 
 安装完成后点击「立即启用」；宿主提示需要重启时，重启桌面应用。发布版请使用上面的包名，npm 或 GitHub 网页链接与 npm 包名不是同一种安装来源。从 Git 安装时，请选用包含下方所述已验证构建产物的提交。
 
-桌面端自带 Harness 内核与包管理器，升级全局 CLI 不会升级桌面端；普通独立 CLI 不能管理桌面 profile，桌面端自带的 CLI carrier 在此版本可以管理。当前精确目标是已发布的 `0.2.0-rc.2`，仍属于 RC；此前源码预测的 `0.2.0` 已退出支持声明。详见[迁移验收记录](./docs/harness-0.2.0-rc.2/README.md)。
+桌面端自带 Harness 内核与包管理器，升级全局 CLI 不会升级桌面端；普通独立 CLI 不能管理桌面 profile，桌面端自带的 CLI carrier 在此版本可以管理。当前精确目标是已发布的 `0.2.1-rc.2`，仍属于 RC；此前源码预测的 `0.2.0` 已退出支持声明。详见[迁移验收记录](./docs/harness-0.2.1-rc.2/README.md)。
 
 ### CLI / Web：1. 安装 DeepSeek Harness
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.2.0-rc.2
+npm install --global @deepseek-ai/dsh@0.2.1-rc.2
 dsh --version
 ```
 

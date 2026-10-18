@@ -8,10 +8,94 @@
  * sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent';
 import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session';
+import type { MemberToolFilter } from './types.ts';
 type Setup = (childCtx: Context, child: Agent) => () => void;
+/**
+ * The immutable effective tool restriction of one member.
+ *
+ * ★ 形状的**家**在叶子 `types.ts`（零 import 的地基）：`TeamMember.runtimeSetup`
+ *   引用了它，而持久记录的形状属于那里。这里重导出，让"版本相关的宿主
+ *   形状集中在本文件"这条纪律不被打破 —— 读者仍然能在这儿找到它。
+ */
+export type { MemberToolFilter } from './types.ts';
+/**
+ * ── ★★★ 成员创建契约：三个世代的 API 收口（Harness 0.2.1）
+ *
+ * MEASURED（0.2.1-rc.2 宿主 asar 精确提取）：`SubagentRuntime` 的方法集合里
+ * **`startContinuable` 已经不存在**，取而代之的是 `startActivation(spec)`；
+ * 与之配套的 `drainContinuableChildren` 也改名为 `drainChildren`。
+ *
+ * ★ 而 `startActivation` **不再接受** `persona` / `toolFilter`：
+ *   宿主的 `spawn` provider 在 0.2.1 把这两个能力位从 `capabilities` 里删了
+ *   （0.2.0 是 `{agentOptions, outputSchema, depthLimit, toolFilter, persona}`，
+ *   0.2.1 是 `{agentOptions, agentPreset, outputSchema, depthLimit}`），
+ *   新的 descriptor 也不再持久化它们。
+ *   ⇒ 于是"成员角色"与"队长专用工具的限制"必须由**插件自己在子会话上装**
+ *     （`childCtx.systemPrompt.section` + `childCtx.tools.restrict`），
+ *     并且那份 setup 要**落进成员记录**，冷恢复时按身份还原。
+ *
+ * ★ 三个世代必须**同时**可走：这个插件仍声明支持 0.1.2-alpha.2 起的宿主，
+ *   在那里 `startActivation` 根本不存在。判定用**能力探测**（`typeof`），
+ *   而不是版本号比较 —— 与 `boundary()` 的既有口径一致。
+ */
+export interface MemberStartSpec {
+    provider: string;
+    label: string;
+    request: {
+        parent: Agent;
+        prompt: ContentBlock[];
+        agentOptions?: AgentOptions;
+        persona?: string;
+        toolFilter?: MemberToolFilter;
+    };
+    signal: AbortSignal;
+}
+/**
+ * Whether the running host owns member setup through managed activations.
+ *
+ * On those hosts the activation itself installs the child composition, so the
+ * plugin's own persona/toolFilter installation is the only source of them and
+ * the provider capability bits `persona`/`toolFilter` are not required (and no
+ * longer advertised). On every older host this is false and the legacy checks
+ * stay in force.
+ */
+export declare function usesManagedActivations(runtime: Context['subagents']): boolean;
+/**
+ * Start one member through whichever creation API the host actually exposes.
+ *
+ * @param runtime - the live `ctx.subagents` service.
+ * @param spec - the version-independent creation request.
+ * @returns the durable child id (and, on managed activations, keeps the
+ *   activation's own settlement observed so a missing report or a failure
+ *   still reaches the parent the way the host intends).
+ */
+export declare function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{
+    childId: SessionId;
+}>;
+/**
+ * Wrap every creation API the host exposes, so one guard bounds descendant
+ * creation regardless of which entry point a caller uses.
+ *
+ * ★ 0.2.1 adds `startActivation`; a guard that only wraps `start` and
+ *   `startContinuable` would silently stop bounding anything on that host
+ *   (the tool layer calls `startActivation` directly). Probing all three keys
+ *   keeps the delegation budget enforced across host generations.
+ * @param ctx - the plugin context (injects `subagents`).
+ * @param check - called with the exact live parent before each creation.
+ */
+export declare function guardSubagentCreation(ctx: Context, check: (parent: Agent) => void): void;
+/**
+ * Targeted recursive cancellation, renamed with the unified activation manager.
+ *
+ * 0.2.1 renamed `drainContinuableChildren` to `drainChildren`; both mean the
+ * same thing (close admission, clear queued work, await descendants) and the
+ * older name is absent rather than deprecated on the newer host, so the call
+ * site has to pick whichever exists.
+ */
+export declare function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void>;
 declare module '@deepseek-ai/dsh-llm' {
     interface MessageSourceMap {
         'agent-teams': {
@@ -335,4 +419,3 @@ export declare function startMemberWithLenientFilter<T>(start: (filter: {
 }) => Promise<T>, filter: {
     deny: string[];
 }): Promise<T>;
-export {};

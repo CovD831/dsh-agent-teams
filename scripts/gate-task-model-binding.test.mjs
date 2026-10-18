@@ -52,7 +52,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -114,7 +114,7 @@ function pluginFixture(workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -431,14 +431,24 @@ test('臂 5 ★ 结构臂：交付面没有路由位（所以"换掉一台在跑
    * ★ 定向突变：若将来的 Harness 给 `sendMessage` 加了路由参数，
    *   这条臂会红 ⇒ 那时"未接线"这句话就该被重新查一遍（而不是继续抄）。
    */
-  const continuation = readFileSync(
-    join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-subagent', 'lib', 'types', 'continuation.d.ts'),
-    'utf8',
+  /**
+   * ★★ 这些声明住在哪个文件里是**宿主版本的事**，而这条臂问的是**签名形状**。
+   *   0.2.0 把它们放在 `lib/types/continuation.d.ts`；0.2.1 合并进了
+   *   `lib/types/manager.d.ts`（`continuation.*` 已不存在，只剩
+   *   `continuation-messages.*`）。写死文件名会让整条臂以 ENOENT 收场 ——
+   *   那不是"契约变了"，只是"文件搬家了"，而报文会把两者混成同一件事。
+   *   ⇒ 先按已知的落点依次解析，全落空才红（且报文说出两个落点）。
+   */
+  const typesDir = join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-subagent', 'lib', 'types')
+  const sources = ['continuation', 'manager']
+    .map(name => ({ name, dts: join(typesDir, `${name}.d.ts`), js: join(typesDir, `${name}.js`) }))
+    .filter(candidate => existsSync(candidate.dts) && existsSync(candidate.js))
+  assert.ok(
+    sources.length > 0,
+    '★ 必须能在已安装的 dsh-subagent 里找到交付契约（找过 continuation.* 与 manager.*）',
   )
-  const continuationJs = readFileSync(
-    join(ROOT, 'node_modules', '@deepseek-ai', 'dsh-subagent', 'lib', 'types', 'continuation.js'),
-    'utf8',
-  )
+  const continuation = sources.map(source => readFileSync(source.dts, 'utf8')).join('\n')
+  const continuationJs = sources.map(source => readFileSync(source.js, 'utf8')).join('\n')
 
   /** ① 交付签名：`(sender, targetId, content, options)` —— **没有**路由位。 */
   const sendMessage = /sendMessage\(([^)]*)\)/.exec(continuation)

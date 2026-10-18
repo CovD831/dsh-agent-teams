@@ -8,6 +8,22 @@
  * @module dsh-agent-teams/types
  */
 
+/**
+ * The immutable effective tool restriction of one member.
+ *
+ * ★ 它住在**叶子**里（本文件零 import，见 `scripts/gate-stall-leaf-home.test.mjs`
+ *   的地基臂）：`TeamMember.runtimeSetup` 是持久记录，持久记录的形状属于
+ *   `types.ts`，而不是某一个接线模块。曾经把它放在 `harness-compat.ts`
+ *   会让本文件反向 import 那个模块 —— 那条 import 会把叶子变成图上的节点，
+ *   环会在下一层重新长出来，而报错会指向别的文件。
+ */
+export interface MemberToolFilter {
+  /** Visible global tools; absent means "no allow-list" (everything not denied stays). */
+  allow?: string[]
+  /** Removed global tools; never empty (the captain-only deny list is always included). */
+  deny: string[]
+}
+
 /** Task lifecycle statuses in progression order. */
 export type TaskStatus =
   | 'pending'
@@ -1066,6 +1082,20 @@ export interface TeamMember {
    * member. Cleared by the next successful start.
    */
   spawnError?: string
+  /**
+   * ── ★★ 成员的"子域设置"，只在 managed activation 宿主上出现 ────────────────────
+   *
+   * MEASURED（0.2.1-rc.2）：宿主的 activation 请求里**不再有** persona /
+   * toolFilter，新的 subagent descriptor 也不再持久化它们。
+   * ⇒ 这两样改由本插件在子 ctx 上装（`systemPrompt.section` + `tools.restrict`）。
+   *   而"装什么"必须能被**冷恢复**重放 —— 于是存进成员的持久记录。
+   *
+   * ★ 为什么不是从 descriptor 读回来：新宿主根本不写它。
+   * ★ 为什么必须持久化而不是只放内存：进程重启后 `pendingSetup` 是空的，
+   *   而成员会以 `runtimeSetup` 为唯一依据恢复自己的限制（读不到就拒绝恢复，
+   *   见 `installMemberSelectionRuntime`）。
+   */
+  runtimeSetup?: { persona: string; toolFilter: MemberToolFilter }
 }
 
 /** One mailbox message. */

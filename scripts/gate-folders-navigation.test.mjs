@@ -48,12 +48,28 @@ const ENTRY = join(HERE, '..', 'src', 'client', 'folders-return-entry.tsx')
 /** ★ 真实的 layout 包（判据落在**官方**的 SlotMap 上，不是复刻）。 */
 const LAYOUT_TYPES = join(
   HERE, '..', 'node_modules', '.pnpm',
-  '@deepseek-ai+dsh-client-ui-layout@0.2.0-rc.2_@deepseek-ai+cordis@4.0.4',
+  '@deepseek-ai+dsh-client-ui-layout@0.2.1-rc.2_@deepseek-ai+cordis@4.0.5',
   'node_modules', '@deepseek-ai', 'dsh-client-ui-layout', 'lib', 'types', 'client', 'index.d.ts',
 )
 
+/**
+ * ★★ 为什么读的是"解析出来的那一份"而不是写死的 `.pnpm` 目录名：
+ *   那个目录名带着 peer 解析哈希（`<version>_<cordis version>`），每次升宿主
+ *   都会变；写死它会让"判据读不到官方类型"伪装成"官方契约没声明"。
+ *   ⇒ 先按 package 入口解析，落空才退回上面那条既有路径。
+ */
+function resolvedLayoutTypes() {
+  const base = join(HERE, '..', 'node_modules', '@deepseek-ai', 'dsh-client-ui-layout')
+  try {
+    const manifest = JSON.parse(readFileSync(join(base, 'package.json'), 'utf8'))
+    const types = manifest.exports?.['./client']?.types
+    if (typeof types === 'string') return join(base, types)
+  } catch {}
+  return LAYOUT_TYPES
+}
+
 test('★★ 臂 1（地基）：`shell.overlay` 是 list + root ⇒ 新 id 加在旁边且【不绑会话】', () => {
-  const dts = readFileSync(LAYOUT_TYPES, 'utf8')
+  const dts = readFileSync(resolvedLayoutTypes(), 'utf8')
   const at = dts.indexOf("'shell.overlay': {")
   assert.notEqual(at, -1, '★ 前置：官方 SlotMap 里真的声明了 shell.overlay')
   const block = dts.slice(at, at + 200)

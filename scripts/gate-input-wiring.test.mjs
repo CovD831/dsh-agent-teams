@@ -135,7 +135,7 @@ function pluginFixture(workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -511,7 +511,7 @@ test('★ 臂 7（历史缺口 ⑤）：窗口表没接线（waits 缺席）—�
   const child = { id: 'member-1', status: 'idle', steer() {}, session: { header: { cwd: workspace }, events: [] } }
   const schedulerCtx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get() { return child } },
+    agents: { list: () => [], get() { return child } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },

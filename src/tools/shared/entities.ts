@@ -51,8 +51,8 @@ import { resolveTeamProfile } from '../../profiles.ts'
 import { createTeamDir } from '../../state.ts'
 import { sessionLeadsTeam, type LiveSessionRef } from '../../lineage.ts'
 import { identityOfTeam } from '../../members.ts'
-import type { AcceptanceResult, ReviewFinding } from '../../types.ts'
-import { inScopeOverlap, isQualityKind, planQualityFollowUp, WRITE_KINDS } from '../../quality-gates.ts'
+import type { AcceptanceResult, ReviewFinding, ReviewedStamp, TaskKind } from '../../types.ts'
+import { inScopeOverlap, isQualityKind, planQualityFollowUp, sanitizeReviewAcceptance, sanitizeReviewObjective, WRITE_KINDS } from '../../quality-gates.ts'
 import { auditRequires } from '../../gates/requires.ts'
 import { TERMINAL_TASK_STATUSES } from '../../types.ts'
 /**
@@ -78,7 +78,7 @@ import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '
 import { STALL_REPEAT_THRESHOLD, observeStall, stallRepeatThreshold } from '../../types.ts'
 import type { StallObservation } from '../../types.ts'
 import { collectCompletedDependencyOutputs, formatDependencyOutputs } from '../../scheduler.ts'
-import { sessionOwnEvents } from '../../harness-compat.ts'
+import { drainMemberChildren, sessionOwnEvents } from '../../harness-compat.ts'
 import { CAPTAIN_KEY, findTeamByCaptain, findTeamByParticipant, readTeam, withTeamLock } from '../../state.ts'
 
 export function withInputSurfaceOnError<T extends { execute: (...args: never[]) => unknown }>(tool: T): T {
@@ -1382,6 +1382,133 @@ export function trimmedOptional(value: string | null | undefined): string | unde
   const trimmed = value?.trim()
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
 }
+/**
+ * ── ★★★ 造一条任务的**唯一**构造点（t117）────────────────────────────────────────
+ *
+ * MEASURED（2026-10-19 普查，可复跑：`grep -rn "tasks.push" src/`）：
+ * 本仓有**四条**各自造 `TeamTask` 的路，每条只写当时那个功能需要的字段：
+ *
+ * | 路径 | 落点 | 字段数 | `gateEvaluations` | 能传 `reviewed` |
+ * |---|---|---|---|---|
+ * | `create_task` | `tools/create-task.ts:707` | 最多（含质量契约） | ✅ | ✅ |
+ * | `plan.tasks` 种子 | 本文件 `:5346` | 12 | ❌ | ❌ |
+ * | `edit_plan.add_task` | `tools.ts:2032` | 9（`kind` 硬编码 `'work'`） | ❌ | ❌ |
+ * | `applyQualityFollowUp` | 本文件 `:5453` | 7 | ❌ | ❌ |
+ *
+ * ⇒ 每加一个新字段（`gateEvaluations` / `reviewed` / `coverageOf` /
+ *   `sourceFindingIds` …）都要记得改四处，而实际上只改了一处。
+ *
+ * ★★ 那不是"路径太多"，是**四个构造函数各持一份字段清单**。本函数把它们收成一份。
+ *
+ * ── 三态：`undefined` 的格子**一个键都不写** ──────────────────────────────────────
+ *
+ * 沿用全仓纪律（与 `create_task` 逐字同源）：缺席时**不写** `{ key: undefined }`，
+ * 而是根本不写那个键。理由见 `create-task.ts` 的 `reviewed` 注释逐字：
+ * 一个"在场但是 undefined"与"审过了、逐条写着结果"在读取方眼里**同形**。
+ *
+ * ── 它**不**做的事 ───────────────────────────────────────────────────────────────
+ *
+ * · 不分配 id（`id` 由调用方给 —— `plan.tasks` 用 `t${index+1}` 与 seq 脱钩，
+ *   而运行期路径用 `t${seq}`，两者不同源，收进来会改变既有 id）。
+ * · 不求值判据（判据挂在哪一处是**下一步**的事，不是构造函数的职责）。
+ * · 不落盘。
+ */
+export interface TaskDraft {
+  id: string
+  subject: string
+  /** 缺省 = 未分配（走 shared pool 等 claim）。 */
+  assignee?: string
+  description?: string
+  dependencies?: readonly string[]
+  kind?: TaskKind
+  round?: number
+  objective?: string
+  inScope?: readonly string[]
+  outOfScope?: readonly string[]
+  acceptance?: readonly string[]
+  verify?: readonly string[]
+  deliverables?: readonly string[]
+  nonGoals?: readonly string[]
+  coverageOf?: readonly string[]
+  reviewedTaskId?: string
+  sourceTaskId?: string
+  sourceFindingIds?: readonly string[]
+  /**
+   * ★ **刻意没有 `reviewed`。** 见 `makeTask` 的注释 ④：
+   *   t9（P2c）的 acc4 要求 `reviewed` 的透传链「四处都在」且「单文件」，
+   *   所以落盘那一步留在 `src/tools/create-task.ts` 里，不经过本接口。
+   *   ⇒ 未接上来的那类"以为能造"的调用会被编译器挡住，而不是静默少写一格。
+   */
+  /** `plan.tasks` 种子专用：模板里的稳定 id（与运行期 id 不同轴）。 */
+  profileSeedId?: string
+  model?: string
+  reasoningEffort?: string
+  /** 覆盖 `createdAt` / `updatedAt`；缺省用调用时的墙钟。 */
+  at?: number
+}
+/**
+ * 造一条 `TeamTask`。**所有**造任务的路径都该走这里。
+ *
+ * ── ★★★ 不做什么（两次我差点写错的地方，都实测过）──
+ *
+ * ① **不做 kind 相关的 sanitize**。
+ *   `sanitizeReviewObjective` / `sanitizeReviewAcceptance` 看上去像"造 review 任务时的
+ *   通用归一化"，其实**不是**：它们是**调用点各自的入参归一化**，各调用点做得不一样 ——
+ *   · `create_task`（`create-task.ts:684-689`）：**两条都做**（模型给的入参可能空）
+ *   · `planQualityFollowUp` 的 requirements 分支（`quality-gates.ts:2105/2121`）：
+ *     **自己做**（因为它有 `'Converge remaining open questions'` 这种专属缺省）
+ *   · `planQualityFollowUp` 的 review 分支（`:2170`）：**不做**（`objective` 取自源任务，
+ *     或落 `Fix findings from ${sourceId}`）
+ *   ⇒ 若 `makeTask` 统一做，自动 repair/review 循环每条新任务会**凭空多出**
+ *     `objective` / `acceptance` 两个键，而它们今天的值是别的。那是行为变化，不是重构。
+ *
+ * ② **不给 `kind` 补缺省**。
+ *   `plan.tasks` 种子建的任务**没有 `kind` 键**（`taskKindOf()` 读成 `'work'`）。
+ *   在这里写 `kind: 'work'` 会让"老数据"与"新数据"在同一格上从**都靠缺省**
+ *   变成**一个有键一个没键**（`entities.ts:1493` 的注释说明了理由）。
+ *
+ * ③ **不替调用点 trim**。
+ *   `description` / `assignee` 的空串处理是**调用点各自的策略**，四条路径不一致且都有理由：
+ *   · `create_task`：**原样透传**（`create-task.ts:727-728`）—— 空串会被**真落盘**
+ *     （`isOptionalString` 允许空串，`BLANK_SENSITIVE_STRING_FIELDS` 不含这两个键），
+ *     读回来仍是空串。
+ *   · `edit_plan.add_task`：**先 `trimmedOptional` 再传**（`tools.ts:2046-2047`）——
+ *     写进去的是"没有这一格"。
+ *   两者**今天就不是同形**。若 `makeTask` 统一 trim，`create_task` 的空串落盘形态会变 ——
+ *   那是行为变化，不是重构。⇒ 调用点自己 trim，`makeTask` 原样收下。
+ *   ★ 唯一例外见下方 `objective`：那一格 `trimmedOptional` 是**通用**的（四条路径都 trim
+ *     或本来就不传空串），所以放在这里。
+ */
+export function makeTask(draft: TaskDraft, now = Date.now()): TeamTask {
+  const at = draft.at ?? now
+  return {
+    id: draft.id,
+    subject: draft.subject,
+    status: 'pending',
+    dependencies: [...(draft.dependencies ?? [])],
+    attempt: 0,
+    createdAt: at,
+    updatedAt: at,
+    ...draft.kind === undefined ? {} : { kind: draft.kind },
+    ...draft.assignee === undefined ? {} : { assignee: draft.assignee },
+    ...draft.description === undefined ? {} : { description: draft.description },
+    ...draft.profileSeedId === undefined ? {} : { profileSeedId: draft.profileSeedId },
+    ...draft.round === undefined ? {} : { round: draft.round },
+    ...trimmedOptional(draft.objective) === undefined ? {} : { objective: draft.objective!.trim() },
+    ...draft.inScope === undefined ? {} : { inScope: [...draft.inScope] },
+    ...draft.outOfScope === undefined ? {} : { outOfScope: [...draft.outOfScope] },
+    ...draft.acceptance === undefined ? {} : { acceptance: [...draft.acceptance] },
+    ...draft.verify === undefined ? {} : { verify: [...draft.verify] },
+    ...draft.deliverables === undefined ? {} : { deliverables: [...draft.deliverables] },
+    ...draft.nonGoals === undefined ? {} : { nonGoals: [...draft.nonGoals] },
+    ...draft.coverageOf === undefined ? {} : { coverageOf: [...draft.coverageOf] },
+    ...draft.reviewedTaskId === undefined ? {} : { reviewedTaskId: draft.reviewedTaskId },
+    ...draft.sourceTaskId === undefined ? {} : { sourceTaskId: draft.sourceTaskId },
+    ...draft.sourceFindingIds === undefined ? {} : { sourceFindingIds: [...draft.sourceFindingIds] },
+    ...draft.model === undefined ? {} : { model: draft.model },
+    ...draft.reasoningEffort === undefined ? {} : { reasoningEffort: draft.reasoningEffort },
+  }
+}
 export function memberOpenTask(team: TeamState, memberName: string, exceptTaskId?: string): TeamTask | undefined {
   return team.tasks.find(task => task.id !== exceptTaskId
     && task.assignee === memberName
@@ -1684,10 +1811,11 @@ export async function stopTeamMemberActivations(
 ): Promise<void> {
   const memberIds = members.filter(member => member.id !== '').map(member => member.id as SessionId)
   if (memberIds.length === 0) return
-  // Every supported exact host has targeted recursive drain. Unlike interrupt,
-  // it closes admission and clears queued work before awaiting descendants.
+  // Targeted recursive drain — named `drainChildren` on 0.2.1 and
+  // `drainContinuableChildren` before it. Unlike interrupt, it closes
+  // admission and clears queued work before awaiting descendants.
   signal?.throwIfAborted()
-  await ctx.subagents.drainContinuableChildren(captain, memberIds)
+  await drainMemberChildren(ctx.subagents, captain, memberIds)
 }
 export const RUNTIME_GATE_LOG_LIMIT = 50
 export const runtimeGateLog: Array<{ at: number; event: string; outcome: string }> = []
@@ -5342,18 +5470,30 @@ export async function initializeProfileTeam(input: {
         status: 'idle' as const,
       }
     }),
-    tasks: profile.tasks.map((template, index) => ({
+    /**
+     * ★ t117：构造走**唯一的** `makeTask`。
+     *
+     * ★ `dependencies` 在这里先过 `seedToActual` —— 模板 id 要换成真正落盘的 id。
+     *   那一步依赖本函数的局部状态（`seedToActual`），不属于"造一条任务"的通用语义。
+     *
+     * ★ `id` 仍是 `t${index+1}` 而不是 `t${taskSeq}`：这条路径的 id 与 `taskSeq`
+     *   **不同源**（一次性种下 N 条，seq 与下标同步推进）。保持原样，不改既有 id。
+     *
+     * ★★ `kind` **不传** —— 与改造前逐字同源。改造前的种子任务**根本没有 `kind` 键**，
+     *   读取方走 `taskKindOf(task)?.kind ?? 'work'` 的缺省。本步是纯重构，
+     *   不借机给老数据补字段：那会让"这条路径建的"与"别的路径建的"在
+     *   `kind` 一格上从**同形**（都靠缺省）变成**不同形**（一个有键一个没键）。
+     *   ★ 而 `taskKindOf` 早已把"没有 kind"读成 `'work'`（`quality-gates.ts:428`），
+     *     所以语义不变。
+     */
+    tasks: profile.tasks.map((template, index) => makeTask({
       id: `t${index + 1}`,
       profileSeedId: template.id,
       subject: template.subject,
       description: template.description,
-      status: 'pending' as const,
       assignee: template.assignee,
       dependencies: template.dependencies.map((dependency) => seedToActual.get(dependency) ?? dependency),
-      attempt: 0,
-      createdAt: now,
-      updatedAt: now,
-    })),
+    }, now)),
     taskSeq: profile.tasks.length,
   }
   // Roster creation is durable planning only. The scheduler starts each
@@ -5464,26 +5604,33 @@ export function applyQualityFollowUp(team: TeamState, closed: TeamTask): { creat
       if (team.tasks.some((item) => item.id === dependency)) return dependency
       return idBySubject.get(dependency) ?? dependency
     })
-    const next: TeamTask = {
+    /**
+     * ★ t117：构造走**唯一的** `makeTask`。
+     *
+     * ★ 两个字段在这里**先解了再传**，不能原样交给 `makeTask`：
+     *   · `reviewedTaskId` 要先过 `idBySubject`（把模板 id 换成真正落盘的 id）
+     *   · `subject` 有缺省式 `${kind}-round-${round}`
+     *   把它们留在这一层是**对的** —— 它们依赖本函数的局部状态（`idBySubject`），
+     *   不属于"造一条任务"的通用语义。
+     */
+    const next: TeamTask = makeTask({
       id,
       subject: draft.subject ?? `${draft.kind}-round-${draft.round ?? 1}`,
-      status: 'pending',
       assignee: draft.assignee,
       dependencies,
-      attempt: 0,
-      createdAt: now,
-      updatedAt: now,
       kind: draft.kind,
-      ...draft.round === undefined ? {} : { round: draft.round },
-      ...draft.objective === undefined ? {} : { objective: draft.objective },
-      ...draft.inScope === undefined ? {} : { inScope: draft.inScope },
-      ...draft.outOfScope === undefined ? {} : { outOfScope: draft.outOfScope },
-      ...draft.acceptance === undefined ? {} : { acceptance: draft.acceptance },
-      ...draft.verify === undefined ? {} : { verify: draft.verify },
-      ...draft.sourceTaskId === undefined ? {} : { sourceTaskId: draft.sourceTaskId },
-      ...draft.sourceFindingIds === undefined ? {} : { sourceFindingIds: draft.sourceFindingIds },
-      ...draft.reviewedTaskId === undefined ? {} : { reviewedTaskId: idBySubject.get(draft.reviewedTaskId) ?? draft.reviewedTaskId },
-    }
+      round: draft.round,
+      objective: draft.objective,
+      inScope: draft.inScope,
+      outOfScope: draft.outOfScope,
+      acceptance: draft.acceptance,
+      verify: draft.verify,
+      sourceTaskId: draft.sourceTaskId,
+      sourceFindingIds: draft.sourceFindingIds,
+      reviewedTaskId: draft.reviewedTaskId === undefined
+        ? undefined
+        : idBySubject.get(draft.reviewedTaskId) ?? draft.reviewedTaskId,
+    }, now)
     team.tasks.push(next)
     created.push(next)
   }

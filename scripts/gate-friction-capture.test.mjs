@@ -195,7 +195,7 @@ function fixture({ withSession = true } = {}) {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     /**
      * ★ 臂 3 要在**契约位**上触发拒绝，而那条路走 `create_task` ⇒ 它需要一个
      *   可用的 `llm`（队长会话的模型路由）。缺它时 `create_task` 在到达判据之前

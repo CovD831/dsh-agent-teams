@@ -199,7 +199,7 @@ function pluginFixture(workspace, { clock, liveAgents = new Map() }) {
         return 'msg-0'
       },
     },
-    agents: { get(id) { return liveAgents.get(id) } },
+    agents: { list: () => [], get(id) { return liveAgents.get(id) } },
     on() { return () => {} },
     effect(setup) { return setup() },
   }
@@ -767,7 +767,7 @@ const ctx = {
   tools: { register(tool) { tools.set(tool.name, tool) } },
   subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'm',
     [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'm' },
-  agents: { get(id) { return id === 'worker-session' ? { id, status: 'idle', session: { header: { cwd: '.', events }, events }, steer() {} } : undefined } },
+  agents: { list: () => [], get(id) { return id === 'worker-session' ? { id, status: 'idle', session: { header: { cwd: '.', events }, events }, steer() {} } : undefined } },
   on() { return () => {} }, effect(setup) { return setup() },
 }
 registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, now: () => 5_000_000 })

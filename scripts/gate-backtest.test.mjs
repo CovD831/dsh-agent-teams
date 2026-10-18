@@ -573,7 +573,7 @@ test('★ t18 臂 2（★ 行为臂）：两种"没有父版本"必须【真的�
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     tools: { register(tool) { tools.set(tool.name, tool) } },
     subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0' },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })

@@ -11,12 +11,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { CAPTAIN_TOOL_NAMES } from './tool-names.ts'
+import type { MemberToolFilter } from './types.ts'
 
 /**
  * Exact protocol exported by dsh-subagent/internal in Alpha.5 and rc.1.
@@ -37,12 +38,156 @@ type Followup = (parent: Agent, childId: SessionId, content: ContentBlock[], opt
 type Queue = (parent: Agent, childId: SessionId, content: ContentBlock[], source: MessageSource, signal: AbortSignal) => Promise<MessageId>
 type Deliver = (parent: Agent, childId: SessionId, content: ContentBlock[], source: MessageSource, signal: AbortSignal, delivery: 'queue' | 'steer') => Promise<MessageId>
 type Send = (sender: Agent, targetId: SessionId, content: ContentBlock[], options: { signal: AbortSignal }) => Promise<MessageId>
+
+/**
+ * The immutable effective tool restriction of one member.
+ *
+ * ★ 形状的**家**在叶子 `types.ts`（零 import 的地基）：`TeamMember.runtimeSetup`
+ *   引用了它，而持久记录的形状属于那里。这里重导出，让"版本相关的宿主
+ *   形状集中在本文件"这条纪律不被打破 —— 读者仍然能在这儿找到它。
+ */
+export type { MemberToolFilter } from './types.ts'
+
+
 interface RuntimeBoundary {
   followup?: Followup
   registerContinuableSetup?: (setup: LegacySetup) => () => void
   sendMessage?: Send
   [hostPromptQueue]?: Queue
   [hostPromptDeliver]?: Deliver
+}
+
+/**
+ * ── ★★★ 成员创建契约：三个世代的 API 收口（Harness 0.2.1）
+ *
+ * MEASURED（0.2.1-rc.2 宿主 asar 精确提取）：`SubagentRuntime` 的方法集合里
+ * **`startContinuable` 已经不存在**，取而代之的是 `startActivation(spec)`；
+ * 与之配套的 `drainContinuableChildren` 也改名为 `drainChildren`。
+ *
+ * ★ 而 `startActivation` **不再接受** `persona` / `toolFilter`：
+ *   宿主的 `spawn` provider 在 0.2.1 把这两个能力位从 `capabilities` 里删了
+ *   （0.2.0 是 `{agentOptions, outputSchema, depthLimit, toolFilter, persona}`，
+ *   0.2.1 是 `{agentOptions, agentPreset, outputSchema, depthLimit}`），
+ *   新的 descriptor 也不再持久化它们。
+ *   ⇒ 于是"成员角色"与"队长专用工具的限制"必须由**插件自己在子会话上装**
+ *     （`childCtx.systemPrompt.section` + `childCtx.tools.restrict`），
+ *     并且那份 setup 要**落进成员记录**，冷恢复时按身份还原。
+ *
+ * ★ 三个世代必须**同时**可走：这个插件仍声明支持 0.1.2-alpha.2 起的宿主，
+ *   在那里 `startActivation` 根本不存在。判定用**能力探测**（`typeof`），
+ *   而不是版本号比较 —— 与 `boundary()` 的既有口径一致。
+ */
+export interface MemberStartSpec {
+  provider: string
+  label: string
+  request: {
+    parent: Agent
+    prompt: ContentBlock[]
+    agentOptions?: AgentOptions
+    persona?: string
+    toolFilter?: MemberToolFilter
+  }
+  signal: AbortSignal
+}
+
+interface CreationBoundary {
+  start?: (name: string, request: MemberStartSpec['request']) => Promise<unknown>
+  startContinuable?: (spec: MemberStartSpec) => Promise<{ childId: SessionId }>
+  startActivation?: (spec: MemberStartSpec & { delivery: 'parent' }) => Promise<{
+    childId: SessionId
+    result: Promise<unknown>
+  }>
+}
+
+/**
+ * Whether the running host owns member setup through managed activations.
+ *
+ * On those hosts the activation itself installs the child composition, so the
+ * plugin's own persona/toolFilter installation is the only source of them and
+ * the provider capability bits `persona`/`toolFilter` are not required (and no
+ * longer advertised). On every older host this is false and the legacy checks
+ * stay in force.
+ */
+export function usesManagedActivations(runtime: Context['subagents']): boolean {
+  return typeof (runtime as unknown as CreationBoundary).startActivation === 'function'
+}
+
+/**
+ * Start one member through whichever creation API the host actually exposes.
+ *
+ * @param runtime - the live `ctx.subagents` service.
+ * @param spec - the version-independent creation request.
+ * @returns the durable child id (and, on managed activations, keeps the
+ *   activation's own settlement observed so a missing report or a failure
+ *   still reaches the parent the way the host intends).
+ */
+export async function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{ childId: SessionId }> {
+  const host = runtime as unknown as CreationBoundary
+  if (typeof host.startActivation === 'function') {
+    // persona/toolFilter are NOT activation fields on 0.2.1; they are installed
+    // on the child context by installMemberSelectionRuntime.
+    const { persona: _persona, toolFilter: _filter, ...request } = spec.request
+    const activation = await host.startActivation.call(runtime, { ...spec, request, delivery: 'parent' })
+    // Preserve native settlement as the missing-report/error fallback on both
+    // fresh and resumed activations. mailbox.ts deduplicates successful reports.
+    void activation.result.catch(() => undefined)
+    return activation
+  }
+  if (typeof host.startContinuable !== 'function') return unsupported('missing member creation API')
+  return host.startContinuable.call(runtime, spec)
+}
+
+/**
+ * Wrap every creation API the host exposes, so one guard bounds descendant
+ * creation regardless of which entry point a caller uses.
+ *
+ * ★ 0.2.1 adds `startActivation`; a guard that only wraps `start` and
+ *   `startContinuable` would silently stop bounding anything on that host
+ *   (the tool layer calls `startActivation` directly). Probing all three keys
+ *   keeps the delegation budget enforced across host generations.
+ * @param ctx - the plugin context (injects `subagents`).
+ * @param check - called with the exact live parent before each creation.
+ */
+export function guardSubagentCreation(ctx: Context, check: (parent: Agent) => void): void {
+  const runtime = ctx.subagents as unknown as CreationBoundary
+  ctx.effect(() => {
+    const disposers: (() => void)[] = []
+    for (const key of ['start', 'startContinuable', 'startActivation'] as const) {
+      const original = runtime[key]
+      if (typeof original !== 'function') continue
+      const descriptor = Object.getOwnPropertyDescriptor(runtime, key)
+      const guarded = async (...args: unknown[]): Promise<unknown> => {
+        const request = key === 'start' ? args[1] : (args[0] as MemberStartSpec).request
+        check((request as MemberStartSpec['request']).parent)
+        return Reflect.apply(original, ctx.subagents, args)
+      }
+      Object.defineProperty(runtime, key, { value: guarded, writable: true, configurable: true })
+      disposers.push(() => {
+        if (Object.getOwnPropertyDescriptor(runtime, key)?.value !== guarded) return
+        if (descriptor === undefined) Reflect.deleteProperty(runtime, key)
+        else Object.defineProperty(runtime, key, descriptor)
+      })
+    }
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'agent-teams: member delegation budget')
+}
+
+/**
+ * Targeted recursive cancellation, renamed with the unified activation manager.
+ *
+ * 0.2.1 renamed `drainContinuableChildren` to `drainChildren`; both mean the
+ * same thing (close admission, clear queued work, await descendants) and the
+ * older name is absent rather than deprecated on the newer host, so the call
+ * site has to pick whichever exists.
+ */
+export async function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void> {
+  const host = runtime as unknown as {
+    drainChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+    drainContinuableChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+  }
+  const drain = host.drainChildren ?? host.drainContinuableChildren
+  if (typeof drain !== 'function') return unsupported('missing targeted child drain')
+  await drain.call(runtime, parent, ids)
 }
 
 function boundary(runtime: Context['subagents']): RuntimeBoundary {
@@ -567,7 +712,7 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
   const installed = new WeakSet<Agent>()
   const active = new Set<() => void>()
   ctx.effect(() => {
-    const stop = onAgentReady(ctx, (agent, vetoable) => {
+    const attach = (agent: Agent, vetoable: boolean): void => {
       if (installed.has(agent)) return
       // Deliberately synchronous: awaiting here loses the first-request race.
       let teardown: () => void
@@ -600,11 +745,27 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
         dispose()
         throw error
       }
-    })
-    return () => {
+    }
+    const stop = onAgentReady(ctx, attach)
+    const cleanup = (): void => {
       stop()
       for (const dispose of [...active]) dispose()
     }
+    try {
+      /**
+       * ★★ 热重载会**丢掉上一份插件装的 child setup，但 Agent 还活着**。
+       *   而 0.2.1 起宿主不再把 persona/toolFilter 持久化进 descriptor
+       *   ⇒ 只订阅事件的话，重载之后那些已经存在的成员**永远**不会重装 setup
+       *     （它们不再触发 agent/created），于是成员以"无角色、无工具限制"的状态
+       *     继续跑 —— 那正是上游 0.1.24 记录的那条回归。
+       * ⇒ 先订阅、再把**当前活着的** Agent 补一遍；attach 是幂等的（WeakSet）。
+       */
+      for (const agent of ctx.agents.list()) attach(agent, false)
+    } catch (error) {
+      cleanup()
+      throw error
+    }
+    return cleanup
   }, 'agent-teams: member lifecycle compatibility')
 }
 
