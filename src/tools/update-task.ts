@@ -465,6 +465,73 @@ function describeError(error: unknown): string {
 }
 
 /**
+ * ── ★★★ D3：`commandsRun[i].status` 与 `exitCode` 的自相矛盾必须被拒 ─────────────
+ *
+ * MEASURED（`src/tools/shared/entities.ts:5554-5591` 的 `parseCommandResults`）：
+ *   它只做**形状**校验 —— `command` 是非空串、`status` ∈ {passed, failed}、
+ *   `exitCode` 是 number 就原样透传。★ 它**从不**把两者放在一起看。
+ *
+ * ⇒ 于是下面这一对都能落盘，而在读取端它们与一份**自洽**的证据同形：
+ * ```
+ *   { command, status: 'passed', exitCode: 1 }   // "通过了，而它退出码是 1"
+ *   { command, status: 'failed', exitCode: 0 }   // "它坏了，而它退出码是 0"
+ * ```
+ * ★ 而 `failureKindOf` 恰恰**只看 `exitCode`**（`src/state.ts:316-326`）——
+ *   ⇒ 一条自报 `status:'failed'` / `exitCode:0` 的命令既不会被算成
+ *     "交付物坏了"，又会被读成"它失败过" ⇒ 两个格子在讲两个不同的故事。
+ *
+ * ── ★★ 判据的三态（第三态是"缺席"，不是"一致"）────────────────────────────────
+ *
+ *   `exitCode === undefined`        ⇒ **不判**。老数据只是没记这一格，
+ *                                      不是矛盾 —— 把"没记"当"矛盾"会拒掉历史。
+ *   `passed` ∧ `exitCode !== 0`     ⇒ 矛盾（`passed:true` 说"它跑通了"）
+ *   `failed` ∧ `exitCode === 0`     ⇒ 矛盾（`failed:true` 说"它没跑通"）
+ *
+ * ★ 返回**一句话**（而不是布尔）—— 拒绝时必须说清是**哪一条**、**哪一格**矛盾，
+ *   否则读日志的人只看到"一条命令不一致"而不知道去改哪一行。
+ */
+export function commandRunConflict(results: readonly CommandResult[]): string | undefined {
+  for (const [index, item] of results.entries()) {
+    /**
+     * ★ 三态第一义：**没记**不是**矛盾**。
+     *   `parseCommandResults` 只在 `typeof exitCode === 'number'` 时才留这一格 ⇒
+     *   缺席意味着调用方没有交它 —— 那是"没测"，须放行（与 t42 同一条纪律：
+     *   "我没能检查"≠"它不行"）。
+     */
+    if (item.exitCode === undefined) continue
+    if (item.status === 'passed' && item.exitCode !== 0) {
+      return `commandsRun[${index}] reports status="passed" but exitCode=${item.exitCode}: a passed command cannot have a non-zero exit code`
+    }
+    if (item.status === 'failed' && item.exitCode === 0) {
+      return `commandsRun[${index}] reports status="failed" but exitCode=0: a failed command cannot have a zero exit code`
+    }
+  }
+  return undefined
+}
+
+/**
+ * ★★ `parseCommandResults` 的**薄包一层**：先交给既有解析器（形状 + 必填 `status`），
+ *    再判 status × exitCode 的一致性。
+ *
+ * ── 为什么是"包一层"而不是"改解析器" ───────────────────────────────────────────────
+ *
+ * `parseCommandResults` 住在 `src/tools/shared/entities.ts` —— 它**不在**本任务的
+ * inScope 里，而它还有别的调用方（终态补证据那一路）。
+ * ★ 而本条判据要的是「本工具**接受**的 commandsRun 必须自洽」——
+ *   那是 `update_task` 的**接受面**，不是那个共享解析器的语义。
+ * ★★ 所以校验放在接受面这一层：解析器的一个字都不动（既有那条
+ *   `commandsRun[i].status must be passed or failed` 的必填校验原样生效），
+ *   而两个入口（终态补证据 / 常规更新）都走这里。
+ */
+export function parseCommandResultsChecked(value: unknown): CommandResult[] | undefined {
+  const parsed = parseCommandResults(value)
+  if (parsed === undefined) return undefined
+  const conflict = commandRunConflict(parsed)
+  if (conflict !== undefined) throw new Error(conflict)
+  return parsed
+}
+
+/**
  * ── ★★★★★ 扫一遍**已经终态**的任务，把它们早已被吸收的树收掉（defect 2）─────────────
  *
  * ── 它修的是什么缺陷（MEASURED，本任务的由来）───────────────────────────────────
@@ -885,7 +952,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           if (TERMINAL_TASK_STATUSES.includes(task.status)) {
             const appended = appendTaskEvidence(task, {
               ...args, findings: parseFindings(args.findings), changedPaths: normalizeBlankOptionalTaskFields(args).changedPaths,
-              acceptanceResults: parseAcceptanceResults(args.acceptanceResults), commandsRun: parseCommandResults(args.commandsRun),
+              acceptanceResults: parseAcceptanceResults(args.acceptanceResults), commandsRun: parseCommandResultsChecked(args.commandsRun),
             }, identity.name)
             if (appended) await writeTeam(stateRoot, fresh)
             return {
@@ -904,7 +971,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           const input = normalizeBlankOptionalTaskFields(args)
           const findings = parseFindings(args.findings)
           const acceptanceResults = parseAcceptanceResults(args.acceptanceResults)
-          const commandsRun = parseCommandResults(args.commandsRun)
+          const commandsRun = parseCommandResultsChecked(args.commandsRun)
           /**
            * ── ★ 判据层（可插拔）────────────────────────────────────────────────────
            *
@@ -1440,8 +1507,31 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            *   只修一处会让它们分叉，而分叉后「哪一处放行」在日志里同形。
            *   ★ 而成因同样是两种：`skippedAll`（一条都没跑）与 `unmeasured`（跑了而测不成）。
            */
+          /**
+           * ── ★★★ D1：第三种局面 —— `blockers` 与 `unmeasured` **同时**在场 ─────────────
+           *
+           * MEASURED（`src/gates/registry.ts:982-987`）：聚合体在存在 unmeasured 时
+           *   **原样透出 `blockers`** ⇒ 于是"一条判据发现了问题、另一条测不成"这一种
+           *   真实局面，求值结果是 `ok:false` ∧ `blockers.length > 0` ∧ `unmeasured !== undefined`。
+           *
+           * ★ 而在此之前本行只问「有没有两种"没能检查"的成因之一」——
+           *   于是那一格里**有 blocker 也被放行**：一次**真实的问题发现**被读成
+           *   "没能检查"，而两者的补救动作**相反**（前者去修，后者去补测量条件）。
+           *
+           * ★★ 所以第三个合取项是 `blockers.length === 0`：
+           *   只要有一条判据报出了问题，这一次就**必须**拒
+           *   （走 `!completionNotChecked && completionGates.ok === false` 那一支 ——
+           *    本行一旦为 true，那一支就被短路掉，于是 blocker 反被放行；
+           *    `noteStall` / `recordFriction` / `throwWithSurface` 全部照旧）。
+           *   ★ 引用**符号**而不是行号：行号随本文件每一次增删漂移，
+           *     而"走哪一支"这个事实不漂移。
+           *
+           * ★ 而**反向半边不许动**：`blockers` 为空时（纯 `unmeasured`，或 `skippedAll`）
+           *   仍然放行 + 告警 —— 那一半是 t42 的结论，本行**只收紧有 blocker 的那一半**。
+           */
           const completionNotChecked = completionGates.ok === false
             && (completionGates.skippedAll !== undefined || completionGates.unmeasured !== undefined)
+            && completionGates.blockers.length === 0
           if (completionNotChecked) {
             const why = completionGates.unmeasured !== undefined
               ? `the completion step could not be measured (${completionGates.unmeasured})`
@@ -1578,56 +1668,6 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             const transition = transitionError(task.status, args.status)
             if (transition !== undefined) throw new Error(transition)
             task.status = args.status
-          }
-          /**
-           * ── ★★★ t19：这一次执行发生了 ⇒ **记进历史**（有序、只追加）─────────────────
-           *
-           * 用户的原话（本格存在的理由）：
-           *   「一个收敛的循环，在用户眼里读成一串互不相干的红色失败」。
-           *
-           * ── ★★ 位置是刻意的：**在 `task.status` 已经落定之后** ──────────────────────
-           *
-           * ★ 若放在赋值**之前**，元素里记的就是**上一个**状态 —— 于是每一条历史
-           *   都比事实**晚一步**，而"它失败过两次然后通过了"这句话会读成
-           *   "它失败过三次"（收敛的那一次被记成前一次的重复）。
-           *   （与 C1 的 `noteStall` 必须排在 `recordFriction` 之前是同一条纪律，
-           *     只是方向相反：那里要的是**这一次**的次数，这里要的是**这一次**的结果。）
-           *
-           * ── ★ 为什么**只有落了终态**才追加 ─────────────────────────────────────────
-           *
-           * 一次 `in_progress` 的中间更新**不是一次执行** —— 它没有结论。
-           * ⇒ 若也记，历史里会塞满"还在跑"的元素，而"跑了几次"这个问句就废了
-           *   （它会等于"更新了几次"）。★ 判据是 `TERMINAL_TASK_STATUSES`。
-           *
-           * ── ★★ 而 `cancelled` 也记 ────────────────────────────────────────────────
-           *
-           * 一条被中止的任务**确实跑到过终态**，而"它被中止了、没通过"是一个
-           * 与"它还在跑"不同形的事实。⇒ 它进历史；读取端从 `status` 读得出它是中止。
-           */
-          if (args.status !== undefined && TERMINAL_TASK_STATUSES.includes(args.status)) {
-            appendExecution(task, {
-              at: Date.now(),
-              /** ★ 与 `TeamTask.attempt` 同一套编号；缺省 0（还没开始任何一代）。 */
-              attempt: task.attempt ?? 0,
-              ...task.attemptId === undefined ? {} : { attemptId: task.attemptId },
-              status: task.status,
-              /**
-               * ★★ `round` / `verdict` / `failureKind` **抄进历史**，而不是让读取端
-               *   去读 `TeamTask` 上那一格 —— 因为那几格是**单值**，会被下一轮覆盖。
-               *   ⇒ 不同步抄的话，"第 1 轮是 needs_revision"这件事下一轮就没了，
-               *     而"它失败过两次然后通过"正是要靠这几格才读得出来。
-               */
-              ...task.round === undefined ? {} : { round: task.round },
-              ...task.verdict === undefined ? {} : { verdict: task.verdict },
-              /**
-               * ★ 成因分类用**既有的那一份**（`failureKindOf`），不在这里重算 ——
-               *   与 t12 的 status 出口**同源**，于是"这条失败是哪一种"只有一个答案。
-               * ★ 只在 `failed` 上算：其余终态没有"失败成因"可言（`failureKindOf`
-               *   对非 failed 任务给的是缺省，抄进来会是一条**假事实**）。
-               */
-              ...task.status === 'failed' ? { failureKind: failureKindOf(task) } : {},
-              ...identity.name === undefined ? {} : { by: identity.name },
-            })
           }
           /**
            * ── ★★★ 落终态时，把 worktree 上的改动【提交】成一个 commit ──────────────
@@ -1863,6 +1903,73 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           if (input.changedPaths !== undefined) task.changedPaths = input.changedPaths
           if (acceptanceResults !== undefined) task.acceptanceResults = acceptanceResults
           if (commandsRun !== undefined) task.commandsRun = commandsRun
+          /**
+           * ── ★★★ t19：这一次执行发生了 ⇒ **记进历史**（有序、只追加）─────────────────
+           *
+           * 用户的原话（本格存在的理由）：
+           *   「一个收敛的循环，在用户眼里读成一串互不相干的红色失败」。
+           *
+           * ── ★★ 位置是刻意的：**在这一代的每一格都已经落定之后** ────────────────────
+           *
+           * ★ 若放在赋值**之前**，元素里记的就是**上一个**状态 —— 于是每一条历史
+           *   都比事实**晚一步**，而"它失败过两次然后通过了"这句话会读成
+           *   "它失败过三次"（收敛的那一次被记成前一次的重复）。
+           *   （与 C1 的 `noteStall` 必须排在 `recordFriction` 之前是同一条纪律，
+           *     只是方向相反：那里要的是**这一次**的次数，这里要的是**这一次**的结果。）
+           *
+           * ── ★★★ 而它**不只是** `status` 一格（D2 修的就是这一格只满足了一半）──────
+           *
+           * MEASURED（本文件的由来）：本块此前住在 `task.status = args.status` 之后、
+           *   而 `task.verdict` / `task.acceptanceResults` / `task.commandsRun` 的赋值
+           *   **都在它后面**。⇒ 一次终态更新写进历史的
+           *   `verdict` / `failureKind` 读的是**上一代**的值：
+           *     · `failureKind === 'inconclusive'`（上一代的 `needs_revision`）
+           *       而这一次是 `failed` + `acceptanceResults` 里有一条 failed；
+           *     · 上一代没有 `verdict` ⇒ 这一次的 `needs_revision` 在历史里**根本没有**。
+           *   ★ 而"归因记到上一代"在读取端与"这一代就是这么回事"**完全同形** ——
+           *     两者都是一条合法形状的 `failureKind`，无人能分辨。
+           *
+           * ★★ 所以本块的位置判据是【本代的全部输入都已落定】：
+           *   `status` · `verdict` · `acceptanceResults` · `commandsRun` 四格都在它之前赋值。
+           *   `round` 不属于这一代（它由 `create_task` 定、本工具从不写）⇒ 无需等待，
+           *   但它与其它几格**一起**抄才构成一代的完整读数。
+           *
+           * ── ★ 为什么**只有落了终态**才追加 ─────────────────────────────────────────
+           *
+           * 一次 `in_progress` 的中间更新**不是一次执行** —— 它没有结论。
+           * ⇒ 若也记，历史里会塞满"还在跑"的元素，而"跑了几次"这个问句就废了
+           *   （它会等于"更新了几次"）。★ 判据是 `TERMINAL_TASK_STATUSES`。
+           *
+           * ── ★★ 而 `cancelled` 也记 ────────────────────────────────────────────────
+           *
+           * 一条被中止的任务**确实跑到过终态**，而"它被中止了、没通过"是一个
+           * 与"它还在跑"不同形的事实。⇒ 它进历史；读取端从 `status` 读得出它是中止。
+           */
+          if (args.status !== undefined && TERMINAL_TASK_STATUSES.includes(args.status)) {
+            appendExecution(task, {
+              at: Date.now(),
+              /** ★ 与 `TeamTask.attempt` 同一套编号；缺省 0（还没开始任何一代）。 */
+              attempt: task.attempt ?? 0,
+              ...task.attemptId === undefined ? {} : { attemptId: task.attemptId },
+              status: task.status,
+              /**
+               * ★★ `round` / `verdict` / `failureKind` **抄进历史**，而不是让读取端
+               *   去读 `TeamTask` 上那一格 —— 因为那几格是**单值**，会被下一轮覆盖。
+               *   ⇒ 不同步抄的话，"第 1 轮是 needs_revision"这件事下一轮就没了，
+               *     而"它失败过两次然后通过"正是要靠这几格才读得出来。
+               */
+              ...task.round === undefined ? {} : { round: task.round },
+              ...task.verdict === undefined ? {} : { verdict: task.verdict },
+              /**
+               * ★ 成因分类用**既有的那一份**（`failureKindOf`），不在这里重算 ——
+               *   与 t12 的 status 出口**同源**，于是"这条失败是哪一种"只有一个答案。
+               * ★ 只在 `failed` 上算：其余终态没有"失败成因"可言（`failureKindOf`
+               *   对非 failed 任务给的是缺省，抄进来会是一条**假事实**）。
+               */
+              ...task.status === 'failed' ? { failureKind: failureKindOf(task) } : {},
+              ...identity.name === undefined ? {} : { by: identity.name },
+            })
+          }
           /**
            * ── ★★★ S1：completion 判据结果【落盘到 task】（此前：求值 → 裁决 → 丢弃）────
            *

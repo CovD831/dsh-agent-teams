@@ -1,3 +1,4 @@
+import { CommandResult } from '../types.ts';
 import { AgentTeamsRuntime } from './shared/entities.ts';
 import type { Context } from '@deepseek-ai/cordis';
 /**
@@ -116,6 +117,48 @@ export declare function reclaimWorktreeAfterDelivery(options: {
     /** 主干引用（默认 `main`，与权威实现一致）。 */
     mainRef?: string;
 }): Promise<ReclaimOutcome>;
+/**
+ * ── ★★★ D3：`commandsRun[i].status` 与 `exitCode` 的自相矛盾必须被拒 ─────────────
+ *
+ * MEASURED（`src/tools/shared/entities.ts:5554-5591` 的 `parseCommandResults`）：
+ *   它只做**形状**校验 —— `command` 是非空串、`status` ∈ {passed, failed}、
+ *   `exitCode` 是 number 就原样透传。★ 它**从不**把两者放在一起看。
+ *
+ * ⇒ 于是下面这一对都能落盘，而在读取端它们与一份**自洽**的证据同形：
+ * ```
+ *   { command, status: 'passed', exitCode: 1 }   // "通过了，而它退出码是 1"
+ *   { command, status: 'failed', exitCode: 0 }   // "它坏了，而它退出码是 0"
+ * ```
+ * ★ 而 `failureKindOf` 恰恰**只看 `exitCode`**（`src/state.ts:316-326`）——
+ *   ⇒ 一条自报 `status:'failed'` / `exitCode:0` 的命令既不会被算成
+ *     "交付物坏了"，又会被读成"它失败过" ⇒ 两个格子在讲两个不同的故事。
+ *
+ * ── ★★ 判据的三态（第三态是"缺席"，不是"一致"）────────────────────────────────
+ *
+ *   `exitCode === undefined`        ⇒ **不判**。老数据只是没记这一格，
+ *                                      不是矛盾 —— 把"没记"当"矛盾"会拒掉历史。
+ *   `passed` ∧ `exitCode !== 0`     ⇒ 矛盾（`passed:true` 说"它跑通了"）
+ *   `failed` ∧ `exitCode === 0`     ⇒ 矛盾（`failed:true` 说"它没跑通"）
+ *
+ * ★ 返回**一句话**（而不是布尔）—— 拒绝时必须说清是**哪一条**、**哪一格**矛盾，
+ *   否则读日志的人只看到"一条命令不一致"而不知道去改哪一行。
+ */
+export declare function commandRunConflict(results: readonly CommandResult[]): string | undefined;
+/**
+ * ★★ `parseCommandResults` 的**薄包一层**：先交给既有解析器（形状 + 必填 `status`），
+ *    再判 status × exitCode 的一致性。
+ *
+ * ── 为什么是"包一层"而不是"改解析器" ───────────────────────────────────────────────
+ *
+ * `parseCommandResults` 住在 `src/tools/shared/entities.ts` —— 它**不在**本任务的
+ * inScope 里，而它还有别的调用方（终态补证据那一路）。
+ * ★ 而本条判据要的是「本工具**接受**的 commandsRun 必须自洽」——
+ *   那是 `update_task` 的**接受面**，不是那个共享解析器的语义。
+ * ★★ 所以校验放在接受面这一层：解析器的一个字都不动（既有那条
+ *   `commandsRun[i].status must be passed or failed` 的必填校验原样生效），
+ *   而两个入口（终态补证据 / 常规更新）都走这里。
+ */
+export declare function parseCommandResultsChecked(value: unknown): CommandResult[] | undefined;
 /**
  * ── ★★★★★ 扫一遍**已经终态**的任务，把它们早已被吸收的树收掉（defect 2）─────────────
  *
