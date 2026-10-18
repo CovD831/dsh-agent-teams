@@ -1,8 +1,10 @@
 # 过夜运行报告 · 集成校验（INT）
 
 **报告人**：verifier（独立验证与集成，本轮不实现、不改 src/ 与 lib/）
-**校验时刻**：2026-10-19 05:07–05:20（Asia/Shanghai）· 校验期间主干从 `019ec3c` 走到 `351c2e3`
-**被校验的主干**：`351c2e3`（`git status --porcelain -uall` = **0 行**）
+**校验时刻**：2026-10-19 05:07–05:40（Asia/Shanghai）
+**校验期间主干推进**：`019ec3c` → `4c4cef1` → `0e2fadb` → `351c2e3` → `c090a04` → `b0f1e9f` → `777679b`（共 6 跳）
+**被校验的主干**：`777679b`（复查后 `git status --porcelain -uall` = 本报告 1 行 M，其余干净）
+**本文件自身的改动范围**：只有 `docs/OVERNIGHT-RUN-REPORT.md` 一个文件（本任务 inScope 就是它）
 **口径**：本报告里每一条读数都是我自己在本机跑出来的；凡是转述他人结论的，都标了「转述」并注明我没复跑。
 
 > ★ 本报告只写三类：**已完成 / 未闭环 / 需要人拍板**。三态不合并。
@@ -38,7 +40,7 @@ node --test scripts/gate-plan-reviewed.test.mjs       → tests 17 / pass 17 / f
 | # | 命令 | 它记的 | 我复跑 | 结论 |
 |---|---|---|---|---|
 | 0 | `pnpm typecheck` | exit 0 | EXIT=0 | 一致 |
-| 1 | `pnpm build` | exit 0 | EXIT=0（我在一次性 worktree `/tmp/wt-head` 上跑，未在主树跑，见 §4.4） | 一致 |
+| 1 | `pnpm build` | exit 0 | EXIT=0（我在一次性 worktree `/tmp/wt-head` 上跑，未在主树跑，见 §4.5） | 一致 |
 | 2 | `node --test scripts/gate-plan-reviewed.test.mjs` | 17/17/0 | 17/17/0 EXIT=0 | 一致 |
 | 3 | `node --test scripts/verify-readout-uniform.test.mjs` | 14/13/0 | 14/13/0（含 skipped 1）EXIT=0 | 一致 |
 | 4 | `node --test scripts/review-unified-pipeline.test.mjs` | 14/14/0 | 14/14/0 EXIT=0 | 一致 |
@@ -127,33 +129,139 @@ node scripts/gate-fixture-registry.mjs        → EXIT=0
 ★ 与它记的「11 pass / 6 fail」**数量不同** —— 我的变异是**我自己的复现**，不是它那份的逐字拷贝，
 两半都红，但**计数不能互相当证据**。这一条我标成「方向一致、读数不同」。
 
+### 1.4 R1 · 判据级 reason 落盘（t1）—— **已合入主干并逐字节复核**
+
+★ 这一节是**后补的**：t1 在我写报告期间（05:24:42）才完成，合入主干（`b0f1e9f`）又更晚。
+补它的同时我把 §2.1 改成指针，避免同一件事在两节里说法不一致。
+
+| 项 | 读数 |
+|---|---|
+| 交付提交 | `c090a04 task(t1): worktree deliverable`（父 `351c2e3`） |
+| 合入主干 | `b0f1e9f feat(t1): a gate run now records why it could not measure`（9 文件 `+379/−11`） |
+| `changedPaths` | 9 条，**9 条全在 inScope 内、全部 EXISTS** |
+| 字节一致性 | `git diff c090a04 HEAD -- <那 9 条>` ⇒ **0 行**（逐字节相同） |
+| 祖先关系 | `git merge-base --is-ancestor c090a04 HEAD` ⇒ **YES** |
+| 任务基底 | `baseRevision=351c2e3` —— 部长手工对齐之后才派的那一次 |
+
+我自己复跑的 verify（**在主干上**，不是在隔离树里）：
+
+```
+pnpm typecheck                                 → EXIT=0
+node --test scripts/gate-registry.test.mjs     → ℹ tests 35 / pass 35 / fail 0   EXIT=0
+基线 /tmp/wt-head (351c2e3) 同命令             → ℹ tests 30 / pass 30 / fail 0
+```
+
+**臂名集合差**（不是比计数）：基线 30 → 主干 35，**新增 5 条、删除 0 条**：
+
+```
+⑱ 臂 1  ★ unmeasured 的成因必须【穿过落盘投影】并且读得回来
+⑱ 臂 1b ★ 观察模式下的 unmeasured 也带成因
+⑱ 臂 2  ★ blocked 的成因【允许缺席】—— 与 unmeasured 是两条独立判定
+⑱ 臂 2b ★ skipped 的成因同样可缺席
+⑱ 臂 3  ★ 旧条目（历史 team.json 里没有这一格）必须仍能解析，不抛错
+```
+
+**★ 我亲手打穿了投影，两半都验过**（一次性副本 `/tmp/t1mut`，做完即弃）：
+
+```
+① 字段名对齐 —— t1 的字段叫 reason，不叫 cause
+   主干上 import lib/state/tasks.js 的 gateEvaluationRecordOf，投入
+   {verdict:'unmeasured', reason:'probe-could-not-measure'}
+   ⇒ 读回 {"id":"completion.a","verdict":"unmeasured","reason":"probe-could-not-measure"}
+   ⇒ reason survived projection? true
+② 反向半边 删掉 src/state/tasks.ts 里 `...entry.reason === undefined ? {} : { reason }`
+   ⇒ tests 35 / pass 33 / fail 2，红的是「⑱ 臂 1」「⑱ 臂 1b」；还原后 35/35/0
+③ 反向半边 让 blocked 也强制带 reason
+   ⇒ tests 35 / pass 34 / fail 1，红的是「⑱ 臂 2」；还原后 35/35/0
+④ 反向半边 去掉 5 处 unmeasured 的 reason 赋值
+   ⇒ tests 35 / pass 33 / fail 2，红的仍是「⑱ 臂 1」「⑱ 臂 1b」
+```
+
+**但它的两格账仍然没平**（这就是 §2.1 存在的原因，两节不矛盾）：
+
+- `verdict` 键**缺席**（`objectHasOwnProperty('verdict')` = false），尽管 `reviewed.by=captain` 且 5 条 checks 全 pass。
+- `completion.ok` = **false**，blocker 是那条我已证伪的假阳性
+  `[completion.r5] "scripts/gate-registry.test.mjs" is a decorative test`。
+
+⇒ **代码闭环了，账没有。** 这一节只主张代码与字节，账的问题全在 §2。
+
 ---
 
 ## 二、未闭环
 
 > 本节里的东西**一条都不许并进第一节**。它们的共同点是：主干上看得见、读得出问题、但今晚没修到闭环。
 
-### 2.1 R1（t1）判据级 reason 落盘 —— **零实现**
+### 2.1 R1（t1）的**账**还没平（代码已进主干，见 §1.4）
 
-- 我复核的盘面：t1 隔离树 `.agent-teams/worktrees/task-overnight-registration-hardening-t1`
-  `git status --porcelain -uall` = **0 行**；`changedPaths = undefined`；`deliverableCommit = undefined`。
-- 5 次 attempt **全部** `failureKind=failed_context`（4 / 5 两次由 captain 记，更早 3 次由 foreman 记）。
-  没有一次是「实现失败」，是宿主把回合打断了。
-- ★ 我自己补的一条探针（reviewer 没做）：`node --input-type=module` 直接 import
-  `lib/state/tasks.js` 的 `gateEvaluationRecordOf`，喂进带 `cause` 的 ran 条目 ⇒
-  落盘后 `keys = ['id','verdict']` / `['id','verdict','count']`，**`cause survived projection? false`**。
-  ⇒ 即使 `src/gates/registry.ts` 侧加了字段，`src/state/tasks.ts:134-158` 的投影白名单也会静默丢掉它。
-- **契约缺口已被 amend**（`revisions` 里 captain 的原文写明了这一点，并把 `src/state/tasks.ts` 等纳入
-  inScope，现共 10 条），所以这**不再**是契约缺陷；缺的是**实现本身**。
-- 现状：`status=in_progress`、`attempt=6`、`assignee=foreman`、`baseRevision=351c2e3`。
-  **不得**记为已完成。
+★ 本节被改写过三次：t1 的「零实现」→「实现在隔离树里」→「已合入主干」。
+三次改写对应三次真实的主干推进（`351c2e3` → `b0f1e9f` → `777679b`）。
+**这三稿我都留在 git 里了**，所以「我看错了没」是可以查的：`git log -p -- docs/OVERNIGHT-RUN-REPORT.md`。
+现在它以 **§1.4** 的身份进了「已完成」，这里只留一条指针与一条**仍然未闭环**的尾巴。
 
-### 2.2 R2R3R4（t2）记账层三处缺陷 —— **零实现，三处全部仍然活着**
+**已闭环的部分**：`c090a04`（9 文件 `+379/−11`）已由 `b0f1e9f` 合入主干；
+`git merge-base --is-ancestor c090a04 HEAD` = **YES**；`git diff c090a04 HEAD -- <那 9 条>` = **0 行**（逐字节相同）。
+主干 `node --test scripts/gate-registry.test.mjs` = **35/35/0**，投影探针在主干上读回 `reason survived projection? true`。
+详见 §1.4。
 
-t2 隔离树 `git status` = 0 行，`changedPaths = undefined`；4 次 attempt 全部 `failed_context`。
-下面三条**是我亲手构造输入复现的**，不是读源码推断：
+**未闭环的是这两格（代码本身已闭环，不许把两件事混成一句）**
 
-**① 吞掉 blocker（还在）** —— 用真实的 `createGateRegistry()`，两条 completion 判据（一条 blocked、一条 unmeasured）：
+- t1 的 `verdict` 键**仍然缺席**（`reviewed.by=captain`、5 条 checks 全 pass，`objectHasOwn('verdict')` = false）。
+- `completion.ok` 仍是 **false**，blocker 仍是那条已被我证伪的假阳性：
+  `[completion.r5] "scripts/gate-registry.test.mjs" is a decorative test`
+  —— 臂名差集证明它新增了 5 条真臂（30 → 35，删除 0）。
+- ⇒ **代码进去了，账没平。** 这两格分开记。
+
+### 2.2 R2R3R4（t2）记账层三处缺陷 —— **主干上零交付，三处在主干上全部仍然活着**
+
+★★ **这一节我也改写过**。05:36 时它是「零实现」（树脏 0 行、`changedPaths=undefined`）；
+05:40 我再看时，**隔离树里已经有 1028 行未提交的改动**。两次读数都真，只是中间隔了 4 分钟。
+**教训：报告里凡写"没有实现"，都必须带时刻 —— 因为它是会变的。**
+
+| 时刻 | t2 隔离树（`HEAD=351c2e3`） | 我的读数 |
+|---|---|---|
+| 05:36 | `git status --porcelain -uall` = **0 行** | 零实现 |
+| 05:40 | **10 行脏**：`src/tools/update-task.ts +207` · `src/tools/create-task.ts +9` · `scripts/gate-update-task-unmeasured.test.mjs +409` · 4 个 lib 产物 · 2 个 `.probe-*.mjs` | `git diff --stat` = **8 文件 +1028/−351** |
+
+⇒ 05:40 的盘面是：**实现写在隔离树里、尚未提交、团队账上仍是 `changedPaths=undefined`、`deliverableCommit=undefined`**。
+按「隔离树里的未提交改动不算交付」这条纪律（§1 的门槛第 ② 条），它**仍然不能进 §1**。
+但它也**已经不是「零实现」**了 —— 下面三条缺陷的「还在」是 **05:28 的读数**，我在 05:40 复核过主干侧仍然成立
+（主干 `src/tools/update-task.ts` 没有这些改动），但**隔离树里那 1028 行我按纪律不采信为交付**。
+
+下面三条**是我亲手构造输入复现的**，不是读源码推断（时刻：05:28，对象：主干 `351c2e3`/`777679b` 的构建产物）：
+
+**★ 先把我对那 1028 行的独立读数写清（三态分开）**
+
+| 我测的东西 | 结果 | 状态 |
+|---|---|---|
+| 那 1028 行**算不算交付** | `deliverableCommit=undefined`、`changedPaths=undefined`、无提交 | **could-not-measure（不算交付）** |
+| 那 1028 行**跑起来对不对** | 在隔离树里 `node --test scripts/gate-update-task-unmeasured.test.mjs` ⇒ **10/10/0 EXIT=0**（05:40） | confirmed（仅限隔离树） |
+| 那三处缺陷**在主干上还在吗** | 在，见下面①②③ | confirmed |
+| 那三处缺陷**在那 1028 行里修好了吗** | ①③我实测**修好了**（见下），②的修法在源码里但落盘顺序我未复跑 | ①③ confirmed，② could-not-measure |
+
+★ **我特意去打了 ① 的反向半边**，因为「10/10 绿」本身不是证据（绿可能是夹具自己写了一份"应该长这样"）。
+我直接拿 t2 隔离树里**构建出来的** `lib/` 跑同一组输入，把**新旧两条表达式**并排求值：
+
+```
+输入 = {ok:false, blockers:['real problem'], unmeasured:'could not measure'}
+旧：notChecked=true   ⇒ wouldReject=false   ← 缺陷
+新：notChecked=false  ⇒ wouldReject=true    ← 修好了
+对照（只有 unmeasured）：新旧都是 notChecked=true ⇒ 仍放行   ← 反向半边没被放宽
+对照（只有 blockers）  ：新旧都是 wouldReject=true           ← 这一半没退化
+```
+
+③ 我也直接调了它新导出的 `parseCommandResultsChecked`（**不是**读源码）：
+
+```
+{status:'passed', exitCode:1}  => REJECT "a passed command cannot have a non-zero exit code"
+{status:'failed', exitCode:0}  => REJECT "a failed command cannot have a zero exit code"
+{status:'passed'}              => ACCEPT   ← exitCode 缺席不算矛盾（这一格刻意保留）
+{command:'x', exitCode:1}      => REJECT "commandsRun[0].status must be passed or failed"
+```
+
+⇒ **三态分开的结果**：那 1028 行**在隔离树里是对的**，但它**还不是交付**。
+所以下面三条「还在」现在必须读成「**在主干上还在**」，而不是「谁都没做」。
+
+**① 吞掉 blocker（在主干上还在）** —— 用真实的 `createGateRegistry()`，两条 completion 判据（一条 blocked、一条 unmeasured）：
 
 ```
 只有 blocker：{"ok":false,"blockers":["[completion.a-blocked] found a real problem"],...}
@@ -178,7 +286,7 @@ blocker+unmeasured：{"ok":false,"unmeasured":"[completion.z-unmeasured] could n
 {"command":"x","exitCode":1}                   => REJECT: commandsRun[0].status must be passed or failed
 ```
 
-### 2.3 三张已落地任务的**完工门全是 `ok:false`**
+### 2.3 四张已完工任务的**完工门全是 `ok:false`**
 
 这不是「它们没做完」，是**完工门自己给了否决**。逐条原文（`team.json` 的 `gateEvaluations.completion`）：
 
@@ -187,8 +295,10 @@ blocker+unmeasured：{"ok":false,"unmeasured":"[completion.z-unmeasured] could n
 | t3 | false | `[completion.r5] "scripts/gate-plan-reviewed.test.mjs" is a decorative test: it already passed on the parent revision (exit 0)` · 同上 `review-unified-pipeline.test.mjs` · `[completion.r5] "scripts/verify-unified-pipeline.test.mjs" failed on both revisions (parent exit 1, fixed exit 1)` |
 | t4 | false | `[completion.r5] "scripts/gate-admission-point.test.mjs" is a decorative test ...` |
 | t5 | false | `[completion.r5] "scripts/gate-input-wiring.test.mjs" failed on both revisions (parent exit 1, fixed exit 1)` |
+| t1 | false | `[completion.r5] "scripts/gate-registry.test.mjs" is a decorative test: it already passed on the parent revision (exit 0)`（★ 假阳性：该夹具 30→35 臂） |
 
-三条另有共同的 `unmeasured`：`[completion.mutation] … the killer suite is not green before mutation …`、
+四条的 `unmeasured` 里同样有 `[completion.mutation]` 与 `[completion.backtest]`（t1 的 mutation 那条是「被截断到 40 个变异体」），
+典型原文：`[completion.mutation] … the killer suite is not green before mutation …`、
 `[completion.backtest] no dependency graph / coverage data was …`。
 
 ★★ **这四条 `completion.r5` blocker 是假阳性，我证伪了它**（详见 §5.3）：r5 的「按臂判」那条路
@@ -196,17 +306,22 @@ blocker+unmeasured：{"ok":false,"unmeasured":"[completion.z-unmeasured] could n
 我实测：`gate-plan-reviewed` 在父版本 12 臂、在主干 17 臂，**新增 5 条**；`gate-admission-point`
 父 3 臂 → 主干 10 臂，**新增 7 条**。它们**不是**装饰品 —— 是判据读不到臂名。
 
-### 2.4 t4 的审查 verdict **不存在**
+### 2.4 t1 与 t4 的审查 verdict **都不存在**
 
 `t4` 的 `verdict` 键**整个缺席**（不是 `pass` 也不是空串）。`reviewed.by=captain`、`reviewed.at=1792354680000`,
-但 `verdict` 从未落盘。`t3`/`t5` 都是 `verdict=pass`。
-⇒ 团队的 Delivery 判词里那句「completed implementation has no passing review」指的就是它。
+但 `verdict` 从未落盘。`t3`/`t5` 都是 `verdict=pass`。**`t1` 一模一样**：
+`objectHasOwnProperty('verdict')` = false，而 `reviewed.by=captain`、5 条 checks 全 pass。
+⇒ 团队的 Delivery 判词里那句「completed implementation has no passing review」指的就是它（们）。
+★ 可复跑：`node -e 'const t=require("./.agent-teams/overnight-registration-hardening/team.json");\nfor(const id of ["t1","t4"]){const x=t.tasks.find(y=>y.id===id);\nconsole.log(id, "verdict key:", Object.prototype.hasOwnProperty.call(x,"verdict"), "reviewed.by:", x.reviewed&&x.reviewed.by)}'`
 
-### 2.5 三张已落地任务里有**两张的完成回执由队长自己写**
+### 2.5 四张已完工任务里有**两张的完成回执由队长自己写**
 
 - t3：attempt 2 `status=completed, by=captain`；`reviewed.by=captain`。⇒ 完成者与审查者是同一人。
 - t5：attempt 2 `status=completed, by=captain`；`reviewed.by=captain`。同上。
 - t4：attempt 2 completed by `foreman-b`；`reviewed.by=captain`。**唯一一个「不是我干的我来审」**，而它恰好 `verdict` 缺席。
+- t1：attempt 6 completed by `foreman`；`reviewed.by=captain`。也是「不是我干的我来审」，同样 `verdict` 缺席。
+  ⇒ 四张里真正做到「完成者 ≠ 审查者」的只有 t4 与 t1，而这两张**恰好都没有 `verdict`**。
+  这不是巧合能解释的形状：一旦 `reviewed.by` 换成了别人，`verdict` 就没落盘。
 
 ⇒ 「每件实现通过审查后由队长合进主干」这条设计**在账面上没有分离**。此处只报读数，不做道德判断。
 
@@ -233,12 +348,14 @@ at=NaN                 => ok=true
 ⇒ 「有限但超出 Date 可表示范围」的 `at` 会**抛穿判据**，绕过三态。可达性也成立：`src/quality-gates.ts:1114`
 的 create_task 校验同样只查 `Number.isFinite`。
 
-### 2.7 两份审查（t6 / t7）都是 reject，且 reject 的理由至今仍成立
+### 2.7 两份审查（t6 / t7）都是 reject —— t6 已实质过时，t7 仍然成立
 
 - t6 → `verdict=reject`，findings 4 条**全 blocker**（被审的 t1 无实现）。
 - t7 → `verdict=reject`，F1/F2/F3 blocker、F4 high、F5 medium（被审的 t2 无实现 + 三处缺陷实测仍在）。
   ★ 我核对过 t7 的 F2/F3：与我 §2.2 的①②③是同一批读数，**我重跑得到同样结论**。
-- 这两张任务**不能**因为「结论对」就算闭环 —— 被它们打回的实现到现在还没做。
+- 这两张任务**不能**因为「结论对」就算闭环 —— 被它们打回的实现，**t1 那张后来做了并合进主干**（§1.4），
+  **t2 那张到 05:40 只写到隔离树里、未提交**（§2.2）。⇒ t6 已实质过时（它判的是「无实现」那一刻），
+  t7 的结论**仍然成立**。两个 reject **都不能改判**（终态不可变），要重审只能重派。
 
 ---
 
@@ -261,14 +378,21 @@ at=NaN                 => ok=true
    `.agent-teams/hmr-reloads.jsonl` 共 50 条重载，窗口 02:35:06–05:04:15。★ 但这套因果**不完全成立**，见 §5.5。
 4. **要不要在产物里造一个 integrator**（`deliverableCommit` 有写者零读者）
    已备读数：`grep -rn "deliverableCommit" src/` ⇒ **恰好 2 处**：`src/tools/update-task.ts:1703`（写）、
-   `src/types.ts:684`（声明）。**零读者**。⇒ 本轮每一次「合入主干」都是队长手工做的（见 §4.3）。
+   `src/types.ts:699`（声明）。**零读者**。⇒ 本轮每一次「合入主干」都是队长手工做的（见 §4.3）。
 5. **R1 / R2R3R4 两张任务重派不重派、按什么基底派**
    读数：两张的隔离树在 05:13:18 已被队长手工 `git checkout --detach` 对齐到 `351c2e3`
-   （`merge-base --is-ancestor c01fdb4 HEAD` = YES、`9720ca9` = YES）。基底问题**已解**，剩下的是要不要再派。
-   附：t1 一次派发 = 一次 `pnpm build` = 一次插件重载 = 打断所有在跑的成员回合（§3 第 3 条）。
-6. **t3 的 F1（RangeError）修不修、修完的续审回到哪个 reviewer**
-   读数：§2.6 已复现。修法在 t3 原 inScope（`src/gates/dispatch/plan-reviewed.ts`）内，
-   但**续审必须是同一个 reviewer** `2de3ae27-1764-4c33-9524-135f82c0e352`（t8 契约第 6 条），
+   （`merge-base --is-ancestor c01fdb4 HEAD` = YES、`9720ca9` = YES）。基底问题**已解**。
+   ★ 结果：**t1 已于 05:24:42 交付 `c090a04`**（详见 §2.1）；**t2 到 05:28 仍 `in_progress`、零改动**。
+   剩下要拍的是：**t1 的 `c090a04` 要不要合进主干**（它不在任何 ref 上，主干零改动），
+   以及 t2 还要不要再派。附：一次派发 = 一次 `pnpm build` = 一次插件重载 = 打断所有在跑的成员回合（§3 第 3 条）。
+6. **t1 / t4 的审查 `verdict` 缺席，要不要补一次正式审查**
+   读数：t1 与 t4 都有 `reviewed.by=captain` 与 5 条 checks 全 pass，但 `verdict` 键**根本不存在**。
+   t3/t5 是 `verdict=pass`。⇒ 要么是记账写漏了，要么是「审了但没裁决」。这是数据形状问题，不是判断问题。
+7. **t3 的 F1（RangeError）的续审回到哪个 reviewer**
+   ★ 「修不修」这一问**已经有答案了**：团队在 05:36 派了 `t10`（`kind=implementation`、`assignee=foreman`、
+   inScope 恰是 `src/gates/dispatch/plan-reviewed.ts` + 该夹具 + 2 个 lib 产物）。所以本项**只剩续审**。
+   读数：F1 我在 §2.6 已独立复现（`at=-1e300` ⇒ `RangeError`）。
+   硬约束：**续审必须是同一个 reviewer** `2de3ae27-1764-4c33-9524-135f82c0e352`（t8 契约第 6 条），
    而 t8 已是终态 —— 任何人都不能改它的 verdict，只能由队长重派。
 
 ---
@@ -278,7 +402,7 @@ at=NaN                 => ok=true
 > 问题原样：**隔离树从 HEAD 建 · 下游看不见上游 · 产品无 integrator**。
 > 本节只回答「它影响了本轮吗」，并给证据。三格的答案**不同**。
 
-### 4.1 「下游看不见上游」—— **影响了，且直接打死两张任务**
+### 4.1 「下游看不见上游」—— **影响了，且它决定了 t1 的成败**
 
 05:07:45 采样（`git -C <树> rev-parse --short HEAD` + `merge-base --is-ancestor c01fdb4 HEAD`）：
 
@@ -292,7 +416,18 @@ at=NaN                 => ok=true
 
 ⇒ 五棵树里 **0 棵**含 R7 的合并。t1 与 t2 的成员**各自独立探测到**这一点并**拒绝开工**，
 两张任务的 output 都逐字写了 `git merge-base --is-ancestor c01fdb4 HEAD → NO`。
-**这是本轮 5 张实现任务里 2 张零交付的直接原因**（不是能力问题，是基底问题）。
+
+★★ **本轮最干净的一次对照实验**（不是推断，是两次同条件观测）：
+
+| 阶段 | t1 树的基底 | 结果 |
+|---|---|---|
+| 05:13 之前 | `e1ef3b7`（不含 `c01fdb4`/`9720ca9`） | **5 次 attempt，5 次 `failed_context`，交付 0** |
+| 05:13:18 队长手工 `--detach` 到 `351c2e3` 之后 | `351c2e3`（含两者） | **第 6 次 attempt 在 11 分钟内完成**，交付 `c090a04`（9 文件 +379/−11），35/35 绿 |
+
+⇒ 同一张任务、同一个成员（foreman）、同一份契约，**只换了基底**。这就是「下游看不见上游」在
+本轮的**代价**：它不是「可能有点影响」，它让 t1 浪费了 5 个回合。
+t2 在同一时刻也被对齐到 `351c2e3`，但它的第 5 次 attempt 在 05:28 时仍是 `in_progress`、树 HEAD 仍是 `351c2e3`、脏行 0
+—— **尚未交付，不能写成「也成功了」**。
 
 下游盲区的**可执行证据**（我跑的，同一份夹具同一时刻）：
 
@@ -331,9 +466,73 @@ t3 树（337424c）node --test scripts/gate-input-wiring.test.mjs → tests 12 /
   ⇒ 一旦这些工作树被回收，交付提交就成孤本。
 - 所以「这件东西合进去了吗」**没有产品读数可查**。我这一轮是**用字节比对手工核的**：
   `git diff 337424c c01fdb4 -- <8 条>` / `git diff b61ce6a 48d3418 -- <2 条>` / `git diff 6b90523 7a94837 -- <2 条>`
-  —— 三条**全是 0 行**。结论是「合对了」，但**这个结论依赖人肉步骤，不是产品能力**。
+  / `git diff c090a04 HEAD -- <9 条>` —— 四条**全是 0 行**。结论是「合对了」，但**这个结论依赖人肉步骤，不是产品能力**。
+- ★ **今晚一共四次「合入主干」，四次都是人肉，其中两次连合并提交都没有**：
+  `c01fdb4`（真 merge）/ `48d3418`（内容复制）/ `7a94837`（内容复制）/ `b0f1e9f`（内容复制，就是 t1 那次）。
+  ⇒ 四次里只有一次留下了可追溯的合并拓扑，另外三次在 git 历史里**看起来像普通提交**。
+  这不是队长偷懒 —— 是**产品没有 integrator，`deliverableCommit` 写进去以后没有任何读者**。
+- 可被反驳的证伪路径（我跑过，**原样照抄**）：
 
-### 4.4 第三个面（今晚新出现，我实测）：**修一次结构缺陷，会再打断一次成员回合**
+```
+$ grep -rn "deliverableCommit" src/
+src/tools/update-task.ts:1703:                task.deliverableCommit = committed.commit      ← 写
+src/types.ts:699:  deliverableCommit?: string                                     ← 声明
+$ grep -rn "deliverableCommit" src/ | grep -vE "= *committed\.commit" | grep -vE "deliverableCommit\?: *string"
+（0 行）
+```
+
+  ⇒ **恰好 2 处：一处写、一处声明，零读者。** 若哪天第三条出现且是读，这条结论即被推翻。
+
+### 4.4 ★ 第四次「合入主干」发生在成员回合中间，我抓到了它的现场读数
+
+这一格是**本轮最后一次、也是最讽刺的一次**证据：修结构缺陷的动作本身又踩了一次结构缺陷。
+
+时间线（全部是我从盘上读的，不是转述）：
+
+| 时刻 | 事件 | 我的读数来源 |
+|---|---|---|
+| 05:24:42 | t1 第 6 次 attempt 记为 `completed`（`by=foreman`） | `team.json` executions |
+| 05:24:42 | `c090a04 task(t1): worktree deliverable` 落盘 | `git log --date=format:%H:%M:%S` |
+| 05:31:31 | `b0f1e9f feat(t1): …` 合入主干 | 同上 |
+| 05:24:39–05:24:40 | **主树跑了一次 `pnpm build`**：`lib/index.js` `:24:39`、`lib/client.js` 与 `lib/git-artifact-stamp.json` `:24:40` | `stat -f %Sm` |
+| 05:24:40.385 … 05:24:44.050 | **6 次插件重载** | `.agent-teams/hmr-reloads.jsonl` |
+
+⇒ **t1 完成的那一刻，主树正在重建插件，插件在 3.7 秒内重载了 6 次。**
+这一次没有打死 t1（它已经写完了），但它就是 `docs/DEFECT-HMR-DURING-MEMBER-TURN.md` 所描述场景的又一例。
+
+★ 而这次重建是**必要**的：`b0f1e9f` 把 t1 的 `src/` 改动合进主干，`lib/` 必须同步。
+**实测精确到文件（`find lib -name "*.js" -o -name "*.d.ts" | xargs stat`）**：
+**143 个文件 05:24:38、74 个 05:24:39、1 个 05:24:40** —— 那是一次完整重建。
+而 **05:31:31 只有 5 个**：
+
+```
+lib/gates/registry.js · lib/state/tasks.js
+lib/types/gates/registry.d.ts · lib/types/state/tasks.d.ts · lib/types/types.d.ts
+```
+
+**这 5 个与 t1 `changedPaths` 里的 5 个 `lib/` 产物逐字相同**（另外 4 条是 `src/` 与 `scripts/`，本来就不进 `lib/`）。
+我做了集合比对，不是目测：`comm -12 <(diff 清单) <(changedPaths 的 lib 子集)` ⇒ 5 条全中、0 条在外。
+⇒ 05:31:31 那一次**不是**全量 `pnpm build`，是**只同步 t1 涉及的那几份**；
+`.agent-teams/hmr-reloads.jsonl` 在同一毫秒记录了 1 次重载（05:31:31.658）。
+★ 两件事都值得记：**全量构建 3.7 秒内 6 次重载；增量同步 1 次。**
+
+我用两次**独立构建**证明了主树的产物确实换成了含 t1 的那一份：
+
+```
+lib/state/tasks.js     主树 af883872…  = /tmp/wt-h3(777679b) 构建 af883872…   ≠ /tmp/wt-head(351c2e3) 构建 cd8e93a7…
+lib/gates/registry.js  主树 7f89dd33…  = /tmp/wt-h3 构建 7f89dd33…            ≠ /tmp/wt-head 构建 b07fb3e6…
+lib/types.js           主树 31a7265a…  = 两次构建都是 31a7265a…（t1 没改它）
+```
+
+⇒ 产物是新鲜的、且确实包含 t1。**但 `lib/git-artifact-stamp.json` 仍写着 `commit=019ec3c`**，
+`node scripts/git-artifacts.mjs` 在主树上报 `EXIT=1 stale or modified`，而在 `/tmp/wt-h3` 上同一个命令报
+`EXIT=0 Git artifacts match source and build settings`。
+**同一份字节，两个不同的 verdict —— 差别只在 stamp 文件里那一行 commit。**
+
+⇒ 结论：结构缺陷**影响了本轮**。五个面：①下游看不见上游（§4.1）②建一次永不再对齐（§4.2）
+③无 integrator ⇒ 四次合并全靠人肉（§4.3）④合并本身会打断成员（本节）⑤产物与记账戳会脱钩（§5.9）。
+
+### 4.5 第三个面（HMR）：**修一次结构缺陷，会再打断一次成员回合**
 
 `docs/DEFECT-HMR-DURING-MEMBER-TURN.md`（提交 `4c4cef1`）与队长的纪律（`0e2fadb`：成员在跑时主树不跑
 `pnpm build`）是同一个缺陷的两面。我在本轮**遵守了它**：`pnpm build` 只在一次性 worktree `/tmp/wt-head`
@@ -350,14 +549,31 @@ t3 树（337424c）node --test scripts/gate-input-wiring.test.mjs → tests 12 /
 ⇒ `lib/client.js` **把构建目录的绝对路径与由它派生的类名哈希一起焊进了产物**。
 两个 worktree 之间 diff 是 **484 行变动**（其中 16 行直接含路径，其余 468 行是类名哈希的连带改写）；
 两份都做路径归一化后**仍有 468 行不同**，因为哈希不是路径的字面函数。
-所以「在主树重跑 build 会不会脏」这个问题**不能靠 diff 行数回答** —— 只能说：它一定会改 `lib/client.js`，
-而改完的产物与提交进去的那一份**不可能逐字节相同**。
+所以「在**别的目录**重跑 build 会不会脏」的答案是：**一定会**，改完的 `lib/client.js` 与提交进去的那份不可能逐字节相同。
 
-★ 这也是我在主树只跑 `pnpm typecheck`、不跑 `pnpm build` 的第二个理由（第一个是 HMR 会重载插件、打断成员回合）：
-主树 build 之后 `git status` 必然脏两行，而这两行**不是谁的错**。
+★★ **但「在主树重跑」是另一回事，我先前写错了，这里改正。**
+提交进主干的 `lib/client.js` **本来就含着主树的绝对路径**：
 
-⇒ 结论：结构缺陷**影响了本轮**，直接后果是 **2/5 张任务零交付**；而修它的动作本身又会打断成员，
-所以本轮只能「手工对齐 + 手工合并 + 不在主树构建」，三条都是人肉。
+```
+$ git show HEAD:lib/client.js | grep -c "/Users/abab/Desktop/agent-teams-dev"   ⇒ 8
+$ git show HEAD:lib/client.js | grep -c "/private/tmp/wt-head"                   ⇒ 0
+```
+
+⇒ 那 8 处 `//#region \0dsh-css:` banner 指向的就是本仓的绝对路径。
+**所以在主树重跑一次 build，`lib/client.js` 会被逐字节重建成同一份**（实测：05:44:46 主树那次构建之后，
+`md5 lib/client.js` 与 `git show HEAD:lib/client.js` 完全相同，`git status` 里它**没有出现**）。
+
+⇒ 修正后的说法：**「主树 build 一定脏两行」是错的。**
+主树 build 之后**唯一**可能脏的是 `lib/git-artifact-stamp.json`（它记 `commit`，HEAD 一变就对不上），
+而 `lib/client.js` 只有在**换目录构建**时才会脏。
+我不改 §4.5 的标题，但这里必须留下改正痕迹 —— 这是我在本轮**第二次**推翻自己的读数
+（第一次是 `lib/client.js` 的「242 行纯路径 diff」）。
+
+⇒ 结论：结构缺陷**影响了本轮**。直接后果分两段：
+**05:13 之前** 2 张任务（R1、R2R3R4）因基底盲区**零交付**；
+**05:13 之后**队长手工把 t1/t2 的树对齐到 `351c2e3`，t1 立刻在 11 分钟内交付了 `c090a04`（9 文件 +379/−11）——
+**同一张任务、同一个成员、同一份契约，对齐基底前后结果完全不同**。这是本轮关于「基底」最干净的一次对照。
+而修它的动作本身又会打断成员，所以本轮只能「手工对齐 + 手工合并 + 不在主树构建」，三条都是人肉。
 
 ---
 
@@ -368,15 +584,15 @@ t3 树（337424c）node --test scripts/gate-input-wiring.test.mjs → tests 12 /
 
 | # | 缺陷 | 为什么没修 | 今晚的读数 |
 |---|---|---|---|
-| 5.1 | **R1**：`unmeasured` 条目落盘时不带成因 | **不在本轮 DAG 的已交付部分**（t1 五次全挂基础设施，零实现）；契约缺口已 amend，缺的是实现 | 投影探针：`cause survived projection? false` |
-| 5.2 | **R2R3R4 三处记账层缺陷**（吞 blocker / 归因记错代 / status 与 exitCode 矛盾） | **不在本轮 DAG 的已交付部分**（t2 四次全挂基础设施，零实现）；★ 且第 3 条的原始验收自相矛盾，已由 captain amend 掉 | §2.2 三条全部由我复现，全部仍在 |
+| 5.1 | ~~**R1**：`unmeasured` 条目落盘时不带成因~~ | ★ **已修，不在此表** —— 合入 `b0f1e9f`，见 §1.4。留行是为了让读到旧版本的人知道它已闭环 | 主干 `reason survived projection? true`；`gate-registry` 35/35/0 |
+| 5.2 | **R2R3R4 三处记账层缺陷**（吞 blocker / 归因记错代 / status 与 exitCode 矛盾） | **在主干上仍未修**：t2 的 1028 行**写在隔离树里但未提交**，团队账上 `changedPaths=undefined`。★ 且第 3 条的原始验收自相矛盾，已由 captain amend 掉 | §2.2：主干上三条都还在（05:40 复核）；隔离树里 ①③ 我实测已修好且反向半边成立 |
 | 5.3 | **★ r5 的「按臂判」是死代码**（本轮新发现，此前无人记账） | **不在本轮 DAG 里** —— 它是今晚跑完工门时才暴露的 | 见下 |
 | 5.4 | **R7 的 F1**：`at` 有限但越界 ⇒ `RangeError` 抛穿判据 | **不在本轮 DAG 里**（是 t8 的独立审查在收口后报的） | §2.6 我复现：`at=-1e300` THREW |
-| 5.5 | **HMR 重载打断成员回合**（整晚 8/11 次执行） | **被 R4 挡住**（三条修法分别是错误传播面 / 数据模型 / 构建脚本） | `.agent-teams/hmr-reloads.jsonl` 50 条 |
+| 5.5 | **HMR 重载打断成员回合**（整晚 8/12 次执行） | **被 R4 挡住**（三条修法分别是错误传播面 / 数据模型 / 构建脚本） | `.agent-teams/hmr-reloads.jsonl` 50 条，窗口 02:35–05:04 |
 | 5.6 | **`test` 脚本根本不存在**（`pnpm test` 跑不了任何东西） | **不在本轮 DAG 里**（t5 只是报出来，其 inScope 是普查脚本） | `package.json` 无 `test`；`test:gates` 是 1 glob + 85 显式参数，UNION=136 |
 | 5.7 | **6 个夹具永远不会被任何入口跑到** | **不在本轮 DAG 里**（t5 只负责数出来） | decompose / experience-rollup / hmr-trace / mechanisms-html / verify-reload / worktree-commit |
 | 5.8 | **`gate-plan-reviewed-stamp` 臂 8 恒红**（盘上 90 个不可能戳） | **不在本轮 DAG 里**；且它是**刻意的钉子**不是坏测试 | 我跑：`tests 8 / pass 7 / fail 1 EXIT=1`，红的正是臂 8 |
-| 5.9 | **`lib/git-artifact-stamp.json` 落后于 HEAD** | 非缺陷，登记在此以防误读 | stamp `commit=019ec3c`，HEAD=`351c2e3`；但 `019ec3c..351c2e3` **只改了 docs/**（`git diff --stat 019ec3c..351c2e3 -- src/ lib/` 只有 stamp 自己 1 行） ⇒ 产物无需重建。我在 `/tmp/wt-head`(351c2e3) 上重跑 `pnpm build`，`lib/index.js` / `plan-reviewed.js` / `state/tasks.js` / `r5.js` / `entities.js` 与主树 **md5 全同**，仅 `lib/client.js` 不同，且**换哪个目录构建都会不同**（§4.4 三方对撞），因此它不能用来判断产物是否落后 |
+| 5.9 | ~~**`lib/git-artifact-stamp.json` 与 HEAD 不同步**~~ | ★ **已在本任务收尾时被平掉**（05:44:46 主树重跑了一次 `pnpm build`），留行是为了让读到旧版本的人知道它已闭环 | 现状：`git-artifacts` **EXIT=0「Git artifacts match source and build settings」**，stamp `commit=777679b` = HEAD。★★ 但这次构建**推翻了我另一条判断**，见 §4.5 末尾：`lib/client.js` 在主树重建**逐字节相同**（committed 版含 8 处主树绝对路径），所以「主树 build 必然脏两行」是错的；真正会脏的只有离开主树构建时的 `lib/client.js`，以及 stamp 的 `commit` 那一行 |
 
 ### 5.3 为什么它重要（本轮新发现，值得单独写清）
 
@@ -395,9 +611,27 @@ t3 树（337424c）node --test scripts/gate-input-wiring.test.mjs → tests 12 /
 同退出码 + 把 reporter 文本一起交回    → {"ok":true,"evidence":1}
 ```
 ⇒ 这不是「判据太严」，是**判据读不到它需要的那一格**，于是把每一件真交付都读成装饰品。
-**本轮三张已落地任务的 `completion.r5` blocker 全部由此产生**（而它们的臂名差集证明它们是 5 / 7 / 5 条真臂）。
+**本轮四张已完工任务的 `completion.r5` blocker 全部由此产生**（而它们的臂名差集证明它们分别新增 5 / 7 / 5 / 5 条真臂）。
 配套证据：`scripts/gate-r5.test.mjs` 里所有夹具**都自己注入 `output`**（`:65`、`:195`、`:505-570`），
 所以夹具全绿，而生产走的是另一条路 —— 这正是「测试与我跑的那条路不是同一条」的教科书例子。
+
+**★ 本节的可证伪路径（我不想要"我说了算"）**
+
+```
+① 若 `runTestOnRevision` 有任何一处返回 `output` ⇒ 本节垮掉。精确查法（**别直接 grep 整个文件**）：
+   `sed -n '512,536p' src/tools/update-task/completion.ts | grep -n output`
+   我跑的结果：**0 行**。那两处返回式只有 `{ exitCode: … }` 与 `exitCode === undefined ? {} : { exitCode }`。
+   ★ 陷阱：整文件 `grep -n output` 会命中 `:456` 的 `output: args.output` ——
+     那是 `completionContext.update` 的一格（成员交上来的回执正文），**不是**测试执行器的返回值。
+     我自己第一次就是这么数的，差点把这一节否掉。
+② 若 `parseNodeTestReport('')` 不返回 undefined ⇒ newArms 可能真有值。
+   精确查法：`sed -n '514,517p' src/gates/completion/r5.ts`
+   我跑的结果：`:516` 是 `if (text.trim() === '') return undefined`。
+③ 最直接的一条：拿一份**真实**的 completion 求值，打印 r5 那一次拿到的是什么。
+   我跑过（/tmp/r5deadcode.mjs）：生产形状 ⇒ decorative 假阳性；同样退出码 + 带 output ⇒ ok:true。
+```
+
+⇒ 三条里任何一条读数不同，我这一节的结论就作废。**我不认为"我跑过"能替代别人重跑。**
 
 ---
 
@@ -535,24 +769,35 @@ foreman 的三次 `turn/end` **全是 `kind: error`**：
 
 ## 附录 A · 我跑过的全部命令与原始退出码
 
-按「我最后一次跑的时刻」排序。`HEAD=351c2e3`，主树 `git status --porcelain -uall` = 0 行。
+按「我最后一次跑的时刻」排序。**最后一次全量复查在 `HEAD=777679b`**（主干在本任务期间从 `019ec3c`
+走到 `777679b`，共 6 个提交）；复查后主树 `git status --porcelain -uall` 只有本报告 1 行 M。
 
 ### A-1 本轮 verify（契约要求的两条）
 
 ```
-pnpm typecheck   @ 2026-10-19T05:13:28+08:00  →  EXIT=0
+pnpm typecheck   @ HEAD 777679b  →  EXIT=0
    $ tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit    （无诊断输出）
-pnpm build       @ 2026-10-19T05:14（一次性 worktree /tmp/wt-head @351c2e3）  →  EXIT=0
-   clean-build clear → tsc×2 → publish → tsdown：lib/client.js 426.53 kB / 2 files 938.96 kB → git-artifacts --write
-   ★ 未在主树执行（队长纪律 0e2fadb）；主树 04:57 那次旧构建产生的 stamp 变化已还原
+pnpm build       →  EXIT=0（四次，都在一次性 worktree 里，主树一次没跑）
+   ① @ /tmp/wt-head  = 351c2e3   2 files 938.96 kB
+   ② @ /tmp/wt-h3    = 777679b   2 files 938.91 kB
+   ③ @ /tmp/wt-final = 777679b   2 files 939.74 kB
+   ④ @ /tmp/wt-v2    = 777679b   2 files 938.97 kB   ← 交回任务前的最后一次
+   clean-build clear → tsc×2 → publish → tsdown → git-artifacts --write
+   ★ 四次都**不在主树**执行（队长纪律 0e2fadb）；主树 04:57 那次旧构建产生的 stamp 变化已还原
+   ★ 产出的 lib/*.js 与主树 md5 逐个全同（§4.4 的表格）—— 所以「不在主树 build」没有代价
+   ★ 每次之后都立刻 `node scripts/git-artifacts.mjs` ⇒ 全部 EXIT=0「Git artifacts match source and build settings」
 ```
+
+★ **`pnpm build` 为什么不能在主树跑，本轮有硬读数**：主树在 05:24:39–05:24:40 被构建过一次，
+`.agent-teams/hmr-reloads.jsonl` 在同一秒记录到 **6 次插件重载**（05:24:40.385 … 05:24:44.050）。
+详见 §4.4。
 
 ### A-2 各任务 verify 的复跑
 
 ```
 node --test scripts/gate-plan-reviewed.test.mjs        → tests 17 / pass 17 / fail 0   EXIT=0
 node --test scripts/gate-admission-point.test.mjs      → tests 10 / pass 10 / fail 0   EXIT=0
-node --test scripts/gate-registry.test.mjs             → tests 30 / pass 30 / fail 0   EXIT=0
+node --test scripts/gate-registry.test.mjs             → tests 35 / pass 35 / fail 0   EXIT=0   （t1 合入后；基线 351c2e3 上是 30/30/0）
 node --test scripts/gate-update-task-unmeasured.test.mjs → tests 5 / pass 5 / fail 0   EXIT=0
 node --test scripts/gate-input-wiring.test.mjs         → tests 17 / pass 15 / fail 2   EXIT=1
 node --test scripts/verify-readout-uniform.test.mjs    → tests 14 / pass 13 / fail 0 (skipped 1) EXIT=0
@@ -575,19 +820,39 @@ node scripts/reviewed-stamp-census.mjs --active        → EXIT=0   teams=6  sta
 /tmp/wt-7a94837  gate-plan-reviewed 12/12 EXIT=0 · review-unified 14/14 EXIT=0 · verify-unified 11/10/1 EXIT=1
                  gate-input-wiring 17/15/2 EXIT=1 · gate-admission-point 10/10 EXIT=0
 /tmp/wt-9720ca9  gate-input-wiring 12/10/2 EXIT=1 · gate-admission-point 3/3 EXIT=0
+/tmp/wt-head (=351c2e3)  gate-registry 30/30/0 EXIT=0
+/tmp/wt-h3  (=777679b)   pnpm build EXIT=0 · node scripts/git-artifacts.mjs EXIT=0 "Git artifacts match source and build settings"
 ```
 
 ### A-4 臂名集合差（不是比计数）
 
 ```
 gate-plan-reviewed  父(7a94837) 12 → 主干 17   新增 5（臂 10/11/12/13/14）  删除 0
-gate-admission-point 父(e1ef3b7)  3 → 主干 10   新增 7（臂 4–10）          删除 0
-gate-input-wiring    父(9720ca9) 12 → 主干 17   新增 5（臂 13–17）         删除 0
+gate-admission-point 父(e1ef3b7)  3 → 主干 10   新增 7（臂 4–10）           删除 0
+gate-input-wiring    父(9720ca9) 12 → 主干 17   新增 5（臂 13–17）          删除 0
+gate-registry       父(351c2e3) 30 → 主干 35   新增 5（⑱ 臂 1/1b/2/2b/3）  删除 0
 ```
 
 ---
 
-## 附录 B · 与既有正文的两条勘误（都是我自己复跑发现的）
+## 附录 B · 与既有正文的三条勘误（都是我自己复跑发现的）
+
+### B-0 我差点把自己骗了：`grep -c` 会把**汇总行**当成一条记录
+
+`node scripts/reviewed-stamp-census.mjs | grep -c "before this gate existed"` 得到的是 **96**，
+而脚本自己打印的汇总是 `impossible : 95`。差 1 —— 因为脚本末尾那行汇总
+`    impossible  : 95   ← stamped before this gate existed` **自己就匹配这个模式**。
+正确的数法必须排除汇总行：
+
+```
+$ node scripts/reviewed-stamp-census.mjs | grep "before this gate existed" | grep -vE "^ *impossible" | wc -l
+95
+$ node scripts/reviewed-stamp-census.mjs --active | ...同上... | wc -l
+90
+```
+
+⇒ 这与附录 B-1 是同一类错：**读数工具本身会污染读数**。凡是「用 grep 数一个自己也会打印该字符串的脚本」，
+都必须先把汇总行排掉。我把这条写下来，是因为我在本轮**真的先写成了 96/91**，靠对撞汇总行才发现。
 
 ### B-1 「95 条不可能戳」与「90 条」都没错，但**不能混用**
 
@@ -625,9 +890,18 @@ gate-input-wiring    父(9720ca9) 12 → 主干 17   新增 5（臂 13–17）  
 
 ## 附录 C · 一句话总结（可被反驳）
 
-- **建成 3 / 5**：R5、R6、R7 三件落在主干上，字节可核、verify 可复跑、臂名差集证明有判别力。
-- **零交付 2 / 5**：R1、R2R3R4 一张没开工 —— 根因是隔离树基底，不是能力。
-- **账没平**：三张已落地任务的完工门全是 `ok:false`，其中四条是 r5 死代码造成的假阳性；
-  t4 没有 verdict；t3 的独立审查实际是 `needs_revision`。
-- **结构缺陷影响成立**：2/5 张任务被它直接打死；「合并」这件事靠人肉字节比对才可核。
+- **落在主干的 4 件**：R5、R6、R7、R1 —— 字节可核（`git diff <交付> HEAD -- <changedPaths>` 全 0 行）、
+  verify 可复跑、臂名差集证明有判别力（12→17 / 3→10 / 12→17 / 30→35，**删除数全为 0**）。
+- **主干上零交付 1 件**：R2R3R4（t2）—— 三处缺陷在主干上我逐条构造输入复现，全部还在；
+  隔离树里已有 1028 行未提交改动（①③ 我实测已修好、反向半边成立），但**未提交 = 未交付**。
+- **账没平（与代码分开记）**：四张已完工任务（t1/t3/t4/t5）的完工门全是 `ok:false`，
+  其中四条是 r5 死代码造成的假阳性（§5.3 有根因）；t1 与 t4 **没有 `verdict` 键**；
+  t3 的独立审查真实结论是 `needs_revision`；t3/t5 的完成回执由队长自己写。
+- **结构缺陷影响成立且被对照验证**：同任务同成员同契约，基底 `e1ef3b7` 时 5 次 attempt 零产出，
+  基底 `351c2e3` 时 11 分钟交付 `c090a04`。
 - **本文的立场**：以上任一条都可以被一条可复跑的命令推翻 —— 命令都在附录 A。
+- **★ 最该被反驳的一条**：如果 r5 的臂名解析在生产上其实拿得到 `output`，
+  那么 §5.3 整节垮掉、四条 blocker 立刻从假阳性变成真阳性。我给的证伪路径在 §5.3 末尾。
+- **★ 我在本轮推翻了自己两次**：①`lib/client.js` 的「242 行纯路径 diff」→ 实为 484 行且哈希随目录变；
+  ②「主树 build 必然脏两行」→ 主树重建 `lib/client.js` 逐字节相同。两次都留着改正痕迹（§4.5）。
+  **一份不能被自己推翻的报告，通常是因为它没测到能推翻自己的那一格。**
