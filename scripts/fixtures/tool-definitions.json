@@ -1290,7 +1290,7 @@
   },
   "agent_teams_restart": {
     "kind": null,
-    "description": "Captain-only: reload this plugin so subsequent calls run the code now on disk. Use after a gate/tool change has been built AND verified. This is an ARBITRATION, not a re-check: it does not re-run the verdict — it only asks whether a passing verdict exists and whether any task is in progress. Refuses when either precondition fails, and says which one.",
+    "description": "Captain-only: re-run this plugin's apply() so it picks up its current config. ★ This does NOT change which code the process runs: a fiber restart re-executes apply against the module already loaded in memory (no import, no cache drop), so edits built to disk stay invisible until the HOST PROCESS is restarted. The result therefore reports `code_on_disk_in_effect` — measured, not assumed: \"yes\" means the process already holds the build on disk, \"no\" names the build it actually holds, \"unmeasured\" means it could not be determined. Use after a gate/tool change has been built AND verified. This is an ARBITRATION, not a re-check: it does not re-run the verdict — it only asks whether a passing verdict exists and whether any task is in progress. Refuses when either precondition fails, and says which one.",
     "parameters": {
       "properties": {
         "verdict": {
@@ -1312,6 +1312,23 @@
         "additionalProperties": false,
         "properties": {
           "blocked_by": {
+            "type": "string"
+          },
+          "code_loaded": {
+            "type": "string"
+          },
+          "code_on_disk": {
+            "type": "string"
+          },
+          "code_on_disk_detail": {
+            "type": "string"
+          },
+          "code_on_disk_in_effect": {
+            "enum": [
+              "yes",
+              "no",
+              "unmeasured"
+            ],
             "type": "string"
           },
           "detail": {
@@ -1338,7 +1355,9 @@
         },
         "required": [
           "restarted",
-          "reason"
+          "reason",
+          "code_on_disk_in_effect",
+          "code_on_disk_detail"
         ],
         "type": "object"
       }

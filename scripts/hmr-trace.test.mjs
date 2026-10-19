@@ -461,3 +461,196 @@ test('★ 臂 12：N4 的窗口常量只有一处定义（改一处就够，不�
   assert.equal(readFileSync(SRC, 'utf8').match(/export const HMR_FAILURE_WINDOW_MS/g)?.length, 1,
     '★★ 连"同一文件里两处"也不许 —— 判据 ③ 说的是"一处定义一处使用"')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// t11：`agent_teams_restart` 说它做不到的事 —— 「盘上的代码生效了吗」
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 这一组臂在钉什么（缺陷记账）───────────────────────────────────────────────
+ *
+ * 该工具的 description 曾逐字写「reload this plugin so subsequent calls run
+ * the code now on disk」。★ 那句是**假的**，两处实测各自独立坐实：
+ *
+ *   · 本文件头 ③：「重载 +1，apply 里的求值探针 0 次」
+ *     （宿主 `Registry.plugin/get` 用回调对象身份做键 ⇒ 重新求值给的是新对象 ⇒ 查不到）
+ *   · `docs/RESEARCH-RESTART-FREE.md` §2：`fiber.restart()` 的调用链
+ *     `_unload() → _reload() → _execute(this._runner)` 里跑的是**构造时捕获的**
+ *     `runtime.callback` ⇒ 重跑同一份已缓存模块的 apply：**能拿新配置，拿不到新代码**
+ *
+ * ⇒ 契约（不许把话说模糊）：「may or may not take effect」与旧措辞**同样不可判**。
+ *   要能回答「这一次到底生效了没有」，而唯一的办法是**测**，不是**断言**。
+ */
+
+const RESTART_MODULE = await import(join(ROOT, 'lib', 'tools', 'restart.js'))
+const { codeOnDiskInEffectFrom, codeOnDiskInEffectMessage } = RESTART_MODULE
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 13 ★★ 区分臂：「生效」与「没生效」必须【真的】能被分开
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 13（区分臂，t11）：同一个判据必须能给出 yes 与 no 两个答案', () => {
+  /**
+   * ── 为什么这一臂是 t11 的核心 ────────────────────────────────────────────────
+   *
+   * ★ 一个"能回答生效没生效"的函数，如果**永远返回同一个答案**，它读起来
+   *   与"已经回答了"一模一样 —— 而那正是本任务要消灭的形状。
+   * ⇒ 所以这里不测"字段在不在"，而测它**在两个方向上都能取值**。
+   *
+   * ★ 两条构造**必须指向不同的状态**，否则这一臂是恒真的：
+   *   · `current` 态 ⇒ 进程持有的就是盘上这一版 ⇒ 后续调用跑盘上代码是**真的**（'yes'）
+   *   · `stale`   态 ⇒ 进程持有另一版          ⇒ 那句话是**假的**（'no'）
+   */
+  const current = { status: 'current', loaded: 'aaa111', onDisk: 'aaa111', commit: 'c1', head: 'c1' }
+  const stale = { status: 'stale', loaded: 'aaa111', onDisk: 'bbb222', commit: 'c1', head: 'c2', why: 'content' }
+
+  const yes = codeOnDiskInEffectFrom(current)
+  const no = codeOnDiskInEffectFrom(stale)
+
+  assert.equal(yes.kind, 'yes', `★ 进程持有当前构建 ⇒ 必须答 'yes'。实测：${JSON.stringify(yes)}`)
+  assert.equal(no.kind, 'no', `★ 进程持有旧构建 ⇒ 必须答 'no'。实测：${JSON.stringify(no)}`)
+
+  /**
+   * ★★ 而两者必须**逐字不同形** —— 只比较 `kind` 还不够：措辞若同形，
+   *   一个读日志的人仍然分不出这是哪一侧。这是本仓那条纪律的机械形式。
+   */
+  const yesMessage = codeOnDiskInEffectMessage(yes)
+  const noMessage = codeOnDiskInEffectMessage(no)
+  assert.notEqual(yesMessage, noMessage, '★ 两态的措辞必须不同形')
+
+  /**
+   * ★ 'no' 必须**指名它实际持有的是哪一版** —— 只说"没生效"仍然要人去猜。
+   *   两个指纹都要在那一句里（持有 vs 盘上）。
+   */
+  assert.ok(
+    noMessage.includes('aaa111') && noMessage.includes('bbb222'),
+    `★ 'no' 必须同时说出【它拿着的】与【盘上的】两个构建。实测：${noMessage}`,
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 14 ★★ 不恒真臂：'no' 必须说清「重载改变不了它」，且不许承诺生效
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 14（不撒谎臂，t11）：测出没生效时，那句话不许再说"盘上的代码生效了"', () => {
+  /**
+   * ── 缺陷的原话在这里被逐字钉住 ────────────────────────────────────────────────
+   *
+   * ★ 旧措辞的那一句是「Subsequent calls run the code now on disk」。
+   *   本臂要求：**当测量结果是 'no' 时，那句话一个字都不许回来** ——
+   *   否则改完的措辞与改之前同形，而"改了"与"没改"在读的人那里不可分。
+   *
+   * ★ 而它还必须**指向真正的动作**：'no' 的情形下能生效的只有重启宿主进程
+   *   （`fiber.restart()` 拿不到新代码，这与 HMR 是两条不同的路）。
+   */
+  const no = codeOnDiskInEffectFrom({ status: 'stale', loaded: 'aaa111', onDisk: 'bbb222', commit: 'c1', head: 'c2', why: 'content' })
+  const message = codeOnDiskInEffectMessage(no)
+
+  assert.ok(
+    !/subsequent calls do run the code now on disk/i.test(message),
+    `★ 'no' 时**不许**再出现旧承诺的原话。实测：${message}`,
+  )
+  assert.match(message, /does NOT change which code/i, `★ 必须说清重载改变不了它。实测：${message}`)
+  assert.match(message, /restarting the host process/i, `★ 必须指向真正能生效的动作。实测：${message}`)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 15 ★★ 三态臂：测不出来不许伪装成任一侧
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 15（三态臂，t11）：unmeasured 与 yes / no 三者【互不同形】', () => {
+  /**
+   * ★ 本仓最贵的那条合流：把**没能测量**并进某一侧。
+   *   这里 `unknown` 的新鲜度读数（stamp 读不到 / HEAD 读不到）不是 'yes'，
+   *   **也**不是 'no' —— 它是第三态，且措辞里必须逐字写着它不是"生效了"。
+   */
+  const unmeasured = codeOnDiskInEffectFrom({ status: 'unknown', reason: 'no build stamp at lib/git-artifact-stamp.json' })
+  assert.equal(unmeasured.kind, 'unmeasured', `★ 实测：${JSON.stringify(unmeasured)}`)
+
+  const message = codeOnDiskInEffectMessage(unmeasured)
+  assert.match(message, /could NOT be determined/i, `★ 必须明说测不出来。实测：${message}`)
+  assert.match(message, /not measured/i, `★ 而"没测到"要逐字出现。实测：${message}`)
+  assert.match(message, /NOT "in effect"/i, `★ ★ 且必须逐字否认"生效了" —— 否则它会被读成 yes。实测：${message}`)
+  assert.ok(
+    !/subsequent calls do run the code now on disk/i.test(message),
+    `★ unmeasured 更不许承诺生效。实测：${message}`,
+  )
+
+  /** ★ 三态的 `kind` 必须两两不同。 */
+  const kinds = new Set([
+    codeOnDiskInEffectFrom({ status: 'current', loaded: 'a', onDisk: 'a' }).kind,
+    codeOnDiskInEffectFrom({ status: 'stale', loaded: 'a', onDisk: 'b', why: 'content' }).kind,
+    unmeasured.kind,
+  ])
+  assert.equal(kinds.size, 3, `★ 三态必须互不同形，实测只有 ${kinds.size} 种：${[...kinds].join(', ')}`)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 16 ★★★ 接线臂：工具**真的**在返回里报出它，且描述不再说那句话
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 16（接线臂，t11）：description 与返回值都换成【可判】的说法', () => {
+  /**
+   * ── 为什么必须有这一臂 ────────────────────────────────────────────────────────
+   *
+   * 臂 13-15 测的是那两个**纯函数**。而工具本体的 description 里还留着旧话，
+   * 或 execute 里**根本没调用**那个纯函数 —— 两种情况在纯函数层都测不出来。
+   * ★ 一个没有被接上的判据，与没有这个判据在观测上完全相同。
+   */
+  const source = readFileSync(join(ROOT, 'src', 'tools', 'restart.ts'), 'utf8')
+
+  /** ① 那句假话**不许**再出现在 description 里（工具的自我描述是调用方的唯一依据）。 */
+  /**
+   * ★ 取 description 时必须处理**转义引号**（描述里有 `plugin\'s`）。
+   *   MEASURED：第一版本臂写的是 `/description: '([^']*)'/`，它在那个反斜杠引号处
+   *   提前收尾（实测只取到 26 个字符）⇒ 后面三条断言全部落空 ⇒ 而它红得
+   *   **看起来像"描述没改"**，实际是**提取器坏了**。
+   *   ★ 与 t49 那条"数括号混进了字符串"同族：**我取的东西与我要的东西不是同一个**。
+   */
+  const description = (source.match(/description: '((?:[^'\\]|\\.)*)'/)?.[1] ?? '').replace(/\\'/g, "'")
+  assert.ok(description.length > 0, '★ 取不到 description —— 锚点失效，本臂必须跟着看清新形状')
+  assert.ok(
+    !/reload this plugin so subsequent calls run the code now on disk/i.test(description),
+    `★ description 里那句旧承诺必须消失。实测：${description.slice(0, 200)}`,
+  )
+  /**
+   * ★ 而它**必须**说清真正的关系：重载换的是 apply / 配置，**不是**模块。
+   *   这三件事各自的字样都要求，因为漏掉任何一件都会让描述重新变得可误读：
+   *     · 换不掉代码          ⇒ `does NOT change which code`
+   *     · 要重启宿主进程才行  ⇒ `HOST PROCESS`
+   *     · 结果是**测量**的    ⇒ `measured, not assumed`
+   */
+  assert.match(description, /does NOT change which code/i, '★ 必须说清重载换不了代码')
+  assert.match(description, /HOST PROCESS/i, '★ 必须指向真正能生效的那个动作')
+  assert.match(description, /measured, not assumed/i, '★ 必须说明这个结论是测出来的，不是断言的')
+
+  /** ② 三态字段必须真的在输出契约里（否则调用方读不到）。 */
+  assert.match(
+    source, /code_on_disk_in_effect: \{[\s\S]{0,200}?enum: \['yes', 'no', 'unmeasured'\]/,
+    '★ 输出 schema 必须声明三态取值域',
+  )
+
+  /** ③ `execute` 里必须真的调用那个纯函数 —— 不是把它导出了事。 */
+  assert.match(
+    source, /codeOnDiskInEffectFrom\(moduleFreshness\(\)\)/,
+    '★ execute 必须把 `moduleFreshness()` 喂给判据（否则字段永远是空的）',
+  )
+
+  /**
+   * ④ ★★ 而三条返回路径都必须带上它 —— 被拒的那一次**也是一次"这一次"**。
+   *
+   *   只钉"出现过 3 次"是不够的（那可以被三个注释满足）。所以这里数的是
+   *   `...codeFields` 这个**展开**出现的次数：它是唯一的携带方式。
+   *
+   * ★ 匹配**不带尾逗号**：三条路径的形状不同（两条是 `...codeFields,`，
+   *   成功那条是 `...codeFields }` 收在行尾）。
+   *   MEASURED：第一版写成 `/\.\.\.codeFields,/g` 数到 **2** ——
+   *   而代码是**对的**（三处都在），红的是**我的正则**。
+   *   ★ 与上面那条 description 提取同族：**读数没测到，不等于那件事没发生。**
+   */
+  const carried = source.match(/\.\.\.codeFields\b/g) ?? []
+  assert.equal(
+    carried.length, 3,
+    `★ 三条返回路径（被拒 / 宿主不能重载 / 成功）都必须带上测量结果，实测只有 ${carried.length} 处`,
+  )
+})
