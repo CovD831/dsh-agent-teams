@@ -775,3 +775,48 @@ judgeWorktreeReclaimable({repo, worktree: '.agent-teams/worktrees/task-self-iter
 ### 修复方向（未实现）
 
 `planReclaim` 要么接受一个 `tasks` 参数并复用 `isTerminalTask`，要么在 CLI 层显式拒绝扫 `task-<team>-<id>` 形状里属于未终结任务的那些。★ 但**不要**把状态过滤塞进 `judgeWorktreeReclaimable` —— 那会让"这棵树的产物被吸收了吗"这个纯问题失去纯粹的答案，而 `scanTerminalWorktrees` 正依赖它足够纯。
+
+---
+
+# 附录：一条会随机器负载变红的门禁（measurement 与 environment 的混淆）
+
+**日期**：2026-10-20 · **状态**：已记账，未修（判据本身是对的）
+**文件**：`scripts/build-atomic.test.mjs:255-259`（臂 1 ★★ 并发读（差分））
+
+## 读数
+
+`pnpm test:gates` 全量跑（~130 个门禁文件并行）时，这一臂偶尔红：
+
+```
+★ 新实现的 miss 率必须低于【每 100 万次 100 次】
+  实测 866.8/百万（3/3461）。超过它说明窗口没有被降到"亚毫秒级"
+```
+
+单独跑同一个文件：**40/40 全绿，连跑两次都是**。
+
+## 成因（不是猜的）
+
+这一臂真的派子进程跑一次完整 build，并在 build 期间反复探测 `lib/` 是否瞬间消失
+（`replay()` 在隔离树里 `spawnSync(buildScript)`，另一侧 `probe` 持续采样）。
+它的下限断言是**比例**（`legacy.misses > fresh.misses * 20`），上限断言是**绝对速率**
+（`freshRate < 100`/百万）。后者对 CPU 争用敏感：全量并行时采样被拖慢，
+同样 3 次 miss 摊在更少的 checks 上 ⇒ 速率被抬高。
+
+⇒ 968ms 的窗口判断吃的是 wall-clock，而 wall-clock 在高负载下不是同一把尺子。
+
+## 为什么不当场改
+
+判据的**方向**是对的：它想钉住"原子替换的窗口必须是亚毫秒级"。
+把上限放宽成 `freshRate < 1000` 只是让这条臂在负载下闭嘴，
+代价是它对真实回归（窗口从 ~0.1ms 退到 ~1ms）失去分辨力 —— 而那正是它存在的理由。
+
+★ 这是一条**会自己变红的门禁**，与 `docs/SELF-ITERATION-PLAN.md` 记的
+「常年失红的臂等于没有臂」是同一形态的反面：**偶发失红的臂，读者会学会忽略它**。
+
+## 若要真修，方向是这三个之一（未实施）
+
+1. 把这个臂从 `test:gates` 的全量并行里拿出来，放进一个串行清单 ——
+   它测的是**吞吐/时序**，本来就不该和 130 个文件抢 CPU。
+2. 上限改成**相对**读数：同一进程里先跑一次自身的对照组，用两次的 checks 数归一化。
+3. 显式声明这是 measurement 而非 invariant，并按 `unmeasured` 报告
+   （本仓已有这条三态口径：测不了比测错好）。
