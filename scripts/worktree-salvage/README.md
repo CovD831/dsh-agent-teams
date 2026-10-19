@@ -341,3 +341,47 @@ du .agent-teams/worktrees/ : 12G → 6.7G
    `${repo}/.agent-teams/worktrees/` 前缀 ⇒ `existsSync` 恒假 ⇒ **回收静默不动手**。
    ★ 这一条特别值得记：如果我只读"reclaimable=1"就宣布成功，**什么都不会被删而报告全绿**。
    抓到它靠的是删除后**再查一次 `stillExists`** —— 而不是相信自己刚打印的那行日志。
+
+---
+
+## ★ 2026-10-20 收口记录：6 棵 refactor 树的最终处置
+
+### 判据的两次口径不同（这不是假阴，是问句不同）
+
+- `judgeWorktreeReclaimable` 问：**"这棵树 HEAD 里的东西，是否以某种形式存在于主干"** —— 四格：
+  `ancestor`（提交可达）/ `content`（与主干 tip 提交内容等价）/ `files`（逐文件 blob 相同）/ `contained`（内容被包含）。
+- `verify-no-lost-work.mjs` 问：**"这棵树原始提交里的每个非派生 blob，是否在集成分支历史里存在过"** —— 只查 blob。
+
+**两者在"我改过内容再合入"这一种情况下必然分岔**，而本次五份文档就是这样合的
+（491 行纯追加，从树里取文本追加到主树文档末尾，不是 cherry-pick）。
+⇒ 所以 `verify-no-lost-work` 会把 t111/t112 报成"有未合流内容"，而实际上
+章节已经在 HEAD：`docs/UI-V5-SINGLE-ENTRY.md:435`（t111）与 `:565`（t112）。
+
+★ 这个分岔**不是判据的错**：它答的是"那个 blob 存在过吗"，而我做的是"把文本搬到另一份文件里"。
+两者的差别正是本仓反复记的那条：**判据算对了，但它读的输入不是你以为的那个。**
+
+### 逐棵的最终读数
+
+| 树 | 独有提交 | 判据 `how` | 树独有内容 | 处置 |
+|---|---|---|---|---|
+| t101 | 2 | keep/not-absorbed | 1 行（旧版**缺失**，主树更全） | 已删，补丁在 |
+| t102 | 1 | **reclaimable/absorbed** | 文档已合入 ⇒ 翻页 | 已删，补丁在 |
+| t108 | 0 | keep/not-absorbed | **无**（只有 `lib/` 派生产物） | 保留（保守，`src/worktree.ts:1450`） |
+| t109 | 1 | **reclaimable/absorbed** | 文档已合入 ⇒ 翻页 | 已删，补丁在 |
+| t111 | 1 | keep/not-absorbed | `src/client/` 15+14 行是**旧版** | 已删，逐行核过在补丁里 |
+| t112 | 1 | keep/not-absorbed | `src/client/` 13 行是**旧版** | 已删，逐行核过在补丁里 |
+
+**删除前做的最后一道核查**（不靠判据，直接问"这行会不会丢"）：
+把每棵树的树独有行逐行拿到补丁里 `grep -F`：
+```
+t101 gate-collection-health-readout.test.mjs :  1 HIT
+t111 folders-panel.tsx                       : 15 HIT
+t112 gate-folders-navigation.test.mjs        :  2 HIT
+```
+全部命中 ⇒ 删除不会丢任何一行。**删完复查 `verify-no-lost-work`，凡"已删"的树
+其非派生内容都判 ✔ 已合流（t111/t112 的文档章节除外，理由见上）。**
+
+### 结论
+树 18 → **5** 棵；`.agent-teams/worktrees` **12G → 4.9G**；磁盘 7.6G → **7.2G 可用**。
+★ 剩下 5 棵 = t108（零内容，保守保留）+ t3/t5/t6/t7（本队自己的，产物已合入主树但提交不同）。
+**这四棵也可以按同样办法处置**：先逐行核树独有内容是否已在主树/补丁里，再删。
