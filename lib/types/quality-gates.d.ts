@@ -702,6 +702,70 @@ export declare function defaultQualityDeliveryGraph(input: {
     tester?: string;
     integrator?: string;
 }): QualityGraphDraft[];
+/**
+ * ── ★★★ 自审拒斥：谁实现的不许自己判过（协议第 7 条的**硬半边**）────────────────
+ *
+ * ── 缺陷形态（本函数存在的理由）──────────────────────────────────────────────
+ *
+ * 队长协议第 7 条逐字：
+ *   `Never approve your own implementation or ask for a deliberate failure.`
+ * 而全仓**没有任何一行代码**判过它：在 `src/` 里 grep `selfReview` 与 `self-review`
+ * 都是 **0 命中**（本判据就是第一处命中）。
+ *
+ * MEASURED（本轮，盘上每个队伍的 team.json 全量）：
+ *   可判的 13 条审查任务里，**4 条是真自审**，且**全部**判 `verdict=pass`：
+ *     `mutation-quality | t4  | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t8  | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t12 | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t14 | reviewer=ledger | impl=ledger | pass`
+ *   ⇒ 这不是一条"可能被违反"的规则，它**已经在生产里被违反了四次、每次都过了**。
+ *
+ * ── ★ 判据的两个输入，各自来自哪里（都在盘上，不需要新字段）────────────────────
+ *
+ * · **实现者** = 被审那条任务（`reviewedTaskId`）的 `executions` 里，最后一条
+ *   `status === 'completed'` 的 `by`。
+ *   ★ 为什么读 `executions` 而不是 `assignee`：`assignee` 说的是"派给谁"，
+ *     而 `executions[].by` 说的是"**谁真的把它做完了**"。一次重派之后两者会分叉，
+ *     而自审说的是后者。
+ * · **审查者** = 本次更新的 `identity.name`（正在提交 verdict 的那个身份）。
+ *
+ * ── ★★ 三态（与全仓纪律同源）───────────────────────────────────────────────────
+ *
+ * · 判得了  ⇒ `{ ok: true }` 或 `{ ok: false, error }`
+ * · **判不了 ⇒ `{ ok: true }`，且 `undecidable` 说明为什么**
+ *   判不了的情形有三种，**都不许**被读成"通过"：
+ *     ① `reviewedTaskId` 缺席（这条 review 没声明审谁）
+ *     ② `reviewedTaskId` 指向的任务不在队里
+ *     ③ 被审任务没有一条 completed 的 execution（⇒ 实现者未知）
+ *   ★ 为什么不在这里硬拒这四种：它们各自已被**别的**判据管着
+ *     （`validateCreateTask` 管 ① 的存在性与悬空；`canDeclareDelivery` 管 ③ 的完成度）。
+ *     在这里再拒一次会让同一件事有两个口径，而两个口径会漂移。
+ *   ★★ **但 `undecidable` 必须可以被读出来** —— 否则"判过了、没问题"与
+ *     "判不了、放过去了"在读数里同形，而那正是本仓记录过最多的那类事故。
+ *
+ * ── ★ 反向半边（为什么不是"一律拒"）───────────────────────────────────────────
+ *
+ * 不拒的两种情形必须是**绿的**，否则这条判据会自己把正常流程打红：
+ *   · 审查者 ≠ 实现者（13 条里的 9 条）
+ *   · 实现者未知（上面 ③）
+ *
+ * @param team  本队当前状态（读被审任务的 `executions`）
+ * @param task  正在被更新的那条任务（`kind=review` 且提交 `verdict`）
+ * @param reviewerName 提交这次判决的身份名（`identity.name`）
+ */
+export declare function judgeSelfReview(input: {
+    team: TeamState;
+    task: TeamTask;
+    reviewerName: string | undefined;
+}): SelfReviewJudgement;
+/** {@link judgeSelfReview} 的三态结果。 */
+export interface SelfReviewJudgement {
+    readonly ok: boolean;
+    /** 只在 `ok === false` 时给：为什么拒。 */
+    readonly error?: string;
+    /** 只在判不了时给：为什么判不了（★ 与"通过"不同形，调用方必须能区分）。 */
+    readonly undecidable?: string;
+}
 export declare function qualityPlanningPrompt(): string;
 export declare function describeQualityLoop(team: TeamState): QualityLoopSnapshot;
 export { QUALITY_KINDS, WRITE_KINDS };
