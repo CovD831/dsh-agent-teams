@@ -429,3 +429,246 @@ const probePanelId = FOLDERS_MAIN_KEY as unknown as MainPanelId
    ⇒ ★ 所以 R9.1 的结论是**"按官方链条推定的 ✅"**，而"我们的 key 在真浏览器里被画出来"**仍未实测**。
 3. **没有裁定 v5 走 `main` 还是 `shell.overlay`** —— 两条都可行（R9.1 末），**取舍由队长/用户定**。
 4. **没有改 `src/snapshot.ts` / `src/gates` / `src/evolution` / `src/evaluator`**（不在 inScope）。
+
+---
+
+# 实施记录：第一层（文件夹 = 工作区，t111）
+
+**基线**：HEAD = `78d2fc7`（`git merge-base --is-ancestor 71790be HEAD` ✅）。
+开工 stamp = `67b28c7` ≠ HEAD ⇒ **先 `pnpm build` 取新鲜基线**。
+**写域**：`src/client/index.tsx` · 新建 `folders-panel.tsx` + `.module.css` · 新建 `scripts/gate-folders-panel.test.mjs` + 产物。
+★ 实测改动 **10 条路径，逐条在 inScope 内**。**零新依赖**。**`MemberRow` / `ActivityPanel` 一行未改**（`git status` 对拍）。
+
+## 0. 验收读数
+
+| 命令 | 结果 |
+|---|---|
+| `npx tsc -p tsconfig.json --noEmit` | **exit=0** |
+| `npx tsc -p tsconfig.client.json --noEmit` | **exit=0** |
+| `pnpm build` | **exit=0**（`lib/client.js` 415.83 kB；stamp == HEAD） |
+| `scripts/gate-main-key-probe.test.mjs`（t103/t105 的地基） | **12/12 仍绿** |
+| `scripts/gate-folders-panel.test.mjs`（本层新增） | **11/11 绿** |
+| `pnpm test:gates` 失败**文件集合** | 基线 16 == 改后 16，`diff` 无输出 ⇒ **净新 = 0** |
+| 变异体 | **6/6 被检出** |
+
+★ 基线取法：开工 `pnpm build` 取新鲜基线 ⇒ `1576 / 1515 / 23 / 16 文件`；改后 `1587 / 1526 / 23 / 16`（新增 11 条本层判据，通过数同步 +11）。
+
+## 1. ★★★ 地基是**已验的**，本轮没有重新论证
+
+t103/t105 已经用同一个 key 验过三件事，而那三条**仍在** `gate-main-key-probe.test.mjs` 里跑、**仍然绿**：
+
+| 臂 | 验的是什么 | 本轮 |
+|---|---|---|
+| 臂 7 | 调 `selectPanel(我们的 key)` ⇒ **真的被选中并渲染** | ✅ 仍绿 |
+| 臂 8 | **反向半边 A**：不调 `selectPanel` ⇒ 渲染的**不是**我们 | ✅ 仍绿 |
+| 臂 9 | **反向半边 B**：传未注册 panelId ⇒ **必须抛**，报文是官方那条 | ✅ 仍绿 |
+
+★ **反向半边 B 的权威性来自官方源码本身**（不是我的断言凑出来的）：
+```js
+// dsh-client-ui-layout/lib/client.js:463
+if (panelId !== null && !this.hasMainPanel(panelId)) throw new Error(`layout.selectPanel: main panel "${panelId}" is not registered`)
+```
+官方 `.d.ts` 逐字：`@throws if the selected main key is not registered; preserves the current selection.`
+
+## 2. 本轮到底改了什么（一句话）
+
+**`FoldersProbe` → `FoldersPanel`**：同一个 `main` key（`agent-teams/folders`）、同一个槽位、
+同一个 `inject` 空面 —— **形状一字未改**，只把"只画一个标记"的探针换成**真正的工作区文件夹视图**。
+
+★ 探针模块（`folders-probe.tsx`）**仍在**：它承载 key 常量与三个可读格子
+（渲染计数 / 注册错误 / 选择结果），那三格是三条反向半边的落点 ⇒ **判据载体一个都没动**。
+
+## 3. 内容：工作区列表（`foldersFromSnapshots`，纯函数）
+
+聚合键是 `team.workspace`（`ActivityTeam` 上**已有**的字段）⇒ **不加数据通道**。
+
+| 判据 | 读数 |
+|---|---|
+| 一个 workspace 一个文件夹（不是一队一个） | 3 个队 / 2 个工作区 ⇒ **2 个文件夹** |
+| **归档队仍算一个工作区** | 只剩归档队的工作区仍在列表里，`liveCount = 0` |
+| 顺序**跨轮询稳定** | 按首次出现序（`Map` 插入序），**不是字母序** |
+| 空 workspace 名**照收** | `''` 仍是一个文件夹（丢掉 = 静默少一个） |
+
+★ 为什么归档队要算：**"这里曾经有工作区"与"从来没有"必须不同形** —— 从列表消失会让两者同形。
+
+## 4. 像素风（零依赖、零位图）
+
+| 做法 | 落点 |
+|---|---|
+| 内联 SVG 的 **`<rect>` 拼文件夹** | `folders-panel.tsx` 的 `FolderGlyph` |
+| `shapeRendering="crispEdges"` | 缩放**不插值**（像素风的观感） |
+| `border-radius: 0` | 圆角是平滑世界的东西 |
+| `box-shadow: 3px 3px 0 0` | **硬阴影**：整像素偏移 + **0 blur** |
+| 颜色只来自 `var(--dsw-alias-*)` | 不引第二套调色板（本仓纪律） |
+| ❌ 不用 `<img>` / 不 import 任何 `.png|.svg` / 不引外链 | 位图 = 体积 + 版权 |
+
+## 5. ★★ 反向半边 C：空态与"读不到"不同形
+
+```
+foldersView([], [])              ⇒ { state: 'loaded', folders: [] }   ← 读到了、确实没有
+foldersView(undefined, undefined) ⇒ { state: 'empty' }                 ← 没发布过快照
+```
+★ 而面板**两种都渲染**：`data-folders-state` 标态、`data-folders-empty="true"` 标空态，
+空态有**一句话**（「还没有工作区。…」）。
+★★ **白屏与"读不到"同形** —— 而两者的补救动作相反（去建一个 vs 去看 `/state` 为什么没回来）。
+
+## 6. ★★★ 变异体 6/6（含一处本轮自抓的假绿）
+
+| 变异体 | 被检出 |
+|---|---|
+| M1 不聚合（一个队一个文件夹） | ✅ FAIL=8 |
+| M2 丢掉归档队（"曾经有" = "从来没有"） | ✅ FAIL=2 |
+| M3 空态退回白屏 | ✅ FAIL=2 |
+| M4 改用 `<img>` 位图 sprite | ✅ FAIL=2 |
+| M5 引一个外部包（`clsx`） | ✅ FAIL=2 |
+| **M6 面板不再喂渲染计数** | ✅ FAIL=2（**补判据后**） |
+
+### ★★★ M6：判据的**载体本身**也要被钉住
+M6（把 `noteProbeRender(FOLDERS_MAIN_KEY)` 变成 `void noteProbeRender`）第一版让我 10 条断言**全绿**。
+
+★ 为什么那是一条**必须**被挡住的变异体：**反向半边 A** 判的是
+`probeRenderCount(FOLDERS_MAIN_KEY) === 0`"不调 selectPanel 就不渲染"。
+⇒ 若面板不喂那个格子，它就退化成**"一个从来没人写过的格子永远是 0"** —— **恒真**，证明不了任何事。
+
+⇒ 补了臂 9b：断言面板**import 并真的调用**了 `noteProbeRender(FOLDERS_MAIN_KEY)`。
+★★ 这是本会话反复记下的同一形态：**判据的载体必须自己也有一条判据。**
+
+### ★ 另一处：把注释算进了计数（与 t80 同一种错）
+臂 9 第一版用 `src.includes('FoldersProbe')` 断言"探针组件不再被渲染"，
+而 `index.tsx` 的**注释**里逐字写着"探针换成真的面板" ⇒ **假红**。
+⇒ 改成只在**代码行**里查。
+
+## 7. 尚未验证的部分（如实报出）
+
+★ **我没有验证过真实浏览器渲染**（本机 `launchChrome()` 不 resolve，干净树同样 —— 与前几轮一致）。
+⇒ "像素风**看起来**对不对"**没有验证**；本轮能保证的是**可编程的那几条**：
+内联 SVG 的几个 `<rect>` · `crispEdges` · 无圆角 · 硬阴影 · 只用语义色 · 空态有可辨识标记。
+
+★ **下一层（点进工作区 → 该工作区的团队）本轮没做** —— 规格 §3 的 ②③ 步。
+本层只负责"文件夹"，且**没有拦截点击**（点中文件夹目前不会进入下一层）。
+
+## 8. 改动清单
+
+```
+src/client/index.tsx                 FoldersProbe → FoldersPanel（形状不变，只换组件）
+src/client/folders-panel.tsx         + 新增：foldersFromSnapshots / foldersView / FoldersPanel / FolderGlyph
+src/client/folders-panel.module.css  + 新增：像素风样式（无圆角 / 硬阴影 / 语义色）
+scripts/gate-folders-panel.test.mjs  + 新增：11 条本层判据（含反向半边 C 与载体臂）
+lib/**（对应产物）+ lib/git-artifact-stamp.json
+docs/UI-V5-SINGLE-ENTRY.md           本节
+```
+
+**未动**：`MemberRow.tsx` · `ActivityPanel.tsx`（W 线那一层）· `src/snapshot.ts` · `src/gates/**` ·
+`src/tools/**` · `folders-probe.tsx` · `gate-main-key-probe.test.mjs`。
+★ **零新依赖**（`package.json` / `pnpm-lock.yaml` 未改）。
+
+# 实施记录：修可用缺陷 —— 常驻回入口 + 文件夹页可出去（t112）
+
+**基线**：HEAD = `885f4b1`（71790be 是祖先 ✅）。开工 stamp = `78d2fc7` ≠ HEAD ⇒ 先 `pnpm build` 取新鲜基线。
+**写域**：`index.tsx` · `folders-panel.tsx` · 新建 `folders-return-entry.tsx` · `folders-panel.module.css` ·
+新建 `scripts/gate-folders-navigation.test.mjs` + 产物。**`TeamChatEntry.tsx` 一行未改**（`git status` 为空）。
+
+## 0. 验收读数
+
+| 命令 | 结果 |
+|---|---|
+| `npx tsc -p tsconfig.json --noEmit` / `--client` | **exit=0 / exit=0** |
+| `pnpm build` | **exit=0**（`lib/client.js` 426.69 kB；stamp == HEAD） |
+| `gate-folders-navigation.test.mjs`（本轮新增） | **10/10 绿** |
+| `gate-folders-panel.test.mjs`（t111 的） | **11/11 绿**（未放宽） |
+| `pnpm test:gates` 失败**文件集合** | 基线 16 == 改后 16，`diff` 无输出 ⇒ **净新 = 0** |
+| 变异体 | **6/6 被检出**（3 条在 typecheck 层） |
+
+★ 基线取法：开工 `pnpm build` ⇒ `1587/1526/23/16`；改后 `1597/1536/23/16`（**+10 通过 = 新增判据**，失败数不变）。
+
+## 1. 修的是什么
+
+用户原话：「我刚才从那个大的界面点击侧面的 session 到了目前的界面,但是现在**回不去那个大的界面**了」。
+
+**根因**（`index.tsx`）：`selectPanel(FOLDERS_MAIN_KEY)` 在**启动期只调一次** ⇒
+进了会话后 `activePanelId` 变成 `conversation`，**没有任何东西能把它切回来**。
+而 `TeamChatEntry` 在非团队会话里 `if (!team) return null` ⇒ 顶不上这个缺。
+
+### ① 常驻回入口（`shell.overlay`）
+
+官方 SlotMap 逐字（`lib/types/client/index.d.ts:85`）：
+```
+'shell.overlay': { kind: 'list'; scope: 'root' }
+```
+· `kind: 'list'` ⇒ **换一个新 id 加在既有条目旁边**（实测：`agent-teams-activity` 仍在）；
+· `scope: 'root'` ⇒ **不绑会话** ⇒ 任何界面都在，**包括不是团队的会话**。
+
+★ 新增 `folders-return-entry.tsx`：**不接任何会话 prop**（臂 2 逐字断言 props 里没有 `sessionId`/`team`）。
+★★ `pointer-events: auto` 是**承重**的：浮层缺省 click-through —— 不开这一行就"看得见、点不着"，而那与"没有这个入口"同形（臂 9）。
+
+### ② 文件夹页能出去（反向半边 B）
+
+文件夹从静态 `<li>` 变成 **`<button>`**（键盘可达）⇒ 点击走 `openConversation()`
+⇒ 生产实现是 **`selectPanel(null)`**（官方：`null` ⇒ 回到 Conversation）。
+
+## 2. 三条反向半边
+
+| | 判据 | 结果 |
+|---|---|---|
+| **A** | 回入口的 props 里**没有会话**；`TeamChatEntry` 仍 `return null` | ✅ 臂 2 + 臂 3 |
+| **B** | 从文件夹点出去 ⇒ 记到 `selectPanel(null)` | ✅ 臂 5 + 臂 8 |
+| **C** | **两次往返**：序列必须是 `[folder, null, folder, null]` | ✅ 臂 6 |
+
+★★ **C 的关键**：`A→B→A` 与 `A→A` 的**计数**可能相同 ⇒ 账本存的是**序列**，并显式断言
+"进文件夹 2 次、出到会话 2 次" —— 单向可用（`[folder, null]`）与**死路**（`[folder, folder]`）都会红。
+
+### ★ 一个刻意的不对称：`unknown` 也显示
+读不到 `activePanelId` 时入口**仍然显示**（`returnEntryState(undefined) === 'unknown'`）。
+理由：它是**唯一能回去的路**；藏起它会把一次读数缺失变成一次**不可用**，而那与"功能没做"同形。
+
+## 3. 变异体 6/6
+
+| 变异体 | 被检出 |
+|---|---|
+| M1 回入口绑会话（加 `sessionId` prop） | ✅ **typecheck** |
+| M2 `unknown ⇒ hidden`（藏起唯一的路） | ✅ 臂 4 FAIL=2 |
+| M3 只进不出（B 缺失） | ✅ 臂 5/8 FAIL=2 |
+| M4 浮层不开 `pointer-events` | ✅ 臂 9 FAIL=2 |
+| M5 注入面改名（`selectPanel` 缺失） | ✅ **typecheck** |
+| M6 注册时注入 `sessionId` | ✅ **typecheck** |
+
+★ **3/6 在 typecheck 层就被挡住** —— 那是比夹具断言更强的检出（编译期 vs 运行期）。
+
+## 4. ★★ 我踩到的一处真回归，以及为什么**没有**去放宽它
+
+第一次跑全量 gates：**净新失败 1 个** —— `scripts/gate-folders-panel.test.mjs`（**t111 的**）红了。
+根因：我在 `folders-panel.tsx` 里加了两个 import（`./folders-return-entry.tsx`、
+`@deepseek-ai/dsh-client-ui-layout/client`），而那个夹具的**臂 8 是 import 白名单**。
+
+★★ **而那个夹具不在本轮写域**（本轮只给了 `gate-folders-navigation.test.mjs`）⇒
+**我不能去放宽它**，也不该为了让它绿而扩白名单。
+⇒ 改法是**让改动不越界**：把"记账"从面板里挪到**注入处**（`index.tsx` 的 `openConversation`），
+`folders-panel.tsx` 的 import 面**恢复成 t111 那一份**（实测 4 条，逐字相同）。
+
+★ 结果：t111 的 11/11 与 t112 的 10/10 **同时绿**，且**一个字都没改别人的夹具**。
+
+## 5. 尚未验证的部分（如实报出）
+
+★ **没有真实浏览器验证**（本机 `launchChrome()` 不 resolve，干净树同样）。
+⇒ 回入口**在屏幕上长什么样、位置会不会挡住别的东西**，**没有验证**。
+本轮能保证的是**可编程的那几条**：`shell.overlay` 的真 spec · 入口的 props 里没有会话 ·
+三态纯函数 · `selectPanel` 的**调用序列** · `pointer-events: auto` 在 CSS 里 · 注入面的键名。
+
+★ 另：`order: 78` 让回入口排在活动面板（`order: 80`）之前 —— **浮层里条目自排**这一点是官方措辞，
+而"78 与 80 在像素上谁先谁后"**需要浏览器确认**（本轮只断言它们不同）。
+
+## 6. 改动清单
+
+```
+src/client/index.tsx                  + shell.overlay 上注册 agent-teams-folders-return；面板注入 openConversation
+src/client/folders-return-entry.tsx   + 新增：调用账本 · returnEntryState 三态 · FoldersReturnEntry
+src/client/folders-panel.tsx          文件夹 <li> → <button>，点击走出到 conversation（import 面不变）
+src/client/folders-panel.module.css   + 回入口样式（含承重的 pointer-events: auto）
+scripts/gate-folders-navigation.test.mjs + 新增 10 条判据（A/B/C + 地基 + 接线 + 零依赖）
+lib/**（产物）+ lib/git-artifact-stamp.json
+docs/UI-V5-SINGLE-ENTRY.md            本节
+```
+
+**未动**：`TeamChatEntry.tsx`（硬边界②，`git status` 为空）· `folders-probe.tsx` · `MemberRow` / `ActivityPanel` ·
+`scripts/gate-folders-panel.test.mjs` · `src/snapshot.ts` · `src/tools` · `src/gates`。
+★ **零新依赖**（`package.json` / `pnpm-lock.yaml` 未改）。

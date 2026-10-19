@@ -100,3 +100,51 @@ UI「能算但看不见」（client 的 FLISTAGES 分叉）
 ---
 
 *本文只写 `docs/`。未改动 `src/`、`scripts/`、`lib/`。*
+
+---
+
+## 7. ★★★ t101 执行记录：§5 顺序① 已落地 —— 读数【存在】了
+
+> **本节由 t101 追加。** §1 实测的 `health.ts 零消费者`，至此结束：
+> `collectionHealthOf` 在 `src/snapshot.ts:631`（`assembleTeamSnapshot` 内）有了**第一个生产调用方**，
+> 而快照经 `/plugins/dsh-agent-teams/state` 路由（`index.ts:412` → `collectTeamsActivity`）生产可达。
+
+### 7.1 落地了什么
+
+| 文件 | 内容 |
+|---|---|
+| **`src/evolution/read.ts`（新建）** | `readSignalsHealth(stateRoot, readFile)` —— 读真实 `signals.jsonl`（`signalsPathOf` 拼路径），逐行 `JSON.parse`（**两种历史形状并存**：t88 带空格 / t87 不带——解析与序列化格式解耦，t93 的教训），投影成 `HealthRecord[]`（component=`source.where`、kind=[信号三分类]、at）+ `refused`（从每行自带 `collection.verdicts` 数 `ok` 之外的裁决，**转发不重算**）。 |
+| **`src/snapshot.ts`** | `TeamActivitySnapshot` 增两格：`collectionHealth?`（`{health, readout}`，只**算出来**时在场）+ `collectionHealthUnmeasurable?`（真算不了＝异常）。`assembleTeamSnapshot` 调用（归档团队不算——与 `historic` 同口径）。 |
+| `src/evolution/health.ts` | **零改动**（被消费，不是被改）。 |
+
+### 7.2 ★ 三态（三种"没有读数"互不同形）
+
+```
+A · 文件缺席（流水线没开过）        ⇒ collectionHealth 整格缺席（**不是空读数**）+ readout.status='unmeasured'
+B · 文件在、零条记录                ⇒ measured + 空集（redundancy/coverage=0）—— 与 A 不同形
+C · 一行坏 JSON                     ⇒ 只跳那一行（skippedMalformed 计数），其余照常算（t93 纪律）
+另 · 真的算不了（异常）             ⇒ collectionHealthUnmeasurable 在场 —— 与 A 不同形
+```
+
+### 7.3 反向半边（全部实测：变异体当场红）
+
+| 臂 | 钉什么 | 变异体实测 |
+|---|---|---|
+| A | 文件缺席 ⇒ unmeasured；refused/totalLines **缺席**（不补 0） | 改成返回空读数 ⇒ **2 臂红** |
+| B | 文件在零记录 ⇒ measured+空集 | （A 变异体同时红 B 侧） |
+| C | 一行坏 JSON ⇒ 计数地跳过 | 改成整文件放弃 ⇒ **1 臂红** |
+| 4/4b | 两代形状全 parse；refused 分组；**撞号不去重**（redundancy 1/2） | — |
+| **5** | ★ 真实 `assembleTeamSnapshot`：有信号 ⇒ 快照带 `collectionHealth`；缺席 ⇒ 整格缺席 | **拔掉接线 ⇒ 1 臂红** |
+
+夹具：`scripts/gate-collection-health-readout.test.mjs`（6 臂全绿）。
+
+### 7.4 投影口径（如实：数据形状决定的）
+
+- **桶分类今天偏窄**：真数据 15 行里 t88 的 10 行分类住在自由文本 `routing.target/effect`（无桶），t87 的 5 行只有 `source.where` + 三分类 ⇒ 本读数今天主要回答"按 (来源， 信号三分类) 分桶的重复率"。**分类不出来的落 `(unattributed)`，不编**；规格顺序 ②（分流）产出结构化类别后，投影在 `read.ts` 一处升级。
+- **refused**：`ok` 之外的裁决各计一次；`unmeasured` 与 `false` 都算"没采进来"但**不合并也不分列**（要分＝形态决策，留给队长）。**没有 `collection` 格的行不数**（不补 0）。
+- **重复 id（5 组撞号）不去重** —— 同桶重复正是 `redundancy` 要暴露的（实测：两条同桶 ⇒ redundancy 1/2）。
+
+### 7.5 Verify 与局限
+
+- 两套 tsc + build 均 exit=0；净变化：对照跑（stash --include-untracked + 确认能建）**1533/1472/23/16 文件** vs 改后 **1539/1478/23/17 文件**（+6 = 本夹具 6 臂；失败文件集合除本夹具外零差异）。
+- **局限**：① 客户端还不知道这一格（activity-monitor 的界面类型没读它——"机制建好 ≠ 接线"，B 线任务）；② 桶分类语义窄于规格（见 7.4）；③ refused 不分 `unmeasured`/`false`（形态决策留给队长）；④ 未起真团队跑一轮；⑤ 归档团队不算读数（`historic` 口径）。
