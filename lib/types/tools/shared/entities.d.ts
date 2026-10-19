@@ -973,7 +973,7 @@ export declare function readExperienceDispatch(options?: {
     readonly occupied?: readonly unknown[];
     readonly loadModule?: () => Promise<FrictionTriageModule>;
 }): Promise<ExperienceDispatchResult>;
-/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那两格（见 `scripts/friction-triage.d.ts`）。 */
+/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那几格（见 `scripts/friction-triage.d.ts`）。 */
 interface FrictionTriageModule {
     readonly triage?: (options?: Record<string, unknown>) => {
         readonly unreadable?: readonly string[];
@@ -994,7 +994,177 @@ interface FrictionTriageModule {
         readonly decomposed: readonly unknown[];
         readonly notReadyBecause?: Record<string, number>;
     };
+    /**
+     * ── ★★★ t6（N3）：分档那一格（`tierOf`）────────────────────────────────────────
+     *
+     * ★ 与 `readExperienceDispatch` 走**同一个模块、同一条装载路** —— 而不是为分档
+     *   另开一份实现：`scripts/friction-triage.mjs` 里那份 `tierOf` 是**唯一真值**
+     *   （`plan-review-tier.test.mjs` 与 `dispatchable` 的准入都读它，见那里的注释
+     *   「一处实现，两处使用」）。在这里再写一份分档，就是本队记账过的第二份真相。
+     */
+    readonly tierOf?: (contract: unknown, options?: {
+        exists?: (path: string) => boolean;
+    }) => {
+        readonly tier?: string;
+        readonly why?: string;
+    };
 }
+/**
+ * ── ★★★ t6（N3）：把「计划审查」那一格读到生产路径上来 ────────────────────────────
+ *
+ * ── 它补的缺口（MEASURED，开工普查）──────────────────────────────────────────────
+ *
+ *     （改前实测，三条命令都按函数名 grep `src/`）
+ *     · 带闭括号的那个函数名 ⇒ 0 行
+ *     · 不带闭括号的那个函数名 ⇒ 0 行（连注释都没有）
+ *     · `tierOf`               ⇒ 1 行，且在注释里
+ *
+ * ★ 这里刻意**不写**那三个字面量：这条注释自己就会变成 grep 的命中。
+ *   改前那次普查是真跑过的（结论：生产调用点 0），而改后的读数应当去
+ *   `plan_review` 那一格看，不在注释里。
+ *
+ * ⇒ `scripts/plan-review-check.mjs` 的四问 + `scripts/friction-triage.mjs` 的分档
+ *   **只被 `scripts/*.test.mjs` 调用** —— 「没审过的计划不该直接派」这句判据
+ *   在盘上只有装置、没有读者。这正是本队记账的第 N 个
+ *   「机制建好了，没有接线」。
+ *
+ * ── ★ 它**不重新实现**四问，也不重新实现分档 ────────────────────────────────────
+ *
+ * 四问（`why-now` / `steps` / `invariant-reading` / `stop-points`）在
+ * `REQUIRED_PLAN_QUESTIONS` 里是**冻结的一份数据**；判据在 `checkPlanReview` 里。
+ * 这里只做两件**本层该做**的事：
+ *   ① 把「一问一契约」的矩阵**聚合成计数 + 逐条名单**（调用方要的是"缺哪一问"）；
+ *   ② 给每一格贴上**「这个 kind 下契约要不要它」**（见下面那段裁定）。
+ * ★ 拿不到的格子一律**不补假值**：`checkPlanReview` 少给一条契约就少算一条，
+ *   而不是补一条 `present`。
+ *
+ * ── ★★★ 裁定（验收第 4 条）：work 类任务长期显示 `unmeasured` 是**噪音**，
+ *                而它今天**不是**从 `objective` 来的 ────────────────────────────────
+ *
+ * 契约原文写的陷阱是：「`why-now` 读的是 `objective`，而 `kind=work` 的任务按设计
+ * 不带 `objective` ⇒ 每一条 work 任务会长期显示 `unmeasured`」。
+ *
+ * ★ 而**实测把这条前提推翻了**（本队真实台账 `.agent-teams/self-iteration-3/team.json`，
+ *   18 条任务，逐条普查）：
+ *
+ *     有非空 objective 的任务数        ⇒ 18 / 18   （work 类 6 条**全都**有）
+ *     `why-now` 判 unmeasured 的条数   ⇒ 0
+ *     `stop-points` 判 unmeasured 的   ⇒ 4（t1 / t13 / t14 / t15）
+ *     这 4 条缺的是什么               ⇒ `verify` 这一格
+ *
+ * ⇒ 真实缺口在 **`verify` / `stop-points`**，不在 `objective` / `why-now`。
+ *   而 "work 类不带 objective" 这句**在本仓不成立**：`validateCreateTask`
+ *   （`src/quality-gates.ts:1012-1030`）**只对质量类**要求 `objective`，
+ *   但它从不**禁止** work 类带 `objective` —— 而本队的 work 类任务都带着。
+ *
+ * ── ★ 三条处理方向里选第 ① 条：单独一格「不适用」──────────────────────────────────
+ *
+ *   ✗ 改从 `subject + description` 读：那会把「没写 objective」这张**契约欠账**
+ *     洗成一张读得出来的读数 —— 与"静默折成 present"只差一步。
+ *   ✗ work 类整个跳过：跳过之后那 4 条 `stop-points` 缺口**从盘上消失**，
+ *     而它们里有一条（t15）是 `verification` 类，本来就该有 `verify`。
+ *   ✓ **单独一格 `not_applicable`**：不并入 `present`、不并入 `missing`、
+ *     不并入 `unmeasured`，自成第四格，且**逐条**给出是哪一条契约的哪一问。
+ *
+ * ── ★★ 而「不适用」的判据**不是**新写的规则，是 `validateCreateTask` 已经在跑的那两条 ──
+ *
+ *     `isQualityKind(kind)`  ⇒ `objective` + `acceptance` 必填
+ *     `WRITE_KINDS`           ⇒ 再加 `inScope` + `verify` 必填
+ *
+ * ⇒ 「契约不要求这一格」才叫不适用。★ 而**只有 `unmeasured` 才可能被改写**：
+ *   一格**填了**但填得没法读（`missing`）在任何 kind 下都是真缺口，不许改判。
+ *
+ * ★ 最后：`overall` **原样**交出去（不因为"不适用"而重算）—— 另开一格
+ *   `applicableOverall` 回答"只看契约要求的那几问是什么结论"。**两个问句，两格**，
+ *   它们不同形，也不许互相顶替。
+ */
+export type PlanReviewReadingState = 'measured' | 'unmeasured';
+/** ★ 与 `scripts/plan-review-check.mjs` 的三态逐字同形（不许折成布尔）。 */
+export type PlanReviewOverall = 'present' | 'missing' | 'unmeasured';
+export interface PlanReviewQuestionCounts {
+    readonly key: string;
+    readonly question: string;
+    /** ★ 下面四格**并列**：`notApplicable` 不是 `present` 的别名。 */
+    readonly present: number;
+    readonly missing: number;
+    readonly unmeasured: number;
+    readonly notApplicable: number;
+}
+export interface PlanReviewGap {
+    readonly id: string;
+    readonly key: string;
+    /** ★ 两态不同形：`missing` = 填了但读不出读数；`unmeasured` = 契约要求的格子压根没有。 */
+    readonly status: 'missing' | 'unmeasured';
+    readonly detail: string;
+}
+export interface PlanReviewNotApplicable {
+    readonly id: string;
+    readonly key: string;
+    readonly why: string;
+}
+export interface PlanReviewReadout {
+    /** 读到的契约条数。 */
+    readonly total: number;
+    /** ★ 判据自己算出来的 `overall` **原样** —— 三态逐字。 */
+    readonly overall: PlanReviewOverall;
+    readonly detail: string;
+    /** ★ 另一个问句：只看**契约要求的那几问**（见上面那段裁定）。 */
+    readonly applicableOverall: PlanReviewOverall;
+    /** ★ 三档计数；键名取 `TIER` 的字面值（`unmeasurable`），不另立拼法。 */
+    readonly tiers: {
+        readonly small: number;
+        readonly large: number;
+        readonly unmeasurable: number;
+    } | undefined;
+    /** `tiers` 缺席时的成因（★ 不是"三档都是 0"）。 */
+    readonly tiersWhy: string | undefined;
+    readonly questions: readonly PlanReviewQuestionCounts[];
+    readonly gaps: readonly PlanReviewGap[];
+    readonly notApplicable: readonly PlanReviewNotApplicable[];
+}
+export interface PlanReviewReading {
+    readonly state: PlanReviewReadingState;
+    readonly why?: string;
+    readonly readout?: PlanReviewReadout;
+}
+/**
+ * `scripts/plan-review-check.mjs` 里**本调用方真正用到**的那几格。
+ * ★ 与 `FrictionTriageModule` 同一条纪律：最小声明，**不用** `@ts-expect-error`
+ *   （那会让「模块不在」与「导出改名了」读成同一件事）。
+ */
+interface PlanReviewModule {
+    readonly REQUIRED_PLAN_QUESTIONS?: readonly {
+        readonly key: string;
+        readonly question: string;
+        readonly evidence: string;
+        readonly requiresReading?: boolean;
+    }[];
+    readonly checkPlanReview?: (plan: readonly unknown[]) => {
+        readonly overall?: string;
+        readonly detail?: string;
+        readonly contracts?: readonly {
+            readonly id?: string;
+            readonly answers?: Record<string, {
+                readonly status?: string;
+                readonly detail?: string;
+            } | undefined>;
+        }[];
+    };
+}
+/**
+ * 走一遍「计划审查」：四问 × 每条契约，加上分档三档计数。
+ *
+ * @param options.tasks 要审的契约（**本队任务** —— 生产路径传 `team.tasks`）
+ * @param options.exists ★ 注入点：`tierOf` 判"那个目录此刻在不在"（判据层不猜路径）
+ * @param options.loadModule ★ 注入点：夹具可以换掉**装载**（**而它不换判据**）
+ * @param options.loadTierModule 同上，装 `tierOf` 那一侧
+ */
+export declare function readPlanReview(options: {
+    readonly tasks: readonly TeamTask[];
+    readonly exists?: (relativePath: string) => boolean;
+    readonly loadModule?: () => Promise<PlanReviewModule>;
+    readonly loadTierModule?: () => Promise<FrictionTriageModule>;
+}): Promise<PlanReviewReading>;
 export declare function moduleFreshnessMessage(freshness?: ModuleFreshness): string;
 export declare function freshnessLine(): string;
 export type RestartArbitration = 

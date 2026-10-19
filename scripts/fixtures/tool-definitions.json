@@ -1809,6 +1809,156 @@
           "phase": {
             "type": "string"
           },
+          "plan_review": {
+            "additionalProperties": false,
+            "properties": {
+              "readout": {
+                "additionalProperties": false,
+                "properties": {
+                  "applicable_overall": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "gaps": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "key",
+                        "status",
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "not_applicable": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "why": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "key",
+                        "why"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "overall": {
+                    "type": "string"
+                  },
+                  "questions": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "number"
+                        },
+                        "not_applicable": {
+                          "type": "number"
+                        },
+                        "present": {
+                          "type": "number"
+                        },
+                        "question": {
+                          "type": "string"
+                        },
+                        "unmeasured": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "question",
+                        "present",
+                        "missing",
+                        "unmeasured",
+                        "not_applicable"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "tiers": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "large": {
+                        "type": "number"
+                      },
+                      "small": {
+                        "type": "number"
+                      },
+                      "unmeasurable": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "small",
+                      "large",
+                      "unmeasurable"
+                    ],
+                    "type": "object"
+                  },
+                  "tiers_why": {
+                    "type": "string"
+                  },
+                  "total": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "total",
+                  "overall",
+                  "detail",
+                  "applicable_overall",
+                  "questions",
+                  "gaps",
+                  "not_applicable"
+                ],
+                "type": "object"
+              },
+              "state": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
           "profile": {
             "additionalProperties": true,
             "properties": {

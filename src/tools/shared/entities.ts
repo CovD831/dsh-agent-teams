@@ -2385,7 +2385,7 @@ export async function readExperienceDispatch(options: {
   }
 }
 
-/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那两格（见 `scripts/friction-triage.d.ts`）。 */
+/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那几格（见 `scripts/friction-triage.d.ts`）。 */
 interface FrictionTriageModule {
   readonly triage?: (options?: Record<string, unknown>) => {
     readonly unreadable?: readonly string[]
@@ -2403,6 +2403,354 @@ interface FrictionTriageModule {
     readonly cannotEmit: readonly unknown[]
     readonly decomposed: readonly unknown[]
     readonly notReadyBecause?: Record<string, number>
+  }
+  /**
+   * ── ★★★ t6（N3）：分档那一格（`tierOf`）────────────────────────────────────────
+   *
+   * ★ 与 `readExperienceDispatch` 走**同一个模块、同一条装载路** —— 而不是为分档
+   *   另开一份实现：`scripts/friction-triage.mjs` 里那份 `tierOf` 是**唯一真值**
+   *   （`plan-review-tier.test.mjs` 与 `dispatchable` 的准入都读它，见那里的注释
+   *   「一处实现，两处使用」）。在这里再写一份分档，就是本队记账过的第二份真相。
+   */
+  readonly tierOf?: (contract: unknown, options?: { exists?: (path: string) => boolean }) => {
+    readonly tier?: string
+    readonly why?: string
+  }
+}
+
+/**
+ * ── ★★★ t6（N3）：把「计划审查」那一格读到生产路径上来 ────────────────────────────
+ *
+ * ── 它补的缺口（MEASURED，开工普查）──────────────────────────────────────────────
+ *
+ *     （改前实测，三条命令都按函数名 grep `src/`）
+ *     · 带闭括号的那个函数名 ⇒ 0 行
+ *     · 不带闭括号的那个函数名 ⇒ 0 行（连注释都没有）
+ *     · `tierOf`               ⇒ 1 行，且在注释里
+ *
+ * ★ 这里刻意**不写**那三个字面量：这条注释自己就会变成 grep 的命中。
+ *   改前那次普查是真跑过的（结论：生产调用点 0），而改后的读数应当去
+ *   `plan_review` 那一格看，不在注释里。
+ *
+ * ⇒ `scripts/plan-review-check.mjs` 的四问 + `scripts/friction-triage.mjs` 的分档
+ *   **只被 `scripts/*.test.mjs` 调用** —— 「没审过的计划不该直接派」这句判据
+ *   在盘上只有装置、没有读者。这正是本队记账的第 N 个
+ *   「机制建好了，没有接线」。
+ *
+ * ── ★ 它**不重新实现**四问，也不重新实现分档 ────────────────────────────────────
+ *
+ * 四问（`why-now` / `steps` / `invariant-reading` / `stop-points`）在
+ * `REQUIRED_PLAN_QUESTIONS` 里是**冻结的一份数据**；判据在 `checkPlanReview` 里。
+ * 这里只做两件**本层该做**的事：
+ *   ① 把「一问一契约」的矩阵**聚合成计数 + 逐条名单**（调用方要的是"缺哪一问"）；
+ *   ② 给每一格贴上**「这个 kind 下契约要不要它」**（见下面那段裁定）。
+ * ★ 拿不到的格子一律**不补假值**：`checkPlanReview` 少给一条契约就少算一条，
+ *   而不是补一条 `present`。
+ *
+ * ── ★★★ 裁定（验收第 4 条）：work 类任务长期显示 `unmeasured` 是**噪音**，
+ *                而它今天**不是**从 `objective` 来的 ────────────────────────────────
+ *
+ * 契约原文写的陷阱是：「`why-now` 读的是 `objective`，而 `kind=work` 的任务按设计
+ * 不带 `objective` ⇒ 每一条 work 任务会长期显示 `unmeasured`」。
+ *
+ * ★ 而**实测把这条前提推翻了**（本队真实台账 `.agent-teams/self-iteration-3/team.json`，
+ *   18 条任务，逐条普查）：
+ *
+ *     有非空 objective 的任务数        ⇒ 18 / 18   （work 类 6 条**全都**有）
+ *     `why-now` 判 unmeasured 的条数   ⇒ 0
+ *     `stop-points` 判 unmeasured 的   ⇒ 4（t1 / t13 / t14 / t15）
+ *     这 4 条缺的是什么               ⇒ `verify` 这一格
+ *
+ * ⇒ 真实缺口在 **`verify` / `stop-points`**，不在 `objective` / `why-now`。
+ *   而 "work 类不带 objective" 这句**在本仓不成立**：`validateCreateTask`
+ *   （`src/quality-gates.ts:1012-1030`）**只对质量类**要求 `objective`，
+ *   但它从不**禁止** work 类带 `objective` —— 而本队的 work 类任务都带着。
+ *
+ * ── ★ 三条处理方向里选第 ① 条：单独一格「不适用」──────────────────────────────────
+ *
+ *   ✗ 改从 `subject + description` 读：那会把「没写 objective」这张**契约欠账**
+ *     洗成一张读得出来的读数 —— 与"静默折成 present"只差一步。
+ *   ✗ work 类整个跳过：跳过之后那 4 条 `stop-points` 缺口**从盘上消失**，
+ *     而它们里有一条（t15）是 `verification` 类，本来就该有 `verify`。
+ *   ✓ **单独一格 `not_applicable`**：不并入 `present`、不并入 `missing`、
+ *     不并入 `unmeasured`，自成第四格，且**逐条**给出是哪一条契约的哪一问。
+ *
+ * ── ★★ 而「不适用」的判据**不是**新写的规则，是 `validateCreateTask` 已经在跑的那两条 ──
+ *
+ *     `isQualityKind(kind)`  ⇒ `objective` + `acceptance` 必填
+ *     `WRITE_KINDS`           ⇒ 再加 `inScope` + `verify` 必填
+ *
+ * ⇒ 「契约不要求这一格」才叫不适用。★ 而**只有 `unmeasured` 才可能被改写**：
+ *   一格**填了**但填得没法读（`missing`）在任何 kind 下都是真缺口，不许改判。
+ *
+ * ★ 最后：`overall` **原样**交出去（不因为"不适用"而重算）—— 另开一格
+ *   `applicableOverall` 回答"只看契约要求的那几问是什么结论"。**两个问句，两格**，
+ *   它们不同形，也不许互相顶替。
+ */
+export type PlanReviewReadingState = 'measured' | 'unmeasured'
+/** ★ 与 `scripts/plan-review-check.mjs` 的三态逐字同形（不许折成布尔）。 */
+export type PlanReviewOverall = 'present' | 'missing' | 'unmeasured'
+
+export interface PlanReviewQuestionCounts {
+  readonly key: string
+  readonly question: string
+  /** ★ 下面四格**并列**：`notApplicable` 不是 `present` 的别名。 */
+  readonly present: number
+  readonly missing: number
+  readonly unmeasured: number
+  readonly notApplicable: number
+}
+
+export interface PlanReviewGap {
+  readonly id: string
+  readonly key: string
+  /** ★ 两态不同形：`missing` = 填了但读不出读数；`unmeasured` = 契约要求的格子压根没有。 */
+  readonly status: 'missing' | 'unmeasured'
+  readonly detail: string
+}
+
+export interface PlanReviewNotApplicable {
+  readonly id: string
+  readonly key: string
+  readonly why: string
+}
+
+export interface PlanReviewReadout {
+  /** 读到的契约条数。 */
+  readonly total: number
+  /** ★ 判据自己算出来的 `overall` **原样** —— 三态逐字。 */
+  readonly overall: PlanReviewOverall
+  readonly detail: string
+  /** ★ 另一个问句：只看**契约要求的那几问**（见上面那段裁定）。 */
+  readonly applicableOverall: PlanReviewOverall
+  /** ★ 三档计数；键名取 `TIER` 的字面值（`unmeasurable`），不另立拼法。 */
+  readonly tiers: { readonly small: number; readonly large: number; readonly unmeasurable: number } | undefined
+  /** `tiers` 缺席时的成因（★ 不是"三档都是 0"）。 */
+  readonly tiersWhy: string | undefined
+  readonly questions: readonly PlanReviewQuestionCounts[]
+  readonly gaps: readonly PlanReviewGap[]
+  readonly notApplicable: readonly PlanReviewNotApplicable[]
+}
+
+export interface PlanReviewReading {
+  readonly state: PlanReviewReadingState
+  readonly why?: string
+  readonly readout?: PlanReviewReadout
+}
+
+/**
+ * 某一问在这个 `kind` 下**是不是契约要求的** —— 「不适用」那一格的唯一判据。
+ *
+ * ★ 判据来源**逐条抄自** `src/quality-gates.ts` 的 `validateCreateTask`
+ *   （`isQualityKind` ⇒ objective + acceptance；`WRITE_KINDS` ⇒ 再加 inScope + verify），
+ *   而不是在这里另立一套依据 —— 后者会让"创建时拒绝"与"审查时说它不适用"分叉。
+ *
+ * ★ 未知的 `evidence` ⇒ 当作**契约要求**（保守方向：宁可多报一条缺口，
+ *   不把一格说不清的账洗成"不适用"）。
+ */
+function evidenceIsRequiredFor(kind: TaskKind | undefined, evidence: string): boolean {
+  if (evidence === 'objective' || evidence === 'acceptance') return isQualityKind(kind)
+  if (evidence === 'inScope' || evidence === 'verify') {
+    return kind !== undefined && (WRITE_KINDS as readonly string[]).includes(kind)
+  }
+  return true
+}
+
+/**
+ * `scripts/plan-review-check.mjs` 里**本调用方真正用到**的那几格。
+ * ★ 与 `FrictionTriageModule` 同一条纪律：最小声明，**不用** `@ts-expect-error`
+ *   （那会让「模块不在」与「导出改名了」读成同一件事）。
+ */
+interface PlanReviewModule {
+  readonly REQUIRED_PLAN_QUESTIONS?: readonly {
+    readonly key: string
+    readonly question: string
+    readonly evidence: string
+    readonly requiresReading?: boolean
+  }[]
+  readonly checkPlanReview?: (plan: readonly unknown[]) => {
+    readonly overall?: string
+    readonly detail?: string
+    readonly contracts?: readonly {
+      readonly id?: string
+      readonly answers?: Record<string, { readonly status?: string; readonly detail?: string } | undefined>
+    }[]
+  }
+}
+
+/**
+ * ★ 默认装载：动态 import + `pluginRoot()` 的运行时路径（与 `loadFrictionTriageModule` 同法）。
+ *
+ * ★★ 而 `scripts/plan-review-check.mjs` **今天不在** `package.json` 的 `files` 白名单里
+ *   （实测：`files` 里有 `friction-triage.mjs` / `judgement-triage.mjs` / `worktree-reclaim.mjs`，
+ *   没有 `plan-review-check.mjs`）⇒ **装出来的包里它不存在**。
+ *   ⇒ 那一条路会落到 `state: 'unmeasured'` 并说清成因 —— 收口是靠白名单，不是靠这里崩。
+ */
+async function loadPlanReviewModule(): Promise<PlanReviewModule> {
+  const target = pathToFileURL(join(pluginRoot(), 'scripts', 'plan-review-check.mjs')).href
+  return await import(/* @vite-ignore */ target) as PlanReviewModule
+}
+
+/**
+ * 走一遍「计划审查」：四问 × 每条契约，加上分档三档计数。
+ *
+ * @param options.tasks 要审的契约（**本队任务** —— 生产路径传 `team.tasks`）
+ * @param options.exists ★ 注入点：`tierOf` 判"那个目录此刻在不在"（判据层不猜路径）
+ * @param options.loadModule ★ 注入点：夹具可以换掉**装载**（**而它不换判据**）
+ * @param options.loadTierModule 同上，装 `tierOf` 那一侧
+ */
+export async function readPlanReview(options: {
+  readonly tasks: readonly TeamTask[]
+  readonly exists?: (relativePath: string) => boolean
+  readonly loadModule?: () => Promise<PlanReviewModule>
+  readonly loadTierModule?: () => Promise<FrictionTriageModule>
+}): Promise<PlanReviewReading> {
+  const load = options.loadModule ?? loadPlanReviewModule
+  let module: PlanReviewModule
+  try {
+    module = await load()
+  } catch (error) {
+    /** ★ 引不进来 ⇒ `unmeasured`（**不是**"没有问题"）—— 并说清是哪一步。 */
+    return {
+      state: 'unmeasured',
+      why: `the plan review module could not be loaded: ${String((error as Error | undefined)?.message)}`,
+    }
+  }
+  const questions = module.REQUIRED_PLAN_QUESTIONS
+  if (typeof module.checkPlanReview !== 'function' || !Array.isArray(questions)) {
+    return {
+      state: 'unmeasured',
+      why: 'the plan review module loaded but no longer exports `REQUIRED_PLAN_QUESTIONS`/`checkPlanReview` '
+        + `(saw: ${typeof questions}/${typeof module.checkPlanReview}) — the shape moved, so this reading means nothing`,
+    }
+  }
+
+  const plan = [...options.tasks]
+  const checked = module.checkPlanReview(plan)
+  const contracts = Array.isArray(checked.contracts) ? checked.contracts : []
+
+  /**
+   * ── 聚合：四问 × 每一条契约 ──────────────────────────────────────────────────
+   * ★ 计数与名单**在同一趟里**产生 —— 分两趟写会让"计数 3、名单 2 条"这种
+   *   自相矛盾的读数在盘上成立。
+   */
+  const buckets = new Map<string, { present: number; missing: number; unmeasured: number; notApplicable: number }>()
+  for (const item of questions) buckets.set(item.key, { present: 0, missing: 0, unmeasured: 0, notApplicable: 0 })
+  const gaps: PlanReviewGap[] = []
+  const notApplicable: PlanReviewNotApplicable[] = []
+  let applicableAnswered = 0
+  let applicableMissing = 0
+  let applicableUnmeasured = 0
+
+  plan.forEach((task, index) => {
+    const contract = contracts[index]
+    /**
+     * ★ `checkPlanReview` 少给一条契约 ⇒ **少算一条**，不补假值。
+     *   （补一条 `present` 会让"读丢了"与"全都合格"同形。）
+     */
+    if (contract === undefined) return
+    const id = typeof contract.id === 'string' && contract.id !== '' ? contract.id : '(a contract with no id)'
+    for (const item of questions) {
+      const bucket = buckets.get(item.key)
+      if (bucket === undefined) continue
+      const raw = contract.answers?.[item.key]?.status
+      /** ★ 认不出的状态 ⇒ 落 `unmeasured`（保守）—— 不落 `present`。 */
+      const status: PlanReviewOverall = raw === 'present' || raw === 'missing' || raw === 'unmeasured'
+        ? raw
+        : 'unmeasured'
+      const detail = typeof contract.answers?.[item.key]?.detail === 'string'
+        ? String(contract.answers[item.key]?.detail)
+        : ''
+      const required = evidenceIsRequiredFor(task.kind, item.evidence)
+      /**
+       * ★★ 「不适用」只对 **`unmeasured`** 开口 —— 一格**填了**却读不出读数
+       *   （`missing`）在任何 kind 下都是真缺口，不许改判。
+       */
+      if (status === 'unmeasured' && !required) {
+        bucket.notApplicable += 1
+        notApplicable.push({
+          id,
+          key: item.key,
+          why: `${task.kind ?? 'work'} tasks are not required to carry \`${item.evidence}\` `
+            + '(see quality-gates.ts: isQualityKind ⇒ objective+acceptance, WRITE_KINDS ⇒ inScope+verify) '
+            + '— absent by contract, not by omission',
+        })
+        continue
+      }
+      bucket[status] += 1
+      applicableAnswered += 1
+      if (status === 'missing') applicableMissing += 1
+      if (status === 'unmeasured') applicableUnmeasured += 1
+      if (status !== 'present') gaps.push({ id, key: item.key, status, detail })
+    }
+  })
+
+  /**
+   * ★ 三档计数：与 `readExperienceDispatch` 走**同一个模块、同一条装载路**。
+   * ★ 装载失败 ⇒ `tiers: undefined` + 成因，**不是** `{small:0,large:0,unmeasurable:0}`
+   *   （三个 0 会与"这一队真的没有大活"同形）。
+   */
+  const loadTier = options.loadTierModule ?? loadFrictionTriageModule
+  let tiers: PlanReviewReadout['tiers']
+  let tiersWhy: string | undefined
+  try {
+    const tierModule = await loadTier()
+    if (typeof tierModule.tierOf !== 'function') {
+      tiersWhy = 'the friction triage module loaded but no longer exports `tierOf` — the tier reading means nothing'
+    } else {
+      const tierOf = tierModule.tierOf
+      const exists = options.exists ?? ((relativePath: string) => existsSync(join(pluginRoot(), relativePath)))
+      let small = 0
+      let large = 0
+      let unmeasurable = 0
+      for (const task of plan) {
+        const tiered = tierOf(task, { exists })
+        const tier = typeof tiered?.tier === 'string' ? tiered.tier : 'unmeasurable'
+        /** ★ 认不出的档 ⇒ 落 `unmeasurable`（保守）；只有 small / large 是"读出来了"。 */
+        if (tier === 'small') small += 1
+        else if (tier === 'large') large += 1
+        else unmeasurable += 1
+      }
+      tiers = { small, large, unmeasurable }
+    }
+  } catch (error) {
+    tiersWhy = `the friction triage module could not be loaded: ${String((error as Error | undefined)?.message)}`
+  }
+
+  const overall: PlanReviewOverall = checked.overall === 'present' || checked.overall === 'missing' || checked.overall === 'unmeasured'
+    ? checked.overall
+    : 'unmeasured'
+  /**
+   * ★ 第二个问句：只看**契约要求的那几问**。
+   *   ★ 一条都问不到 ⇒ `unmeasured`（不写 `present`：什么都没问出来不是"全都合格"）。
+   */
+  const applicableOverall: PlanReviewOverall = applicableAnswered === 0
+    ? 'unmeasured'
+    : applicableUnmeasured > 0 ? 'unmeasured' : applicableMissing > 0 ? 'missing' : 'present'
+
+  return {
+    state: 'measured',
+    readout: {
+      total: plan.length,
+      overall,
+      detail: typeof checked.detail === 'string' ? checked.detail : '',
+      applicableOverall,
+      tiers,
+      tiersWhy,
+      questions: questions.map((item) => {
+        const bucket = buckets.get(item.key)
+        return {
+          key: item.key,
+          question: item.question,
+          present: bucket?.present ?? 0,
+          missing: bucket?.missing ?? 0,
+          unmeasured: bucket?.unmeasured ?? 0,
+          notApplicable: bucket?.notApplicable ?? 0,
+        }
+      }),
+      gaps,
+      notApplicable,
+    },
   }
 }
 
@@ -5773,6 +6121,25 @@ export function renderStatus(value: JsonValue): string {
      * ★ 部署状态（t34 的格）。**必须渲染出来** —— 见下面那段 MEASURED。
      */
     deployment?: { status: string; message: string; loaded?: string; on_disk?: string }
+    /**
+     * ★ 计划审查读数（t6 的格）。**同样必须渲染出来** —— 理由与 `deployment` 逐字相同：
+     *   一个只在返回值里、而人看不见的读数，与它不存在是同一件事。
+     */
+    plan_review?: {
+      state: string
+      why?: string
+      readout?: {
+        total: number
+        overall: string
+        detail: string
+        applicable_overall: string
+        tiers?: { small: number; large: number; unmeasurable: number }
+        tiers_why?: string
+        questions: { key: string; question: string; present: number; missing: number; unmeasured: number; not_applicable: number }[]
+        gaps: { id: string; key: string; status: string; detail: string }[]
+        not_applicable: { id: string; key: string; why: string }[]
+      }
+    }
   }
   const flags = [
     team.halted ? 'halted' : undefined,
@@ -5861,6 +6228,69 @@ export function renderStatus(value: JsonValue): string {
      *   与它未渲染时那种"看得见 current、看不见 unknown"的写法相反。
      */
     ...team.deployment === undefined ? [] : [`Deployment: ${team.deployment.message}`],
+    /**
+     * ── ★★★ t6（N3）：计划审查必须【渲染出来】───────────────────────────────────────
+     *
+     * ★ 理由与上面 `Deployment` 那段 MEASURED **逐字相同**，所以不再复述一遍 ——
+     *   只记这一格的特殊之处：
+     *
+     *   ① 三态在**渲染层**就分形，且每一态**指向不同的下一步**：
+     *        `unmeasured` ⇒ 去接线（模块没装进来 / 导出改名了）
+     *        `missing`    ⇒ 去补契约（填了，但读不出读数）
+     *        缺口里分 `missing` 与 `unmeasured` 两种 —— 前者去改文字，后者去填那一格
+     *      ★ 把三者印成同一句"有缺口"，等于让人去改文字而那一格其实压根不存在。
+     *
+     *   ② 「不适用」**单独一行**，绝不折进计数 —— 它是噪音，不是缺口。
+     *      契约原文的陷阱说的正是这件事：把噪音印成缺口，会让人去补一个
+     *      **契约根本不要求**的格子；而把噪音印成合格，会让真缺口消失。
+     *
+     *   ③ 空缺时**说"没读到"**，不说"0 条全部合格"。
+     */
+    ...(() => {
+      const review = team.plan_review
+      if (review === undefined) return []
+      if (review.state !== 'measured' || review.readout === undefined) {
+        return [`Plan review: unmeasured (${review.why ?? 'the reading carried no reason — that is a defect at the call site'})`]
+      }
+      const readout = review.readout
+      const tiers = readout.tiers === undefined
+        ? `tiers NOT READ${readout.tiers_why === undefined ? '' : ` (${readout.tiers_why})`}`
+        : `tiers small=${readout.tiers.small} large=${readout.tiers.large} unmeasurable=${readout.tiers.unmeasurable}`
+      const lines = [
+        `Plan review: ${readout.overall} over ${readout.total} contract(s) — ${tiers}`
+          + `${readout.applicable_overall === readout.overall ? '' : ` · required-questions only: ${readout.applicable_overall}`}`,
+        /**
+         * ── ★★★ 必须渲染的那一行：`overall` 是**原样**交过来的判据原话 ───────────────
+         *
+         * ★ 它是 `checkPlanReview` 自己在**不知道 kind** 的前提下下的结论，而上面那行
+         *   的 `tiers` 与本段下面的逐问计数是**知道 kind** 的。两者会不同（实测：
+         *   `overall=unmeasured` 而 `required-questions only: present`）。
+         *
+         * ★ 不印它，`unmeasured` 就是一个**没有成因的字**：读的人只能猜是"模块没装好"
+         *   还是"有格子没填"。印它，两句话就在同一屏上，而那两句话**说的不是同一件事**
+         *   （一句是"盘上有几格读不出来"，一句是"契约要求的那几格里缺不缺"）。
+         */
+        ...readout.detail === '' ? [] : [`  raw reading (kind-agnostic): ${readout.detail}`],
+        ...readout.total === 0 ? [] : readout.questions.map((item) => (
+          `  · ${item.key}: present=${item.present} missing=${item.missing} unmeasured=${item.unmeasured} not-applicable=${item.not_applicable}`
+        )),
+      ]
+      /** ★ 逐条名单：计数说"缺几个"，这里说"缺在哪一条的哪一问"。 */
+      if (readout.gaps.length > 0) {
+        lines.push(`  missing readings (${readout.gaps.length}):`)
+        for (const gap of readout.gaps) {
+          lines.push(`    - ${gap.id} / ${gap.key} [${gap.status}] ${gap.detail.slice(0, 180)}`)
+        }
+      }
+      /** ★ 「不适用」自成一段 —— 与上面那段并列，不合并（合并就是那个噪音陷阱）。 */
+      if (readout.not_applicable.length > 0) {
+        lines.push(`  not applicable by contract (${readout.not_applicable.length}; noise, not a gap):`)
+        for (const entry of readout.not_applicable) {
+          lines.push(`    - ${entry.id} / ${entry.key}`)
+        }
+      }
+      return lines
+    })(),
     `Captain inbox (${team.captain_inbox.length}):`,
     ...team.captain_inbox.map((message) => `  - [${message.from}] ${message.content}`),
     ...(team.member_inbox ?? []).map(message => `  - [${message.from}] ${message.content}`),
