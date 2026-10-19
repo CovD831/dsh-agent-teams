@@ -37,6 +37,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
+/**
+ * ★ t7：工具数量由**真源**说，不由夹具手抄。
+ *   见臂 6 里 `MODULE_FLOOR` / `registered` 那一段的说明。
+ */
+import { TEAM_TOOL_NAMES } from '../lib/tool-names.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TOOLS_DIR = join(ROOT, 'src', 'tools')
@@ -413,11 +418,49 @@ test('臂 6 ★ 收口臂：tools.ts 里【不再有工具体】—— 判结构
   )
   /** ★ 而"工具模块确实存在且各自装自己的工具"要有读数（否则上面两条可以被"全删掉"满足）。 */
   const modules = sourceFiles(TOOLS_DIR).filter((f) => !f.includes('/shared/'))
-  assert.ok(modules.length >= 15, `★ 工具模块必须有内容（实测 ${modules.length} 个）—— 空集合上"都搬走了"是恒真的`)
+  /**
+   * ── ★★ 下面这两个数为什么**不是**"当前形状"，而是"退化边界"（t7 修）────────────
+   *
+   * MEASURED（2026-10-20，t7 加第 17 个工具时本臂红，逐字）：
+   *
+   *     ✖ 臂 6 ★ 收口臂：tools.ts 里【不再有工具体】—— 判结构，不判行数
+   *       AssertionError [ERR_ASSERTION]: ★ 15 个模块合起来必须注册 16 个工具（实测 17）—— 一条不多、一条不少
+   *       17 !== 16
+   *
+   * ★ 而它红的理由与本臂要测的东西（"拆分有没有退回去"）**毫无关系** ——
+   *   加一个工具本来就是一个正常事件。这正是本臂上方 :392-398 自己写下的那条纪律：
+   *   「夹具不得把『当前数量/为空/形状』写成不变量…… 把它钉死，下一次正常的增删
+   *   就会红，而红的原因与『拆分有没有退回去』毫无关系（棘轮）」。
+   *   ⇒ 它把**行数**换成了**工具数**，犯的是同一个毛病。
+   *
+   * ── 修法：两个数改成"退化的下界"，而不是"今天的值" ─────────────────────────
+   *
+   *   `MODULE_FLOOR = 3`  ← **不是**当前模块数（今天 16）。它是"工具体分散在多个
+   *      模块里"这条**结构性质**的下界：一个模块装全部工具 = 拆分退回去了，
+   *      而那正是本臂存在的理由。★ 取 3 而不是 2，是因为"两个模块"离退化太近、
+   *      足够让 `A→15 个 + B→2 个` 这种形状过去；而 3 已经在"明显分散"那一侧。
+   *      **它不随正常增删变红，只在拆分退回时变红。**
+   *
+   *   `registered` 与 `TEAM_TOOL_NAMES.length` 对拍 ← 数量由**真源**说，不由夹具说。
+   *      `src/tool-names.ts` 是"稳定业务 API 清单 + captain-only 可见性"的唯一真源
+   *      （`capabilities.ts:9` / `harness-compat.ts:19` / `src/index.ts:46` 三处消费），
+   *      而它自己的注释逐字写着「一个新工具的上线是**两处同时**的动作」。
+   *      ⇒ 一个工具只注册不登记，本臂现在会红 —— 它同时钉住了那条不变量。
+   */
+  const MODULE_FLOOR = 3
+  assert.ok(
+    modules.length >= MODULE_FLOOR,
+    `★ 工具体必须分散在多个模块里（实测 ${modules.length} 个，下界 ${MODULE_FLOOR}）`
+    + ' —— 一个模块装全部就等于拆分退回去了',
+  )
   let registered = 0
   for (const file of modules) {
     const text = readFileSync(file, 'utf8')
     registered += (text.match(/ctx\.tools\.register\(/g) ?? []).length
   }
-  assert.equal(registered, 16, `★ 15 个模块合起来必须注册 16 个工具（实测 ${registered}）—— 一条不多、一条不少`)
+  assert.equal(
+    registered, TEAM_TOOL_NAMES.length,
+    `★ 工具模块合起来必须注册 ${TEAM_TOOL_NAMES.length} 个工具（实测 ${registered}）`
+    + ' —— 一条不多、一条不少；★ 这个数来自 `src/tool-names.ts`（真源），不是夹具手抄',
+  )
 })

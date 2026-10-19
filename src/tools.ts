@@ -98,6 +98,13 @@ import { register as register_delivery } from './tools/delivery.ts'
 import { register as register_resume } from './tools/resume.ts'
 import { register as register_delete } from './tools/delete.ts'
 import { register as register_restart } from './tools/restart.ts'
+/**
+ * ★ t7（N6）：把「计划审查」做成一次**显式**工具调用。
+ *
+ * ★ 工具体之间不互相调用（各自只向 `ctx.tools` 注册），所以它排在哪一行
+ *   都不影响语义；放在末尾是为了让 diff 只多两行。
+ */
+import { register as register_review_plan } from './tools/review-plan.ts'
 import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, makeTask, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf } from './tools/shared/entities.ts'
 // ── ★ t39：对外接口不变 ─────────────────────────────────────────────────────
 // 这两个类型此前【声明在 tools.ts 里】，外部（src/index.ts）从这里 import。
@@ -2306,6 +2313,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   register_resume(ctx, scheduler, config)
   register_delete(ctx, config)
   register_restart(ctx, config)
+  register_review_plan(ctx, config)
   // Live-member hydration validates saved filters against registered tools.
   installedSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
     scheduler.kickMember(workspace, teamId, memberName)

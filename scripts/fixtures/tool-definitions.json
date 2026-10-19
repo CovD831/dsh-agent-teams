@@ -1404,6 +1404,230 @@
     },
     "execute": "[function:execute/2]"
   },
+  "agent_teams_review_plan": {
+    "kind": null,
+    "description": "Run the adversarial plan review on a task contract and, ONLY if every question passes, return a `reviewed` stamp you can pass to create_task/amend_task. Call this before dispatch: `dispatch.plan-reviewed` rejects any task without a stamp. When the review cannot settle a question (needs-review) or rejects it, this tool returns NO stamp and lists each failing question with the remedy — a stamp whose shape is legal but whose content failed would launder \"cannot decide\" into \"reviewed\".",
+    "parameters": {
+      "properties": {
+        "by": {
+          "description": "Who performs the review (recorded in the stamp). Defaults to the caller identity (`captain` or the member name).",
+          "type": "string"
+        },
+        "contract": {
+          "additionalProperties": false,
+          "description": "The contract to review: the same fields you are about to pass to create_task (subject, objective, inScope, outOfScope, acceptance, verify, dependencies, kind).",
+          "properties": {
+            "acceptance": {
+              "description": "Acceptance criteria — each must be falsifiable by one directed mutation.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dependencies": {
+              "description": "Task ids this contract depends on.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "inScope": {
+              "description": "Workspace-relative POSIX paths this task may change.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "description": "Quality kind (implementation / repair / verification / review / requirements / integration / work).",
+              "type": "string"
+            },
+            "objective": {
+              "description": "Why this task exists — what breaks if it is not done now.",
+              "type": "string"
+            },
+            "outOfScope": {
+              "description": "Workspace-relative POSIX paths this task must not change.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "subject": {
+              "description": "Task subject.",
+              "type": "string"
+            },
+            "verify": {
+              "description": "Verification commands.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "contract"
+      ],
+      "type": "object"
+    },
+    "output": {
+      "render": "[function:render/2]",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "verdict": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "verdict",
+                "why"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "plan_detail": {
+            "type": "string"
+          },
+          "plan_overall": {
+            "type": "string"
+          },
+          "plan_per_question": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "detail": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "status",
+                "detail"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "refusals": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "remedy": {
+                  "type": "string"
+                },
+                "verdict": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "verdict",
+                "why",
+                "remedy"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reviewed": {
+            "additionalProperties": false,
+            "properties": {
+              "at": {
+                "type": "number"
+              },
+              "by": {
+                "type": "string"
+              },
+              "checks": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    },
+                    "why": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "why"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "at",
+              "by",
+              "checks"
+            ],
+            "type": "object"
+          },
+          "stampable": {
+            "type": "boolean"
+          },
+          "tier": {
+            "type": "string"
+          },
+          "tier_next_step": {
+            "type": "string"
+          },
+          "tier_why": {
+            "type": "string"
+          },
+          "unmeasured": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stampable",
+          "checks",
+          "refusals",
+          "plan_overall",
+          "plan_detail",
+          "plan_per_question",
+          "tier",
+          "tier_why"
+        ],
+        "type": "object"
+      }
+    },
+    "execute": "[function:execute/2]"
+  },
   "agent_teams_send_message": {
     "kind": null,
     "description": "Send coordination or current-task guidance directly to the captain or a teammate. A running recipient receives it at the next model step; an idle recipient wakes. Messages are durably retained until read. Use task creation/reassignment for a new unit of work, not repeated status nudges.",
