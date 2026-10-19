@@ -731,3 +731,47 @@ git status --short
 5. **不把本文当成 t5 的平反书** —— t5 的 `verify` 里还有
    `scripts/worktree-isolation.test.mjs`，它在主树是 **exit 0 / 12 pass**（实测），
    这一条不受本缺陷影响。t5 是否成立由它的完整 verify 决定，不由本文决定。
+
+---
+
+## 附录：G8 —— 同一份判据，两条调用路径的安全性不同
+
+本轮的 t14（清磁盘）开工前由成员拦下，发现的是**另一类**缺陷：判据是对的，**调用路径**是错的。
+
+### 缺陷形状
+
+| 路径 | 入口 | 任务状态过滤 | 对一棵 in_progress 任务的树 |
+|---|---|---|---|
+| 生产自动回收 | `scanTerminalWorktrees` `scripts/worktree-reclaim.mjs:549` | ✅ `:557` `if (!isTerminalTask(task)) continue` | **连判都不判** |
+| CLI 全仓大扫除 | `planReclaim` `scripts/worktree-reclaim.mjs:437` | ❌ 无 | `reclaimable` ⇒ **删掉正在写的目录** |
+
+`planReclaim` 用的是 `listWorktrees(repo)` —— 裸目录枚举，**没有任何任务状态概念**。
+
+### 为什么判据本身没错
+
+`judgeWorktreeReclaimable` 回答的问题是「这棵树的产物**被吸收了吗**」，不是「这棵树**还有人用吗**」。对一个刚建、HEAD 还是上游祖先的树，`ancestor` 这个答案**是真的**。
+
+⇒ 这是**两个不同的问题**，而两条调用路径把其中一个当成了另一个。`src/tools/update-task.ts:242` 早就把这条写进注释：
+
+> `planReclaim` 扫的是**整棵** `<repo>/.agent-teams/worktrees/`（`listWorktrees(repo)`）⇒ 它是"全仓大扫除"，它删的树与**这条任务**没有关系。★ 而这里要的是**按任务**回收：只动 `this task` 那一棵。
+
+### 实测
+
+```
+judgeWorktreeReclaimable({repo, worktree: '.agent-teams/worktrees/task-self-iteration-3-t4',
+                          mainRef: 'task-mutation-integrate'})
+⇒ {"status":"reclaimable","reason":"absorbed","how":"ancestor","behind":1}
+```
+
+而那棵树的所属任务此刻 `status=in_progress`、`assignee=architect`、成员 `working`。
+
+### 与缺陷 A/B 的共同点
+
+三者是同一个形状的第三、第四例：**判据算对了，但它读的输入不是它以为的那个**。
+- 缺陷 A：门算对了 exit code，但 cwd 不是任务的那棵树。
+- 缺陷 B：断言算对了正则，但期望的路径形状停在三个提交之前。
+- **G8**：判据算对了「产物被吸收」，但"这个树还在被写"这条事实**根本没进它的输入**。
+
+### 修复方向（未实现）
+
+`planReclaim` 要么接受一个 `tasks` 参数并复用 `isTerminalTask`，要么在 CLI 层显式拒绝扫 `task-<team>-<id>` 形状里属于未终结任务的那些。★ 但**不要**把状态过滤塞进 `judgeWorktreeReclaimable` —— 那会让"这棵树的产物被吸收了吗"这个纯问题失去纯粹的答案，而 `scanTerminalWorktrees` 正依赖它足够纯。
