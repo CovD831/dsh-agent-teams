@@ -36,6 +36,41 @@ import {
  */
 import { FoldersPanel } from './folders-panel.tsx'
 /**
+ * ── ★★★ t118：这个**浏览器标签页**里是否已经为"呈现工作区"切过一次面板 ─────────────
+ *
+ * 存储位置的选择是这一格的全部内容（三个候选都试过）：
+ *
+ *   · **模块级 `let`** —— HMR 重载清空模块状态 ⇒ 每次重载都返回 false ⇒ 又切一次。
+ *     ★ 那**正是**用户报的那个缺陷本身，不是它的解法。
+ *   · **`localStorage`** —— 跨标签页共享 ⇒ "新开一页"读到的还是上一页留下的标记，
+ *     于是新页面**永远不切**。把一个"太吵"的缺陷换成一个"太哑"的。
+ *   · **`sessionStorage`** —— ★ 每个标签页一份、页面刷新保留、关掉重开为空，
+ *     且 **HMR 重载不动它**。三条恰好对上"每次页面生命周期一次"。
+ *
+ * ★ 读不出来（无 `window` / 存储被禁用抛错）⇒ 当作**没切过**。
+ *   理由：那会让面板**切过去**（多打扰一次），而不是**永久不切**（功能静默消失）。
+ *   ★ 两者不对称，而取舍是刻意的 —— 能看见的过度好过看不见的缺失。
+ */
+const FOLDERS_SELECTED_THIS_VISIT_KEY = 'dsh-agent-teams:folders-selected:v1'
+
+function hasSelectedPanelThisPageVisit(): boolean {
+  try {
+    return typeof window !== 'undefined' && window.sessionStorage.getItem(FOLDERS_SELECTED_THIS_VISIT_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** ★ 标记"这一页已经呈现过了"。写失败**不阻塞**本次呈现（能切就切，别把功能搭进去）。 */
+function markPanelSelectedThisPageVisit(): void {
+  try {
+    if (typeof window !== 'undefined') window.sessionStorage.setItem(FOLDERS_SELECTED_THIS_VISIT_KEY, '1')
+  } catch {
+    /* 存储不可用 ⇒ 这一页下次重载会再切一次。可接受的降级，不抛。 */
+  }
+}
+
+/**
  * ★★★ t112：**常驻的「回到工作区」入口**。
  *
  * 修的是一个用户在**真实使用**里发现的缺陷：启动时文件夹页被选中（见下面那次
@@ -357,43 +392,51 @@ export function apply(ctx: ClientContext): void {
    */
   try {
     /**
-     * ── ★★★ t117：**只有在用户此刻不在别处时**才把面板切过来 ──────────────────────
+     * ── ★★★ t117 / t118：**每次页面生命周期只切一次** ──────────────────────────────
      *
-     * USER-REPORTED（逐字）：
+     * USER-REPORTED（两次，逐字）：
      * > 「是因为你一直在重启吗，怎么时不时就会被切到工作区那个页面，
      * >   很影响我在其他会话的工作，不应该时不时就切到工作区页面」
+     * > 「为什么还是会不停地切到工作区，不要这样」
      *
-     * ── 根因（MEASURED，本轮）──────────────────────────────────────────────────
+     * ── 机制（MEASURED，不是推测）────────────────────────────────────────────────
      *
-     * 本块是 `apply()` 里的**无条件**副作用：只要本插件被加载，就 `selectPanel(我们的 key)`。
-     * 而加载不只发生在"页面打开"：
-     *   · `~/.dsh/profiles/desktop/cordis.patch.yml:530` 的 HMR `root: ['.']`
-     *     ⇒ `lib/**` 每次被 `pnpm build` 重写后 100ms 就重载客户端插件
-     *     （`.agent-teams/hmr-reloads.jsonl` 实测 50 次重载，最小间隔 **181ms**，
-     *      10 秒内连击 **28** 次）；
-     *   · 每次重载 `apply()` 重跑 ⇒ 又一次无条件 `selectPanel`。
-     * ⇒ **用户正在别的会话里打字，插件的重建把我这侧的面板推到他眼前。**
-     *   而官方 `ILayout.selectPanel(panelId: MainPanelId | null)` 的语义是
-     *   "**用户想切换到某个面板**" —— 没人想切，却被切了。
+     * 本块是 `apply()` 的副作用：插件每被加载一次，就 `selectPanel(我们的 key)`。
+     * 而"加载"不只发生在页面打开：
+     *   `~/.dsh/profiles/desktop/cordis.patch.yml:536` 的 HMR `root: ['.']`
+     *   ⇒ `lib/**` 每次被 `pnpm build` 重写后约 100ms 就重载客户端插件。
+     *   实测 `.agent-teams/hmr-reloads.jsonl`：50 次重载，最小间隔 **181ms**，
+     *   10 秒内连击 **28** 次。⇒ 我在另一侧敲一次构建，你这一侧就被推走一次。
      *
-     * ── ★ 判据：只在 `activePanelId === null` 时切 ─────────────────────────────
+     * ── ★★★ t117 的第一次修法是【错的】，记在这里免得再犯 ─────────────────────────
      *
-     * `PanelInfo`（`dsh-client-ui-layout/lib/types/client/service.d.ts:17`）逐字：
-     *   `readonly activePanelId: MainPanelId | null;`
-     *   `null` ⇒ **显示当前会话**（Conversation）。
+     * 第一版判据：`activePanelId === null` 时才切。理由是"null ⇒ 用户不在任何面板上"。
+     * ★★ 而 `service.d.ts:18` 逐字：`null displays the current Conversation` ——
+     *   **`null` 恰恰是"用户正在会话里"**，也就是**最常见**的状态。
+     *   ⇒ 这个守卫在最常见的场景下**恰好放行**，等于没修。
+     *   用户复测当场打回：「为什么还是会不停地切」。
      *
-     * 所以：
-     *   · `activePanelId === null`  ⇒ 用户没在任何面板上 ⇒ 切过去是**首次呈现**，保留；
-     *   · `activePanelId !== null`  ⇒ 用户**正站在某个面板上**（可能是本插件的文件夹页，
-     *     也可能是别的插件的面板）⇒ **一个字都不动**。
+     * ── ★ 正确的判据是【页面生命周期】，不是【面板位置】──────────────────────────
      *
-     * ★ 反向半边（为什么不是"只在首次加载时切"）：本插件拿不到"这是第几次加载"
-     *   —— HMR 重载后模块状态全清，`let firstLoad = true` 每次都是 `true`。
-     *   而 `activePanelId` 是**宿主**的状态，重载不会重置它 ⇒ 它才是"用户此刻在哪"的真值。
+     * 用户要的是"打开页面时给我看一眼工作区，之后别再来打扰我"。
+     * 那件事的对象是**这个浏览器标签页**，而它的真值是 `sessionStorage`：
+     *   · 每个**标签页**一份，刷新页面 ⇒ 还在（不重复切）；
+     *   · **关掉标签页再开** ⇒ 空（该给的那一眼还是给）；
+     *   · HMR 重载 ⇒ **不动它**（那正是我们要的：重载 ≠ 新的一页）。
+     *
+     * ★★ 为什么不是模块级 `let firstLoad = true`：HMR 重载会把模块状态全清，
+     *   于是每次重载都是 `true` ⇒ 又切一次。**那正是本缺陷本身**，不是它的解法。
+     * ★ 为什么不是 `localStorage`：它跨标签页共享，"新开一页"就读不到"这是新的一页"。
+     *
+     * ── ★ 反向半边（这一格不许被收紧成"永不切"）────────────────────────────────
+     *
+     * 首次打开**仍然要切** —— 那是 v5 的设计（文件夹页就是入口）。
+     * ⇒ 臂 14 断言：没有标记时**必须**调 `selectPanel` 并**写下**标记；
+     *   有标记时**必须不调**。两半都要绿，否则修法就变成了"把功能删掉"。
      */
     noteProbeSelection(FOLDERS_MAIN_KEY)
-    const currentPanel = ctx.layout.panelInfo?.getSnapshot?.()?.activePanelId ?? null
-    if (currentPanel === null) {
+    if (!hasSelectedPanelThisPageVisit()) {
+      markPanelSelectedThisPageVisit()
       /**
        * ★ `selectPanel` 收的是**品牌类型** `MainPanelId`（`= string & { readonly [BRAND]: 'MainPanelId' }`），
        *   不是裸 `string` —— 编译期实测报错：`Argument of type 'string' is not assignable to MainPanelId`。

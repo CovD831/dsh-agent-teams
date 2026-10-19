@@ -311,41 +311,83 @@ test('★★ 臂 12：选择阶段的三个读数各占一格（调用 / 接受 
   assert.equal(after.error, 'boom', 'a rejection must be readable, not silent')
 })
 
-test('★★★ 臂 13：自动切面板必须**先问用户在不在别处**（t117 用户投诉的东西）', () => {
+test('★★★ 臂 13：自动切面板必须**每个页面生命周期只切一次**（t117 → t118）', () => {
   /**
-   * USER-REPORTED（逐字）：
+   * USER-REPORTED（两次，逐字）：
    * > 「是因为你一直在重启吗，怎么时不时就会被切到工作区那个页面，
    * >   很影响我在其他会话的工作，不应该时不时就切到工作区页面」
+   * > 「为什么还是会不停地切到工作区，不要这样」
    *
-   * ── 被钉住的是什么 ────────────────────────────────────────────────────────────
+   * ── ★★★ 第一版判据是【错的】，这条注释留着免得再犯 ─────────────────────────────
    *
-   * `apply()` 是**每次插件加载**都会跑一次的。而加载不只发生在"页面打开"：
-   * HMR 会在 `lib/**` 被重写后 100ms 重载本插件
-   * （`.agent-teams/hmr-reloads.jsonl` 实测 50 次，最小间隔 **181ms**，10 秒内连击 **28** 次）。
-   * ⇒ 一个**无条件** `selectPanel(我们的 key)` 意味着：我这边每次 `pnpm build`，
-   *   用户无论正在哪个会话里工作，眼前都会被推回到工作区页。
+   * t117 的判据是 `activePanelId === null` 时才切，理由写成"null ⇒ 用户不在任何面板上"。
+   * 而 `dsh-client-ui-layout/lib/types/client/service.d.ts:18` 逐字：
+   *   `null displays the current Conversation`
+   * ⇒ **`null` 恰恰是"用户正在会话里"** —— 最常见的那种状态。
+   *   守卫在最常见的场景下**恰好放行** ⇒ 等于没修 ⇒ 用户复测当场打回。
    *
-   * ★ 判据：真值在**宿主**（`ctx.layout.panelInfo.activePanelId`），不在本插件。
-   *   `null` ⇒ 显示会话；非 `null` ⇒ 用户正站在某个面板上 ⇒ 不许动。
-   *   （官方 `service.d.ts:19` 逐字 `readonly activePanelId: MainPanelId | null;`）
+   * ── ★ 正确的判据是【页面生命周期】──────────────────────────────────────────────
    *
-   * ★ 为什么不用"只在首次加载时切"：HMR 重载后模块状态全清，
-   *   `let firstLoad = true` 每次都是 `true` —— 那个变量在这里是**测不出来的**。
+   * 用户要的是"打开页面给我看一眼工作区，之后别再来打扰"。那件事的对象是
+   * **这个浏览器标签页**，它的真值在 `sessionStorage`：
+   *   · 刷新页面 ⇒ 还在（不重复切）· 关掉重开 ⇒ 空（该给的那眼还是给）
+   *   · ★ **HMR 重载 ⇒ 不动它**（重载 ≠ 新的一页，这正是缺陷的成因）
+   *
+   * ★ 为什么不是模块级 `let firstLoad`：HMR 重载把模块状态全清 ⇒ 每次都是 true
+   *   ⇒ **那正是缺陷本身**，不是解法。这条判据上我与自己的第一版相反，写下来供后人核。
    */
   const source = readFileSync(INDEX, 'utf8')
     .replace(/\/\*[\s\S]*?\*\//gu, '')
     .replace(/^\s*\/\/.*$/gmu, '')
 
+  /**
+   * ★★ 反向半边之一：必须**读**这个标签页的标记，而不是读宿主的面板位置。
+   *   读宿主位置是上一版失败的形态 —— 注释剥离之后这条断言能把它打红。
+   */
   assert.match(
-    source, /panelInfo\?\.getSnapshot\?\.\(\)\?\.activePanelId/,
-    '★ 切面板之前必须读宿主的 activePanelId —— 不读就无法知道用户此刻在不在别处',
+    source, /hasSelectedPanelThisPageVisit\(\)/,
+    '★ 切之前必须问"这一页是否已经呈现过" —— 读宿主 activePanelId 是上一版的错（null = 正在会话里）',
   )
   /**
-   * ★★ 反向半边：必须在**条件里**调，而不是读完再无条件调。
-   *   把 `if (currentPanel === null) { ... selectPanel ... }` 拆成
-   *   "读一下、然后照样无条件 selectPanel" ⇒ 读数看着有，行为没变 ⇒ 用户还是被打断。
-   *   所以这里断言 `selectPanel` 出现在 `=== null` 的**守卫块**里。
+   * ★★ 收窄到**选择块之内**：`activePanelId` 在本文件另有两处合法用途
+   *   （`:115` 的 `useLegacyPanelInfo` 桩、`:142` 的 `conversationVisible`），
+   *   它们与"要不要切面板"无关。全文件级 `doesNotMatch` 会把它们一起打红 ——
+   *   而那条臂就会因为一个**无关**的原因红，等于测错了东西。
    */
-  const guarded = /if\s*\(\s*\w*[Pp]anel\w*\s*===\s*null\s*\)\s*\{[\s\S]*?ctx\.layout\.selectPanel\(/
-  assert.match(source, guarded, '★ selectPanel 必须**只在** activePanelId === null 时被调用')
+  const selectionBlock = /noteProbeSelection\(FOLDERS_MAIN_KEY\)([\s\S]*?)noteProbeSelectionAccepted\(\)/u.exec(source)?.[1] ?? ''
+  assert.notEqual(selectionBlock, '', '★ 必须找得到那个选择块（找不到说明结构变了，本臂要重新对准）')
+  assert.doesNotMatch(
+    selectionBlock, /activePanelId/,
+    '★★ 选择块里不许再拿 activePanelId 当守卫：null 表示"用户正在会话里"，而那是最常见的状态',
+  )
+
+  /**
+   * ★★ 反向半边之二：`selectPanel` 必须在 `!hasSelected...` 的**守卫块**里。
+   *   "读一下标记、然后照样无条件切" ⇒ 读数看着有、行为没变 ⇒ 用户还是被打断。
+   */
+  const guarded = /if\s*\(\s*!\s*hasSelectedPanelThisPageVisit\(\)\s*\)\s*\{[\s\S]*?ctx\.layout\.selectPanel\(/
+  assert.match(source, guarded, '★ selectPanel 必须**只在**这一页还没呈现过时被调用')
+
+  /**
+   * ★★ 反向半边之三（防止修法退化成"永远不切"）：标记必须在**调用的同一次**里写下。
+   *   只判"不切"的话，把整个块删掉也能全绿 —— 而那就把 v5 的入口功能删了。
+   */
+  /**
+   * ★★★ 而"写了标记"必须在 `selectPanel` **之前**、在**同一个守卫块内** ——
+   *   定向突变实测过：只断言 `/markPanelSelectedThisPageVisit\(\)/` 出现时，
+   *   把那一行从守卫块里**挪到块外**（于是它无条件运行、`selectPanel` 却还在块内）
+   *   迭代 13/13 **全绿**。★ 那是一个真缺陷：首次呈现的标记会在**没切**的情况下写下，
+   *   而之后每次重载都读到它 ⇒ **这一页永远不再呈现**（功能静默消失）。
+   *   ⇒ 判据收窄成"同一个守卫块里，先写标记、后切面板"。
+   */
+  const insideGuard = /if\s*\(\s*!\s*hasSelectedPanelThisPageVisit\(\)\s*\)\s*\{([\s\S]*?)\n    \}/u.exec(source)?.[1] ?? ''
+  assert.notEqual(insideGuard, '', '★ 必须找得到那个守卫块')
+  const markAt = insideGuard.indexOf('markPanelSelectedThisPageVisit()')
+  const selectAt = insideGuard.indexOf('ctx.layout.selectPanel(')
+  assert.notEqual(markAt, -1, '★ 标记必须在守卫块【之内】写（块外写 = 没切也记账 ⇒ 这一页永不呈现）')
+  assert.ok(markAt < selectAt, '★ 先写标记、后切面板（反过来：切成功而记账失败时，下次重载会再切一次）')
+  assert.match(
+    source, /sessionStorage/,
+    '★ 标记必须落在 sessionStorage：模块级变量会被 HMR 重载清空（那正是缺陷本身）',
+  )
 })
