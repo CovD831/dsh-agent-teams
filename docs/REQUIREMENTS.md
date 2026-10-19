@@ -336,3 +336,41 @@ N1 的台账与 N3 的审查链判定 ⇒ **先有数据与审查，再有深挖
 它奖励少写 `inScope`、惩罚写清，且能被 `amend_task` 缩域绕过。
 ⇒ 保留的是"**让循环状态可读 + 让计数不可绕 + 让触顶真的停且可解**"这三件，
 它们才直接回答用户这一问。
+
+## 13. ★★ 契约在建任务那一刻就该自查：声明了 `src/` 就必须配对 `lib/`
+
+> 「若门要求"changedPaths ⊆ inScope"而契约又强制 lockstep 产物，那么**任何改 src/ 的实现任务都需要把对应 lib/ 产物写进 inScope** —— 建议在 create_task 侧把这条变成默认生成，否则会一直重复。」
+> —— 2026-10-20，t11 成员在其交付报告里提出（本次会话采纳）
+
+**判据**:本轮**三个**任务（t5、t11、t8/t6/t9）全部栽在同一件事上：实现完成、验收全绿，
+被 `implementation cannot complete: <artifact> is undeclared` 挡在门外。而本仓
+`scripts/git-artifacts.mjs` 在 build 陈旧时失败、`pnpm build` 又是改 `src/` 后的硬要求
+⇒ **任何碰 `src/` 的任务必然产出 `lib/` 改动**，这不是偶然，是结构性的。
+代价每次都是"一个成员的完整实现 + 一次契约修订 + 一次重来"。
+
+**现状**:⚠️ 部分 —— 判据**本体**早已存在且正确，缺的是"它在建任务那一刻说话"。
+- ✅ `src/gates/contract/build-artifact-scope.ts:317` `return blocked(blockers)`，措辞逐字：
+  `inScope declares source path(s) ... but declares no build artifact under "lib/"...`
+- ✅ 它的文件头 `:14` 早就把这个失效形态写下来了：「契约在【建】的那一刻就已经写错了」
+- ✅ `src/tools/create-task.ts:821` `await rejectOnContractGates(ctx, {...}, 'create_task', ...)` —— **create_task 路径真的会跑它**
+- ❌ **`edit_plan` 的 `add_task` 路径完全不跑任何契约门**：`src/tools.ts:2049` 硬编码 `kind: 'work'`，
+  而 `StagedPlanMutation`（`src/tools/shared/entities.ts:240`）结构上没有 `kind`/`inScope`/`acceptance` 格
+  ⇒ 本轮 t11 的契约是我用 `create_task` 建的，却**没有**经过判据自查，
+  而 t9 要修的正是这条路的另一半
+
+**证据**:
+```bash
+# 判据存在且在 create_task 上生效
+grep -n "rejectOnContractGates" src/tools/create-task.ts        # :821
+# plan 路线不跑它
+grep -c "rejectOnContractGates" src/tools.ts                    # 0
+# 触发条件：声明了 src/ 但没声明 lib/
+node scripts/plan-review-check.mjs --help                       # （相邻的 CLI，同一族判据）
+```
+
+★★ 两条纪律：
+1. **在"建"那一刻说，不在"完成"那一刻说** —— 同一个事实，建任务时说是一次提醒，
+   完成时说是一次损失（`build-artifact-scope.ts:18-20` 逐字）。
+2. **"自动补齐"与"提示"是两件事**，不要顺手把 `lib/` 塞进 `inScope` ——
+   那会让 `inScope` 从"这次要改什么"退化成"这次可能会碰到什么"，而它现在是
+   `changedPaths ⊆ inScope` 那条判据的唯一真值来源。
