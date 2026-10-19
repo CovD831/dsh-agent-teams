@@ -90,6 +90,11 @@
       "test": "arm 9 — ★ FLIPPED (t33): the real path no longer reports the f-0020 wording",
       "fixture": "scripts/gate-repair-completion.test.mjs",
       "because": "pristine a176e5d 上逐字复现（零改动）；t33 是既有记账点。同上由 t10 记账点的 pristine 对照证得。"
+    },
+    {
+      "test": "臂 8 ★★★ 真实盘面上不存在\"早于这道门上线\"的 reviewed 戳",
+      "fixture": "scripts/gate-plan-reviewed-stamp.test.mjs",
+      "because": "★ 这是一条【钉子臂】，按它自己的文件头第 57-62 行：它对着真实的 .agent-teams/ 断言\"零个不可能戳\"，当前盘上有 90 个。它断言的是【数据面】不是代码面 —— 我在干净 HEAD worktree（git worktree add --detach a669781，零改动）+ 接真实台账上逐字复现：'★ 盘上有 90 个 reviewed 戳早于这道门上线（2026-10-09T01:33:50.000Z）'，8 tests / 7 pass / 1 fail。处置不是把 at 改成今天（那是伪造），是让戳指向它审过的产物（reviewedArtifacts），见 scripts/gate-plan-reviewed-stamp.test.mjs:291 的注释 A 与 docs/ 里的设计题 —— 那件事在另一个任务的写域里，不在本清单能解决的范围。"
     }
   ],
   "_pinned_by": "t18（F2 基线已知失败清单腐化）。",
