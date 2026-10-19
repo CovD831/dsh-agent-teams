@@ -310,3 +310,42 @@ test('★★ 臂 12：选择阶段的三个读数各占一格（调用 / 接受 
   assert.equal(after.calls, 2)
   assert.equal(after.error, 'boom', 'a rejection must be readable, not silent')
 })
+
+test('★★★ 臂 13：自动切面板必须**先问用户在不在别处**（t117 用户投诉的东西）', () => {
+  /**
+   * USER-REPORTED（逐字）：
+   * > 「是因为你一直在重启吗，怎么时不时就会被切到工作区那个页面，
+   * >   很影响我在其他会话的工作，不应该时不时就切到工作区页面」
+   *
+   * ── 被钉住的是什么 ────────────────────────────────────────────────────────────
+   *
+   * `apply()` 是**每次插件加载**都会跑一次的。而加载不只发生在"页面打开"：
+   * HMR 会在 `lib/**` 被重写后 100ms 重载本插件
+   * （`.agent-teams/hmr-reloads.jsonl` 实测 50 次，最小间隔 **181ms**，10 秒内连击 **28** 次）。
+   * ⇒ 一个**无条件** `selectPanel(我们的 key)` 意味着：我这边每次 `pnpm build`，
+   *   用户无论正在哪个会话里工作，眼前都会被推回到工作区页。
+   *
+   * ★ 判据：真值在**宿主**（`ctx.layout.panelInfo.activePanelId`），不在本插件。
+   *   `null` ⇒ 显示会话；非 `null` ⇒ 用户正站在某个面板上 ⇒ 不许动。
+   *   （官方 `service.d.ts:19` 逐字 `readonly activePanelId: MainPanelId | null;`）
+   *
+   * ★ 为什么不用"只在首次加载时切"：HMR 重载后模块状态全清，
+   *   `let firstLoad = true` 每次都是 `true` —— 那个变量在这里是**测不出来的**。
+   */
+  const source = readFileSync(INDEX, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '')
+
+  assert.match(
+    source, /panelInfo\?\.getSnapshot\?\.\(\)\?\.activePanelId/,
+    '★ 切面板之前必须读宿主的 activePanelId —— 不读就无法知道用户此刻在不在别处',
+  )
+  /**
+   * ★★ 反向半边：必须在**条件里**调，而不是读完再无条件调。
+   *   把 `if (currentPanel === null) { ... selectPanel ... }` 拆成
+   *   "读一下、然后照样无条件 selectPanel" ⇒ 读数看着有，行为没变 ⇒ 用户还是被打断。
+   *   所以这里断言 `selectPanel` 出现在 `=== null` 的**守卫块**里。
+   */
+  const guarded = /if\s*\(\s*\w*[Pp]anel\w*\s*===\s*null\s*\)\s*\{[\s\S]*?ctx\.layout\.selectPanel\(/
+  assert.match(source, guarded, '★ selectPanel 必须**只在** activePanelId === null 时被调用')
+})
