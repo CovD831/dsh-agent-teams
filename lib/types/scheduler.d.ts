@@ -13,6 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { BaselineResolution, UpstreamTaskInput } from './worktree.ts';
 import type { TaskStatus, TeamTask } from './types.ts';
 /** Per-dependency output cap in the assignment prompt. */
 export declare const DEPENDENCY_OUTPUT_MAX_CHARS = 2000;
@@ -234,6 +235,14 @@ export interface DispatchTicket {
     readonly profileProtocol?: string;
     readonly profileSeedId?: string;
     readonly dependencyOutputs: readonly DependencyOutput[];
+    /**
+     * ── ★★★ 直接上游的产物读数（t5）：建树基线的输入 ──────────────────────────────
+     *
+     * ★ 在**票里**算，而不是在建树那一刻再读一次队状态：两者之间隔着 `await`
+     *   （`writeTeam` 与一整个 `createTaskWorktree`），期间上游可能被 reassign 或
+     *   回收。票里的这一格是"决定派发那一刻的上游成品"，而它正是判据要的那个口径。
+     */
+    readonly upstreamBaselines: readonly UpstreamTaskInput[];
     readonly executionPrompt?: string;
     readonly kind?: string;
     readonly round?: number;
@@ -264,7 +273,38 @@ export interface DispatchTicket {
      *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
      */
     readonly worktreeUnavailable?: string;
+    /**
+     * ── ★★★ 建树基线的**出处**（t5）────────────────────────────────────────────────
+     *
+     * 在场 ⇔ 真的建出了树。它是"这棵树里看得见什么"的唯一读数，而此前那一格
+     * **不存在** —— 读的人只能假设"基线 = 主树 HEAD"，而在有上游产物时那假设是错的。
+     */
+    readonly worktreeBaseline?: BaselineResolution;
 }
+/**
+ * ── ★★★ 一条任务的**直接上游**（t5）：它们是建树基线的唯一来源 ──────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边此前只表达**顺序**，不表达**可见性** ——
+ * 于是下游的树从主树 HEAD 建，上游的提交**不在**里面 ⇒ 下游在旧代码上干活，
+ * 且两者写域重叠时下游会整文件覆盖掉上游的修复（实测 94 条实现→实现边里
+ * 60 条写域重叠、47 条上游真的提交了）。
+ *
+ * ── 为什么只取【直接】边，而不是全祖先 ─────────────────────────────────────────
+ *
+ * 递归会让"可见性"从一个可核对的**局部**性质变成一次闭包推理。而直接边已经
+ * 足够，理由是**归纳的**：B 依赖 A ⇒ B 的树含 A 的产物 commit ⇒ B 自己的产物
+ * commit 是 A 的后代 ⇒ C 依赖 B ⇒ C 的树含 B（因而也含 A）。
+ * ★ 而这条归纳**只在每一层都真的按产物定基线时成立** —— 所以这里宁可少收，
+ *   也不要把"我以为它含了"当成读数。
+ *
+ * ── ★ 反向半边：没有依赖边 ⇒ 返回空数组 ────────────────────────────────────────
+ *
+ * 空数组是**有意义**的：它让 `resolveWorktreeBaseline` 走 `source: 'trunk'`，
+ * 也就是"这条任务的上游就是主干本身"。⇒ 与之并行的任务**看不见**彼此的产物，
+ * 那是**对的**（它们之间没有边），而这一格必须与"有边但上游没提交"不同形
+ * （后者是 `[{kind:'not-committed'}]`，见 `describeBaseline` 的措辞）。
+ */
+export declare function collectUpstreamBaselines(tasks: readonly TeamTask[], task: TeamTask): readonly UpstreamTaskInput[];
 /**
  * ── ★★ 递归收集【已了结】的上游及其结论（t28 修 f-0018）─────────────────────────
  *

@@ -47,6 +47,104 @@ export interface WorktreeResult {
      * member, instead of letting it discover a broken `pnpm test` by surprise.
      */
     missingIgnored: string[];
+    /**
+     * ── ★★★ 这一次的基线【是从哪儿来的】（t5）──────────────────────────────────────
+     *
+     * 它把"基线"从一个**位置**（永远是主树 HEAD）变成一个**有出处的读数**：
+     * 哪条上游提交了、哪条没提交、哪条读不到，逐条在这里。缺席即沉默，而沉默
+     * 正是这次要消灭的形态（见 `docs/WORKTREE-BASE-DEFECT.md`）。
+     */
+    baseline: BaselineResolution;
+}
+/**
+ * ── ★★★ 一条上游依赖的基线读数 —— 三态（t5）────────────────────────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边只表达顺序、不表达可见性。修法是让
+ * 建树时把上游的 `deliverableCommit` 当成基线。★ 而"上游提交了没有"本身是
+ * **三态**，把它压成一个 `string | undefined` 会让下面两件事同形：
+ *
+ *   · 上游**还没提交**（没做出东西 / 不是会提交的 kind）⇒ 退回主树 HEAD 是**对的**；
+ *   · 上游**提交了、而那个 commit 现在读不到**（树被回收，提交成了不可达对象）
+ *     ⇒ 退回主树 HEAD 是**将就**，读的人必须看得出"这不是上游的成品"。
+ *
+ * ⇒ 三态各自有名，且读不到那一态必须带 `why`。
+ */
+export type UpstreamBaselineReading = 
+/** 上游提交了，且那个 commit 在这个仓库里解析得出。 */
+{
+    readonly kind: 'committed';
+    readonly taskId: string;
+    readonly commit: string;
+}
+/** 上游没有 `deliverableCommit` —— 它没提交（或它的 kind 本来就不建树）。 */
+ | {
+    readonly kind: 'not-committed';
+    readonly taskId: string;
+}
+/** 上游声称有产物，**读不到**：commit 解析不出 / 连任务记录都不在。 */
+ | {
+    readonly kind: 'unreadable';
+    readonly taskId: string;
+    readonly why: string;
+};
+/** 建树基线的出处。 */
+export interface BaselineResolution {
+    /** 实际拿来当起点的 commit（`git worktree add --detach` 的那一格）。 */
+    readonly base: string;
+    /**
+     * 这个起点是**哪来的**：
+     *   `trunk`    —— 主树 HEAD（没有可用的上游产物时的正确回退）
+     *   `upstream` —— 某条上游的产物 commit（或它的后代）
+     *   `existing` —— ★ 树**本来就在**，这一格是它当前 HEAD 的**读数**，不是我们选的
+     *
+     * ── ★ 为什么第三格必须存在（否则这一层会说谎）────────────────────────────────
+     *
+     * 复用分支（`existsSync(join(path,'.git'))`）**不重新对齐**已经建好的树 ——
+     * `docs/WORKTREE-BASE-DEFECT.md` 的补充段实测过：一棵在旧 trunk 上建的树，
+     * 之后无论 trunk 怎么走，它都停在原地。
+     *
+     * ★ 于是"我算出来的基线"与"这棵树实际的 HEAD"可以是**两个不同的 commit**。
+     *   把前者当成后者的读数，就是本仓记账最久的形态：**读数与实际不同形**。
+     *   ⇒ 复用分支返回的是实际 HEAD，且 `source: 'existing'` 明说"这不是我选的"。
+     */
+    readonly source: 'trunk' | 'upstream' | 'existing';
+    /** 主树 HEAD。★ **总是**解析出来 —— 它是回退项，必须随时可读。 */
+    readonly trunk: string;
+    /** 逐条上游读数，顺序与入参一致（没有依赖边 ⇒ 空数组）。 */
+    readonly upstream: readonly UpstreamBaselineReading[];
+    /**
+     * ── ★ 上游产物【不在】这条基线的历史里（从基线到达不了它们）───────────────
+     *
+     * 对 `source: 'upstream'` 而言这是"别的上游与基线分叉了"；
+     * 对 `source: 'existing'` 而言这是"这棵树建立之后上游才提交，而它没重新对齐"
+     * —— 后者是**更常见**的一格，且它正是缺陷文档里那个"mtime 证明不了树里有提交"。
+     */
+    readonly diverged: readonly {
+        readonly taskId: string;
+        readonly commit: string;
+    }[];
+}
+/**
+ * 一条上游依赖的输入：只有两格，因为**只有这两格能影响基线**。
+ *
+ * ★ 刻意**不**收整个 `TeamTask`：这层只需要"有没有产物 commit"，
+ *   收全集会让它顺手去读 kind / status / inScope —— 那些是**别处**的真值，
+ *   在这里再判一次就是第二份真相（本仓记账过多次的形态）。
+ */
+export interface UpstreamTaskInput {
+    readonly taskId: string;
+    /**
+     * 上游的产物 commit（`TeamTask.deliverableCommit`）。**缺席 = 上游没提交** ——
+     * 而不是"我不知道"。三态的中间那一格由调用方用缺席表达，读不到用别的方式表达
+     * （见 `UpstreamBaselineReading.unreadable`：它是本层真的去 `rev-parse` 之后
+     * 才敢下的结论，不是调用方的猜测）。
+     */
+    readonly deliverableCommit?: string;
+    /**
+     * 调用方**已经知道**读不到时用它（例如任务记录根本不在队里）。
+     * ★ 有它就不再尝试解析 —— 一个假 commit 会解析成假基线。
+     */
+    readonly unreadable?: string;
 }
 export interface WorktreeRefusal {
     ok: false;
@@ -100,6 +198,17 @@ export interface CreateWorktreeOptions {
     teamId?: string;
     /** Where worktrees live; defaults to `<repo>/.agent-teams/worktrees`. */
     root?: string;
+    /**
+     * ── ★★★ 本任务的**上游依赖**（t5）────────────────────────────────────────────
+     *
+     * 给了它，基线就**不再**无条件取主树 HEAD：`resolveWorktreeBaseline` 会挑其中
+     * 最早那个可用的产物 commit（见那里的拓扑理由）。缺省 ⇒ 退回主树 HEAD，
+     * 而那是**没有上游时的正确行为**，不是"不知道"。
+     *
+     * ★ 缺省**不是**静默缺省：`baseline.source` 会如实写 `'trunk'`，
+     *   而 `baseline.upstream` 是空数组（"这条任务没有依赖边"是可读的读数）。
+     */
+    upstream?: readonly UpstreamTaskInput[];
 }
 /**
  * ── ★★★ 一棵任务 worktree 的目录名 ───────────────────────────────────────────────
@@ -132,13 +241,64 @@ export interface CreateWorktreeOptions {
  */
 export declare function worktreeDirName(teamId: string | undefined, taskId: string): string;
 /**
+ * ── ★★★ 建树基线：从「永远是主树 HEAD」改成「按上游产物定」（t5）──────────────────
+ *
+ * MEASURED（`docs/WORKTREE-BASE-DEFECT.md`）：`createTaskWorktree` 从
+ * `detectWorktreeSupport(repo).base`（= 主树 HEAD）建树，而"任务 B 依赖任务 A"
+ * **不**让 B 的树包含 A 的提交 ⇒ 下游在**旧代码**上干活，且两者写域重叠时
+ * 下游会**整文件覆盖**掉上游的修复。真实语料：94 条实现→实现边里 60 条（63.8%）
+ * 写域重叠、47 条（50%）上游真的提交了。
+ *
+ * ── 为什么挑【最早】那个可用产物，而不是最后一个 ────────────────────────────────
+ *
+ * 依赖的产物各自是一条 commit，它们**未必**在同一条历史里（各自从主干切出去）。
+ * 拿"最后一条"会让基线**只**含那一条上游，其余的仍然看不见；而任何一个 commit
+ * 的后代都**含**它自己 ⇒ 取最早者（拓扑上的最上游）能让**它自己**被包含。
+ * ★ 更要紧的是：这样取到的基线与"上游全都看得见"之间**不画等号** ——
+ *   所以 `diverged` 会把"某条上游与基线不在同一条历史"如实报出来，而不是假装
+ *   它们已经合并了。真正的合并（integrator）是 t16 的事，这里**不做**。
+ *
+ * ── 反向半边：上游没提交 ⇒ 退回主树 HEAD（这是**对的**，不是降级）───────────────
+ *
+ * 上游没提交 = 它没产出可看的东西 ⇒ 主树 HEAD 就是当前可见的最新代码。
+ * ★ 因此这一格**绝不**拒绝建树：一个"上游还没做完"的状态不该让下游连树都建不出来
+ *   （那会把一次正常排序变成一次卡死，正是本仓记账过的 infinite-loop 形态）。
+ *
+ * ── 三态（逐条上游，不是整体一个布尔）────────────────────────────────────────
+ *
+ *   `committed`     —— 有 `deliverableCommit` 且在这个仓库里解析得出
+ *   `not-committed` —— 没有 `deliverableCommit`（没提交 / kind 本来不建树）
+ *   `unreadable`    —— 声称有产物，而 commit 解析不出（树被回收成不可达对象等）
+ *
+ * ★ 第三种**必须**与第二种不同形：前者是"上游没东西可看"，后者是"上游说有、
+ *   而我读不到" —— 后者的补救动作是去查为什么读不到，不是继续在旧代码上干活。
+ *
+ * ★ 本函数**只读**：不建树、不写盘、不改任何任务记录。判据与派发都能安全地调它。
+ */
+export declare function resolveWorktreeBaseline(options: {
+    repo: string;
+    /** 主树 HEAD（`detectWorktreeSupport` 已解析出来的那一格，避免重复读 git）。 */
+    trunk: string;
+    upstream?: readonly UpstreamTaskInput[];
+}): BaselineResolution;
+/**
  * 给一个任务建一个 detached worktree。
  *
  * ★ 为什么 `--detach`：实测边界① —— 同一个分支不能检出到两个 worktree，
- *   而并行成员必然都在同一分支上。detach 之后每个任务各有一个独立的 HEAD，
+ *   而并行成员必然都在同一分支上。detach 之后每个任务各有一个独立 HEAD，
  *   互不冲突；R5 需要的父/修复版本切换在 detach 状态下照样能做。
+ *
+ * ★ t5：基线**不再**无条件取主树 HEAD —— 见 {@link resolveWorktreeBaseline}。
+ *   给了 `options.upstream` 就按上游产物定，回退项仍是主树 HEAD。
  */
 export declare function createTaskWorktree(options: CreateWorktreeOptions): WorktreeResult | WorktreeRefusal;
+/**
+ * ── ★ 一句话说清基线是怎么定的（日志与派发文本共用，不各写一份）───────────────────
+ *
+ * 三态必须**读得出是哪一种**：上游已提交 / 上游没提交 / 读不到上游。
+ * 一个"基线：abc1234"的读数把三件事压成了同一行。
+ */
+export declare function describeBaseline(resolution: BaselineResolution): string;
 export interface ProvisionOptions {
     /** The repository (captain workspace) the dependencies are copied from. */
     repo: string;

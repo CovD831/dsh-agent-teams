@@ -21,7 +21,8 @@ import { deliverToMember, deliverToMemberDetailed } from './members.ts'
 import { sessionLeadsTeam } from './lineage.ts'
 import { identityOfTeam, liveRefsOf } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
-import { createTaskWorktree, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
+import { createTaskWorktree, describeBaseline, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
+import type { BaselineResolution, UpstreamTaskInput } from './worktree.ts'
 import { restartQueueFrom } from './tools/shared/entities.ts'
 import {
   markMailboxDelivered,
@@ -312,6 +313,14 @@ export interface DispatchTicket {
   readonly profileProtocol?: string
   readonly profileSeedId?: string
   readonly dependencyOutputs: readonly DependencyOutput[]
+  /**
+   * ── ★★★ 直接上游的产物读数（t5）：建树基线的输入 ──────────────────────────────
+   *
+   * ★ 在**票里**算，而不是在建树那一刻再读一次队状态：两者之间隔着 `await`
+   *   （`writeTeam` 与一整个 `createTaskWorktree`），期间上游可能被 reassign 或
+   *   回收。票里的这一格是"决定派发那一刻的上游成品"，而它正是判据要的那个口径。
+   */
+  readonly upstreamBaselines: readonly UpstreamTaskInput[]
   readonly executionPrompt?: string
   readonly kind?: string
   readonly round?: number
@@ -342,6 +351,13 @@ export interface DispatchTicket {
    *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
    */
   readonly worktreeUnavailable?: string
+  /**
+   * ── ★★★ 建树基线的**出处**（t5）────────────────────────────────────────────────
+   *
+   * 在场 ⇔ 真的建出了树。它是"这棵树里看得见什么"的唯一读数，而此前那一格
+   * **不存在** —— 读的人只能假设"基线 = 主树 HEAD"，而在有上游产物时那假设是错的。
+   */
+  readonly worktreeBaseline?: BaselineResolution
 }
 
 function taskProfileSeedId(task: TeamTask): string | undefined {
@@ -351,6 +367,50 @@ function taskProfileSeedId(task: TeamTask): string | undefined {
 
 function teamProfileProtocol(team: TeamState): string | undefined {
   return team.profile?.protocol
+}
+
+/**
+ * ── ★★★ 一条任务的**直接上游**（t5）：它们是建树基线的唯一来源 ──────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边此前只表达**顺序**，不表达**可见性** ——
+ * 于是下游的树从主树 HEAD 建，上游的提交**不在**里面 ⇒ 下游在旧代码上干活，
+ * 且两者写域重叠时下游会整文件覆盖掉上游的修复（实测 94 条实现→实现边里
+ * 60 条写域重叠、47 条上游真的提交了）。
+ *
+ * ── 为什么只取【直接】边，而不是全祖先 ─────────────────────────────────────────
+ *
+ * 递归会让"可见性"从一个可核对的**局部**性质变成一次闭包推理。而直接边已经
+ * 足够，理由是**归纳的**：B 依赖 A ⇒ B 的树含 A 的产物 commit ⇒ B 自己的产物
+ * commit 是 A 的后代 ⇒ C 依赖 B ⇒ C 的树含 B（因而也含 A）。
+ * ★ 而这条归纳**只在每一层都真的按产物定基线时成立** —— 所以这里宁可少收，
+ *   也不要把"我以为它含了"当成读数。
+ *
+ * ── ★ 反向半边：没有依赖边 ⇒ 返回空数组 ────────────────────────────────────────
+ *
+ * 空数组是**有意义**的：它让 `resolveWorktreeBaseline` 走 `source: 'trunk'`，
+ * 也就是"这条任务的上游就是主干本身"。⇒ 与之并行的任务**看不见**彼此的产物，
+ * 那是**对的**（它们之间没有边），而这一格必须与"有边但上游没提交"不同形
+ * （后者是 `[{kind:'not-committed'}]`，见 `describeBaseline` 的措辞）。
+ */
+export function collectUpstreamBaselines(
+  tasks: readonly TeamTask[],
+  task: TeamTask,
+): readonly UpstreamTaskInput[] {
+  const byId = new Map(tasks.map(candidate => [candidate.id, candidate]))
+  return task.dependencies.map((dependencyId) => {
+    const dependency = byId.get(dependencyId)
+    if (dependency === undefined) {
+      /**
+       * ★ 未知依赖 id ⇒ `unreadable`，**不是** `not-committed`。
+       *   两者后果相反：前者要人去查"那条任务怎么没了"，后者是"它确实没产出"。
+       *   （`unsatisfiedDependencies` 也把未知 id 当阻塞 —— 同一条纪律。）
+       */
+      return { taskId: dependencyId, unreadable: 'it is not in this team any more' }
+    }
+    return dependency.deliverableCommit === undefined
+      ? { taskId: dependency.id }
+      : { taskId: dependency.id, deliverableCommit: dependency.deliverableCommit }
+  })
 }
 
 /**
@@ -872,6 +932,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
               task.id,
               (message) => ctx.logger.warn(message),
             ),
+            upstreamBaselines: collectUpstreamBaselines(fresh.tasks, task),
           }
         })
         if (ticket === undefined) return
@@ -901,13 +962,31 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         let worktreePath: string | undefined
         let worktreeMissingIgnored: readonly string[] | undefined
         let worktreeUnavailable: string | undefined
+        let worktreeBaseline: BaselineResolution | undefined
         if (needsWorktree) {
           /**
            * ★ `teamId` 必须传：任务 id 按团队重新计数（每个团队的 t1 都叫 t1），
            *   而只用 `task-<id>` 会让新团队命中上一轮的树 —— 实测过，
            *   见 `worktreeDirName` 上面那段。
+           *
+           * ── ★★★ t5：基线由【上游产物】定，不再是主树 HEAD ────────────────────
+           *
+           * `ticket.upstreamBaselines` 是这条任务的直接上游。`resolveWorktreeBaseline`
+           * 会挑其中最早那个可解析的产物 commit 当起点；没有可用产物时**退回**
+           * 主树 HEAD（那是"上游没提交"的正确行为，不是降级）。
+           *
+           * ★ 空数组（这条任务没有依赖边）⇒ 基线仍是主树 HEAD，而这是**对的** ——
+           *   并行任务之间本就没有可见性关系。两种情形在 `baseline.source` 上
+           *   给出同一个 `'trunk'`，但在 `baseline.upstream` 上不同形
+           *   （`[]` vs `[{kind:'not-committed'}]`），且 `describeBaseline` 的措辞
+           *   把"没有上游依赖"与"有上游而它没提交"写成两句不同的话。
            */
-          const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId, teamId: team.id })
+          const created = createTaskWorktree({
+            repo: workspace,
+            taskId: ticket.taskId,
+            teamId: team.id,
+            upstream: ticket.upstreamBaselines,
+          })
           if (created.ok !== true && created.unsupported === true) {
             /**
              * ── ★ 这个仓库【没有】隔离能力 ⇒ 降级派发，但留下痕迹 ──────────────
@@ -1002,6 +1081,28 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           } else {
             worktreePath = created.path
             worktreeMissingIgnored = created.missingIgnored
+            worktreeBaseline = created.baseline
+            /**
+             * ── ★★★ t5：基线的三态**必须读得出来**（这一行就是那条验收）───────────
+             *
+             * `docs/WORKTREE-BASE-DEFECT.md` 的第二个形态：基线此前是一个**位置**
+             * （永远是主树 HEAD），没有任何读数能回答"这棵树里看得见上游吗"。
+             *
+             * ⇒ 现在每一次建树都留一句，而 `describeBaseline` 把三态写成**三句
+             *   不同的话**：
+             *
+             *     · 上游已提交   ⇒ `baseline is upstream deliverable t3@abc1234`
+             *     · 上游没提交   ⇒ `... (N upstream task(s), none of them has a
+             *                       readable deliverable commit)` 或 `not committed: t3`
+             *     · 上游读不到   ⇒ `unreadable: t3 (its deliverable commit "abc"
+             *                       does not resolve in <repo> (...))`
+             *     · 没有依赖边   ⇒ `... (this task has no upstream dependency)`
+             *
+             * ★ 用 `info` 而不是 `warn`：前两种是**正常**结果。把"上游没提交"
+             *   报成 warn 会让每一次正常派发都留一条噪音，而噪音会让人开始忽略
+             *   warn —— 那时第三条（真的读不到）也一起被忽略。
+             */
+            ctx.logger.info(`agent-teams: task "${ticket.taskId}" worktree baseline — ${describeBaseline(created.baseline)}`)
             /**
              * ★ 把这个任务的【隔离基准】交回调用方。
              *
@@ -1079,6 +1180,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             ? {}
             : { worktreeMissingIgnored },
           ...worktreeUnavailable === undefined ? {} : { worktreeUnavailable },
+          ...worktreeBaseline === undefined ? {} : { worktreeBaseline },
         }
 
         const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)

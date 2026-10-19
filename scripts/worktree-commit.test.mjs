@@ -397,7 +397,13 @@ test('★★ 臂 12（接线臂）：两个调用点都用【同一个】函数�
    *   与"这条任务本来就不建树"同形（本仓记账过的那条）。
    */
   const scheduler = readFileSync(join(ROOT, 'src', 'scheduler.ts'), 'utf8')
-  assert.match(scheduler, /createTaskWorktree\(\{ repo: workspace, taskId: ticket\.taskId, teamId: team\.id \}\)/,
+  /**
+   * ★ t5：这一行现在是**多行**的调用（多了 `upstream:` 那一格），所以正则必须
+   *   允许换行 —— 而它仍然钉住同一件事：`repo` / `taskId` / `teamId` 三格都传了。
+   *   ★ 刻意不写成"整段文本等值"：那会让任何一次加参数都红，而红的原因与
+   *     "路径算错了"毫无关系（假红比不钉还坏）。
+   */
+  assert.match(scheduler, /createTaskWorktree\(\{\s*repo: workspace,\s*taskId: ticket\.taskId,\s*teamId: team\.id,/,
     '★ scheduler 必须把 teamId 传给建树')
 
   const updateTask = readFileSync(join(ROOT, 'src', 'tools', 'update-task.ts'), 'utf8')

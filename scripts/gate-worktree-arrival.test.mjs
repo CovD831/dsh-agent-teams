@@ -27,7 +27,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { gate, appliesTo, id, point, requires } from '../lib/gates/dispatch/worktree.js'
@@ -381,8 +381,14 @@ function schedulerFixture(workspace) {
     session: { header: { cwd: workspace }, events: [] },
   }
   const captain = { id: 'captain', status: 'idle', session: { append() {} }, steer() {} }
+  const infos = []
   const ctx = {
-    logger: { debug() {}, warn(message) { warnings.push(message) } },
+    /**
+     * ★ t5：`info` 必须在这个夹具里存在 —— 调度器在建树成功那一格会用它读
+     *   基线出处（`ctx.logger.info` 在 `src/scheduler.ts` 里本来就有别的调用者，
+     *   所以缺的是夹具不是生产代码）。收集起来，好让新臂能读那条读数。
+     */
+    logger: { debug() {}, info(message) { infos.push(message) }, warn(message) { warnings.push(message) } },
     agents: { get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -393,7 +399,7 @@ function schedulerFixture(workspace) {
    *   注入点正是插件自己用的那一个（`tools.ts` 也是这么注入的）。
    */
   const dispatch = async (_captain, _teamId, _memberName, text) => { deliveries.push(text); return true }
-  return { ctx, child, captain, warnings, deliveries, dispatch }
+  return { ctx, child, captain, warnings, infos, deliveries, dispatch }
 }
 
 async function seedTeam(workspace, kind) {
@@ -409,6 +415,50 @@ async function seedTeam(workspace, kind) {
     }],
   })
   return stateRoot
+}
+
+/**
+ * ── ★★★ t5 接线臂的夹具：一条**带产物上游**的任务 ──────────────────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边此前只表达顺序。这个夹具造出真实的
+ * 三格——上游 completed 且带 `deliverableCommit`、下游 pending 且依赖它——
+ * 好让调度器**自己**去取那个 commit 并传进 `createTaskWorktree`。
+ *
+ * ★ 上游的提交落在 **side 分支**上（不在主干）：否则"下游看见了"无论如何都成立，
+ *   接线臂就成了恒真命题。这一条是本次改动里最容易写错的地方。
+ */
+async function seedTeamWithUpstream(workspace) {
+  const stateRoot = join(workspace, '.agent-teams')
+  await withTeamLock(`probe:${stateRoot}`, async () => {})
+  const { createTeamDir } = await import('../lib/state.js')
+  const trunkHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()
+  execFileSync('git', ['checkout', '-q', '-b', 'upstream-work'], { cwd: workspace })
+  mkdirSync(join(workspace, 'src'), { recursive: true })
+  writeFileSync(join(workspace, 'src', 'upstream.ts'), 'export const fromUpstream = 1\n')
+  execFileSync('git', ['add', '-A'], { cwd: workspace })
+  execFileSync('git', ['commit', '-qm', 'upstream work'], { cwd: workspace })
+  const upstreamCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()
+  execFileSync('git', ['checkout', '-q', '-'], { cwd: workspace })
+  assert.equal(
+    execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim(), trunkHead,
+    '★ 夹具前提：主干停在原地（上游的产物不在主干上）',
+  )
+  await createTeamDir(stateRoot, {
+    id: 'team', name: 'Team', captainSessionId: 'captain', createdAt: 1, taskSeq: 2,
+    members: [{ id: 'worker-session', name: 'worker', status: 'idle', joinedAt: 1 }],
+    tasks: [
+      {
+        id: 't-up', subject: 'upstream work', assignee: 'worker', status: 'completed',
+        kind: 'implementation', dependencies: [], createdAt: 1, updatedAt: 2,
+        deliverableCommit: upstreamCommit,
+      },
+      {
+        id: 't-down', subject: 'downstream work', assignee: 'worker', status: 'pending',
+        kind: 'implementation', dependencies: ['t-up'], createdAt: 1, updatedAt: 2,
+      },
+    ],
+  })
+  return { stateRoot, trunkHead, upstreamCommit }
 }
 
 test('★ 接线臂（闸门）：是 git 仓库却建不出 worktree ⇒ kickMember【不派发】，任务回到待派发', async () => {
@@ -571,4 +621,179 @@ test('★ 接线臂：依赖注入失败必须【报出来】，不能静默通�
   assert.deepEqual(result.copied, [])
   assert.equal(result.failed.length, 1)
   assert.match(result.failed[0].reason, /not present/)
+})
+
+// ── ★★★ t5 接线臂：调度器必须**真的**把上游产物传下去 ──────────────────────────
+//
+// 库函数对了 ≠ 机制生效（本文件开篇那条教训）。下面两臂从**队状态**出发，
+// 经过真实的 `kickMember`，再断言终点的树里有什么。
+
+test('★★ 接线臂（t5 正向）：上游 completed 且带产物 ⇒ 派发出去的树里看得见它', async () => {
+  const workspace = track(makeRepo())
+  const { upstreamCommit } = await seedTeamWithUpstream(workspace)
+  const { ctx, deliveries, dispatch, infos } = schedulerFixture(workspace)
+  const scheduler = installTeamScheduler(ctx, { stateDir: '.agent-teams', dispatch })
+
+  await scheduler.kickMember(workspace, 'team', 'worker')
+
+  assert.equal(deliveries.length, 1, '★ 依赖已满足 ⇒ 必须派发')
+  const worktreePath = join(workspace, '.agent-teams', 'worktrees', 'task-team-t-down')
+  track(worktreePath)
+  assert.ok(existsSync(worktreePath), '★ 下游必须有自己的隔离树')
+
+  /**
+   * ★★ 这就是那条验收读数：`git -C <worktree> merge-base --is-ancestor <upstream> HEAD`
+   *   退出 0。它读的是**派发之后盘上的树**，不是函数返回值 —— 接线断掉时它必红。
+   */
+  execFileSync('git', ['merge-base', '--is-ancestor', upstreamCommit, 'HEAD'], {
+    cwd: worktreePath, stdio: ['ignore', 'ignore', 'ignore'],
+  })
+  assert.ok(
+    existsSync(join(worktreePath, 'src', 'upstream.ts')),
+    '★ 上游产出的文件必须在这棵树里（内容层面再断言一次）',
+  )
+  /**
+   * ★ 并且这件事**留下了读数**：基线出处必须进日志。没有这一句，读的人只能
+   *   假设"基线 = 主树 HEAD"，而那正是缺陷文档记的那个假设。
+   */
+  assert.ok(
+    infos.some(message => /worktree baseline — .*upstream deliverable/.test(message)),
+    '★★ 建树基线必须落成一条读数（"上游已提交"这一格）',
+  )
+})
+
+test('★★ 接线臂（t5 反向）：没有依赖边 ⇒ 并行任务的树里【看不见】彼此的产物', async () => {
+  const workspace = track(makeRepo())
+  const { upstreamCommit } = await seedTeamWithUpstream(workspace)
+  /**
+   * ★ 把下游的依赖**去掉** —— 两条任务变成并行的。输入只差这一格，
+   *   期望相反：它不该看见那条产物。否则"给所有树都塞上全部提交"也会通过正向臂，
+   *   而那会毁掉并行成员的独立性。
+   */
+  const { readTeam, writeTeam } = await import('../lib/state.js')
+  const stateRoot = join(workspace, '.agent-teams')
+  const team = await readTeam(stateRoot, 'team')
+  const downstream = team.tasks.find(task => task.id === 't-down')
+  downstream.dependencies = []
+  await writeTeam(stateRoot, team)
+
+  const { ctx, deliveries, dispatch, infos } = schedulerFixture(workspace)
+  const scheduler = installTeamScheduler(ctx, { stateDir: '.agent-teams', dispatch })
+  await scheduler.kickMember(workspace, 'team', 'worker')
+
+  assert.equal(deliveries.length, 1, '★ 没有依赖也必须派发')
+  const worktreePath = join(workspace, '.agent-teams', 'worktrees', 'task-team-t-down')
+  track(worktreePath)
+  assert.ok(existsSync(worktreePath))
+
+  let visible = true
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', upstreamCommit, 'HEAD'], {
+      cwd: worktreePath, stdio: ['ignore', 'ignore', 'ignore'],
+    })
+  } catch {
+    visible = false
+  }
+  assert.equal(visible, false, '★★ 反向读数：没有边就不该看见 —— 这正是"可见性由边决定"的另一半')
+  assert.equal(existsSync(join(worktreePath, 'src', 'upstream.ts')), false)
+  assert.ok(
+    infos.some(message => /worktree baseline — .*no upstream dependency/.test(message)),
+    '★ 而读数必须说出"这条任务没有上游依赖"（不是沉默，也不是"上游没提交"）',
+  )
+})
+
+// ── ★★★ t5 真实语料读数：这条缺陷到底影响过多少条边 ────────────────────────────
+//
+// 合成夹具证明得了"修好了"，证明不了"值得修"。这条臂读**真实的队状态**
+// （父仓 `.agent-teams/*/team.json` 与 `archive/*/team.json`），把三态逐条数出来。
+//
+// ★ 与 `worktree-reclaim.test.mjs` 的 `AGENT_TEAMS_RECLAIM_READING` 同一条约定：
+//   读数有价值，但它不属于每个突变体都跑的那条路 ⇒ 默认跳过、显式开启。
+//     AGENT_TEAMS_BASELINE_READING=1 node --test scripts/gate-worktree-arrival.test.mjs
+
+test('★★ 真实读数（t5）：impl→impl 依赖边的三态，以及旧口径下真被挡住的那些', async (t) => {
+  if (process.env.AGENT_TEAMS_BASELINE_READING !== '1') {
+    t.skip('真实读数：设 AGENT_TEAMS_BASELINE_READING=1 时运行。★ 它读父仓的真实队状态，'
+      + '不属于每个突变体都要跑的那条路；三态的判别本身由便宜的正向/反向臂（同一个生产函数）守着')
+    return
+  }
+  /**
+   * ★ 用 `--git-common-dir` 找**主检出**，而不是按路径层级去推：
+   *   本文件经常在一条 worktree 里跑（`.../.agent-teams/worktrees/task-*`），
+   *   `dirname(dirname(cwd))` 会指到 `.agent-teams/.agent-teams` 这种不存在的地方 ——
+   *   而那条错误只在"从 worktree 里跑"时出现，正好是我跑它的方式。
+   */
+  const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    cwd: process.cwd(), encoding: 'utf8',
+  }).trim()
+  const parent = dirname(commonDir)
+  const impl = new Set(['implementation', 'repair'])
+  const files = []
+  for (const name of readdirSync(join(parent, '.agent-teams'))) {
+    for (const candidate of [
+      join(parent, '.agent-teams', name, 'team.json'),
+      join(parent, '.agent-teams', 'archive', name, 'team.json'),
+    ]) {
+      if (existsSync(candidate)) files.push(candidate)
+    }
+  }
+  const revParseOk = (cwd, commit) => {
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '--quiet', `${commit}^{commit}`], { cwd, stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const isAncestor = (cwd, maybeAncestor, descendant) => {
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', maybeAncestor, descendant], { cwd, stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: parent, encoding: 'utf8' }).trim()
+  const tally = { total: 0, committed: 0, notCommitted: 0, unreadable: 0, invisibleUnderOldRule: 0 }
+  for (const file of files) {
+    let team
+    try {
+      team = JSON.parse(readFileSync(file, 'utf8'))
+    } catch {
+      continue
+    }
+    const byId = new Map((team.tasks ?? []).map(task => [task.id, task]))
+    for (const task of team.tasks ?? []) {
+      for (const depId of task.dependencies ?? []) {
+        const up = byId.get(depId)
+        if (up === undefined) continue
+        if (!impl.has(task.kind) || !impl.has(up.kind)) continue
+        tally.total++
+        const commit = up.deliverableCommit
+        if (commit === undefined) {
+          tally.notCommitted++
+        } else if (!revParseOk(parent, commit)) {
+          tally.unreadable++
+        } else {
+          tally.committed++
+          /**
+           * ★ 这才是"修好了什么"的读数：旧口径的基线永远是主树 HEAD，那条产物
+           *   **不在**它的历史里 ⇒ 下游当时确实看不见。落在 HEAD 历史里的那一条
+           *   属于"旧口径碰巧也对"，不该算进修好的部分。
+           */
+          if (!isAncestor(parent, commit, head)) tally.invisibleUnderOldRule++
+        }
+      }
+    }
+  }
+  console.log('t5 真实读数：', JSON.stringify(tally, null, 2))
+  assert.ok(tally.total > 0, '★ 真实语料里必须真的有 impl→impl 边，否则这条读数什么都没测到')
+  assert.ok(tally.committed > 0, '★ 必须真的有上游提交了的边 —— 否则"修好了"无从谈起')
+  assert.ok(
+    tally.invisibleUnderOldRule > 0,
+    '★★ 必须真的存在"旧口径看不见"的边 —— 若为 0，这条缺陷在本语料上就是无害的，'
+    + '那要如实记成 unmeasured，而不是把它并进"修好了"',
+  )
+  assert.equal(tally.committed + tally.notCommitted + tally.unreadable, tally.total,
+    '★ 三态互斥且穷尽')
 })

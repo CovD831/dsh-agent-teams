@@ -52,6 +52,93 @@ export interface WorktreeResult {
    * member, instead of letting it discover a broken `pnpm test` by surprise.
    */
   missingIgnored: string[]
+  /**
+   * ── ★★★ 这一次的基线【是从哪儿来的】（t5）──────────────────────────────────────
+   *
+   * 它把"基线"从一个**位置**（永远是主树 HEAD）变成一个**有出处的读数**：
+   * 哪条上游提交了、哪条没提交、哪条读不到，逐条在这里。缺席即沉默，而沉默
+   * 正是这次要消灭的形态（见 `docs/WORKTREE-BASE-DEFECT.md`）。
+   */
+  baseline: BaselineResolution
+}
+
+/**
+ * ── ★★★ 一条上游依赖的基线读数 —— 三态（t5）────────────────────────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边只表达顺序、不表达可见性。修法是让
+ * 建树时把上游的 `deliverableCommit` 当成基线。★ 而"上游提交了没有"本身是
+ * **三态**，把它压成一个 `string | undefined` 会让下面两件事同形：
+ *
+ *   · 上游**还没提交**（没做出东西 / 不是会提交的 kind）⇒ 退回主树 HEAD 是**对的**；
+ *   · 上游**提交了、而那个 commit 现在读不到**（树被回收，提交成了不可达对象）
+ *     ⇒ 退回主树 HEAD 是**将就**，读的人必须看得出"这不是上游的成品"。
+ *
+ * ⇒ 三态各自有名，且读不到那一态必须带 `why`。
+ */
+export type UpstreamBaselineReading =
+  /** 上游提交了，且那个 commit 在这个仓库里解析得出。 */
+  | { readonly kind: 'committed'; readonly taskId: string; readonly commit: string }
+  /** 上游没有 `deliverableCommit` —— 它没提交（或它的 kind 本来就不建树）。 */
+  | { readonly kind: 'not-committed'; readonly taskId: string }
+  /** 上游声称有产物，**读不到**：commit 解析不出 / 连任务记录都不在。 */
+  | { readonly kind: 'unreadable'; readonly taskId: string; readonly why: string }
+
+/** 建树基线的出处。 */
+export interface BaselineResolution {
+  /** 实际拿来当起点的 commit（`git worktree add --detach` 的那一格）。 */
+  readonly base: string
+  /**
+   * 这个起点是**哪来的**：
+   *   `trunk`    —— 主树 HEAD（没有可用的上游产物时的正确回退）
+   *   `upstream` —— 某条上游的产物 commit（或它的后代）
+   *   `existing` —— ★ 树**本来就在**，这一格是它当前 HEAD 的**读数**，不是我们选的
+   *
+   * ── ★ 为什么第三格必须存在（否则这一层会说谎）────────────────────────────────
+   *
+   * 复用分支（`existsSync(join(path,'.git'))`）**不重新对齐**已经建好的树 ——
+   * `docs/WORKTREE-BASE-DEFECT.md` 的补充段实测过：一棵在旧 trunk 上建的树，
+   * 之后无论 trunk 怎么走，它都停在原地。
+   *
+   * ★ 于是"我算出来的基线"与"这棵树实际的 HEAD"可以是**两个不同的 commit**。
+   *   把前者当成后者的读数，就是本仓记账最久的形态：**读数与实际不同形**。
+   *   ⇒ 复用分支返回的是实际 HEAD，且 `source: 'existing'` 明说"这不是我选的"。
+   */
+  readonly source: 'trunk' | 'upstream' | 'existing'
+  /** 主树 HEAD。★ **总是**解析出来 —— 它是回退项，必须随时可读。 */
+  readonly trunk: string
+  /** 逐条上游读数，顺序与入参一致（没有依赖边 ⇒ 空数组）。 */
+  readonly upstream: readonly UpstreamBaselineReading[]
+  /**
+   * ── ★ 上游产物【不在】这条基线的历史里（从基线到达不了它们）───────────────
+   *
+   * 对 `source: 'upstream'` 而言这是"别的上游与基线分叉了"；
+   * 对 `source: 'existing'` 而言这是"这棵树建立之后上游才提交，而它没重新对齐"
+   * —— 后者是**更常见**的一格，且它正是缺陷文档里那个"mtime 证明不了树里有提交"。
+   */
+  readonly diverged: readonly { readonly taskId: string; readonly commit: string }[]
+}
+
+/**
+ * 一条上游依赖的输入：只有两格，因为**只有这两格能影响基线**。
+ *
+ * ★ 刻意**不**收整个 `TeamTask`：这层只需要"有没有产物 commit"，
+ *   收全集会让它顺手去读 kind / status / inScope —— 那些是**别处**的真值，
+ *   在这里再判一次就是第二份真相（本仓记账过多次的形态）。
+ */
+export interface UpstreamTaskInput {
+  readonly taskId: string
+  /**
+   * 上游的产物 commit（`TeamTask.deliverableCommit`）。**缺席 = 上游没提交** ——
+   * 而不是"我不知道"。三态的中间那一格由调用方用缺席表达，读不到用别的方式表达
+   * （见 `UpstreamBaselineReading.unreadable`：它是本层真的去 `rev-parse` 之后
+   * 才敢下的结论，不是调用方的猜测）。
+   */
+  readonly deliverableCommit?: string
+  /**
+   * 调用方**已经知道**读不到时用它（例如任务记录根本不在队里）。
+   * ★ 有它就不再尝试解析 —— 一个假 commit 会解析成假基线。
+   */
+  readonly unreadable?: string
 }
 
 export interface WorktreeRefusal {
@@ -159,6 +246,17 @@ export interface CreateWorktreeOptions {
   teamId?: string
   /** Where worktrees live; defaults to `<repo>/.agent-teams/worktrees`. */
   root?: string
+  /**
+   * ── ★★★ 本任务的**上游依赖**（t5）────────────────────────────────────────────
+   *
+   * 给了它，基线就**不再**无条件取主树 HEAD：`resolveWorktreeBaseline` 会挑其中
+   * 最早那个可用的产物 commit（见那里的拓扑理由）。缺省 ⇒ 退回主树 HEAD，
+   * 而那是**没有上游时的正确行为**，不是"不知道"。
+   *
+   * ★ 缺省**不是**静默缺省：`baseline.source` 会如实写 `'trunk'`，
+   *   而 `baseline.upstream` 是空数组（"这条任务没有依赖边"是可读的读数）。
+   */
+  upstream?: readonly UpstreamTaskInput[]
 }
 
 /**
@@ -204,11 +302,160 @@ export function worktreeDirName(teamId: string | undefined, taskId: string): str
 }
 
 /**
+ * ── ★★★ 建树基线：从「永远是主树 HEAD」改成「按上游产物定」（t5）──────────────────
+ *
+ * MEASURED（`docs/WORKTREE-BASE-DEFECT.md`）：`createTaskWorktree` 从
+ * `detectWorktreeSupport(repo).base`（= 主树 HEAD）建树，而"任务 B 依赖任务 A"
+ * **不**让 B 的树包含 A 的提交 ⇒ 下游在**旧代码**上干活，且两者写域重叠时
+ * 下游会**整文件覆盖**掉上游的修复。真实语料：94 条实现→实现边里 60 条（63.8%）
+ * 写域重叠、47 条（50%）上游真的提交了。
+ *
+ * ── 为什么挑【最早】那个可用产物，而不是最后一个 ────────────────────────────────
+ *
+ * 依赖的产物各自是一条 commit，它们**未必**在同一条历史里（各自从主干切出去）。
+ * 拿"最后一条"会让基线**只**含那一条上游，其余的仍然看不见；而任何一个 commit
+ * 的后代都**含**它自己 ⇒ 取最早者（拓扑上的最上游）能让**它自己**被包含。
+ * ★ 更要紧的是：这样取到的基线与"上游全都看得见"之间**不画等号** ——
+ *   所以 `diverged` 会把"某条上游与基线不在同一条历史"如实报出来，而不是假装
+ *   它们已经合并了。真正的合并（integrator）是 t16 的事，这里**不做**。
+ *
+ * ── 反向半边：上游没提交 ⇒ 退回主树 HEAD（这是**对的**，不是降级）───────────────
+ *
+ * 上游没提交 = 它没产出可看的东西 ⇒ 主树 HEAD 就是当前可见的最新代码。
+ * ★ 因此这一格**绝不**拒绝建树：一个"上游还没做完"的状态不该让下游连树都建不出来
+ *   （那会把一次正常排序变成一次卡死，正是本仓记账过的 infinite-loop 形态）。
+ *
+ * ── 三态（逐条上游，不是整体一个布尔）────────────────────────────────────────
+ *
+ *   `committed`     —— 有 `deliverableCommit` 且在这个仓库里解析得出
+ *   `not-committed` —— 没有 `deliverableCommit`（没提交 / kind 本来不建树）
+ *   `unreadable`    —— 声称有产物，而 commit 解析不出（树被回收成不可达对象等）
+ *
+ * ★ 第三种**必须**与第二种不同形：前者是"上游没东西可看"，后者是"上游说有、
+ *   而我读不到" —— 后者的补救动作是去查为什么读不到，不是继续在旧代码上干活。
+ *
+ * ★ 本函数**只读**：不建树、不写盘、不改任何任务记录。判据与派发都能安全地调它。
+ */
+export function resolveWorktreeBaseline(options: {
+  repo: string
+  /** 主树 HEAD（`detectWorktreeSupport` 已解析出来的那一格，避免重复读 git）。 */
+  trunk: string
+  upstream?: readonly UpstreamTaskInput[]
+}): BaselineResolution {
+  const { repo, trunk } = options
+  const requested = options.upstream ?? []
+  const readings: UpstreamBaselineReading[] = []
+  /** 可用的产物：`{ taskId, commit }`，按"能不能解析出 commit"筛过。 */
+  const usable: { taskId: string; commit: string }[] = []
+
+  for (const upstream of requested) {
+    if (upstream.unreadable !== undefined) {
+      readings.push({ kind: 'unreadable', taskId: upstream.taskId, why: upstream.unreadable })
+      continue
+    }
+    const commit = upstream.deliverableCommit
+    if (commit === undefined || commit.trim() === '') {
+      readings.push({ kind: 'not-committed', taskId: upstream.taskId })
+      continue
+    }
+    /**
+     * ★ 解析一次，而不是信字符串：`deliverableCommit` 是**短 id**（`commitWorktree`
+     *   写的是 `rev-parse --short`）⇒ 必须在这里换成完整对象名才可作基线。
+     *   而解析失败**不等于**"上游没提交"—— 它是 `unreadable`（见上）。
+     */
+    const resolved = tryGit(repo, ['rev-parse', '--verify', '--quiet', `${commit.trim()}^{commit}`])
+    if (!resolved.ok) {
+      readings.push({
+        kind: 'unreadable',
+        taskId: upstream.taskId,
+        why: `its deliverable commit "${commit}" does not resolve in ${repo} (${resolved.message})`,
+      })
+      continue
+    }
+    const full = resolved.value.trim()
+    readings.push({ kind: 'committed', taskId: upstream.taskId, commit: full })
+    usable.push({ taskId: upstream.taskId, commit: full })
+  }
+
+  if (usable.length === 0) {
+    /**
+     * ★ 没有可用产物 ⇒ 主树 HEAD。`source: 'trunk'` 让读的人**看得出**这一步
+     *   是"没有上游可看"，而不是"上游看了、都一样"（两者后果相反）。
+     */
+    return { base: trunk, source: 'trunk', trunk, upstream: readings, diverged: [] }
+  }
+
+  /**
+   * ── ★★★ 先找"包含其余全部"的那一条（链的情形）────────────────────────────────
+   *
+   * 若上游之间是**链**（B 是 A 的后代，例如 t9 依赖 t6 而 t6 又依赖 t3），
+   * 那么选**最早**那条会让下游看不见后来的上游 —— 那正是本任务要消灭的形态，
+   * 只是换了一层皮：A 的改动在，B 的改动**不在**，而读数却说"基线是上游"。
+   *
+   * ⇒ 先问"有没有一条能到达其余全部"。有 ⇒ 选它（下游看见的**最多**，且
+   *   `diverged` 自然为空）。没有 ⇒ 真分叉，退回按时间挑一条并逐条列 `diverged`。
+   *
+   * ★ 真实语料：6 个"下游有 ≥2 条 committed 上游"的情形**全部**是真分叉，
+   *   所以这条分支在当前语料上不触发 —— 而它仍然必须有，否则一旦出现链，
+   *   丢掉的将是**上游的提交**，且没有任何读数会说话。
+   */
+  const dominator = usable.find(candidate =>
+    usable.every(other => other.commit === candidate.commit || isAncestorOrFail(repo, other.commit, candidate.commit)),
+  )
+
+  /**
+   * ── 挑最早那个：按"提交时间"排序，同刻按拓扑（谁能到达谁）────────────────────
+   *
+   * ★ 为什么不用 `git rev-list` 的拓扑序：这些 commit **可能互不可达**，
+   *   拓扑排序对不相交的分支没有唯一答案。而提交时间是每一条都有的读数。
+   * ★ 同刻（同一秒内的批量提交，实测常见）⇒ 用 `--is-ancestor` 破平局：
+   *   祖先比后代早。
+   */
+  const withTime = usable.map((entry) => {
+    const stamp = tryGit(repo, ['show', '-s', '--format=%ct', entry.commit])
+    const seconds = Number.parseInt(stamp.ok ? stamp.value.trim() : '', 10)
+    return { ...entry, at: Number.isFinite(seconds) ? seconds : Number.MAX_SAFE_INTEGER }
+  })
+  withTime.sort((a, b) => {
+    if (a.at !== b.at) return a.at - b.at
+    if (a.commit === b.commit) return 0
+    if (isAncestorOrFail(repo, a.commit, b.commit)) return -1
+    if (isAncestorOrFail(repo, b.commit, a.commit)) return 1
+    return a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0
+  })
+  const chosen = dominator ?? withTime[0]!
+  const diverged = usable
+    .filter(entry => entry.commit !== chosen.commit)
+    .filter(entry => !isAncestorOrFail(repo, entry.commit, chosen.commit))
+    .map(entry => ({ taskId: entry.taskId, commit: entry.commit }))
+  return { base: chosen.commit, source: 'upstream', trunk, upstream: readings, diverged }
+}
+
+/**
+ * ★ 三态而不是布尔：`true` 是祖先、`false` 不是、`undefined` 是**问不出来**。
+ *   把第三态并进前两态之一，就会在 git 抖动时静默给出一个错误的拓扑判断。
+ */
+function isAncestorOrFail(repo: string, maybeAncestor: string, descendant: string): boolean {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', maybeAncestor, descendant], {
+      cwd: repo,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * 给一个任务建一个 detached worktree。
  *
  * ★ 为什么 `--detach`：实测边界① —— 同一个分支不能检出到两个 worktree，
- *   而并行成员必然都在同一分支上。detach 之后每个任务各有一个独立的 HEAD，
+ *   而并行成员必然都在同一分支上。detach 之后每个任务各有一个独立 HEAD，
  *   互不冲突；R5 需要的父/修复版本切换在 detach 状态下照样能做。
+ *
+ * ★ t5：基线**不再**无条件取主树 HEAD —— 见 {@link resolveWorktreeBaseline}。
+ *   给了 `options.upstream` 就按上游产物定，回退项仍是主树 HEAD。
  */
 export function createTaskWorktree(options: CreateWorktreeOptions): WorktreeResult | WorktreeRefusal {
   const { repo, taskId } = options
@@ -220,22 +467,128 @@ export function createTaskWorktree(options: CreateWorktreeOptions): WorktreeResu
 
   if (!existsSync(root)) mkdirSync(root, { recursive: true })
 
+  /**
+   * ★ 基线在**建树之前**算：它与"树在不在"无关，而把它挪进两个分支里
+   *   会造出两份口径（本仓记账过多次的形态）。
+   */
+  const baseline = resolveWorktreeBaseline({ repo, trunk: support.base, ...options.upstream === undefined ? {} : { upstream: options.upstream } })
+
   // 已经建过 ⇒ 复用（重试一个任务的同一个 attempt 不该炸）
   if (existsSync(join(path, '.git'))) {
-    const base = tryGit(path, ['rev-parse', 'HEAD'])
+    /**
+     * ── ★★★ 复用分支：【不】重新对齐，且必须如实说"这不是我选的"──────────────
+     *
+     * `docs/WORKTREE-BASE-DEFECT.md` 补充段实测：一棵在旧 trunk 上建的树，
+     * 之后 trunk 怎么走它都停在原地 —— 而 `mtime` 证明不了它含哪些提交。
+     *
+     * ★ 这里**不偷偷 ff**：重新对齐会动一棵成员可能正在里面干活的树，那是另一个
+     *   决定（缺陷文档把它列为"需人拍板"的三态：clean-and-behind ⇒ ff、
+     *   dirty ⇒ 拒绝派发、already-current ⇒ 用）。本任务只负责把**读数**给对。
+     *
+     * ⇒ 所以 `base`/`baseline.base` 取**实际 HEAD**，`source` 取 `'existing'`，
+     *   并把"上游产物不在这个 HEAD 的历史里"逐条列进 `diverged`。
+     *   ★ 这一格是**反向半边**在本层的体现：复用一棵旧树时，下游**仍然**看不见
+     *     后来的上游提交 —— 而它现在**读得出来**，不再需要靠 mtime 去猜。
+     */
+    const head = tryGit(path, ['rev-parse', 'HEAD'])
+    if (!head.ok) {
+      /**
+       * ★ HEAD 读不出来 ⇒ 这棵"树"是坏的。此前这里回退到 `support.base`
+       *   —— 那是在**报告一个这棵树并没有的 commit**（最坏的一种假读数：
+       *   调用方会以为下游看得见主树 HEAD）。
+       *   现在退回 `support.base` 只用于 `git worktree add` 的既有语义不变，
+       *   但 `baseline` 明白地说"读不出来"，且 `base` 仍回退（调用方需要它）。
+       */
+      return {
+        ok: true,
+        path,
+        base: support.base,
+        missingIgnored: missingIgnored(repo, path),
+        baseline: {
+          ...baseline,
+          source: 'existing',
+          base: support.base,
+          diverged: committedOutside(repo, baseline.upstream, support.base),
+        },
+      }
+    }
+    const actual = head.value.trim()
     return {
       ok: true,
       path,
-      base: base.ok ? base.value.trim() : support.base,
+      base: actual,
       missingIgnored: missingIgnored(repo, path),
+      baseline: {
+        ...baseline,
+        source: 'existing',
+        base: actual,
+        diverged: committedOutside(repo, baseline.upstream, actual),
+      },
     }
   }
 
-  const added = tryGit(repo, ['worktree', 'add', '--detach', path, support.base])
+  const added = tryGit(repo, ['worktree', 'add', '--detach', path, baseline.base])
   if (!added.ok) {
     return { ok: false, reason: `could not create an isolated worktree: ${added.message}` }
   }
-  return { ok: true, path, base: support.base, missingIgnored: missingIgnored(repo, path) }
+  return { ok: true, path, base: baseline.base, missingIgnored: missingIgnored(repo, path), baseline }
+}
+
+/**
+ * 哪些上游产物 commit **从 `at` 到达不了**（等价于"这棵树里看不见它们"）。
+ *
+ * ★ 用"到达不了"而不是"不等于"：一条上游是 `at` 的祖先时，它的内容**在**
+ *   这棵树里 —— 把它报成 diverged 会让正常的传递依赖变成噪音，而噪音会
+ *   让人开始忽略这一整行（那时真的看不见的那条也一起被忽略）。
+ */
+function committedOutside(
+  repo: string,
+  readings: readonly UpstreamBaselineReading[],
+  at: string,
+): { taskId: string; commit: string }[] {
+  const outside: { taskId: string; commit: string }[] = []
+  for (const reading of readings) {
+    if (reading.kind !== 'committed') continue
+    if (!isAncestorOrFail(repo, reading.commit, at)) outside.push({ taskId: reading.taskId, commit: reading.commit })
+  }
+  return outside
+}
+
+/**
+ * ── ★ 一句话说清基线是怎么定的（日志与派发文本共用，不各写一份）───────────────────
+ *
+ * 三态必须**读得出是哪一种**：上游已提交 / 上游没提交 / 读不到上游。
+ * 一个"基线：abc1234"的读数把三件事压成了同一行。
+ */
+export function describeBaseline(resolution: BaselineResolution): string {
+  const committed = resolution.upstream.filter(entry => entry.kind === 'committed')
+  const notCommitted = resolution.upstream.filter(entry => entry.kind === 'not-committed')
+  const unreadable = resolution.upstream.filter(entry => entry.kind === 'unreadable')
+  const parts: string[] = []
+  if (resolution.source === 'existing') {
+    /**
+     * ★ 复用分支：**不**声称"基线由上游定" —— 它没定。这棵树停在自己建立时的那一刻。
+     *   读的人必须看得出"这是已有树的实际位置"，否则他会以为刚刚做了对齐。
+     */
+    parts.push(`baseline is where this existing worktree already sits (${resolution.base.slice(0, 12)}) — a worktree that was already there is NOT re-aligned, so it may predate its upstream`)
+  } else if (resolution.source === 'upstream') {
+    const names = committed.map(entry => `${entry.taskId}@${entry.commit.slice(0, 12)}`)
+    parts.push(`baseline is upstream deliverable ${names.join(', ')}${notCommitted.length === 0 ? '' : ` (${notCommitted.length} upstream task(s) committed nothing, so only the committed ones are visible)`}`)
+  } else if (resolution.upstream.length === 0) {
+    parts.push('baseline is the captain\'s workspace HEAD (this task has no upstream dependency)')
+  } else {
+    parts.push(`baseline is the captain's workspace HEAD (${resolution.upstream.length} upstream task(s), none of them has a readable deliverable commit)`)
+  }
+  if (notCommitted.length > 0 && resolution.source !== 'trunk') {
+    parts.push(`not committed: ${notCommitted.map(entry => entry.taskId).join(', ')}`)
+  }
+  if (unreadable.length > 0) {
+    parts.push(`unreadable: ${unreadable.map(entry => entry.kind === 'unreadable' ? `${entry.taskId} (${entry.why})` : entry.taskId).join('; ')}`)
+  }
+  if (resolution.diverged.length > 0) {
+    parts.push(`NOT visible from that baseline (diverged history): ${resolution.diverged.map(entry => `${entry.taskId}@${entry.commit.slice(0, 12)}`).join(', ')}`)
+  }
+  return parts.join(' — ')
 }
 
 /**
