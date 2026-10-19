@@ -1200,6 +1200,42 @@ export interface TeamState {
   reviewPolicy?: ReviewPolicy
   /** Set when an automatic review/repair loop hits its configured ceiling. */
   escalated?: boolean
+  /**
+   * ── ★★★ 计划审查环已经转了几轮（N5 / t8）────────────────────────────────────
+   *
+   * `edit_plan` **每调用一次** +1（★ 不是每个 operation +1 —— 一次调用含多个
+   * operation 在语义上是**一轮反馈**；按 operation 计数会让一次批量修 5 处
+   * 吃掉 5/3 轮，上限在第一次真实修订就打爆）。
+   *
+   * ★ 计数落点在 `updatePlanBatch` 的 `withTeamLock` 内、与"打回 awaiting_review"
+   *   **同一个 `writeTeam`** 上（N5.12 漏洞 3：写在别处会让"打回"与"计数"在
+   *   不同的事务边界上，一次在锁内失败的操作可能已经计了数却没打回，或反之）。
+   *
+   * ★★ 与 `planReviewState` **不同**：`approveStagedTeam` 会 `delete` 那一格
+   *   （审查上下文随批准结束），但**不删这一格** —— 否则"这个计划审了几轮才通过"
+   *   在批准之后永久丢失，而那正是自迭代最需要的那条读数（N5.13）。
+   *
+   * ★ 缺席 = 本轮之前建的队 ⇒ 读侧按 `0`，但 `describePlanLoop.roundsSource`
+   *   会把它与"确实是 0"分开（三态纪律）。
+   */
+  planReviewRounds?: number
+  /**
+   * ── ★★★ 计划审查环已敲响上限（N5.14）─────────────────────────────────────────
+   *
+   * ★★ **本格归计划环独有 —— 不许复用 `team.escalated`**：
+   *   `team.escalated` 是**质量环**的位，全仓**只有一个写入点**且**没有清除点**
+   *   （`resume` 只清 `halted`），同时它还是两个交付阻断项的来源。
+   *   ⇒ 若计划环写它，**一次计划超轮 = 整队永久不可交付，连 resume 都解不开**。
+   *   ⇒ 通用教训：复用别人的状态位之前，先数它有**几个清除点**；
+   *     只写不清的位对它自己的主人是对的，对借用它的人是陷阱。
+   *
+   * 清除点：下一次 `edit_plan` 打回 `awaiting_review` 时一并清（与计数同一处），
+   * 以及 `resume` 的**显式归零**（`rounds = 0` + 清 flag）。
+   *
+   * ★★ 而"只清 flag 不归零"**不算解除**：那会让 `rounds >= maxRounds`
+   *   在**同一份数据上立刻重新算出** escalated（审查者实测的死码）。
+   */
+  planReviewEscalated?: boolean
 }
 
 /**

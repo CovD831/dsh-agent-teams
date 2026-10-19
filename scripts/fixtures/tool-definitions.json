@@ -2033,6 +2033,76 @@
           "phase": {
             "type": "string"
           },
+          "plan_loop": {
+            "additionalProperties": false,
+            "properties": {
+              "canEnd": {
+                "type": "boolean"
+              },
+              "maxRounds": {
+                "type": "number"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "rounds": {
+                "type": "number"
+              },
+              "roundsSource": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "surfaces": {
+                "additionalProperties": false,
+                "properties": {
+                  "notApplicable": {
+                    "type": "number"
+                  },
+                  "notApplicableIds": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "readable": {
+                    "type": "number"
+                  },
+                  "total": {
+                    "type": "number"
+                  },
+                  "unreadable": {
+                    "type": "number"
+                  },
+                  "unreadableIds": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "total",
+                  "readable",
+                  "unreadable",
+                  "unreadableIds",
+                  "notApplicable",
+                  "notApplicableIds"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "state",
+              "rounds",
+              "maxRounds",
+              "reason",
+              "canEnd",
+              "roundsSource"
+            ],
+            "type": "object"
+          },
           "plan_review": {
             "additionalProperties": false,
             "properties": {

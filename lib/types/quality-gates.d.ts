@@ -33,6 +33,29 @@ import { type AcceptanceResult, type CommandResult, type ReviewFinding, type Rev
 declare const QUALITY_KINDS: readonly TaskKind[];
 declare const WRITE_KINDS: readonly TaskKind[];
 declare const DEFAULT_REVIEW_POLICY: Required<Pick<ReviewPolicy, 'requirementsMinRounds' | 'requirementsMaxRounds' | 'codeMaxRounds' | 'maxRepairAttempts'>>;
+/**
+ * ── ★★★ 计划审查环的轮次上限（N5 / t8）─────────────────────────────────────────
+ *
+ * ★ 它**不是** `ReviewPolicy` 的第六格 —— 这是实测决定的，不是偏好：
+ *
+ *   `ReviewPolicy` 是**四处封闭**的五格：`src/types.ts:311` 的 interface、
+ *   `src/profiles.ts:24` 的 `REVIEW_POLICY_KEYS`、`src/index.ts:132` 的 zod schema、
+ *   以及 `isReviewPolicy` 的 `Object.keys(value).every(k => allowed.has(k))`。
+ *   塞第六格会让 `profiles.ts:1068-1073` 的 `assertAllowedKeys` **直接抛错**，
+ *   而 `profiles.ts` 与 `index.ts` 都不在计划环的写域里。
+ *
+ * ★★ 而且两个数**依据不同**，不该并进同一个接口：
+ *   质量环那个（`codeMaxRounds: 3`）是**产品配置** —— 不同 kind 需要不同次数；
+ *   计划环这个是**这个功能的常数** —— 今天没有任何证据说明不同团队需要
+ *   不同的"计划最多被打回几次"。
+ *   强行并进一个接口，会让将来调其中一个时，不得不为什么都没变的那一个负责。
+ *
+ * ★ 将来若要 profile 覆盖：那要同时改上述四处，那是**另一个决定**，
+ *   不该夹在计划环的落地里。这段注释存在，就是为了让下一个人知道那一格要动四处。
+ *
+ * ★ 与 `DEFAULT_REVIEW_POLICY` **并列**而不合并（N5.15）。
+ */
+export declare const PLAN_REVIEW_MAX_ROUNDS = 3;
 export interface CreateTaskInput {
     subject: string;
     description?: string;
@@ -285,6 +308,81 @@ export interface QualityLoopSnapshot {
     escalated: boolean;
     deliverable: boolean;
     summary: string;
+}
+/**
+ * ── ★★★ 计划审查环的五态（N5 / t8）─────────────────────────────────────────────
+ *
+ * 与 `QualityLoopState` **同形但不同位**：`describePlanLoop` 不读 `team.escalated`，
+ * `describeQualityLoop` 不读 `team.planReviewEscalated` —— 两个环各读自己的位。
+ *
+ * ★ 为什么不复用 `team.escalated`（这是本次设计里最贵的一条教训）：
+ *   `team.escalated` 全仓**只有一个写入点**（`applyQualityFollowUp`）且**没有清除点**
+ *   （`resume` 只清 `halted`）。它同时是两个交付阻断项的来源
+ *   （`canDeclareDelivery` 的 `team requires escalation resolution`）。
+ *   ⇒ 若计划环写它，**一次计划超轮 = 整队永久不可交付，连 resume 都解不开**。
+ *   ⇒ 复用别人的状态位之前，先数它有几个**清除点**。
+ */
+export type PlanLoopState = 'halted' | 'awaiting-review' | 'reviewing' | 'escalated' | 'approved';
+export interface PlanLoopSnapshot {
+    state: PlanLoopState;
+    /** 已发生的计划审查轮次数。★ 缺席按 `0` 读（存量团队没有这一格）。 */
+    rounds: number;
+    /** 上限。★ 模块常量 `PLAN_REVIEW_MAX_ROUNDS` —— 不从 `reviewPolicy` 取（见那里的注释）。 */
+    maxRounds: number;
+    /**
+     * ★★ **这一层真正的产出**（`state` 只是它的索引）。
+     *
+     * 它必须逐字说清"为什么还不能结束"，因为调用方若只用 `canEnd`（= `state === 'approved'`），
+     * 拿到的就是一个可读的**否定**答案，而不是一个布尔。
+     *
+     * ★ 三态在这一个字里也要成立：`unmeasured` 的格子**不拦**但**必须点名** ——
+     *   "N 条任务的表面读不出来"要逐条写出来，不许静默并进"通过"。
+     */
+    reason: string;
+    /** ★ 唯一的放行读数：**只有** `state === 'approved'` 时计划可以开跑。 */
+    canEnd: boolean;
+    /**
+     * ── ★★ 轮次这一格是**读到的**还是**缺席按 0 读的**（三态纪律）──────────────
+     *
+     *   `persisted` ⇒ 盘上真有 `planReviewRounds` ⇒ `rounds` 是实测值
+     *   `absent`    ⇒ 存量团队（这一格在本轮之前不存在）⇒ `rounds` 是 **0**，
+     *                 ★ 而"我把它读成 0"与"它确实是 0"必须不同形 ——
+     *                 后者会让存量团队看起来像"审了 0 轮就通过"，前者才说得清成因。
+     *
+     * ★ 另开一格而不是并进 `reason`：`reason` 是人读的散文，这一格是**机器可判**的。
+     *   把可判的东西只写进散文，等于让下游去 `includes` 一个句子。
+     */
+    roundsSource: 'persisted' | 'absent';
+    /**
+     * ── ★★ 契约表面的逐条读数（**读数，不是闸**）─────────────────────────────────
+     *
+     * ★★ 分档那一层（large 必须带 reviewed 戳）已被对抗性审查推翻并**明文砍掉**，
+     *   不许重装。理由（审查者原话，逐字）：它的判据方向是**反的** ——
+     *   奖励少写 `inScope`、惩罚诚实声明，且能被被审方自己缩域绕过。
+     *   ⇒ 所以这里只做**读数**，一个字都不参与放行。
+     *
+     * 三态**不同形**（与全库那条最贵的纪律一致）：
+     *   `readable`       ⇒ 契约声明了表面 ⇒ 能判
+     *   `unreadable`     ⇒ 这条**是写类任务**（`implementation`/`repair`）而表面缺席/为空
+     *                      ⇒ ★ 这是**真缺口**（`validateCreateTask` 对写类强制 `inScope`）
+     *   `notApplicable`  ⇒ 这条**不是写类** ⇒ 契约本来就不要求它 ⇒ ★ **噪音，不是缺口**
+     *
+     * ★ 把后两者并成一个"缺"会让噪音淹没真缺口；并成一个"齐"会让真缺口消失 ——
+     *   两种合流都已被本仓记账（t6 的同一格）。
+     */
+    surfaces: PlanLoopSurfaces;
+}
+export interface PlanLoopSurfaces {
+    /** 任务总数（全量，不是抽样）。 */
+    total: number;
+    /** 契约声明了表面 ⇒ 能判。 */
+    readable: number;
+    /** ★ 写类任务而表面缺席/为空 ⇒ 真缺口。`unreadableIds` 逐条点名。 */
+    unreadable: number;
+    unreadableIds: string[];
+    /** ★ 非写类任务没有表面 ⇒ 契约本来就不要求 ⇒ 噪音。`notApplicableIds` 逐条点名。 */
+    notApplicable: number;
+    notApplicableIds: string[];
 }
 export interface QualityGraphDraft {
     subject: string;
@@ -769,6 +867,54 @@ export interface SelfReviewJudgement {
 export declare function qualityPlanningPrompt(): string;
 export declare function describeQualityLoop(team: TeamState): QualityLoopSnapshot;
 export { QUALITY_KINDS, WRITE_KINDS };
+/**
+ * ── ★★★ 计划审查环：让"这个循环能不能结束"有一个可读的答案（N5 / t8）──────────────
+ *
+ * 用户原话（m01373）：
+ * > 「加进去，然后计划是否能开始跑也是希望有一个门禁把关，
+ * >   其实就是计划的审查循环是否可以结束的问题。」
+ *
+ * ★ 它答的是**终止性**，不是**准入**：「这个循环会自己停下来吗」，
+ *   而不是「这一份计划够不够好」。两者的修法完全不同 —— 前者要一条单调不减的度量
+ *   加一个有界的天花板，后者要一套判据。
+ *
+ * ── ★★ 判定顺序（第二版；第一版被对抗性审查推翻）────────────────────────────────
+ *
+ * ```
+ *   team.halted === true                    ⇒ 'halted'          ★ 最前
+ *   team.planReviewEscalated === true       ⇒ 'escalated'       ★ 本队自己的位
+ *   rounds >= maxRounds                     ⇒ 'escalated'       ★ 读时也要能算出来
+ *   team.phase === 'running'                ⇒ 'approved'        ★★ 必须在这两条【之后】
+ *   planReviewState === 'awaiting_feedback' ⇒ 'reviewing'
+ *   否则                                     ⇒ 'awaiting-review'
+ * ```
+ *
+ * ★★★ **`halted` 必须最先**（`describeQualityLoop` 同序）：
+ *   `haltTeamWork` **不要求 `phase === 'running'`** —— 它只查 `requireFreshCaptainTeam`，
+ *   然后 `fresh.halted = true`。⇒ **一个 staged 团队也能被 halt**。
+ *   若把 `phase === 'running'` 判在最前，**一个被停止的团队会被读成 `approved`**。
+ *
+ * ★★★ **`approved` 必须排在两条 `escalated` 之后**：
+ *   ```
+ *   {phase:'staged',  rounds:4} ⇒ 'escalated'
+ *   {phase:'running', rounds:4} ⇒ 'approved'   ← 第一版就是这个结果
+ *   ```
+ *   对一个正在跑的团队，`rounds=4 > max=3` 与 `rounds=0` **读出同一个 `approved`**
+ *   ⇒ 「这个循环审到顶了没有」这条读数**恰恰在批准之后不可读** —— 而用户问的就是它。
+ *   ⇒ 上限必须在**放行之前**就拦住，而不是等它跑起来之后被 `phase` 遮掉。
+ *
+ * ★ 副作用（**必须承认的设计后果**）：一个 `rounds >= max` 的 running 团队会读成
+ *   `escalated`，而它其实已经在跑。这不是错 —— 那是「它当初是被放行的，而放行点上
+ *   没有读上限」的**如实记录**。修法不在读侧（读侧若也遮掉，那段历史就查不出来了），
+ *   在放行点（`approveStagedTeam` 的轮次闸）。
+ *
+ * ── ★★ 三态：`unmeasured` 不拦，但**必须点名** ──────────────────────────────────
+ *
+ * ★ 契约表面读不出来的那些任务**不参与放行判定**（"没说改哪里"不是"改得很大"），
+ *   但 `reason` 里要**逐条**写出来 —— 不许静默并进"通过"。
+ *   放行 ≠ 通过：一个是"它可以跑了"，一个是"它被看清楚了"。
+ */
+export declare function describePlanLoop(team: TeamState): PlanLoopSnapshot;
 /** Persisted evidence must remain loadable after process restart. */
 export declare function isTaskEvidence(value: unknown): value is TaskEvidence;
 /** Append observations without mutating the original result or its completion time. */
