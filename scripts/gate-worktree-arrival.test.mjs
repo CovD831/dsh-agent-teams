@@ -475,7 +475,19 @@ test('★ 接线臂（闸门对照臂）：仓库可用 ⇒ 照常派发，提�
   await scheduler.kickMember(workspace, 'team', 'worker')
 
   assert.equal(deliveries.length, 1, '★ 能隔离就必须派发出去')
-  assert.match(deliveries[0], /Working directory: .*task-t-impl/, '★ 成员必须看到自己的隔离目录')
+  /**
+   * ★ 路径形状是 `task-<teamId>-<taskId>`（`worktreeDirName` 带团队前缀，60c51f7
+   *   起就是这样）—— 此处的正则此前还停在 `task-t-impl`，于是这一臂在**未改动的
+   *   HEAD 上**也一直在红（用 `git stash` 实测确认：HEAD 上同样 21/22）。
+   *   它不是任何一次改动造成的，但一条常年失红的对照臂等于没有对照臂
+   *   （红着的时候没人再看它）⇒ 在这里一并对齐，并断言团队前缀**在场**。
+   *
+   * ★ 为什么它是缺陷而不是"测试没跟上"：`docs/DEFECT-VERIFY-RERUN-WRONG-CWD.md`
+   *   证明了这条错误的断言**已经在生产里造成一次误判** —— t5 的交付物在它的隔离
+   *   树里 exit 0，而 `[completion.verify-rerun]` 在队长工作区重跑得 exit 1，
+   *   于是任务被记为 failed。见 e-0041。
+   */
+  assert.match(deliveries[0], /Working directory: .*task-team-t-impl/, '★ 成员必须看到自己的隔离目录（含团队前缀）')
   const team = await readTeam(stateRoot, 'team')
   assert.equal(team.tasks[0].status, 'claimed')
 })
