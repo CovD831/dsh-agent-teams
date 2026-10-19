@@ -123,7 +123,7 @@ import { fileURLToPath } from 'node:url'
  *     本文件里**不留**那份实现的副本（契约逐字：不许把它改成脚本的私有副本，
  *     那只是把重复换个位置，而"谁是真值"仍然只有一份）。
  */
-import { judgeWorktreeReclaimable, describeReclaimability } from '../lib/worktree.js'
+import { judgeWorktreeReclaimable, describeReclaimability, resolveTrunkRef } from '../lib/worktree.js'
 /**
  * ★★ 路径名也取**同一份真值**（建树 / 找树 / 这里扫描都用它）。
  *   `worktreeDirName(teamId, taskId)` 是 `src/worktree.ts` 导出的确定性命名；
@@ -207,23 +207,54 @@ function git(cwd, args) {
  *
  * @returns `{ status: 'reclaimable'|'keep'|'undecidable', ... }`
  */
-export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits = DEFAULT_STALE_COMMITS, budget }) {
+export function judgeWorktree({ repo, worktree, mainRef, staleCommits = DEFAULT_STALE_COMMITS, budget }) {
+  /**
+   * ── ★★★ W1：本函数**不再有** `mainRef = 'main'` 这条静默缺省 ────────────────────
+   *
+   *   旧写法逐字是 `mainRef = 'main'`。它与权威实现里的 `mainRef = 'main'` 是
+   *   **同一个缺陷的两份副本**，而本仓的集成**不在** `main` 上
+   *   （实测 `main` 落后集成分支 HEAD 209 个提交）⇒ 两条路径都在比错的引用。
+   *
+   *   ⇒ 现在：不给就交给 `resolveTrunkRef`（声明式来源），它答 `unresolved`
+   *     就**如实说判不了** —— 而**不**退回一个字面量。
+   *     ★ 这一层**必须**也删掉缺省，而不是只删 `src/` 那份：
+   *       生产接线经 `update-task.ts` 动态加载的正是**本文件**
+   *       （`loadWorktreeReclaimModule()`），脚本层留一个缺省等于缺陷还在。
+   */
+  const trunk = resolveTrunkRef(repo, mainRef)
+  if (trunk.status === 'unresolved') {
+    /**
+     * ★ 人话走**同一个函数**（`describeReclaimability`），不在这里另写一句 ——
+     *   否则"判不了"在两条路径上会有两种措辞，而其中一种可能被读成"可以删"。
+     *   （第一版就是 `reason: trunk.why`：那不是那句话，臂 T25-3 立刻变红。）
+     */
+    const undecided = { status: 'undecidable', why: trunk.why }
+    return { status: 'undecidable', worktree, why: trunk.why, reason: describeReclaimability(undecided) }
+  }
   /**
    * ★ 权威裁决 —— **同一个函数引用**，不是"再写一遍同样的判断"。
+   *   传的是**解析出来的那个引用名**（不是另一个字面量）：权威会再核验一次它的 commit，
+   *   两次核验看着冗余，而它们问的是不同的事 —— 这里问"这个仓库认不认这个名字"，
+   *   权威问"拿到这个名字之后我到底比的是哪个 sha"。
    */
-  const verdict = judgeWorktreeReclaimable({ repo, worktree, mainRef })
+  const verdict = judgeWorktreeReclaimable({ repo, worktree, mainRef: trunk.ref })
 
   /**
    * ★ `undecidable` ⇒ **原样交出去**，且**不**补任何"可清"的字段。
    *   它判不了 ≠ 它可以清（契约逐字钉住这一条）。
    */
   if (verdict.status === 'undecidable') {
+    /**
+     * ★ 这里**不**带 `trunk`：权威在它那一步答 `undecidable` 时也没有这一格
+     *   （没比成，自然没有"比的谁"）。三态的字段区分在这里保持一致。
+     */
     return { status: 'undecidable', worktree, why: verdict.why, reason: describeReclaimability(verdict) }
   }
   if (verdict.status === 'keep') {
     return {
       status: 'keep',
       worktree,
+      trunk: verdict.trunk,
       reason: verdict.reason,
       behind: verdict.behind,
       detail: verdict.detail,
@@ -270,21 +301,23 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
      *     ⇒ 复核动作指向一个必然失败的查法，而那读起来像"日志在撒谎"。
      */
     why: verdict.how === 'ancestor'
-      ? `HEAD is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`
+      ? `HEAD is an ancestor of ${trunk.ref}, and no uncommitted source file is unique to it`
       : verdict.how === 'content'
-        ? `the commit's change is already on ${mainRef} with the same patch-id (cherry-picked), and no uncommitted source file is unique to it`
+        ? `the commit's change is already on ${trunk.ref} with the same patch-id (cherry-picked), and no uncommitted source file is unique to it`
         : verdict.how === 'files'
-          ? `every file the commit touched is byte-identical at ${mainRef}'s tip (landed by hand), and no uncommitted source file is unique to it`
+          ? `every file the commit touched is byte-identical at ${trunk.ref}'s tip (landed by hand), and no uncommitted source file is unique to it`
           /**
            * ★★ 第四句：与上一句**必须不同形**，且要点明"主干顶端可能已经又动过"。
            *   ⇒ 两者的**复核动作不同**：`'files'` 对主干顶端逐文件比；
            *     `'contained'` 要在主干**历史**里找那份内容（`git log <tip> --find-object`）。
            */
-          : `the content of every file the commit touched is contained in ${mainRef}'s history (merged in; the tip may have moved on), and no uncommitted source file is unique to it`,
+          : `the content of every file the commit touched is contained in ${trunk.ref}'s history (merged in; the tip may have moved on), and no uncommitted source file is unique to it`,
   })
   return {
     status: 'reclaimable',
     worktree,
+    /** ★ 这一次拿谁比的（W1）—— `how` 那四句措辞念的就是它的 `ref`。 */
+    trunk: verdict.trunk,
     layers,
     behind,
     hasDeps,
@@ -434,9 +467,30 @@ function removeWorktreeFallback({ repo, worktree }) {
  * ★ `apply: false`（默认）⇒ **绝不删除任何东西**，只报清单与预计回收。
  * ★ `apply: true` ⇒ 删之前**仍然打印清单**，让日志里能对上"预计"与"实际"。
  */
-export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes } = {}) {
+export function planReclaim({ repo = REPO_ROOT, mainRef, staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes } = {}) {
   const worktrees = listWorktrees(repo)
-  const judged = worktrees.map((worktree) => judgeWorktree({ repo, worktree, mainRef, staleCommits }))
+  /**
+   * ── ★★★ W1：整份计划**只解析一次**主干引用 ──────────────────────────────────────
+   *
+   *   ★ 为什么是"一次"而不是每棵树各解析一次：
+   *     ① 一份计划里的所有裁决必须拿**同一个**引用比，否则读数是拼出来的
+   *        （而"逐棵各解一次"在解析器会随 git 状态变的场合等于自欺）；
+   *     ② 解析结果**要交出去**（`trunk` 那一格）—— 一份说不出"拿谁比的"的计划，
+   *        正是本缺陷的形态：数字齐全、而比较对象是错的。
+   *
+   *   ★ 而 `unresolved` ⇒ **整份计划一个都不删**：没有主干就无从判定，
+   *     无从判定不等于可以清。它不靠"每棵树各自变 undecidable"来实现，
+   *     而是在这里就**明确**说出来（`applied: false` 且带 `why`）。
+   */
+  const trunk = resolveTrunkRef(repo, mainRef)
+  const judged = trunk.status === 'unresolved'
+    ? worktrees.map((worktree) => ({
+        status: 'undecidable',
+        worktree,
+        why: trunk.why,
+        reason: trunk.why,
+      }))
+    : worktrees.map((worktree) => judgeWorktree({ repo, worktree, mainRef: trunk.ref, staleCommits }))
   for (const entry of judged) {
     const bytes = directoryBytes(entry.worktree)
     if (bytes !== undefined) entry.bytes = bytes
@@ -455,7 +509,13 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
    *   ★ 而它只影响【是否真删】，不影响干跑的清单（清单永远如实报）。
    */
   const withinBudget = budgetBytes === undefined || projectedBytes >= budgetBytes
-  const wouldApply = apply && withinBudget
+  /**
+   * ★★ 三道**合取**，缺一不可：调用方要删 ∧ 预算够 ∧ **主干引用解析出来了**。
+   *   最后那道是 W1 加的：没有一个能核验的主干，`reclaimable` 本来就该是空集
+   *   （每棵树各自 `undecidable`），而这里**再显式门一次**是故意的 ——
+   *   免得将来有人只改了上面那半、把"没主干"重新读成"可以删"。
+   */
+  const wouldApply = apply && withinBudget && trunk.status === 'resolved'
 
   const removed = []
   if (wouldApply) {
@@ -480,11 +540,14 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
 
   return {
     scanned: worktrees.length,
+    /** ★ 这份计划**拿谁比的**（W1）。`unresolved` ⇒ 带 `why`，且一个都没删。 */
+    trunk,
     reclaimable,
     keep,
     undecidable,
     projectedBytes,
     removed,
+    /** ★ `unresolved` 时**绝不**报 `applied: true` —— 什么都没判定，就不许说删了。 */
     applied: wouldApply,
     withinBudget,
   }
@@ -546,8 +609,14 @@ export function isTerminalTask(task) {
  *   ⇒ 本函数在**判定之前**就把非终态剔掉（不是判完了再忽略结果）——
  *     两者的区别在于"有没有去碰那棵树"。
  */
-export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef = 'main' }) {
+export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef }) {
   const root = join(repo, '.agent-teams', 'worktrees')
+  /**
+   * ★★ W1：整次扫描**只解析一次**主干引用（理由与 `planReclaim` 同）。
+   *   ⇒ 解析不出来时**不是**逐棵树各自报 `undecidable`（那读起来像"这批树都判不了"），
+   *     而是把**原因**交出去，并让清单为空 —— 因为**一次判定都没发生**。
+   */
+  const trunk = resolveTrunkRef(repo, mainRef)
   const scanned = []
   const reclaimable = []
   const kept = []
@@ -565,13 +634,19 @@ export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef = 'main
      *   它与"树在而判据说保留"是两件事，读的人要能分开。
      */
     if (!existsSync(worktree)) continue
-    const verdict = judgeWorktree({ repo, worktree, mainRef })
+    /**
+     * ★ 没有可核验的主干 ⇒ 这一棵树**连判都不判**：判了也只能得到一个
+     *   带 `unresolved` 的 `undecidable`，而"整批都没比成"与"逐棵判不了"
+     *   是两件事（后者会诱使人去看那几棵树）。
+     */
+    if (trunk.status === 'unresolved') continue
+    const verdict = judgeWorktree({ repo, worktree, mainRef: trunk.ref })
     scanned.push(verdict)
     if (verdict.status === 'reclaimable') reclaimable.push(verdict)
     else if (verdict.status === 'keep') kept.push(verdict)
     else undecidable.push(verdict)
   }
-  return { scanned, reclaimable, kept, undecidable }
+  return { trunk, scanned, reclaimable, kept, undecidable }
 }
 
 /**
@@ -637,8 +712,27 @@ if (process.argv[1] && import.meta.url.endsWith(basenameSafe(process.argv[1]))) 
     process.exit(0)
   }
   const apply = process.argv.includes('--apply')
-  const result = planReclaim({ apply })
+  /**
+   * ★ `--trunk <ref>`：显式指定主干引用。
+   *   ★ 不给 ⇒ 走 `resolveTrunkRef` 的声明式来源（主树检出的那条分支）。
+   *   ★★ 这条解析**不设缺省字面量** —— 旧版此处硬等价于 `mainRef: 'main'`，
+   *     而本仓的集成不在 `main` 上（落后 209 个提交）⇒ CLI 的清单一直是错的。
+   */
+  const trunkFlagIndex = process.argv.indexOf('--trunk')
+  const trunkFlag = trunkFlagIndex >= 0 ? process.argv[trunkFlagIndex + 1] : undefined
+  const result = planReclaim(trunkFlag === undefined ? { apply } : { apply, mainRef: trunkFlag })
   console.log(`回收扫描：${result.scanned} 个 worktree`)
+  /**
+   * ★★★ 主干引用这一行是**必须打的**：一份说不出"拿谁比的"的回收清单，
+   *   正是 W1 的形态（数字齐全、比较对象是错的）。
+   */
+  if (result.trunk.status === 'resolved') {
+    console.log(`  主干引用：${result.trunk.ref} @ ${result.trunk.commit.slice(0, 12)}`
+      + `（来源：${result.trunk.source === 'explicit' ? '调用方显式给出' : '主树检出的分支'}）`)
+  } else {
+    console.log(`  主干引用：✘ 解析不出来 —— ${result.trunk.why}`)
+    console.log('  ★ 没有主干就无从判定；这一次**没有**任何树被判定为可清。')
+  }
   console.log(`  可清 ${result.reclaimable.length} · 保留 ${result.keep.length} · 判不了 ${result.undecidable.length}`)
   console.log(`  预计回收 ${(result.projectedBytes / 1024 / 1024).toFixed(1)} MiB`)
   if (result.reclaimable.length > 0) {

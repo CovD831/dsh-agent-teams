@@ -216,6 +216,140 @@ export function detectWorktreeSupport(repo: string): { ok: true; base: string } 
   return { ok: true, base: head.value.trim() }
 }
 
+/**
+ * ── ★★★ 主干引用**从哪来**（W1：一个会过期的字符串不许再当缺省）─────────────────
+ *
+ * ── 它修的是什么（MEASURED，本任务的由来）───────────────────────────────────────
+ *
+ *   判据此前的签名是 `mainRef?: string`，而实现里写着 `mainRef = 'main'`。
+ *   两处**生产**调用点（`src/tools/update-task.ts` 的交付后回收、终态扫描）
+ *   都没传它 ⇒ 判据永远在跟一个**字面量** `'main'` 比。
+ *   而本仓的集成**不在** `main` 上：实测 `main` 落后集成分支 HEAD **209 个提交**
+ *   （`git rev-list --count main..HEAD` = 209，2026-10-20 读数）。
+ *   ⇒ 同一个判据、同一棵树，把引用从 `'main'` 换成集成分支，
+ *     8 棵树的裁决从 `keep` 翻成 `reclaimable`。
+ *   ⇒ 这就是"磁盘 95% 满而 worktree 占 9.8G"的成因：**不是判据错了，是它读错了引用**。
+ *
+ * ── ★★★ 为什么**不能**只是把缺省从 `'main'` 改成集成分支的名字 ──────────────────
+ *
+ *   那是把"写死一个会过期的字符串"换成"写死**另一个**会过期的字符串"。
+ *   分支名会变（本仓本轮就从 `main` 换到 `task-mutation-integrate`，
+ *   下一次可能是别的）；写死它只是把同一个缺陷的复发时间往后推。
+ *   ⇒ 所以缺省**不是**一个名字，而是**一个问法**：主树自己检出在哪条分支上。
+ *
+ * ── 声明式来源（按优先级）───────────────────────────────────────────────────────
+ *
+ *   ① `'explicit'` —— 调用方给了。★ 生产接线走的就是这一条：调用方先问
+ *      `resolveTrunkRef(workspace)`，再把 `.ref` **显式**传进判据
+ *      ⇒ 判据本身不再有"我猜一个"的余地。
+ *   ② `'main-worktree-branch'` —— 从 `git worktree list --porcelain` 的**第一块**
+ *      读主树检出的分支。★ 为什么是它：主树（captain 的工作区）就是"集成发生在哪"
+ *      的那个地方 —— 成员在 detached 的隔离树里干活，产出被落盘到主树所在的
+ *      分支上。**主树检出的分支 = 本仓此刻认定的主干**，这件事 git 自己知道，
+ *      不需要我们再抄一遍常量。
+ *
+ * ── ★★★ 而"读到了名字"**不等于**"读到了引用"（这一步是可辩论的那一半）──────────
+ *
+ *   MEASURED：`git update-ref -d refs/heads/main`（HEAD 仍符号指向 main）之后，
+ *   `git worktree list --porcelain` **照旧**打印 `branch refs/heads/main`（退出码 0），
+ *   `git symbolic-ref --quiet --short HEAD` **照旧**答 `main` ——
+ *   而此时 `git rev-parse --verify --quiet 'main^{commit}'` **失败**（rc=1）。
+ *   ⇒ 若不核实就把那个名字当成主干，判据会拿着一个**解析不出来的引用**去比，
+ *     而那必须落到 `undecidable`（判不了 ≠ 可以清）。
+ *   ⇒ 所以下面**先拿到名字、再核验它 resolve 成 commit**；核验失败 ⇒ `unresolved`。
+ *
+ * ── 三态，且三者不同形 ─────────────────────────────────────────────────────────
+ *
+ *   `resolved`   —— 带 `ref`（给人看/给日志念）、`commit`（判据真正用的那个）、`source`
+ *   `unresolved` —— 带 `why`。★ **绝不**退回一个字面量：没有主干就"无从比较"，
+ *                  而那与"比过了、一样"是两件事。
+ */
+export type TrunkRefResolution =
+  | {
+      status: 'resolved'
+      /** 人读的引用名（`'task-mutation-integrate'`）。★ 判据**不**用它去跑 git。 */
+      ref: string
+      /** ★ 判据真正拿去比较的那个 commit sha —— 已核验可解析。 */
+      commit: string
+      /** 这个引用是怎么来的（读日志的人据此判断这次比较可信不可信）。 */
+      source: 'explicit' | 'main-worktree-branch'
+    }
+  | { status: 'unresolved'; why: string }
+
+/**
+ * 解读主树（`git worktree list` 的第一块）检出的分支名。
+ *
+ * ★ 单独抽出来是为了可单测：`porcelain` 的格式是"块之间空行、块内 `key value`"，
+ *   而块**顺序**有意义（第一块恒是主工作树）。
+ * @returns 分支短名（`refs/heads/x` ⇒ `x`）；detached / 读不到 ⇒ `undefined`。
+ */
+export function mainWorktreeBranch(porcelain: string): string | undefined {
+  const lines = porcelain.split('\n')
+  for (const line of lines) {
+    if (line.trim() === '') break // 第一块结束
+    const prefix = 'branch refs/heads/'
+    if (line.startsWith(prefix)) {
+      const name = line.slice(prefix.length).trim()
+      return name === '' ? undefined : name
+    }
+  }
+  return undefined
+}
+
+/**
+ * 解析"这一次判据该拿哪个引用当主干"。
+ *
+ * @param repo - 主仓库根（任意一个 worktree 的公共目录所在仓库都行）。
+ * @param explicit - 调用方显式给出的引用名。★ 给了就**只用它** ——
+ *   调用方说比谁就比谁，本函数不替它改主意（那会让"我显式传了这个"变得不可信）。
+ * @returns 三态。★ `unresolved` 由调用方各自决定怎么处置
+ *   （判据 ⇒ `undecidable`；规划器 ⇒ 报出来而不是删）。
+ */
+export function resolveTrunkRef(repo: string, explicit?: string): TrunkRefResolution {
+  const candidate = explicit !== undefined && explicit.trim() !== '' ? explicit.trim() : undefined
+  /** ★ 核验：名字 → commit。**这一步不能省**（见上面 MEASURED 那段）。 */
+  const resolve = (ref: string): string | undefined => {
+    const result = tryGit(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+    return result.ok ? result.value.trim() : undefined
+  }
+  if (candidate !== undefined) {
+    const commit = resolve(candidate)
+    if (commit === undefined) {
+      return {
+        status: 'unresolved',
+        why: `the trunk ref "${candidate}" was given explicitly but does not resolve in ${repo}`,
+      }
+    }
+    return { status: 'resolved', ref: candidate, commit, source: 'explicit' }
+  }
+  const listed = tryGit(repo, ['worktree', 'list', '--porcelain'])
+  if (listed.ok === false) {
+    return { status: 'unresolved', why: `git worktree list failed in ${repo} (${listed.message})` }
+  }
+  const branch = mainWorktreeBranch(listed.value)
+  if (branch === undefined) {
+    return {
+      status: 'unresolved',
+      why: `the main worktree in ${repo} is not on a branch (detached HEAD), `
+        + 'so there is no declared trunk to compare against — pass one explicitly',
+    }
+  }
+  const commit = resolve(branch)
+  if (commit === undefined) {
+    return {
+      status: 'unresolved',
+      /**
+       * ★ 措辞上刻意**不出现** "deleted"：`undecidable` 的那句人话要和
+       *   "删掉了什么"在读数上分开（臂 16 直接断言日志里不出现 `deleted `）。
+       *   ★ 一个"判不了"的读数里混进删除的动词，读的人会以为发生过删除。
+       */
+      why: `the main worktree in ${repo} is on branch "${branch}", but that name does not `
+        + 'resolve to a commit (the ref is gone, or the branch has no commit yet)',
+    }
+  }
+  return { status: 'resolved', ref: branch, commit, source: 'main-worktree-branch' }
+}
+
 /** gitignore 的顶层条目（只取顶层名字，够用来提示 node_modules 这类）。 */
 function ignoredTopLevel(repo: string): string[] {
   const listed = tryGit(repo, ['status', '--ignored', '--porcelain'])
@@ -1111,6 +1245,8 @@ export type WorktreeReclaimability =
   | {
       status: 'reclaimable'
       reason: 'absorbed'
+      /** ★ 这一次**拿谁比的**（W1）：读日志的人据此判断这次裁决可不可信。 */
+      trunk: TrunkReading
       /**
        * ★ 是**哪一种**吸收（三种形态**不是**同一件事，读的人要能分开）：
        *   `'ancestor'` —— 提交对象真的并进了主干（形态 Ⅰ）；
@@ -1137,15 +1273,44 @@ export type WorktreeReclaimability =
       how: 'ancestor' | 'content' | 'files' | 'contained'
       behind: number | undefined
     }
-  | { status: 'keep'; reason: 'not-absorbed' | 'unique-work'; behind: number | undefined; detail: string; orphaned?: string[] }
+  | { status: 'keep'; reason: 'not-absorbed' | 'unique-work'; trunk: TrunkReading; behind: number | undefined; detail: string; orphaned?: string[] }
   | { status: 'undecidable'; why: string }
+
+/**
+ * ── ★★★ 「这次裁决拿谁比的」必须**随裁决一起交出去**（W1）─────────────────────────
+ *
+ * ── 为什么它是一个字段，而不是只写进日志 ────────────────────────────────────────
+ *
+ *   本缺陷的原始形态是：判据**照常**给出裁决（`keep`），而那个 `keep` 是拿
+ *   一个落后 209 个提交的引用比出来的。⇒ **裁决本身看不出它读错了引用**：
+ *   一个"我比错了对象"的 keep 与一个"产物真的没被吸收"的 keep **完全同形**。
+ *
+ *   ⇒ 所以把"比的是谁、从哪来"做成**裁决的一部分**：
+ *     `source` 说清这个引用是怎么来的，读的人（以及臂）据此能分辨
+ *     "显式给了" / "从主树检出的分支推出来的"，而不必去猜。
+ *
+ * ── ★★ 而它**不是**第四种 status ────────────────────────────────────────────────
+ *   它不改变裁决（判断仍然是「产物被吸收了吗」），只让那次判断**可复核**。
+ *   三态之间的字段仍有区分（`undecidable` 没有它 —— 没比成，自然没有"比的谁"）。
+ */
+export interface TrunkReading {
+  /** 人读的引用名（`'task-mutation-integrate'`）。 */
+  readonly ref: string
+  /** 已核验可解析的那个 commit sha —— 判据真正拿去比的是它。 */
+  readonly commit: string
+  /** 这一次的引用从哪来。★ `'explicit'` 与 `'main-worktree-branch'` 是两种可信度。 */
+  readonly source: 'explicit' | 'main-worktree-branch'
+}
 
 /**
  * 判一个 worktree 能不能回收。
  *
  * @param repo - 主仓库根。
  * @param worktree - 那个检出目录。
- * @param mainRef - 主干引用（默认 `main`）。
+ * @param mainRef - ★ 主干引用。**没有缺省值** —— 不给就走
+ *   `resolveTrunkRef` 的**声明式来源**（主树自己检出在哪条分支上）。
+ *   断言：本参数的类型里**没有** `= 'main'` 这种兜底；一个会过期的字面量
+ *   不许再冒充"主干"。见 `resolveTrunkRef` 的文档（含 MEASURED 的 209 个提交）。
  * @returns 三态。★ 三者**不同形**：可清的带 `reason: 'absorbed'` 与 `how`
  *   （`'ancestor'`｜`'content'`，见 `WorktreeReclaimability`）；
  *   不可清的带 `reason` 与 `detail`（以及可能的 `orphaned`）；
@@ -1167,19 +1332,43 @@ export type WorktreeReclaimability =
 export function judgeWorktreeReclaimable(options: {
   repo: string
   worktree: string
+  /** ★ 显式给出就只比它；不给 ⇒ `resolveTrunkRef` 的声明式来源。**没有字面量兜底。** */
   mainRef?: string
 }): WorktreeReclaimability {
-  const { repo, worktree, mainRef = 'main' } = options
+  const { repo, worktree } = options
   const headResult = tryGit(worktree, ['rev-parse', 'HEAD'])
   if (headResult.ok === false) {
     return { status: 'undecidable', why: 'HEAD could not be read (not a git checkout, or no commit yet)' }
   }
   const head = headResult.value.trim()
-  const mainResult = tryGit(repo, ['rev-parse', '--verify', '--quiet', `${mainRef}^{commit}`])
-  if (mainResult.ok === false) {
-    return { status: 'undecidable', why: `the trunk ref "${mainRef}" could not be resolved in ${repo}` }
+  /**
+   * ★★★ 主干引用**由解析器给**，不是由一个缺省参数给 ────────────────────────────
+   *
+   *   旧写法：`const { …, mainRef = 'main' } = options` ⇒ 调用方不传就静默比 `main`，
+   *   而本仓的集成**不在** `main` 上（落后 209 个提交，见 `resolveTrunkRef`）
+   *   ⇒ 判据读错了引用，而**它的输出看不出这一点**（读起来像一个正常的 keep）。
+   *
+   *   ⇒ 现在：解析器答 `unresolved` ⇒ 判据答 `undecidable`。
+   *     ★ 这一个映射是刻意的：没有主干就**无从比较**，而"无从比较"
+   *       与"比过了、没被吸收"必须不同形 —— 后者会被人拿去做删除决策的反向依据。
+   */
+  const trunkResolution = resolveTrunkRef(repo, options.mainRef)
+  if (trunkResolution.status === 'unresolved') {
+    return { status: 'undecidable', why: trunkResolution.why }
   }
-  const mainHead = mainResult.value.trim()
+  const mainHead = trunkResolution.commit
+  /**
+   * ★ 人读的引用名：解析器说 `'explicit'` 就念**调用方给的那个**，
+   *   说 `'main-worktree-branch'` 就念**主树检出的那个分支**。
+   *   （判据自己不去跑 git 解析它 —— `commit` 才是已经核验过的那个。）
+   */
+  const mainRef = trunkResolution.ref
+  /** ★ 随裁决交出去的那一格（见 `TrunkReading`：让"这次比的是谁"可复核）。 */
+  const trunk: TrunkReading = {
+    ref: trunkResolution.ref,
+    commit: trunkResolution.commit,
+    source: trunkResolution.source,
+  }
 
   /**
    * ★ (a-Ⅰ) 已提交的部分**真的**被吸收了。
@@ -1547,6 +1736,7 @@ export function judgeWorktreeReclaimable(options: {
     return {
       status: 'keep',
       reason: 'not-absorbed',
+      trunk,
       behind,
       /**
        * ★ 这段措辞要能解释**三种**没被吸收的形状（否则读的人会以为"只有 merge 才算"）：
@@ -1574,6 +1764,7 @@ export function judgeWorktreeReclaimable(options: {
     return {
       status: 'keep',
       reason: 'unique-work',
+      trunk,
       behind,
       orphaned,
       detail: `${orphaned.length} uncommitted source file(s) exist ONLY here — their content appears in no commit`
@@ -1595,7 +1786,7 @@ export function judgeWorktreeReclaimable(options: {
        *     只有当真主顶端已经变过时，才落到 `'contained'`。
        */
       : filesAbsorbed ? 'files' : 'contained'
-  return { status: 'reclaimable', reason: 'absorbed', how, behind }
+  return { status: 'reclaimable', reason: 'absorbed', trunk, how, behind }
 }
 
 /** 把那个判定说成一句人话。★ 三态各有各的措辞（不许同形）。 */
@@ -1634,7 +1825,18 @@ export function describeReclaimability(verdict: WorktreeReclaimability): string 
     return `${how}${verdict.behind === undefined ? '' : ` (${verdict.behind} commit(s) behind)`} — safe to reclaim`
   }
   if (verdict.status === 'keep') {
-    return `${verdict.reason === 'unique-work' ? 'HELD: unique work' : 'HELD: not absorbed'} — ${verdict.detail}`
+    /**
+     * ★★★ W1：`keep` 那一句**必须**带上"拿谁比的"────────────────────────────────
+     *
+     *   本缺陷的原始形态里，一个**比错了引用**的 keep 与一个"产物真的没被吸收"的
+     *   keep **完全同形** —— 两者都说 "HELD: not absorbed"，而前者该修、后者该留。
+     *   ⇒ 把 `trunk` 念出来：读的人据此能去 `git merge-base --is-ancestor <head> <trunk.commit>`
+     *     复核，而不是相信一句无法证伪的话。
+     *   ★ 而它**不改判**：措辞里多一个可复核的坐标，裁决仍然是那一个。
+     */
+    const compared = `[compared against ${verdict.trunk.ref} @ ${verdict.trunk.commit.slice(0, 12)}`
+      + ` (${verdict.trunk.source === 'explicit' ? 'given explicitly' : 'the main worktree\'s checked-out branch'})]`
+    return `${verdict.reason === 'unique-work' ? 'HELD: unique work' : 'HELD: not absorbed'} — ${verdict.detail} ${compared}`
   }
   return `whether this worktree can be reclaimed could NOT be determined (${verdict.why}) — that is "not measured", not "safe to delete"`
 }

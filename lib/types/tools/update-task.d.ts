@@ -114,7 +114,18 @@ export declare function reclaimWorktreeAfterDelivery(options: {
      *   「连 git 台账一起清」的唯一出处（见 `removeWorktree` 的文件头）。
      */
     remove?: (path: string) => void;
-    /** 主干引用（默认 `main`，与权威实现一致）。 */
+    /**
+     * ★ 主干引用。**没有缺省值**（W1）。
+     *
+     *   旧注释逐字写着「主干引用（默认 `main`，与权威实现一致）」—— 而那句话本身
+     *   就是缺陷的一部分：本仓的集成**不在** `main` 上（实测落后 209 个提交），
+     *   所以"默认 main"意味着**判据永远在跟一个过期的引用比**。
+     *
+     *   ★ 现在缺省**不是**一个名字，而是一个问法：不给就由
+     *     `resolveTrunkRef(repo)` 从"主树自己检出在哪条分支"推出来。
+     *     ★ 而两处**生产**调用点都会先显式解析、再传进来 —— 那是这条链上唯一
+     *       能保证"比较对象是对的"的位置（见 `:1809` / `:2133` 两处的注释）。
+     */
     mainRef?: string;
 }): Promise<ReclaimOutcome>;
 /**
@@ -221,7 +232,10 @@ export declare function reclaimTerminalWorktrees(options: {
      *   签名与 {@link reclaimWorktreeAfterDelivery} 的那一格**刻意保持一致**。
      */
     remove?: (path: string) => void;
-    /** 主干引用（默认 `main`，与权威实现一致）。 */
+    /**
+     * ★ 主干引用。**没有缺省值**（W1）—— 理由与
+     *   {@link reclaimWorktreeAfterDelivery} 上那一格逐字相同（见那里）。
+     */
     mainRef?: string;
 }): Promise<{
     scanned: number;

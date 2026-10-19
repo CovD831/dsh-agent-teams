@@ -67,6 +67,19 @@ import {
   RECLAIM_OFF_ENV,
 } from './worktree-reclaim.mjs'
 
+/**
+ * ★ 权威实现（`lib/worktree.js`）—— W1 那几条臂直接问它，**不经过脚本层**。
+ *   ★ 为什么必须直问：本任务的缺陷有一份副本在**每一层**（`src/worktree.ts` 的
+ *     `mainRef = 'main'`、`scripts/worktree-reclaim.mjs` 的三处 `mainRef = 'main'`）。
+ *     只测脚本层，`src/` 那份缺省删没删是**测不出来**的。
+ */
+import {
+  judgeWorktreeReclaimable,
+  resolveTrunkRef,
+  mainWorktreeBranch,
+  describeReclaimability,
+} from '../lib/worktree.js'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 
 /** 跑一条 git 命令（`.trim()` —— t84 实测：不 trim 会让 SHA 带尾换行）。 */
@@ -3131,5 +3144,316 @@ test('★★★ t34 臂 19（★ 构建产物臂）：含 lib/ 的提交仍须�
     }
   } finally {
     f.done()
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ── ★★★ W1：回收判据读错了引用（mainRef 的静默缺省）─────────────────────────────
+//
+// 缺陷原话：`judgeWorktreeReclaimable` 的缺省是 `mainRef = 'main'`，而两处生产
+// 调用点都不传它 ⇒ 判据永远在跟一个**过期的** `main` 比。实测 `main` 落后集成
+// 分支 HEAD **209** 个提交（`git rev-list --count main..HEAD`）。
+// ⇒ 同一个判据、同一棵树，把引用从 `'main'` 换成集成分支，8 棵树的裁决从
+// `keep` 翻成 `reclaimable`。**磁盘 95% 满而 worktree 占 9.8G 就是这么来的。**
+//
+// ★ 本组臂的设计约束（两半边，缺一不可）：
+//   ① 正向：引用**选对**时，该回收的**确实**回收了；
+//   ② 反向：引用选对时，产物**真没被吸收**的**仍然** keep（判据不许被放宽成恒真）。
+//   只做 ① 会得到一个"什么都能删"的判据；只做 ② 会得到一个"什么都不删"的判据。
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** `maybeAncestor` 是不是 `descendant` 的祖先。★ 用退出码判（`--is-ancestor` 成功时无输出）。 */
+function reachable(cwd, maybeAncestor, descendant) {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', maybeAncestor, descendant], {
+      cwd, stdio: ['ignore', 'ignore', 'ignore'],
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('★★★★★ W1 臂 1（本任务的目的臂）：引用选错 ⇒ 该回收的**没回收**', async () => {
+  /**
+   * ── ★★★ 这一臂钉的就是缺陷的形态 ────────────────────────────────────────────
+   *
+   *   夹具刻意造出"主干在 `main`，而集成分支在别处"这个真实形状：
+   *
+   *     C0（main）── W（集成分支 task-mutation-integrate = W）
+   *
+   *   树停在 **W**，而 `main` **停在 C0** ⇒ W **不是** `main` 的祖先。
+   *   ⇒ 拿 `'main'` 去判 ⇒ `keep`（**这就是缺陷的读数**：明明产物已被吸收，却留着）
+   *   ⇒ 拿「主树检出的那条分支」去判 ⇒ `reclaimable how=ancestor`（**修好之后的读数**）
+   *
+   *   ★★ 两条断言**必须在同一次运行里都成立**：只断言后者，
+   *     一个恒返回 `reclaimable` 的实现也能通过。
+   */
+  const f = fixture()
+  try {
+    const C0 = f.head()
+    /** ② 主树切到集成分支（此后主树检出的就是它 —— 声明式来源读到的就是它）。 */
+    git(f.repo, ['checkout', '-q', '-b', 'task-mutation-integrate'])
+    /** ③ 在 worktree 里提交 W（detached，父是 C0）。 */
+    const wt = f.worktreeAt(C0, 'task-w1')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'w1.ts'), 'export const w1 = "delivered in the worktree"\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'deliverable'])
+    const W = git(wt, ['rev-parse', 'HEAD'])
+    /** ④ 集成分支快进到 W（模拟"产物被合流了"）。`main` 原地不动。 */
+    git(f.repo, ['merge', '-q', '--ff-only', W])
+
+    /**
+     * ── ★★★ 前置：W 在 `main` 上**真的不可达** ──────────────────────────────────
+     *
+     *   ★ 这一条是**必须的**，不是洁癖：若 C0 恰好等于 W 的父（或 `main` 也走到了 W），
+     *     那"两个引用给出不同答案"就成了同义反复 —— 臂在**没修**的情况下也会绿。
+     *     ★ t5 踩过这个坑：上游提交放在主线分支上，`trunk == upstreamCommit`
+     *       让整组断言变成恒真。⇒ 所以这里**先证明前提**，再断言结论。
+     */
+    assert.equal(reachable(f.repo, W, 'main'), false,
+      '★ 前置：W 在 main 上必须不可达（否则"选错引用"这个前提是假的）')
+    assert.equal(reachable(f.repo, W, 'task-mutation-integrate'), true,
+      '★ 前置：W 必须可从集成分支到达（否则"产物已被吸收"这个前提是假的）')
+
+    /** ⑤-a 缺陷形态的读数：显式拿 `'main'` 去判 ⇒ **keep**。 */
+    const withMain = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt, mainRef: 'main' })
+    assert.equal(withMain.status, 'keep',
+      `★★ 拿 main 去判必须答 keep（这就是"该回收的没回收"）。实测：${JSON.stringify(withMain)}`)
+
+    /** ⑤-b 修好之后的读数：不给 ⇒ 声明式来源 ⇒ **reclaimable**。 */
+    const declarative = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(declarative.status, 'reclaimable',
+      `★★★ 走声明式来源必须答 reclaimable。实测：${JSON.stringify(declarative)}`)
+    assert.equal(declarative.how, 'ancestor', JSON.stringify(declarative))
+    /** ★ 而"这次拿谁比的"**必须能从返回值读到**（不是只出现在日志里）。 */
+    assert.equal(declarative.trunk.ref, 'task-mutation-integrate', JSON.stringify(declarative.trunk))
+    assert.equal(declarative.trunk.source, 'main-worktree-branch', JSON.stringify(declarative.trunk))
+    assert.equal(declarative.trunk.commit, W, JSON.stringify(declarative.trunk))
+
+    /** ⑤-c 脚本层同样两半边（生产经这一层）。 */
+    const scriptMain = judgeWorktree({ repo: f.repo, worktree: wt, mainRef: 'main' })
+    assert.equal(scriptMain.status, 'keep', JSON.stringify(scriptMain))
+    const scriptDeclarative = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(scriptDeclarative.status, 'reclaimable', JSON.stringify(scriptDeclarative))
+    assert.equal(scriptDeclarative.how, 'ancestor', JSON.stringify(scriptDeclarative))
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ W1 臂 2（反向半边 · 甲）：主树 HEAD 与解析出的引用一致时，原本可清的仍然可清', async () => {
+  /**
+   * ★ 反向半边的第一半：**别为了修引用把正常情形弄坏**。
+   *   主树没换分支 ⇒ 声明式来源解析出来的就是 `main`
+   *   ⇒ 一棵"HEAD 是 main 祖先"的树必须**仍然** reclaimable。
+   *   ★ 若这一臂红，说明"删掉缺省"把普通情形也一起弄没了 —— 那是过度修复。
+   */
+  const f = fixture()
+  try {
+    const wt = f.worktreeAt(f.head(), 'task-plain')
+    f.commit('two')
+    f.commit('three')
+
+    const verdict = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(verdict.status, 'reclaimable', JSON.stringify(verdict))
+    assert.equal(verdict.how, 'ancestor', JSON.stringify(verdict))
+    /** ★ 解析出来的必须真的是主树检出的那条分支（这里是 `main`）。 */
+    assert.equal(verdict.trunk.ref, 'main', JSON.stringify(verdict.trunk))
+    assert.equal(verdict.trunk.source, 'main-worktree-branch', JSON.stringify(verdict.trunk))
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★★ W1 臂 3（反向半边 · 乙）：产物真的没被吸收 ⇒ 仍判 keep（判据不许被放宽成恒真）', async () => {
+  /**
+   * ★ 反向半边的第二半，也是**最容易被省略掉的那一半**：
+   *   把引用换成集成分支之后，一棵**产物只在树里、从未合流**的树，
+   *   必须仍然答 `keep / not-absorbed`。
+   *
+   *   构造：树在 W（从 C0 分出），而**集成分支只从 C0 走了一步到 C1**，W 没进去。
+   *   ⇒ W 不是 C1 的祖先、patch-id 不命中、逐文件不命中、内容不可达
+   *     ⇒ 四格全 falsy ⇒ `keep`。
+   *
+   * ★★ 而且**两种引用都要答 keep**：这条路与"读哪个引用"无关 ——
+   *   它测的是判据**没有**因为本次改动而变成恒真。
+   */
+  const f = fixture()
+  try {
+    const C0 = f.head()
+    /* 主树切到集成分支，并在**那条分支上**前进一格（避开 W）。 */
+    git(f.repo, ['checkout', '-q', '-b', 'task-mutation-integrate'])
+    f.commit('trunk-moves-on-without-w')
+    const C1 = f.head()
+    /* 树从 C0 分出并在其中提交 W —— 这份产物没有任何人吸收它。 */
+    const wt = f.worktreeAt(C0, 'task-unabsorbed')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'only-here-w1.ts'), 'export const onlyHere = "nobody merged this"\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'unabsorbed'])
+    const W = git(wt, ['rev-parse', 'HEAD'])
+
+    assert.equal(reachable(f.repo, W, C1), false, '★ 前置：W 必须不被集成分支吸收')
+
+    const verdict = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(verdict.status, 'keep',
+      `★★★ 产物没被吸收 ⇒ 必须 keep（否则判据被放宽成恒真了）。实测：${JSON.stringify(verdict)}`)
+    assert.equal(verdict.reason, 'not-absorbed', JSON.stringify(verdict))
+    /** ★ 而它必须说清"拿谁比的" —— 否则读的人无从复核（这正是缺陷的形态）。 */
+    assert.equal(verdict.trunk.ref, 'task-mutation-integrate', JSON.stringify(verdict.trunk))
+    assert.match(describeReclaimability(verdict), /compared against task-mutation-integrate @/,
+      '★ keep 的人话必须带出比较对象，否则"比错了引用的 keep"与"真的没吸收"同形')
+
+    /** 换回显式 `'main'` 也必须是 keep（这条与引用无关，测的是判据本体）。 */
+    const withMain = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt, mainRef: 'main' })
+    assert.equal(withMain.status, 'keep', JSON.stringify(withMain))
+  } finally {
+    f.done()
+  }
+})
+
+test('★★ W1 臂 4：「读到了名字」≠「读到了引用」—— 名字解析不出来时必须 unresolved', async () => {
+  /**
+   * ── ★★★ 这条臂钉的是一个**只能靠实测发现**的形状 ────────────────────────────
+   *
+   *   MEASURED：`git update-ref -d refs/heads/main`（HEAD 仍**符号指向** main）之后，
+   *     `git worktree list --porcelain` **照旧**打印 `branch refs/heads/main`（rc=0）
+   *     `git symbolic-ref --quiet --short HEAD` **照旧**答 `main`（rc=0）
+   *     而 `git rev-parse --verify --quiet 'main^{commit}'` **失败**（rc=1）
+   *
+   *   ⇒ 一个"信分支名"的解析器会在这里**拿到一个不存在的引用**，
+   *     然后拿它去 `merge-base` —— 而那必须落到 `undecidable`（判不了 ≠ 可以清）。
+   *   ★ 若不核实，这一格会被读成 `keep`（甚至 `reclaimable`），而读数是假的。
+   */
+  const f = fixture()
+  try {
+    const wt = f.worktreeAt(f.head(), 'task-unresolvable')
+    f.commit('two')
+    /** ★ 让名字还在（HEAD 仍符号指向 main），而引用**消失**。 */
+    git(f.repo, ['update-ref', '-d', 'refs/heads/main'])
+
+    /** ① 名字确实**还读得到** —— 否则这一臂测的就不是"核实"那一步。 */
+    const porcelain = git(f.repo, ['worktree', 'list', '--porcelain'])
+    assert.equal(mainWorktreeBranch(porcelain), 'main',
+      '★ 前置：删掉引用之后 `worktree list` 仍然打印那个分支名（这正是陷阱所在）')
+    /** ② 而它**解析不出来**。 */
+    let resolved = false
+    try {
+      git(f.repo, ['rev-parse', '--verify', '--quiet', 'main^{commit}'])
+      resolved = true
+    } catch { resolved = false }
+    assert.equal(resolved, false, '★ 前置：那个名字必须解析不出 commit（否则陷阱不存在）')
+
+    /** ③ 解析器必须答 `unresolved`，且 `why` 说清是"名字在、引用不在"。 */
+    const trunk = resolveTrunkRef(f.repo)
+    assert.equal(trunk.status, 'unresolved',
+      `★★ 名字读得到而引用读不到 ⇒ 必须 unresolved。实测：${JSON.stringify(trunk)}`)
+    assert.match(trunk.why, /main/, `★ why 必须点名那个分支。实测：${trunk.why}`)
+
+    /** ④ 判据必须落到 `undecidable`（**不是** keep，更不是 reclaimable）。 */
+    const verdict = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(verdict.status, 'undecidable',
+      `★★★ 没有可核验的主干 ⇒ undecidable（判不了 ≠ 可以清）。实测：${JSON.stringify(verdict)}`)
+    /** ⑤ 脚本层同样 —— 且人话必须把"没测到"与"可以删"分开。 */
+    const scripted = judgeWorktree({ repo: f.repo, worktree: wt })
+    assert.equal(scripted.status, 'undecidable', JSON.stringify(scripted))
+    assert.match(scripted.reason, /NOT be determined|not measured|safe to delete/i,
+      `★ 人话必须区分"没测到"与"可以删"。实测：${scripted.reason}`)
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★★ W1 臂 5（安全 · 端到端）：主干引用解析不出来时，`planReclaim --apply` 一个都不删', async () => {
+  /**
+   * ★ 这是"引用的解析"与"删除"之间**唯一**的接线点，所以必须端到端测：
+   *   解析失败 ⇒ 清单为空 ⇒ `applied: false` ⇒ 树**逐字节还在**。
+   *   ★ 只断言 `status === 'undecidable'` 是不够的：那只是判据说了什么，
+   *     而这一臂问的是"**删除动作**有没有发生"（判据对 ≠ 调用它的那条路对）。
+   */
+  const f = fixture()
+  try {
+    const wt = f.worktreeAt(f.head(), 'task-must-survive')
+    f.commit('two')
+    git(f.repo, ['update-ref', '-d', 'refs/heads/main'])
+
+    const result = planReclaim({ repo: f.repo, apply: true })
+    assert.equal(result.trunk.status, 'unresolved', JSON.stringify(result.trunk))
+    assert.equal(result.reclaimable.length, 0,
+      `★★ 没有主干 ⇒ 一棵都不许判成可清。实测：${JSON.stringify(result.reclaimable)}`)
+    assert.equal(result.removed.length, 0, `★★ 一个都不许删。实测：${JSON.stringify(result.removed)}`)
+    assert.equal(result.applied, false, '★ 什么都没判定就不许报 applied:true')
+    assert.ok(existsSync(wt), '★★★ 树必须还在 —— 这是这一臂的全部意义')
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ W1 臂 6：显式给出的引用**优先**于主树检出的分支，且两种来源可分辨', async () => {
+  /**
+   * ★ 两件事：
+   *   ① 调用方说比谁就比谁（解析器不替它改主意 —— 否则"我显式传了"变得不可信）；
+   *   ② `source` 必须能分辨 `'explicit'` 与 `'main-worktree-branch'` ——
+   *      两者的**可信度不同**（一个是调用方的意图，一个是从仓库状态推出来的）。
+   */
+  const f = fixture()
+  try {
+    const C0 = f.head()
+    git(f.repo, ['checkout', '-q', '-b', 'task-mutation-integrate'])
+    const wt = f.worktreeAt(C0, 'task-explicit')
+    git(wt, ['config', 'user.email', 't@t'])
+    git(wt, ['config', 'user.name', 't'])
+    writeFileSync(join(wt, 'src', 'e.ts'), 'export const e = 1\n')
+    git(wt, ['add', '-A'])
+    git(wt, ['commit', '-qm', 'deliverable'])
+    const W = git(wt, ['rev-parse', 'HEAD'])
+    git(f.repo, ['merge', '-q', '--ff-only', W])
+
+    const explicit = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt, mainRef: 'main' })
+    assert.equal(explicit.trunk.source, 'explicit', JSON.stringify(explicit.trunk))
+    assert.equal(explicit.trunk.ref, 'main', JSON.stringify(explicit.trunk))
+    /** ★ 显式给 `main` ⇒ 就按 `main` 判 ⇒ 没吸收 ⇒ keep（不被主树的分支带跑）。 */
+    assert.equal(explicit.status, 'keep', JSON.stringify(explicit))
+
+    const declarative = judgeWorktreeReclaimable({ repo: f.repo, worktree: wt })
+    assert.equal(declarative.trunk.source, 'main-worktree-branch', JSON.stringify(declarative.trunk))
+    assert.equal(declarative.status, 'reclaimable', JSON.stringify(declarative))
+    /** ★ 两种来源**必须可分辨** —— 否则读日志的人分不出这次比较可不可信。 */
+    assert.notEqual(explicit.trunk.source, declarative.trunk.source)
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★ W1 臂 7（接线臂）：两处生产调用点都**显式**把引用传下去了', async () => {
+  /**
+   * ★ 判据再对，调用点不传就等于没修 —— 这正是本缺陷的原始形态
+   *   （判据有缺省、而两个调用点都不传 ⇒ 缺陷**在接线处**成立）。
+   *
+   * ★ 断言的粒度：**两个调用块内**都要出现 `mainRef`，而不是"文件里出现过"。
+   *   后者会被函数签名行（`mainRef?: string`）满足 ⇒ 恒真的判据。
+   */
+  const source = readFileSync(join(HERE, '..', 'src', 'tools', 'update-task.ts'), 'utf8')
+  const blocks = [
+    ['reclaimWorktreeAfterDelivery', 'reclaimWorktreeAfterDelivery({'],
+    ['reclaimTerminalWorktrees', 'reclaimTerminalWorktrees({'],
+  ]
+  for (const [label, opener] of blocks) {
+    const at = source.indexOf(opener)
+    assert.ok(at > 0, `★ 找不到 ${label} 的调用块 —— 接线臂会变成恒真`)
+    /**
+     * ★★ 窗口**必须往前够**：解析发生在**调用之前**（`const trunkRef = resolveTrunkRef(...)`），
+     *   所以只往后切片会漏掉它 —— 而漏掉的后果是这条臂**对着一个正确实现报红**，
+     *   读起来像"没接线"。★ 这是我自己踩的：第一版窗口是 `[at, at+1200)`。
+     */
+    const block = source.slice(Math.max(0, at - 1600), at + 1200)
+    assert.match(block, /mainRef:/,
+      `★★★ ${label} 的调用块里必须显式传 mainRef（否则判据落回解析器，比较对象不可控）`)
+    assert.match(block, /resolveTrunkRef\(/,
+      `★★ ${label} 必须**先解析再传** —— 只传一个字面量等于把缺陷换个位置`)
   }
 })
