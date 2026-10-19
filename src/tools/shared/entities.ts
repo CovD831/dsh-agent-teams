@@ -2453,7 +2453,17 @@ export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshn
      *   ⇒ ★ 我第一版改写把后者去掉了（换成了 "restart the host"），于是臂 10 红。
      *     而那正是"改一条消息时，要核【谁在读它】"的那一格。
      */
-    return `this process is running an OLDER build than the one on disk (${detail}) `
+    /**
+     * ★★ 2026-10-20：这里曾是 `an OLDER build than the one on disk`，而臂 10 钉的
+     *   字样是 `OLDER than the one on disk` —— 于是这一臂从 `89419bc` 起一直是红的，
+     *   而它红的理由**不是判据错**，只是我在"说清它旧掉的是哪一版"时多插了一个词。
+     *
+     *   ★ 修法是**改实现而不是改断言**：断言钉的那句本身就在说"这一态必须明说自己旧"，
+     *     而 `reload the plugin` 那半句钉的是"必须指向动作"—— 两条都是对**内容**的要求，
+     *     不是对措辞的洁癖。把 `build` 挪到括号里，两句话都保住了。
+     *   ★ 而一条常年失红的臂等于没有臂：红着的时候没人再看它。
+     */
+    return `this process is running a build that is OLDER than the one on disk (${detail}) `
       + '— a stale build does not merely warn: it can re-open a defect that is already fixed, '
       + 'and it blocks BOTH terminal states (a refusal here may be that old defect, not your work). '
       + 'Do not retry, do not alter the deliverable, and do not fabricate a field: stop and report. '
