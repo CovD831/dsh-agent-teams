@@ -14,6 +14,15 @@ import type { FailureKind, VisualTaskState } from './state.ts';
 import type { CollectionHealth } from './evolution/types.ts';
 import type { SignalsHealthRead } from './evolution/read.ts';
 /**
+ * ── ★★★ t4 / N2：分流层的**生产出口**（`propose.ts` + `history.ts` 的第一个生产消费者）──
+ *
+ * 背景（`docs/EVOLUTION-WIRING-GAP.md` §1）：`propose.ts` 零消费者、`history.ts` 零消费者
+ * ⇒ "把一条信号转成一个提案"这一步**在代码里存在、而没有任何路径走过它**。
+ * 本节把它接在与 `collectionHealth` **同一条路**上（`/state` → `collectTeamsActivity`
+ * → `assembleTeamSnapshot`）—— 于是"产出了提案"这件事第一次**在盘上读得到**。
+ */
+import { type ProposalPipelineReadout } from './evolution/index.ts';
+/**
  * Visual task state for the activity panel.
  *
  * ── ★★ M4 收敛（t65）：本类型**不再在这里声明** ────────────────────────────────
@@ -281,6 +290,25 @@ export interface TeamActivitySnapshot {
      *   （读文件抛了非 ENOENT 的错等）。
      */
     readonly collectionHealthUnmeasurable?: string;
+    /**
+     * ── ★★★ t4 / N2：分流读数（`readProposalPipeline` 的产出）──────────────────────────
+     *
+     * ★ 四格各自回答一个**不同**的问题，不许互相顶替：
+     * ```
+     *   · 缺席                    ⇒ signals.jsonl 没开过（流水线没走过）
+     *   · routing.produced        ⇒ 产出了几份提案（可执行：`createTaskParamsOf` → create_task）
+     *   · routing.none            ⇒ 看过了、真的不必改
+     *   · routing.unmeasured      ⇒ ★ 判不了（带 `unmeasuredReasons` 说清卡在哪）
+     * ```
+     * ★★ **三态不同形**是本格存在的全部理由：若把 `unmeasured` 并进 `none`，
+     *   "分流层坏了"就会表现为"库里安静地没有提案" —— 而那与"确实没有提案"同形。
+     */
+    readonly proposalPipeline?: ProposalPipelineReadout;
+    /**
+     * ★★ t4：分流读数**算不了**时的原因（只在真的算不了时在场 —— 缺席 = 算出来了）。
+     * ★ 与 `proposalPipeline: undefined`（signals 文件缺席，正常态）**不同形**。
+     */
+    readonly proposalPipelineUnmeasurable?: string;
     /**
      * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
      *

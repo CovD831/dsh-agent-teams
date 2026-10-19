@@ -32,6 +32,15 @@ import { collectionHealthOf } from './evolution/health.ts'
 import { readSignalsHealth } from './evolution/read.ts'
 import type { CollectionHealth } from './evolution/types.ts'
 import type { SignalsHealthRead } from './evolution/read.ts'
+/**
+ * ── ★★★ t4 / N2：分流层的**生产出口**（`propose.ts` + `history.ts` 的第一个生产消费者）──
+ *
+ * 背景（`docs/EVOLUTION-WIRING-GAP.md` §1）：`propose.ts` 零消费者、`history.ts` 零消费者
+ * ⇒ "把一条信号转成一个提案"这一步**在代码里存在、而没有任何路径走过它**。
+ * 本节把它接在与 `collectionHealth` **同一条路**上（`/state` → `collectTeamsActivity`
+ * → `assembleTeamSnapshot`）—— 于是"产出了提案"这件事第一次**在盘上读得到**。
+ */
+import { readProposalPipeline, type ProposalPipelineReadout } from './evolution/index.ts'
 
 /**
  * Visual task state for the activity panel.
@@ -308,6 +317,25 @@ export interface TeamActivitySnapshot {
    *   （读文件抛了非 ENOENT 的错等）。
    */
   readonly collectionHealthUnmeasurable?: string
+  /**
+   * ── ★★★ t4 / N2：分流读数（`readProposalPipeline` 的产出）──────────────────────────
+   *
+   * ★ 四格各自回答一个**不同**的问题，不许互相顶替：
+   * ```
+   *   · 缺席                    ⇒ signals.jsonl 没开过（流水线没走过）
+   *   · routing.produced        ⇒ 产出了几份提案（可执行：`createTaskParamsOf` → create_task）
+   *   · routing.none            ⇒ 看过了、真的不必改
+   *   · routing.unmeasured      ⇒ ★ 判不了（带 `unmeasuredReasons` 说清卡在哪）
+   * ```
+   * ★★ **三态不同形**是本格存在的全部理由：若把 `unmeasured` 并进 `none`，
+   *   "分流层坏了"就会表现为"库里安静地没有提案" —— 而那与"确实没有提案"同形。
+   */
+  readonly proposalPipeline?: ProposalPipelineReadout
+  /**
+   * ★★ t4：分流读数**算不了**时的原因（只在真的算不了时在场 —— 缺席 = 算出来了）。
+   * ★ 与 `proposalPipeline: undefined`（signals 文件缺席，正常态）**不同形**。
+   */
+  readonly proposalPipelineUnmeasurable?: string
   /**
    * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
    *
@@ -635,6 +663,47 @@ export async function assembleTeamSnapshot(
       collectionHealthUnmeasurable = String((error as { message?: unknown })?.message ?? error)
     }
   }
+  /**
+   * ── ★★★ t4 / N2：算分流读数（`propose.ts` / `history.ts` 的第一个生产消费者）────────
+   *
+   * ★ 落点与 `collectionHealth` **完全相同**（`/state` → `collectTeamsActivity` → 这里）——
+   *   理由也一样：那是 UI **真读**的通道。接在这里之后，
+   *   `routeSignals` / `readProposalPipeline` 在 `src/` 里第一次有了【非测试】调用方。
+   *
+   * ★★ 读**同一份** `signals.jsonl`，**不**再开第二个口径：`readProposalPipeline` 内部
+   *   用的是 `signalsPathOf(stateRoot)`（与 `readSignalsHealth` 同一个函数）——
+   *   所以"两个读数看的是不是同一份文件"在这份形状下**写不出分叉**。
+   *
+   * ★★ 归档团队（`historic`）同样**不算**：理由与上面那格逐字相同（archive 树的
+   *   `signals.jsonl` 不是现役读数）。★ 但**措辞不同形**：这里留给它一条
+   *   `proposalPipelineUnmeasurable`，而不是让整格静默缺席 ——
+   *   因为归档团队**确实**有一条"为什么这格算不出来"的原因可讲。
+   */
+  let proposalPipeline: TeamActivitySnapshot['proposalPipeline']
+  let proposalPipelineUnmeasurable: string | undefined
+  if (options.historic === true) {
+    proposalPipelineUnmeasurable = 'archived team: the routing readout is only computed for live teams'
+  } else {
+    try {
+      const readout = await readProposalPipeline(stateRoot, async (path, encoding) => {
+        const { readFile } = await import('node:fs/promises')
+        return readFile(path, encoding)
+      })
+      /**
+       * ★★ `unmeasured` ⇒ 整格缺席（**不是**空读数）：
+       *   把"流水线没开过"投影成 `{ total: 0, produced: 0, none: 0 }` 会让它与
+       *   "开了、看了 0 条、确实没有提案"同形 —— 而两者的补救动作相反。
+       */
+      if (readout.status === 'unmeasured') {
+        proposalPipeline = undefined
+      } else {
+        proposalPipeline = readout
+      }
+    } catch (error: unknown) {
+      /** ★ 算不了是**异常** —— 与"文件缺席"不同形（同 `collectionHealthUnmeasurable` 口径）。 */
+      proposalPipelineUnmeasurable = String((error as { message?: unknown })?.message ?? error)
+    }
+  }
   return {
     workspace,
     teamId: state.id,
@@ -807,6 +876,15 @@ export async function assembleTeamSnapshot(
      */
     ...collectionHealth === undefined ? {} : { collectionHealth },
     ...collectionHealthUnmeasurable === undefined ? {} : { collectionHealthUnmeasurable },
+    /**
+     * ── ★★★ t4 / N2：分流读数（只【算出来】时在场）─────────────────────────────────
+     *
+     * · `proposalPipeline` **缺席** = `signals.jsonl` 没开过（流水线没走过）。
+     * · `proposalPipelineUnmeasurable` **在场** = 真的算不了（异常 / 归档团队）。
+     * ★ 两者不同形：前者是**正常态**（还没开始采集），后者是**异常**。
+     */
+    ...proposalPipeline === undefined ? {} : { proposalPipeline },
+    ...proposalPipelineUnmeasurable === undefined ? {} : { proposalPipelineUnmeasurable },
   }
 }
 

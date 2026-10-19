@@ -17,7 +17,7 @@
  * ★★ 两条口径会漂移；一套不会。
  */
 
-import type { Proposal, RoutingDecision } from './types.ts'
+import type { Proposal, RoutingDecision, RoutingEffectRef, RoutingTargetRef } from './types.ts'
 
 /**
  * ── ★★ 提案 id 的分配 —— ★ **从调用方给的既有 id 推进**（不在这里读盘）──────────────
@@ -126,4 +126,381 @@ export function unknownCreateTaskKeys(params: CreateTaskParams): readonly string
  */
 export function unmeasuredDecision(why: string): RoutingDecision {
   return { needChange: false, modality: 'unmeasured', why }
+}
+
+/**
+ * ── ★★★ t4 / N2：**分流** —— 把一条信号变成一份提案（`routeSignal`）────────────────
+ *
+ * 这是 `docs/EVOLUTION-WIRING-GAP.md` §3 说的那个"缺的产生方"：
+ *
+ * ```
+ * ★ t91 造了 `RoutingDecision`（五态）与 `Proposal`
+ * ★★ 而没有任何路径产生过一个 Proposal
+ * ⇒ ★★★ 缺的是:"把一条信号转成一个 Proposal" —— ★ 那正是【分流】那一步
+ * ```
+ *
+ * ── ★★ 本函数是**纯函数**（不 I/O、不读盘、不抛）─────────────────────────────────
+ *
+ * ★ 三个理由，缺一不可：
+ *   ① 它跑在**快照组装**上（`/state` 每次轮询都会走到），一次磁盘读都不该有；
+ *   ② `docs/SELF-ITERATION-PLAN.md` §N2 要求"纯函数，五态，不 I/O"；
+ *   ③ ★★ 纯函数才**可被逐条复现** —— 同一条信号今天与明天必须给出同一个裁决，
+ *      否则"这条为什么没成提案"就变成一句无法复核的解释。
+ *
+ * ★★ 而"纯"的边界写清：它**不做**两件看起来该做的事 ——
+ *   · 它**不**扫既有的 `proposals.jsonl` 去算 id（id 由调用方给，见 {@link nextProposalId}）；
+ *   · 它**不**决定"要不要派"（那是 `docs/PLAN-REVIEW.md` 的分档闸，不是分流）。
+ *
+ * ── ★★★ 三态：产出了 / 判不了 / 真的没有 —— **三条路径在读数上不同形** ───────────────
+ *
+ * ```
+ *   produced    ⇒ 产出一份 Proposal（`proposal` 在场）
+ *   unmeasured  ⇒ 判不了：缺输入（没有 `record` / 消息为空 / 归类不出来）
+ *                 ⇒ `decision.modality === 'unmeasured'` 且**没有** `proposal`
+ *   none        ⇒ 真的没有：看过了，这条信号不该变成提案
+ *                 ⇒ `decision.modality === 'none'` 且**没有** `proposal`
+ * ```
+ *
+ * ★★ 为什么 `unmeasured` 不许并进 `none`：两者的**补救动作相反** ——
+ *   `none` 是"这条不必改"（事情做完了），`unmeasured` 是"我们还不知道"（回去补输入）。
+ *   并起来之后，"分流层坏了"会表现为"库里安静地没有提案" —— 而那与"确实没有提案"同形。
+ *   ★ 这正是本仓记账最久的那个形态，也是本文件存在的理由。
+ *
+ * ★ 而第三个字段 `{ produced, proposal }` 把**同一个判断**写成两格：
+ *   `produced` 是机器读的（可数），`proposal` 是给 `create_task` 的（可执行）。
+ *   两格必须同时在场/同时缺席 —— 那是**同一个事实的两种形状**，不是两个判断。
+ */
+export interface SignalRoute {
+  /** ★ 哪种形态（三态之一，与 `decision.modality` 一致地解释）。 */
+  readonly outcome: 'produced' | 'none' | 'unmeasured'
+  /** ★★ 分流依据 —— **无条件的**（三态都有，连 `unmeasured` 也必须说清卡在哪）。 */
+  readonly decision: RoutingDecision
+  /** ★ 产出的提案（只有 `outcome === 'produced'` 时在场）。 */
+  readonly proposal?: Proposal
+}
+
+/**
+ * ★ 分流需要的那部分信号形状 —— **按结构收，不按 `EvolutionSignal` 收**。
+ *
+ * 理由与 `propose.ts` 的既有纪律同源（`nextProposalId` 不自己扫盘）：
+ * 读盘那件事已经由 `read.ts` 做完并给了 `HealthRecord`，而**这一层只做判断**。
+ * ★ 而两代形状（t88 手工补录 / t87 `observe` 采集）**都要能喂进来** ——
+ * 所以这里只要求**两种形状都有的那几格**。
+ */
+export interface RoutableSignal {
+  /** ★ 信号 id（`e-0007`）—— 进 `Proposal.from`，回溯用。 */
+  readonly id: string
+  /** ★ 原文，不改写（`observe` 的 `message` / t88 的 `title`）。 */
+  readonly message: string
+  /** ★ 确定性来源（`source.where`）—— 分流的**第一依据**。 */
+  readonly where?: string
+  /** ★ 判据 id（`source.gateId`）—— 有它时**优先于 `where`** 当靶。 */
+  readonly gateId?: string
+  /** ★ 工具名（`source.tool`）。 */
+  readonly tool?: string
+  /** ★ 信号三分类（`rejection` / `success` / `insight`）。 */
+  readonly kind?: string
+  readonly at?: number
+}
+
+/** ★ 分流要用的**既有读数** —— 由调用方注入（本模块不读盘）。 */
+export interface RoutingContext {
+  /** ★ 这一批信号的条数（**缺席** ⇒ 判不了：没有分母就算不出"占多少"）。 */
+  readonly batchSize?: number
+  /**
+   * ★ 每个 `(component, kind)` 桶各多少条 —— `effect` 的**指向依据**。
+   * ★ 缺席时 `effect` 仍然能给（用这条信号自己的 where/kind），
+   *   但 `why` 里会**如实说明**"这是按本条信号自身归的桶，不是按整批读数"。
+   */
+  readonly bucketCounts?: ReadonlyMap<string, number>
+}
+
+/**
+ * ★ 靶的类型：判据 id 有 ⇒ `{kind:'gate', ref}`（**结构化**，新写入一律结构化）；
+ * 没有 ⇒ 只能给一条**描述性字符串**（t88 的历史形状，对分流合格、对收益不合格）。
+ */
+function targetOf(signal: RoutableSignal): { readonly target: RoutingTargetRef; readonly why: string } | undefined {
+  if (signal.gateId !== undefined && signal.gateId.trim() !== '') {
+    return {
+      target: { kind: 'gate', ref: signal.gateId },
+      why: `the signal names gate "${signal.gateId}" (source.gateId), so the change has a mechanical target`,
+    }
+  }
+  if (signal.where !== undefined && signal.where.trim() !== '') {
+    /**
+     * ★ **不编判据名**：`source.where` 是"哪个入口拒的"，不是判据 id。
+     *   把它写成 `{kind:'gate'}` 会让"这个位置没有判据"伪装成"有一条判据"。
+     */
+    return {
+      target: `${signal.where}: the rejection point named by source.where (no gate id was recorded)`,
+      why: `the signal names the rejection point "${signal.where}" but records no gate id, so the target can only be descriptive`,
+    }
+  }
+  return undefined
+}
+
+/**
+ * ★★ 分流的**五态判定** —— 一条信号该以什么形态改。
+ *
+ * 规则（逐条可核，不猜）：
+ * ```
+ *   ① kind === 'success'                        ⇒ none（这条是成功记录，没有要改的东西）
+ *      ★ **先判它**：这一问的答案不依赖 where，见下面判序那段实测
+ *   ② where/message 有任何一格缺失或空白          ⇒ unmeasured（缺输入，不是"不必改"）
+ *   ③ 有 gateId                                 ⇒ hard（机械靶：去改/加那条判据）
+ *   ④ 只有 where、没有 gateId                    ⇒ contract（要人/agent 实施的一条任务）
+ *   ⑤ 其余（两代形状都归不出来）                  ⇒ unmeasured（判不了，不硬塞）
+ * ```
+ *
+ * ★★ 为什么 ③ 是 `hard` 而不是 `soft`：`source.gateId` 的存在**本身**就是
+ *   "这件事有一条机读的判据在管"的证据（`observe` 只在判据求值处传 `gateId`）。
+ *   ⇒ 要动它 = 动判据的**内容** ⇒ 机械可判 ⇒ `hard`。
+ *   ★ 而 `contract` 那一路是"知道哪个入口拒的，但说不出是哪条判据" ⇒
+ *   只能变成一条**要人写**的任务契约 —— 那正是本仓 `create_task` 的形状。
+ *
+ * ★★★ 而"五态各有非零实例"是本函数**必须能自证**的性质（§N2 acceptance ①）：
+ *   真实台账上 `hard`（14 条带 gateId）/ `contract`（23 条只有 where）都会出现；
+ *   `unmeasured` 由缺输入臂造出来；`none` 由 `success` 臂造出来；
+ *   `soft` **不**由分流产出 —— ★ 它不是"没有实例"，而是**分流不产 `soft`**：
+ *   `soft` 是"改 prompt / profile"，而一条**判据拒绝**信号说不清该改哪句 prompt。
+ *   ⇒ ★ 如实写在这里，而不是为了凑五态编一条规则出来。
+ */
+function decideRouting(signal: RoutableSignal): RoutingDecision {
+  const where = signal.where?.trim() ?? ''
+  const gateId = signal.gateId?.trim() ?? ''
+  const message = signal.message.trim()
+  /**
+   * ── ★★★ 判序（t4 现场修正，**顺序本身就是这条判据的一部分**）──────────────────
+   *
+   * MEASURED（真实台账，47 行）：t88 那 10 行手工补录里**有 1 行 `kind: 'success'`**，
+   * 而它同样没有 `source.where`。⇒ 若先判"缺输入"，这一行会被判成 `unmeasured`；
+   * 而它**其实是"真的不必改"** —— 那正是本条验收禁止的合流。
+   *
+   * ★ 判序的理由（不是风格问题）：
+   * ```
+   *   · `success` 这一问的答案**不依赖 `where`** —— "这是成功记录，没有要改的东西"
+   *     从 `kind` 一格就能判定。⇒ 缺 `where` 挡不住它。
+   *   · 而 `rejection`/`insight` 那一问要的是"改哪里" ⇒ 缺 `where` **确实**挡得住它。
+   * ⇒ 顺序：先判**结论不受缺格影响的**那一支，再判**依赖缺格的**那一支。
+   * ★ 反过来（先判缺格）就会把"确实不必改"折叠进"判不了" —— 而两者的
+   *   补救动作相反（一个是收工，一个是回去补输入）。
+   * ```
+   */
+  /** ★ ① 成功记录 ⇒ 真的不必改（★ 与 ② 不同形：这一条**测得了**，且结论是"不用改"）。 */
+  if (signal.kind === 'success') {
+    return {
+      needChange: false,
+      modality: 'none',
+      why: `routing: this signal recorded a SUCCESS (kind: 'success'), not a rejection — there is nothing to change`
+        + (where === '' ? ' (it names no source.where, and it does not need to: the answer "nothing to change" does not depend on where it happened)' : ` at "${where}"`)
+        + ' (a success signal that became a proposal would be the loop inventing work for itself)',
+      ...(() => { const t = targetOf(signal); return t === undefined ? {} : { target: t.target } })(),
+    }
+  }
+  /** ★ ② 缺输入 ⇒ 判不了（说不清是谁在哪拒的，就谈不上怎么改）。 */
+  if (where === '' || message === '') {
+    return unmeasuredDecision(
+      `routing: cannot decide what to change — the signal is missing `
+      + `${where === '' ? 'source.where' : ''}${where === '' && message === '' ? ' and ' : ''}${message === '' ? 'message' : ''} `
+      + `(a signal that cannot say where it was rejected cannot say what to change)`,
+    )
+  }
+  /** ★ ③ 有判据 id ⇒ 机械靶。 */
+  if (gateId !== '') {
+    return {
+      needChange: true,
+      modality: 'hard',
+      why: `routing: the rejection at "${where}" names gate "${gateId}" — that gate is a machine-checkable predicate, `
+        + 'so the change is to the predicate itself (add a clause / fix its input), not to a prompt',
+      target: { kind: 'gate', ref: gateId },
+    }
+  }
+  /**
+   * ★ ④ 只有 where ⇒ 一条要人实施的任务契约。
+   *   ★ 而 `target` 只能是描述性的（`targetOf` 的第二路）—— 不编判据名。
+   */
+  const described = targetOf(signal)
+  return {
+    needChange: true,
+    modality: 'contract',
+    why: `routing: the rejection at "${where}" records no gate id — the criterion that fired cannot be named, `
+      + 'so the fix has to be spelled out as a task contract rather than as a predicate change',
+    ...described === undefined ? {} : { target: described.target },
+  }
+}
+
+/**
+ * ★★ `effect` 的**靶**：这条提案生效后，哪个 `(component, kind)` 桶该下降。
+ *
+ * ★ 它必须**总是**给出（§N2 acceptance ② 要"至少一条带 target 与 effect"，
+ *   而这里把 `effect` 做成**无条件**的）—— 理由：`effect` 是**与评估器的接口**
+ *   （`MODULE-IO-CONTRACTS.md` §3.2：没有它，收益就只能靠感觉）。
+ *   ★ 而缺省那条**不是编的**：它就是这条信号自己落进的那个桶
+ *   （`read.ts` 的 `healthRecordOf` 用的同一套投影：`component ← source.where`、
+ *   `kind ← [signal.kind]`），所以"这条不再发生"**必然**让那个桶下降。
+ */
+function effectOf(signal: RoutableSignal): RoutingEffectRef {
+  const component = signal.where?.trim() ?? ''
+  const kind = signal.kind === undefined || signal.kind.trim() === '' ? '(unclassified)' : signal.kind.trim()
+  /** ★ `component` 为空时**不编**一个桶名 —— 让它显式缺席（`(unattributed)` 是 health.ts 的兜底，不是这里编的）。 */
+  return component === '' ? { component: '(unattributed)', kind: [kind] } : { component, kind: [kind] }
+}
+
+/**
+ * ★ 一份提案的 `contract` —— 从信号**能读出什么就写什么**，读不出就**不写**。
+ *
+ * ★★ 这里最容易犯的错是"把 `message` 原文抄进 `objective` 就算完"——
+ *   那会产出一张**看起来完整**、而 `acceptance` 是空的任务契约，
+ *   而空验收的任务在派发闸门上是**会被拒**的（`implementation/repair` 类必须带验收）。
+ *   ⇒ 所以 `acceptance` 至少给一条**可读真假**的断言："这条信号不再出现"。
+ *
+ * ★ 而 `verify` **不写**：一句机械命令要从一条自由文本 `message` 里编出来，
+ *   编出来的那条命令**必然**是在杜撰 —— 那正是本仓反复记账的"恒真验收"的来源。
+ *   ⇒ 缺 `verify` 是**诚实**的（`create_task` 里 `verify` 是可选）。
+ */
+function contractOf(signal: RoutableSignal): Proposal['contract'] {
+  const where = signal.where?.trim() ?? ''
+  const gateId = signal.gateId?.trim() ?? ''
+  const bucket = effectOf(signal) as { readonly component: string; readonly kind: readonly string[] }
+  const subject = gateId !== ''
+    ? `Stop the rejection at ${gateId}`
+    : `Stop the rejection at ${where}`
+  return {
+    subject,
+    /** ★ 质量类才需要验收；这里给 `repair`（它**就是**在修一条反复发生的拒绝）。 */
+    kind: 'repair',
+    objective: `Make "${where}" stop rejecting with: ${signal.message}`,
+    /** ★★ 至少一条**可读真假**的断言 —— 不是"改好了"，而是"这个桶降了"。 */
+    acceptance: [
+      `the (${bucket.component}, ${bucket.kind.join(',')}) bucket drops below its reading at the time this proposal was produced`
+      + (gateId === '' ? '' : `, and the rejection message from ${gateId} no longer appears in signals.jsonl`),
+    ],
+    inScope: [where],
+    nonGoals: [
+      'this proposal does NOT widen or relax the criterion that fired — if the criterion is itself in loop B '
+      + '(collection-gates / verify-command / confidence-threshold), changing it is a human decision',
+    ],
+  }
+}
+
+/**
+ * ★★★ **把一条信号转成一份提案** —— `propose.ts` 的产生方（t4 / §N2 第 ② 步）。
+ *
+ * @param signal  - 一条信号（两代形状都收，见 {@link RoutableSignal}）。
+ * @param knownMax - 既有提案的最大编号（★ 由调用方给：本模块**不读盘**）。
+ * @param context - 分流要用的既有读数（**可选** —— 缺席时 `why` 会如实说明口径）。
+ * @returns 三态之一（见 {@link SignalRoute}）。★ **从不抛**：一条坏信号不许让整批消失。
+ */
+export function routeSignal(
+  signal: RoutableSignal,
+  knownMax: number,
+  context: RoutingContext = {},
+): SignalRoute {
+  const decision = decideRouting(signal)
+  /** ★ 判不了 / 不必改 ⇒ **没有提案**，而两者的 `modality` 已经不同形。 */
+  if (decision.modality === 'unmeasured') return { outcome: 'unmeasured', decision }
+  if (decision.modality === 'none') return { outcome: 'none', decision }
+  /**
+   * ★ 这里只剩 `hard` / `contract`（`soft` 不由分流产出，见 {@link decideRouting}）。
+   *   ⇒ 两者都产出一份**可执行**的提案。
+   */
+  const effect = effectOf(signal)
+  const routed: RoutingDecision = {
+    ...decision,
+    effect,
+    why: context.bucketCounts === undefined
+      ? `${decision.why}. The effect bucket is derived from this signal alone `
+        + `(${JSON.stringify(effect)}); no batch reading was supplied, so it does not claim a share of a total.`
+      : `${decision.why}. The effect bucket is ${JSON.stringify(effect)}, `
+        + `which currently holds ${context.bucketCounts.get(`${(effect as { component: string }).component}|${(effect as { kind: readonly string[] }).kind.join(',')}`) ?? 0} `
+        + `of ${context.batchSize ?? 0} signals in this batch.`,
+  }
+  return {
+    outcome: 'produced',
+    decision: routed,
+    proposal: {
+      id: nextProposalId(knownMax),
+      at: signal.at ?? 0,
+      contract: contractOf(signal),
+      routing: routed,
+      from: [signal.id],
+    },
+  }
+}
+
+/**
+ * ★★ 一整批信号的分流读数 —— **三态各有一格计数，且不是同一个数**。
+ *
+ * ★ 为什么要有这个（而不是让调用方自己数）：三态若在调用点各数一遍，
+ *   它们会分叉（本仓记账最贵的那类缺陷）。⇒ 聚合只有这一处实现。
+ *
+ * ★★ 而 `unmeasured` 那一格**必须**能说清"卡在哪"：`reasons` 是
+ *   每条 `unmeasured` 的 `why`（去重后按出现次数降序）—— ★ 一句"3 条判不了"
+ *   若说不出是哪三类的什么信息缺了，它就只是一句噪音。
+ */
+export interface RoutingReadout {
+  /** ★ 这批一共看了几条（**分母**：没有它，"产出了 2 条"说不出比例）。 */
+  readonly total: number
+  /** ★ 产出了提案的条数。 */
+  readonly produced: number
+  /** ★ 真的不必改的条数。 */
+  readonly none: number
+  /** ★ 判不了的条数（★ 与 `none` **不同形**）。 */
+  readonly unmeasured: number
+  /** ★ 五态各自的条数（`modality` 逐格，含恒为 0 的 `soft` —— 缺格会被读成"没算"）。 */
+  readonly byModality: Readonly<Record<RoutingDecision['modality'], number>>
+  /** ★ 产出的提案（按 `from` 里的信号 id 可回溯）。 */
+  readonly proposals: readonly Proposal[]
+  /** ★★ 判不了的**原因清单**（去重 + 计数）—— 说不出原因的 `unmeasured` 不算读数。 */
+  readonly unmeasuredReasons: readonly { readonly why: string; readonly count: number }[]
+}
+
+/**
+ * ★ 分流一整批 —— `routeSignal` 的批处理面（**纯函数**，同一条纪律）。
+ *
+ * @param signals - 一批信号（顺序即 id 分配顺序 ⇒ 可复现）。
+ * @param knownMax - 既有提案的最大编号（★ 由调用方给）。
+ * @param context - 可选读数。
+ */
+export function routeSignals(
+  signals: readonly RoutableSignal[],
+  knownMax: number,
+  context: RoutingContext = {},
+): RoutingReadout {
+  const byModality: Record<RoutingDecision['modality'], number> = {
+    hard: 0, soft: 0, contract: 0, none: 0, unmeasured: 0,
+  }
+  const proposals: Proposal[] = []
+  const reasons = new Map<string, number>()
+  let produced = 0
+  let none = 0
+  let unmeasured = 0
+  /** ★ 逐条推进 id —— 同一条信号无论跑几次都拿到同一个 id（可复现）。 */
+  let cursor = Number.isFinite(knownMax) && knownMax > 0 ? Math.floor(knownMax) : 0
+  for (const signal of signals) {
+    const route = routeSignal(signal, cursor, context)
+    byModality[route.decision.modality] += 1
+    if (route.outcome === 'produced') {
+      produced += 1
+      cursor += 1
+      /** ★ `proposal` 在 `produced` 分支上必然在场（见 `routeSignal` 的三个 return）。 */
+      proposals.push(route.proposal as Proposal)
+    } else if (route.outcome === 'none') {
+      none += 1
+    } else {
+      unmeasured += 1
+      reasons.set(route.decision.why, (reasons.get(route.decision.why) ?? 0) + 1)
+    }
+  }
+  return {
+    total: signals.length,
+    produced,
+    none,
+    unmeasured,
+    byModality,
+    proposals,
+    unmeasuredReasons: [...reasons.entries()]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .map(([why, count]) => ({ why, count })),
+  }
 }

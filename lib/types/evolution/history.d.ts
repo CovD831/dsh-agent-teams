@@ -58,3 +58,83 @@ export declare function reviewBeforeChange(history: CollectionHistory, subject: 
     readonly history: readonly CollectionGateChange[];
     readonly note: string;
 };
+/**
+ * ── ★★ 为什么"记一条"必须落盘，而不只是 `new CollectionHistory()` 然后丢掉 ─────────
+ *
+ * MEASURED（t4 开工实测，`docs/EVOLUTION-WIRING-GAP.md` §3 ②逐字）：
+ * ```
+ *   ★ record({gateId, at, before, after, evidence}) 四格缺一即抛
+ *   ★★ 而【没有任何生产路径调用它】⇒ ★ 判据变更历史是空的
+ * ```
+ * ★ 而"进程内内存里记了一条、进程退出就没了"**在观测上与没记过完全相同** ——
+ *   那正是本仓判据里那句「一个没有调用方的产出，与没有那个产出在观测上完全相同」
+ *   的**时间维版本**：一个只在内存里活过一次的记录，与从未记录过同形。
+ *   ⇒ 所以本节的落点是**一个文件**：`<stateRoot>/evolution/history.jsonl`。
+ *
+ * ── ★★★ 三态：写进去了 / 判不了 / 真的没有 ─────────────────────────────────────
+ * ```
+ *   recorded   ⇒ 一行真的追加进了 history.jsonl（`path` + `line` 在场）
+ *   unmeasured ⇒ **写不了**（没有 stateRoot / 目录建不出来 / 追加抛错）
+ *               ⇒ ★ 必须带 `why`，且**不许**降级成 `recorded: false` 就算了
+ *   absent     ⇒ 这次**没有判据变更**（不是失败：没改判据当然没有历史）
+ *               ⇒ ★ 与 `unmeasured` 不同形：前者是"没事发生"，后者是"我们没能记事"
+ * ```
+ * ★★ 把三者并在一个布尔里，就等于把"历史是空的因为没改过"与
+ *   "历史是空的因为我们写不进去"读成同一件事 —— 而后者会让
+ *   "反复来回改"这个退化**永远看不出来**（历史永远是空的，永远"看起来没改过"）。
+ *
+ * ── ★ 为什么落点是 `<stateRoot>/evolution/`（与 `signals.jsonl` 同一个目录）──────
+ *
+ * ★ 因为它们是**同一条流水线的两个产出**，而本仓已裁定状态根的排他写法
+ *   （`signalsPathOf` 逐字：「由调用方给，不许用进程级单值」）。★ 分开两个根
+ *   会让"这个团队的历史"与"这个团队的信号"能指向不同的树 —— 那是一个可造出来的错配。
+ */
+export type HistoryWriteOutcome = {
+    readonly status: 'recorded';
+    readonly path: string;
+    readonly line: string;
+} | {
+    readonly status: 'unmeasured';
+    readonly why: string;
+} | {
+    readonly status: 'absent';
+    readonly why: string;
+};
+/** ★ `history.jsonl` 的**唯一**路径口径（与 `signalsPathOf` 同源形状）。 */
+export declare function historyPathOf(stateRoot: string): string;
+/**
+ * ★★ 追加一条判据变更历史 —— **本模块唯一的写入口**。
+ *
+ * ★ 三条纪律（每条都能被夹具钉住）：
+ *   ① **复用 `CollectionHistory.record` 的四格校验**，不另写一套 ——
+ *      ★ 两套校验会分叉，而分叉之后"什么算一条记录"就有两个答案。
+ *   ② **不抛** —— 调用方在"改判据"这条路径上（可能是一次自动改动）。
+ *      ★ 把"记不了账"变成"这次改动失败"会**改变可观测的时序**（与 `appendSignal` 同纪律）。
+ *   ③ **写入是原子的按行追加**（`O_APPEND`）：一行 = 一条记录，坏一行不影响其余行。
+ *
+ * @param stateRoot - 这个团队自己的状态根（★ 不许是进程级单值）。
+ * @param change - 一条四格俱全的变更（`gateId` / `at` / `before` / `after` / `evidence`）。
+ * @param write - 注入的追加函数（生产给 `fs/promises.appendFile`；夹具注入内存版）。
+ */
+export declare function recordCollectionChange(stateRoot: string | undefined, change: CollectionGateChange, write: (path: string, text: string) => Promise<void>): Promise<HistoryWriteOutcome>;
+/**
+ * ★★ 把磁盘上的 `history.jsonl` 读回一个 `CollectionHistory` —— **读全部历史再决定**。
+ *
+ * ★ 它与 `recordCollectionChange` 是**一对**：只写不读等于没有历史
+ *   （Raven 那句 "read ALL files under history/" 要的是**读**那一半）。
+ *
+ * ★ 三态：`measured`（读到若干条，可能是 0 条）/ `unmeasured`（文件缺席或读不了）。
+ *   ★ 而"读到 0 条"**不是** `unmeasured`：文件在、里面真是空的 —— 那是一个读数。
+ *
+ * @param stateRoot - 状态根。
+ * @param readFile - 注入的读函数（生产给 `fs/promises.readFile`；夹具注入内存版）。
+ */
+export interface HistoryReadout {
+    readonly status: 'measured' | 'unmeasured';
+    readonly reason?: 'file-absent';
+    readonly history: CollectionHistory;
+    /** ★ 坏行计数（半写坏的行不该让全部历史消失 —— 与 `readSignalsHealth` 同纪律）。 */
+    readonly skippedMalformed?: number;
+    readonly totalLines?: number;
+}
+export declare function readCollectionHistory(stateRoot: string, readFile: (path: string, encoding: 'utf8') => Promise<string>): Promise<HistoryReadout>;
