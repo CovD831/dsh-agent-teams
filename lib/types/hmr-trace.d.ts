@@ -187,3 +187,51 @@ export declare function installHmrTrace(ctx: Context, stateRoot: string): void;
  *   ⇒ 不传参数时返回 `[]` ⇒ 臂 10 的第一半当场红。
  */
 export declare function readHmrTrace(stateRoot: string, sincePid?: number): HmrReloadEntry[];
+/**
+ * ── ★★ 一次失败距离一次重载多近，才「可能是那次重载造成的」──────────────────────
+ *
+ * ★ 这个数是**从实测到的间隙**上取的，不是拍的：
+ *   `docs/DEFECT-HMR-DURING-MEMBER-TURN.md` 记的四次 `inactive context` 失败，
+ *   距各自那一次重载分别是 **538 ms / 11 ms / 537 ms / 6 ms**。
+ *   同一份记录里还有两次 `empty_output` 失败，距最近的重载 **65 s / 91 s**
+ *   —— 它们与重载无关，而**这一点正是靠"窗口外"这个读数分出来的**。
+ *
+ * ★ 为什么取 5 s 而不是 1 s：宿主侧的重载是 `debounce: 100` 之后才跑的，
+ *   而一次 `pnpm build` 会连写好几个产物 —— **一次构建产生的那一批重载
+ *   可能横跨几百毫秒到一两秒**，成员回合落在那一批的尾巴上是常态。
+ *   取 1 s 会把"这批里的第二次重载"判成窗口外。
+ *
+ * ★ 为什么不取 60 s 一类的大值：开发时每十几秒就构建一次，
+ *   窗口一宽，**真正的**工作失败就会被成批地算成基础设施故障 ——
+ *   那正是本判据要消灭的"两件事同形"，只是换了个方向。
+ *
+ * ★ 定向突变：把它改成 `0` ⇒ 窗口内一条也命中不了 ⇒ 豁免臂当场红。
+ */
+export declare const HMR_FAILURE_WINDOW_MS = 5000;
+/**
+ * 在 `at` 之前（含）最近一次重载**是否落在窗口内**；在则返回那一条。
+ *
+ * ★★ 为什么返回整条记录而不返回 `boolean`：调用方要能把
+ *   「哪一次重载、差了多少毫秒」写进它给队长的消息里。
+ *   一个 `true` 只能说明"有"，**说不出是哪一次** —— 而人要复现时要的正是那一个数。
+ *
+ * ── ★ 三个边界，各自是【不同】的结论，不许合并 ─────────────────────────────────
+ *
+ *   ① 痕迹文件不存在 / 一行也没有 ⇒ `undefined`。这是**正常的初始态**
+ *      （没构建过就没有重载），不是"读失败"。
+ *   ② 有重载，但都早于窗口 ⇒ `undefined`。**"重载过，但那时还没到这次失败"**。
+ *   ③ 有重载落在 `[at - 窗口, at]` ⇒ 返回**最近的那一条**。
+ *   ★ 本该有记录却读不出来（`readHmrTrace` 的 `catch`）也落 `undefined` ——
+ *     它和 ①② 在"没读到"这一点上同形。这里**故意不区分**：本函数的返回值
+ *     只用来决定"要不要豁免一次失败"，而"读不出来"**必须**落回不豁免
+ *     （保守的一侧 = 照常上报）。若把读不出来做成第三态让调用方去处理，
+ *     迟早有人把它当"豁免"用。
+ *
+ * ★ 为什么复用 `readHmrTrace` 而不自己读一遍文件：一份读盘/解析逻辑，
+ *   两处就会分叉，而"分叉了"与"一致"在源码里同形（见上面那条 `sincePid` 注释）。
+ *
+ * @param stateRoot - resolved state root（痕迹文件所在目录）。
+ * @param at - 那次失败被观察到的时刻（ms epoch）。
+ * @param pid - 只想认某个进程写下的重载；`undefined` = 不筛进程。
+ */
+export declare function reloadJustBefore(stateRoot: string, at: number, pid?: number): HmrReloadEntry | undefined;

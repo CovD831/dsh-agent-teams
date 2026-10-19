@@ -1,0 +1,215 @@
+{
+  "plan": [
+    {
+      "id": "N0",
+      "kind": "work",
+      "subject": "读数脚本：把§2的每一组数变成一条可复跑的命令",
+      "assignee": "captain",
+      "objective": "docs/REQUIREMENTS.md §7 硬门槛②要求改前读数先于产品改动。今天没有一条命令能打印这些数 —— 一次性 ad-hoc 脚本不可复跑即不可复核。写一个只读脚本 scripts/evolution-readout.mjs。",
+      "inScope": [
+        "scripts/evolution-readout.mjs"
+      ],
+      "acceptance": [
+        "输出含 signals.total、rows.observeShaped、by kind、collection.<gate>.<verdict> 计数、collected.keyPresent 与 keyMissing、proposals.rows、history.rows、hmr.reloads",
+        "在当前台账上跑出的 signals.total = 39、rows.observeShaped = 29、cooldown:unmeasured = 29、collected.keyPresent = 0",
+        "wouldBlock 两行（dedupe / cooldown）只在 observeShaped 上算，且各自打印分母；实测 3 / 15",
+        "脚本只用标准库（node:fs 等），对 lib/ 零 import，且不写任何文件",
+        "⑤ ★ 输出含 `directions` 一节：按 `frictions/*.json` 的 `index.component` 分桶，每桶印 `{frictions, signals, verdicts{ok,blocked,unmeasured}}` —— 实测当前分布 `dispatch 170 / completion 164 / contract 24 / contract.verify-command 2 / runtime.liveness 2 / admission.convene 2`（393 文件）。这是\"方向 → 今天的缺陷密度\"的语料，用户给出方向后跑一次就能决定先深挖哪条（见 MD §7.2）"
+      ],
+      "verify": [
+        "node scripts/evolution-readout.mjs",
+        "node scripts/evolution-readout.mjs --json"
+      ],
+      "dependencies": []
+    },
+    {
+      "id": "N1",
+      "kind": "implementation",
+      "subject": "采集入口解焊：拆开两个 kind，注入索引与来源，让 collected 落盘",
+      "assignee": "captain",
+      "objective": "collect.ts:462 硬编码 kind: rejection 把 ObserveInput.kind 丢掉；三个调用点不传 index/source 使 dedupe 恒真 cooldown 恒 unmeasured；collected 这一格 0/29 落盘。三处一起修。 ★★ 一条被审查抓出来的错读数：`collected.keyPresent` 的上限是 29 不是 39（10 条 t88 旧行结构上没有该格），且真根因是 `JSON.stringify` 丢弃 `undefined`（collect.ts:470 + :228），不是\"从未落盘\" ⇒ acceptance 拆成\"存量冻结 / 新增必落\"双读数（见 MD §N1.1）。 ★★ 审查抓出的第二条前置：`CollectionIndex` 没有派生方 —— `index.json` 是 t88 手写统计（`grep index.json src/ scripts/` 零命中），`lastBySource` 全仓 6 处命中全是定义或构造空 ⇒ cooldown 的 29/29 unmeasured 不是\"判据坏了\"是\"输入从未存在过\"。派生函数落在 `src/evolution/read.ts`（它已在读 signals.jsonl，`readSignalsHealth` 在 :96），故 inScope +1 文件（见 MD §N1.2）。",
+      "inScope": [
+        "src/evolution/collect.ts",
+        "src/gates/collection/shared.ts",
+        "src/tools/create-task.ts",
+        "src/tools.ts",
+        "src/tools/shared/entities.ts",
+        "src/evolution/read.ts"
+      ],
+      "acceptance": [
+        "★★ 双读数（第一版是单读数 `0 → = signals.total`，上限错；见 MD §N1.1）：(a) 存量 29 行冻结 —— `collected.keyPresent` 在旧行上永远是 0（历史裁决，不回填）；(b) 新写一条 —— 新追加行的 `\"collected\" in signal === true`（`collected: undefined` 也要落成一格，如 null）。两个数都要印出来",
+        "在同 39 行台账上重放，脚本打印 dedupe wouldBlock 3 条、cooldown wouldBlock 15 条",
+        "signalKind 默认 rejection 时 by kind 逐字仍是 {rejection:36,insight:2,success:1}",
+        "ObserveInput.kind（去重键成员）与 EvolutionSignal.kind（rejection|success|insight）在类型上不再同名",
+        "⑤ ★ 不做回填：那 29 条旧行的 collected 按今天规则重算并写回 = 伪造历史读数；要看历史走 `--replay`（只读算出、不落盘）"
+      ],
+      "verify": [
+        "pnpm typecheck",
+        "node --test scripts/gate-collection-health-readout.test.mjs scripts/gate-signal-id-uniqueness.test.mjs",
+        "node scripts/evolution-readout.mjs"
+      ],
+      "dependencies": [
+        "N0"
+      ]
+    },
+    {
+      "id": "N2",
+      "kind": "implementation",
+      "subject": "分流层：routeSignal 产出五态 RoutingDecision，并收口 evolution 接口面",
+      "assignee": "captain",
+      "objective": "propose.ts 零消费者、RoutingDecision 唯一构造点是 unmeasuredDecision、history.ts 从未写过一条、src/evolution/index.ts 不存在（违反 REQUIREMENTS §1 规则 A，今有 6 处深路径 import）。",
+      "inScope": [
+        "src/evolution/route.ts",
+        "src/evolution/index.ts",
+        "src/evolution/collect.ts",
+        "src/snapshot.ts"
+      ],
+      "acceptance": [
+        "routeSignal 对 29 条 observe 形状信号跑出五态各有实例，且 unmeasured 条数 < 29",
+        "至少一条产出带 target 与 effect 的 RoutingDecision",
+        "深路径 import 从 7 → 0：grep -rE \"from '(\\./|\\.\\./)+evolution/\" src/ 必须归零，全部走 index.ts（★ 正则里必须带 +：写 (\\./|\\.\\./) 而不带 + 时，../../evolution/ 那条会被漏数成 6）",
+        "readout 打印 proposals.rows；0 条时也必须给出为什么这批信号一条都不该成提案"
+      ],
+      "verify": [
+        "pnpm typecheck",
+        "node --test scripts/gate-producer-consumer.test.mjs scripts/gate-collection-health-readout.test.mjs",
+        "node scripts/evolution-readout.mjs",
+        "pnpm test:gates"
+      ],
+      "dependencies": [
+        "N1"
+      ]
+    },
+    {
+      "id": "N3",
+      "kind": "implementation",
+      "subject": "前置循环审查接线：分档与四问读数投进 status，amend 前问一次 history",
+      "assignee": "captain",
+      "objective": "用户原话：关于计划的前置循环审查，代码里有，但是好像没接上。实测：checkPlanReview 只被 1 个夹具调、reviewStateOf 零生产调用方、admission 三条判据生产求值点 0。",
+      "inScope": [
+        "src/tools/status.ts",
+        "src/tools/shared/entities.ts",
+        "src/tools/amend-task.ts"
+      ],
+      "acceptance": [
+        "agent_teams_status 输出出现 planReview 一节，含 small/large/unmeasurable 三档计数与逐条缺哪一问",
+        "对真实团队跑 status：large + unmeasurable > 0（本团队四步全 large）",
+        "checkPlanReview 的 overall 三态在 status 里同形呈现（present/missing/unmeasured），不许并成布尔",
+        "真实调用点（非注释、非类型引用）从 0 → 至少 1：grep -rn \"checkPlanReview(\" src/ 排除以 * 或 // 开头的行",
+        "不许与既有 planReviewState 那格（awaiting_review|awaiting_feedback，散在 snapshot.ts:258/646 等）混同 —— status.ts 里 planReview 今天的 grep 计数是 0"
+      ],
+      "verify": [
+        "pnpm typecheck",
+        "node --test scripts/plan-review-tier.test.mjs scripts/review-unified-pipeline.test.mjs scripts/gate-experience-dispatch.test.mjs"
+      ],
+      "dependencies": [
+        "N2"
+      ]
+    },
+    {
+      "id": "N4",
+      "kind": "implementation",
+      "subject": "HMR：重载同刻的基础设施故障不落 failed，并保留对照臂",
+      "assignee": "captain",
+      "objective": "docs/DEFECT-HMR-DURING-MEMBER-TURN.md 已定位未修：重载打断成员回合，agent/error 触发 failMemberOpenAttempt，把一次构建判成一次工作失败。盘上 12 条任务带该指纹。",
+      "inScope": [
+        "src/members.ts",
+        "src/hmr-trace.ts"
+      ],
+      "acceptance": [
+        "夹具：写一条同刻 hmr-reloads.jsonl 再触发 cannot get required service ⇒ 任务仍是 in_progress，且队长信箱有明说 infrastructure 的消息",
+        "对照臂：不写重载记录同样触发 ⇒ 任务仍然 failed（证明豁免不是放过所有失败）",
+        "HMR_FAILURE_WINDOW_MS 只有一处定义一处使用",
+        "pnpm test:gates 通过数不下降（对照 1590）",
+        "分档如实为 large（inScope 是 members.ts + hmr-trace.ts 两个 src 文件），不是 small"
+      ],
+      "verify": [
+        "pnpm typecheck",
+        "node scripts/member-failure-tdd.mjs",
+        "node --test scripts/hmr-trace.test.mjs",
+        "pnpm test:gates"
+      ],
+      "dependencies": []
+    },
+    {
+      "id": "N5",
+      "kind": "implementation",
+      "subject": "计划门禁：approve 时刻查分档 + 四问 + 轮次上限，并让「循环何时可以结束」可读",
+      "assignee": "captain",
+      "objective": "在 approveStagedTeam 里加两道今天不存在的闸（未审大档 + 轮次上限），并新增 describePlanLoop 让「这个计划审查循环能不能结束」有一个可读的多态答案。今天 approve 的唯一机械门是 validateStagedGraph（纯图结构，src/tools.ts:496），它不查审没审过；planReviewRounds 全仓零命中，edit_plan 每动一次把 planReviewState 打回 awaiting_review（src/tools.ts:2076）却没有计数。★★ 放行条件经实测修正过一次：第一版要求「全部任务 tier===small」，而历史 6 个真实团队通过率 0%（见 docs/SELF-ITERATION-PLAN.md §N5.11），故改为「不存在 tier===large 且无 reviewed 戳的任务」；unmeasurable 放行但必须在 reason 里点名，不并入通过。★ 另一条约束：evaluate('admission') 今天接到 approve 会让每次批准都落 ok:false（convene 的 appliesTo 恒 true 而 requires 的 upstream/producedDocuments 全仓无生产写入方），所以本步不走注册表，直接在 approve 同层判。 ★★ 另一条实测（§N5.13）：`planReviewState` 从不进 `status` 工具面（`grep planReviewState src/tools/status.ts` 零命中），只有 `snapshot` 给前端看过 ⇒ \"计划审查循环停在哪\"今天队长与用户都读不到；这不是\"再加一个字段\"，是补一个半接的洞。 ★★ 对抗性审查推翻了两处：① 第三层闸不许复用 team.escalated（无清除点，一次超轮让整队永久不可交付且 resume 也解不开）⇒ 改用本队自己的 planReviewEscalated；② maxRounds 不能从 reviewPolicy 取（五格封闭，加第六格会被 profiles.ts:1073 抛错）。\n\n★★ 2026-10-20 对抗性审查后的修正（7 条全部实测成立）：① 第二层分档+reviewed 戳被砍 —— tierOf 的判据方向是反的（数的是\"声明了几个 src/ 文件\"，实测 ['src/tools.ts','src/types.ts'] ⇒ large 而['src/tools.ts','lib/tools.js','lib/types/tools.d.ts'] ⇒ small），奖励少写 inScope、惩罚写清，且 amend_task（无 phase 闸、不计数）能把 large 缩成 small 后照样 approve（见 §N5.6-bis）；② 上限必须在 approveStagedTeam 里真的被读（今天不读，rounds=4 仍批准成功）；③ 解除必须是显式归零 rounds=0，清 flag 是死码（rounds>=max 会立刻重新算出 escalated）；④ phase==='running' ⇒ approved 必须排到两个 escalated **之后**；⑤ 计数要覆盖 amend_task 与 approval:'automatic' 分支（后者今天完全不经过 approveStagedTeam）；⑥ \"人点名\"要把解析后的 id 列表落进 fresh.planReviewBypass（顶层新键，isTeamState 不校验），因为 confirmation 在 src/tools/approve.ts:42 就被丢弃；⑦ inScope 必须含 src/tools/shared/entities.ts（否则 approve.ts 传 4 参 TS2554）。\n\n★★ verify 命令的取舍（S1 实测）：`node --test scripts/quality-gates-tdd.mjs` **不进 verify** —— 它不是 node:test 文件（自研 runner），且实测 exit 1、错误逐字 `create_task rejected: [dispatch.plan-reviewed] this plan has not been reviewed: no `reviewed` stamp is attached` ⇒ 它是 §6 基线里 stage4 的**既有红**，与 N5 改了什么无关；把它放进 verify，N5 永远不会绿。同理剔掉硬编码端口 49318 的 curl（本机专属）。",
+      "inScope": [
+        "src/quality-gates.ts",
+        "src/tools.ts",
+        "src/types.ts",
+        "src/tools/status.ts",
+        "src/tools/approve.ts",
+        "src/tools/shared/entities.ts"
+      ],
+      "outOfScope": [
+        "src/gates/admission/",
+        "src/scheduler.ts",
+        "src/tools/create-task.ts",
+        "src/evolution/"
+      ],
+      "acceptance": [
+        "① 正向（先绿，否则下面几条\"拦住了\"与\"全拦住了\"同形）：一份只含 small 任务的 staged 计划 ⇒ agent_teams_approve 返回 ok:true",
+        "② ★ 分档层已砍（§N5.6-bis 实测 tierOf 方向反：奖励少写 inScope、惩罚写清）。保留为**读数**：approve 的返回值 / status 的 planLoop.reason 里逐条列出每条的 tier 与 why，但**不据此拒绝**。★ 本轮的门禁**不**包含\"large 无 reviewed 戳则拦\"",
+        "③ ★ 被 ② 取代（分档作读数不作闸）。★ 结构上不可审查的那条路单独拦：`edit_plan` 的 add_task 不许静默造 `kind:'work'`（`src/tools.ts:2049` 硬编码）—— 要求调用方显式声明 kind 或给契约，否则 ok:false 并指名该任务",
+        "④ unmeasurable 不拦但点名：再加一条 inScope 缺失的 review 任务 ⇒ ok:true，而 describePlanLoop(team).reason 里逐字出现\"1 条任务的表面读不出来\"（三态不许同形：放行 ≠ 通过）",
+        "⑤ planReviewRounds 在 edit_plan 每调一次后 +1：连调 3 次后 rounds === 3（★ 按调用计数，不按 operation 计数；一次调用含多个 operation 仍算 1 轮，理由见 §N5.12）",
+        "⑥ 第 maxRounds+1 次 edit_plan 后 `team.planReviewEscalated === true` 且 `describePlanLoop(team).state === 'escalated'`。★★ **不是 `team.escalated`** —— 那是质量环的位，`src/quality-gates.ts:2260` 逐字 `if (team.escalated === true) blockers.push('team requires escalation resolution')`，复用它会让 ⑩ 必假（实测 canDeclareDelivery({escalated:true}) ⇒ blockers 含该项）。见 §N5.14",
+        "⑦ agent_teams_status 输出里出现 planLoop 一节，含 {state, rounds, maxRounds, reason} 四格；reason 非空时逐字说明为什么还不能结束",
+        "⑧ 负向对照（halted 优先）：对 ③ 那份计划调 halt 后再读 describePlanLoop ⇒ state === 'halted'，不是 'approved'（专防\"phase===running 判在最前\"那个错序，见 §N5.8）",
+        "⑨ ★ 批准之后仍读得到轮次：对 ③ 那份计划 approve 之后，`agent_teams_status` 的 `planLoop.rounds` 仍等于批准前的值（今天 `delete fresh.planReviewState`（`src/tools.ts:2166`）会让\"审了几轮才通过\"在批准后永久丢失 —— 而这正是自迭代最需要的那条读数，见 §N5.13）",
+        "⑩ ★ 超轮只影响计划环：让计划超轮后，`describeQualityLoop(team).state` 仍是原值、`canDeclareDelivery(team).blockers` **不含** escalation 项（★ 负向对照，专防 N5.14 那个\"借用别人的位\"的错）",
+        "⑪ ★★ 上限在**唯一的放行点**上真的生效：把 staged 团队置为 planReviewRounds=4（max=3）。planReviewEscalated=true 后调 agent_teams_approve ⇒ **必须被拒**，且报错逐字点名轮次与上限。★ 今天实测 approveStagedTeam（src/tools.ts:2143）既不读 planReviewRounds 也不读 escalated，批准后读成 'approved' ⇒ 上限在放行点上不存在",
+        "⑫ ★★ 解除路径不是死码：按 N5.8 的判定顺序，清掉 planReviewEscalated 之后 rounds>=max 会**立刻重新算出** escalated。⇒ 解除必须是**显式归零 rounds=0 + 清 flag**（只在 resume 或人在批准时点名发生），acceptance：归零后 describePlanLoop.state !== 'escalated' 且 rounds === 0；只清 flag 不归零 ⇒ 仍 'escalated'（负向对照，证明这一格不是假的）",
+        "⑬ ★★ `approval:'automatic'` 分支的不对称必须被承认并钉住：`src/tools/create.ts:180` 逐字 `const staged = args.approval === 'required'`，不传 approval 的新用户走 automatic 且**不经过 approveStagedTeam**。acceptance：在本轮文档里明写\"本闸只覆盖 approval:'required'\"，且验收臂断言 automatic 路径的落盘形态（phase=undefined 等）与 required 路径不同形 —— ★ 不许让它静默地读成\"门禁通过\""
+      ],
+      "verify": [
+        "pnpm typecheck",
+        "node --test scripts/plan-review-tier.test.mjs",
+        "node --test scripts/gate-tool-output-schema.test.mjs",
+        "pnpm test:gates"
+      ],
+      "dependencies": [
+        "N3"
+      ],
+      "whyNow": "用户 m01373 逐字：\"计划是否能开始跑也是希望有一个门禁把关，其实就是计划的审查循环是否可以结束的问题\"。实测今天没有任何机械答案：planReviewRounds 零命中、approve 零判据求值（grep -cE \"registry.evaluate|wireDispatch\" src/tools/approve.ts ⇒ 0）、reviewStateOf 不读 checks（reviewed 内含 fail/unmeasured/形状坏 全判 reviewed）。",
+      "stepReadings": [
+        "1. 造 describePlanLoop + planReviewRounds 递增（src/quality-gates.ts、src/types.ts），先只读不拦 —— 跑一次 status 记录今天那份 staged 计划的真实读数作为改前基线",
+        "2. 在 approveStagedTeam 加第二道闸：拦 large 且无戳，unmeasurable 放行但点名。★ 先用历史 6 个团队的计划回放一遍，确认通过率从 0/6 抬到接近 1/6（口径 B），再往下走",
+        "3. 加绕行口（confirmation 里的显式点名词），让被拦的 large 可以由人承担",
+        "4. 加第三道闸（轮次上限 + escalate），与 describeQualityLoop 同形；同时让 create_task 在 staged 时也计数（§N5.12 漏洞 2）",
+        "5. 把 describePlanLoop 投进 status 的 planLoop 一节（src/tools/status.ts），与 describeQualityLoop 同一条路",
+        "6. 把 scripts/plan-review-check.mjs 改成从 lib/ 再导出的薄壳（它在发布白名单外，改它不破坏已发布契约），消除两份真值"
+      ],
+      "boundaries": [
+        "★ 不在 src/gates/admission/ 下新增或修改判据。理由：admission 的三条 id 被 scripts/gate-admission-point.test.mjs:190 写死；且 convene 的 requires 两格（upstream/producedDocuments）全仓无生产写入方，新增第四条会让\"半接状态\"更难看。门禁直接落在 approveStagedTeam，与 validateStagedGraph 同层。",
+        "★ 不在 create / add_task 时刻判。staged 的意义就是\"还没跑，先让人看\"；在那里判会把\"先铺图、再逐条审\"的计划链切断。",
+        "★ 不在 scheduler.kickTeam 判。那时 phase 已是 running、planReviewState 已被 delete（src/tools.ts:2166），审查上下文已经丢了。",
+        "★ 不改 dispatch.plan-reviewed 的插入点，也不把它接到计划路线。理由：计划路线造出来的任务结构上不可能带 reviewed（TaskDraft 刻意没有 reviewed；StagedPlanMutation.add_task 无 kind 且被硬编码为 work），接上去会拦下全部任务。",
+        "★ 不改 scripts/plan-review-check.mjs 与 scripts/plan-review-tier.mjs 的判定逻辑，只把 plan-review-check.mjs 改成从 lib/ 再导出的薄壳。理由：两者都在 package.json 的 files 白名单外（NOT SHIPPED），门禁若只调它们，装了插件的人拿不到 —— 它会在作者本机通过、在用户机器上不存在。",
+        "★ 不在 create_task 上加 phase 闸。虽然 create_task 绕得过计数（无 phase 检查，见 §N5.12 漏洞 2），但改它会变更已发布工具契约、且与 G7 相邻 ⇒ 本轮只用\"create_task 在 staged 时也 +1\"这一行便宜的修法兜住计数，彻底的 phase 闸记进 §11。",
+        "★ 不写 reviewed 戳给\"人在 approve 时点名的 large\"。人有的是批准权，不是审查记录 —— 这两种权利在数据上必须不同形（REQUIREMENTS「三态不许同形」）。",
+        "★★★ 绝不许复用 team.escalated —— 实测全仓只有一个写入点（entities.ts:5672）且没有清除点（resume 只清 halted；quality-gates.ts:2770 那个 escalated:false 是返回值不是清除），而它是 canDeclareDelivery:2260 与 describeQualityLoop:2757 的阻断项 ⇒ 一次计划超轮会让整队永久不可交付且 resume 解不开（见 MD §N5.14）。用本队自己的 planReviewEscalated",
+        "★★ maxRounds 用模块常量，不从 reviewPolicy 取 —— ReviewPolicy 是四处封闭的五格（types.ts:311 / profiles.ts:24 / index.ts:132 / quality-gates.ts:466），加第六格会被 profiles.ts:1073 直接抛错，会把写域扩到 profiles.ts / index.ts / state.ts（见 MD §N5.15）",
+        "★★ 逃生口必须有落点：`confirmation` 今天在 `src/tools/approve.ts:38` 判空后就被丢掉，`approveStagedTeam`（`entities.ts:268`）形参里没有它 ⇒ 门禁看不见用户的批准文本。改法：`approveStagedTeam` 加可选第四参数 `approval?: { confirmation: string }`，`approve.ts:42` 传进去；`src/index.ts:519` 的 Web 路径**不传**（浏览器点按钮不产生文本，通用批准不该被当成逐点名授权）—— 可选参数正是为了让 index.ts 一行不改就继续编译（零扩散）。★ 点名到不存在的 task id 必须拒绝，不许静默当\"没点名\"（见 MD §N5.16）"
+      ],
+      "stopPoints": [
+        "S1 第 1 步后：把改前基线读数给人看（今天那份 staged 计划的 tier / 四问 / rounds），确认这三个读数与你对\"能不能跑\"的直觉一致 —— 如果不一致，问题在读数而不是在闸",
+        "S2 第 2 步后：★ 最关键的停止点 —— 用历史 6 个团队回放，若通过率仍是 0/6，说明闸门造错了（不是历史团队错了），必须停下来改判据",
+        "S3 第 3 步后：确认绕行口真的能放行，且 reason 里记下了谁点名了哪几条",
+        "S4 第 4 步后：确认第 maxRounds+1 次 edit_plan 触发 escalate，且 create_task 也计数",
+        "S5 全部完成后：★ 用它拦一次本计划自己。预期是被拦下并逐条说明理由，然后你在 approve 时点名放行 —— 那是正确行为，不是失败"
+      ],
+      "tierNote": "large。inScope 里现存 src/ 文件 4 个（quality-gates.ts / tools.ts / types.ts / tools/status.ts）+ scripts 1 个。按 tierOf 信号 A（src 文件 >=2）⇒ large ⇒ 必须人裁决，不许自动派发。 ★★ 审查抓出：第一版标 `kind: requirements`，而它实改 4 个 src 文件。实测 `src/gates/completion/kind-requirements.json` 的 `requirements.requiredGates = []`（because 逐字 \"a requirements task produces prose…\"），`implementation.requiredGates = [completion.r5, completion.mutation, completion.backtest]` ⇒ 标 requirements 等于让一个改产品行为的步骤绕开三道完工门。已改标 `implementation`（★ 不拆成 N5a/N5b：拆开会让 DAG 多一步多一条边，而\"先写契约再改代码\"的次序已经在 acceptance 里逐条表达）。",
+      "coverageOf": [
+        "用户 m01373 追加的\"计划能不能开始跑\"门禁",
+        "docs/REQUIREMENTS.md ## 11 的\"自迭代不是它自己决定改自己\""
+      ]
+    }
+  ],
+  "generatedAt": "2026-10-20",
+  "baselineRef": "docs/SELF-ITERATION-PLAN.md §2 与 §6"
+}

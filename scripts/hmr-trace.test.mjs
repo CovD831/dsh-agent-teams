@@ -19,7 +19,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, readdirSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,6 +29,7 @@ const SRC = join(ROOT, 'src', 'hmr-trace.ts')
 
 const {
   modulesFromReloads, shapeOf, appendHmrReload, readHmrTrace, HMR_TRACE_LIMIT, HMR_TRACE_FILE,
+  reloadJustBefore, HMR_FAILURE_WINDOW_MS,
 } = await import(join(ROOT, 'lib', 'hmr-trace.js'))
 
 function scratch() {
@@ -378,4 +379,85 @@ test('★★ 臂 10（归属臂）：`sincePid` 只筛那一个进程 —— 而
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 11：★★ 窗口臂 —— 「这次失败离那次重载多近」必须是一个能读的读数
+//   这一格是 N4 的判据来源：`src/members.ts` 靠它决定一次 `inactive context`
+//   该记成基础设施故障还是工作失败。窗口两侧各一条，中间的边界各一条。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★ 臂 11：`reloadJustBefore` 的窗口是【单边】的，且两侧结论不同形', () => {
+  const dir = scratch()
+  try {
+    appendHmrReload(dir, { at: 10_000, shape: 'Map(1)', pid: 7 })
+    appendHmrReload(dir, { at: 20_000, shape: 'Map(1)', pid: 7 })
+
+    /** ① 窗口内 ⇒ 命中的是**最近那条**（不是最早那条，也不是"有没有"）。 */
+    assert.equal(reloadJustBefore(dir, 20_000, 7)?.at, 20_000, '★ 恰好在重载那一刻 ⇒ 命中它自己')
+    assert.equal(reloadJustBefore(dir, 20_500, 7)?.at, 20_000, '★ 500 ms 之后 ⇒ 命中最近那条')
+
+    /** ② 窗口边界：恰好 `HMR_FAILURE_WINDOW_MS` 仍然算窗口**内**（闭区间）。 */
+    assert.equal(reloadJustBefore(dir, 20_000 + HMR_FAILURE_WINDOW_MS, 7)?.at, 20_000,
+      '★ 窗口是闭区间 —— 取开区间会让边界那 1 ms 落在没人定义的一侧')
+    assert.equal(reloadJustBefore(dir, 20_000 + HMR_FAILURE_WINDOW_MS + 1, 7), undefined,
+      '★★ 越过窗口 1 ms ⇒ undefined（这就是"与重载无关"的那个读数）')
+
+    /**
+     * ③ ★★ 未来不算：一条**晚于**这次失败的重载解释不了它。
+     *    系统时钟回拨会让这种记录出现；把它算进来，就是拿未来解释过去。
+     */
+    assert.equal(reloadJustBefore(dir, 5_000, 7), undefined,
+      '★★ 早于所有重载 ⇒ 不许拿"后来的那次重载"解释更早的一次失败')
+    /**
+     * ★ 而边界这一格要选一条**两侧都有邻居**的时刻才测得准：
+     *   `at = 15_000` 时，20_000 那条在**未来**（必须跳过），10_000 那条
+     *   恰好差 `HMR_FAILURE_WINDOW_MS`（必须算进来）⇒ 命中 10 000。
+     *   ★ 这一个读数同时钉住两件事：未来被排除、"恰好一个窗口"没被排除。
+     *   定向突变：把 `entry.at > at` 那一行删掉 ⇒ 这里会返回 20 000，当场红。
+     */
+    assert.equal(reloadJustBefore(dir, 15_000, 7)?.at, 10_000,
+      '★★ 未来那条要跳过、恰好差一个窗口那条要算进来')
+
+    /**
+     * ④ ★ 空痕迹 ⇒ `undefined`，**不是**抛。
+     *    "从没构建过"是正常的初始态；而它必须落回**保守的一侧**（不豁免）。
+     */
+    const empty = scratch()
+    try {
+      assert.equal(reloadJustBefore(empty, 1_000, 7), undefined, '★ 没有痕迹 ⇒ 不豁免，而不是抛')
+    } finally {
+      rmSync(empty, { recursive: true, force: true })
+    }
+
+    /** ⑤ ★ pid 过滤要跟着走：别的进程的重载不许被当成本进程的。 */
+    assert.equal(reloadJustBefore(dir, 20_100, 8), undefined, '★ 换一个 pid ⇒ 一条也不算（别人的重载不算数）')
+    assert.equal(reloadJustBefore(dir, 20_100)?.at, 20_000, '★ 不筛进程时仍然读得到（既有口径不变）')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('★ 臂 12：N4 的窗口常量只有一处定义（改一处就够，不是两处要同步）', () => {
+  /**
+   * ★ 本仓记账最多的形态之一是"同一个数写在两个地方，改一处留下另一处"。
+   *   一个分叉的窗口常量会让"窗口是 5 秒"与"窗口是 5 秒"读起来同形，
+   *   而实际两处取值不同 —— 于是同一份失败记录在两个入口得到相反结论。
+   */
+  const hits = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.ts')) {
+        const text = readFileSync(full, 'utf8')
+        if (text.includes('HMR_FAILURE_WINDOW_MS')) hits.push(full)
+      }
+    }
+  }
+  walk(join(ROOT, 'src'))
+  assert.deepEqual(hits.map((file) => file.slice(ROOT.length + 1)), ['src/hmr-trace.ts'],
+    '★ 窗口常量只许定义在 hmr-trace.ts 一处；别处要 5 秒就 import 它')
+  assert.equal(readFileSync(SRC, 'utf8').match(/export const HMR_FAILURE_WINDOW_MS/g)?.length, 1,
+    '★★ 连"同一文件里两处"也不许 —— 判据 ③ 说的是"一处定义一处使用"')
 })
