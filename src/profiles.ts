@@ -10,6 +10,8 @@
  */
 
 import { CAPTAIN_KEY, sanitizeKey } from './state.ts'
+import { TASK_KINDS, type TeamState } from './types.ts'
+import { validateCreateTask } from './quality-gates.ts'
 
 /** Hard cap on named profiles so the usage prompt cannot grow without bound. */
 export const MAX_TEAM_PROFILES = 16
@@ -22,7 +24,31 @@ const PROFILE_KEYS = ['description', 'protocol', 'executionPrompt', 'fallback', 
 const REVIEW_POLICY_KEYS = ['requirementsMinRounds', 'requirementsMaxRounds', 'codeMaxRounds', 'maxRepairAttempts', 'requiredReviewers'] as const
 const MEMBER_KEYS = ['name', 'role', 'provider', 'model', 'reasoning_effort', 'executionPrompt', 'fallback'] as const
 const FALLBACK_KEYS = ['provider', 'model'] as const
-const TASK_KEYS = ['id', 'subject', 'description', 'assignee', 'dependencies'] as const
+/**
+ * ── ★★★ t-new：`kind` 及其契约字段（这一格修的是**两条路不同形**）──────────────────
+ *
+ * 缺陷形态：队长协议 rule 3 逐字写着
+ *   `Every task needs a subject; pass kind and assignee explicitly when the plan specifies them.`
+ * 而 `create({plan:{tasks}})` 的 schema 只声明了 5 个键、且 `additionalProperties: false`
+ * ⇒ 宿主校验器（`@deepseek-ai/dsh-tools` lib/index.js:467）会把 `kind` 判成
+ *   `"tasks[0].kind" is not a declared property (additionalProperties: false)`
+ * ⇒ **协议说"可以传"，工具说"没这个键"**。两个口径，一个动作。
+ *
+ * ★ 而这不是"少一个可选字段"：`kind` 决定一条任务走不走质量门（`isQualityKind`），
+ *   而质量门要求 `objective`/`acceptance`/`inScope`/`verify`。所以要么**整组**支持，
+ *   要么整组不支持 —— 只放 `kind` 进去会造出"质量 kind 缺契约"的任务，
+ *   那正好是 `validateCreateTask` 会拒的形状（`${kind} tasks require ...`）。
+ *
+ * ⇒ 因此这里一次性放行**契约字段全集**，且 `makeTask` 本来就装得下它们
+ *   （`entities.ts:1524` 逐键展开 `kind`/`objective`/`acceptance`/`verify`/...）。
+ *   缺的从来不是"存"，是"允许传"与"搬过去"。
+ */
+const TASK_KEYS = [
+  'id', 'subject', 'description', 'assignee', 'dependencies',
+  'kind', 'objective', 'acceptance', 'verify', 'inScope', 'outOfScope',
+  'deliverables', 'nonGoals', 'coverageOf', 'round', 'model', 'reasoning_effort',
+  'reviewedTaskId',
+] as const
 
 /** One member row in a named team-profile template (unresolved). */
 export interface TeamModelFallbackConfig {
@@ -106,6 +132,55 @@ export interface NormalizedProfileTask {
   assignee?: string
   dependencies: string[]
   sourceIndex: number
+  /**
+   * ── ★ 契约字段：`kind` 决定一条任务走不走质量门，其余是质量门要求的入参 ──────────
+   *
+   * 与 `TaskDraft`（`tools/shared/entities.ts`）逐键同名，因为本结构**直接喂** `makeTask`。
+   * 不给默认值：`undefined` ⇒ `makeTask` 不写这一格 ⇒ 与"改造前建的种子任务"同形
+   * （见 `entities.ts:5524` 那段「`kind` **不传**」的注释 —— 本改造不推翻它，
+   *  只是让**想传的时候**传得进去）。
+   *
+   * ★ `reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+   *   **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+   *   而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。
+   */
+  kind?: import('./types.ts').TaskKind
+  objective?: string
+  acceptance?: string[]
+  verify?: string[]
+  inScope?: string[]
+  outOfScope?: string[]
+  deliverables?: string[]
+  nonGoals?: string[]
+  coverageOf?: string[]
+  round?: number
+  model?: string
+  reasoningEffort?: string
+  /**
+   * ── ★★★ 审查任务要审的是哪条（**推翻**了本结构此前"这一格不该在这里"的裁定）──────
+   *
+   * OLD（此前写在 `:142-145`，逐字）：
+   *   「`reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+   *     **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+   *     而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。」
+   *
+   * ★ 为什么推翻：
+   *   ① **"系统生成物"这个前提是错的。** `defaultQualityDeliveryGraph()`
+   *      （`quality-gates.ts:2520`）本身就在**建队之前**生成一张含 review 的完整 DAG，
+   *      而 `validateCreateTask`（`:1052`）要求 review 必须带 `reviewedTaskId`。
+   *      ⇒ 那个函数产出的图**自己过不了自己的校验**（实测原文：
+   *      `profile task "review-round-1" is not a valid review task — review tasks require reviewedTaskId`）。
+   *      只要这一格不存在，"生成一个标准质量图"这条路就永远走不通。
+   *   ② **"不同轴"这个理由站不住。** 建队时本来就把种子 id 映射成 `tN`
+   *      （`entities.ts:5497 seedToActual`），而 `dependencies` 一直在用这套映射。
+   *      让 `reviewedTaskId` 走**同一套**映射，它就在同一个轴上 —— 反例见
+   *      `entities.ts:5562` 那段：不换名会写出一个永远指不中的引用。
+   *   ③ 悬空引用现在也**不会静默**：`validateCreateTask` 会逐字拒
+   *      `reviewed task "xxx" does not exist`。
+   *
+   * ★ 语义：填的是**种子 id**（模板 id），不是 `tN`。
+   */
+  reviewedTaskId?: string
 }
 
 /** A fully validated, topologically ordered team profile. */
@@ -403,6 +478,11 @@ function normalizeListedProfile(
       memberByName,
       memberByKey,
       requireAssignee,
+      /**
+       * ★ 种子 linkage 只在**整张图都读完**之后才能判：`reviewedTaskId` 指的那条
+       *   可能出现在本任务**之后**。⇒ 循环里跳过，读完再判（见下面 `assertSeedLinkage`）。
+       */
+      { deferLinkage: true },
     )
     const collidingId = taskById.get(task.id)
     if (collidingId !== undefined) {
@@ -420,6 +500,7 @@ function normalizeListedProfile(
     draftTasks.push(task)
   }
 
+  assertSeedLinkage(draftTasks, listed.name)
   const tasks = topoSortTasks(draftTasks, listed.name)
   return omitUndefined({
     name: listed.name,
@@ -568,6 +649,7 @@ function normalizeTask(
   memberByName: Map<string, NormalizedProfileMember>,
   memberByKey: Map<string, NormalizedProfileMember>,
   requireAssignee: boolean,
+  options: { deferLinkage?: boolean } = {},
 ): NormalizedProfileTask {
   const raw = asRecord(value, path)
   assertAllowedKeys(raw, TASK_KEYS, path)
@@ -591,6 +673,48 @@ function normalizeTask(
     memberByName,
     memberByKey,
   )
+  /**
+   * ── ★ 契约字段的归一化：**在入口就判真伪**，而不是等到 `create_task` 那一层 ────────
+   *
+   * ★ 为什么在这里判：`create({plan})` 是**一次原子调用** —— 若一条任务的 `kind`
+   *   拼错（`'implmentation'`）或质量 kind 缺 `acceptance`，最坏的结果不是报错，
+   *   而是**建出一队任务、然后每条都在派发时被 `validateCreateTask` 弹回来**。
+   *   那时人已经在看"计划已批准"，而账上是一队注定失败的任务。
+   *   ⇒ 在这里拒，等于在**建队那一刻**把不合法的计划挡在门外。
+   *
+   * ★ 判据**复用** `validateCreateTask`（`quality-gates.ts:980`）而不是重写一份 ——
+   *   两份"什么算合法质量任务"的真相一定会漂移，而漂移后**没人读得出来**。
+   *   这里做的是把输入**整形成**它认识的形状，再让它裁。
+   */
+  const kind = normalizeTaskKind(raw['kind'], `${path}.kind`)
+  const objective = optionalNonEmptyString(raw['objective'], `${path}.objective`)
+  const acceptance = optionalStringList(raw['acceptance'], `${path}.acceptance`)
+  const verify = optionalStringList(raw['verify'], `${path}.verify`)
+  const inScope = optionalStringList(raw['inScope'], `${path}.inScope`)
+  const outOfScope = optionalStringList(raw['outOfScope'], `${path}.outOfScope`)
+  const deliverables = optionalStringList(raw['deliverables'], `${path}.deliverables`)
+  const nonGoals = optionalStringList(raw['nonGoals'], `${path}.nonGoals`)
+  const coverageOf = optionalStringList(raw['coverageOf'], `${path}.coverageOf`)
+  const round = optionalPositiveInt(raw['round'], `${path}.round`)
+  const model = optionalNonEmptyString(raw['model'], `${path}.model`)
+  const reasoningEffort = optionalNonEmptyString(raw['reasoning_effort'], `${path}.reasoning_effort`)
+  /**
+   * ★ 审查 linkage：填的是**种子 id**（见 `NormalizedProfileTask.reviewedTaskId` 那段）。
+   *   这里只判"非空字符串"，**不在这里**判"指向的队伍里有没有那条任务" ——
+   *   那需要整张图的上下文，由落盘前的 `validateCreateTask` 判。
+   */
+  const reviewedTaskId = optionalNonEmptyString(raw['reviewedTaskId'], `${path}.reviewedTaskId`)
+  assertTaskContract({
+    path,
+    id,
+    kind,
+    objective,
+    acceptance,
+    verify,
+    inScope,
+    reviewedTaskId,
+    deferLinkage: options.deferLinkage === true,
+  })
   return omitUndefined({
     id,
     subject,
@@ -598,7 +722,198 @@ function normalizeTask(
     assignee,
     dependencies,
     sourceIndex,
+    kind,
+    objective,
+    acceptance,
+    verify,
+    inScope,
+    outOfScope,
+    deliverables,
+    nonGoals,
+    coverageOf,
+    round,
+    model,
+    reasoningEffort,
+    reviewedTaskId,
   })
+}
+
+/**
+ * ★ 只接 `TASK_KINDS` 里存在的值。拼错的 kind 一旦放过去，`taskKindOf` 会把它读成
+ *   `'work'`（缺省），于是一条"本该走质量门"的任务**静默降级成普通任务** ——
+ *   而它看起来是建成了、派发了、完成了。
+ */
+function normalizeTaskKind(value: unknown, path: string): import('./types.ts').TaskKind | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new Error(`${path} must be a string`)
+  const trimmed = value.trim()
+  if (!(TASK_KINDS as readonly string[]).includes(trimmed)) {
+    throw new Error(`${path} must be one of: ${TASK_KINDS.join(', ')} (got "${value}")`)
+  }
+  return trimmed as import('./types.ts').TaskKind
+}
+
+function optionalStringList(value: unknown, path: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array of strings`)
+  const kept: string[] = []
+  for (let index = 0; index < value.length; index += 1) {
+    const item = value[index]
+    if (typeof item !== 'string') throw new Error(`${path}[${index}] must be a string`)
+    const trimmed = item.trim()
+    if (trimmed === '') continue
+    if (kept.includes(trimmed)) continue
+    kept.push(trimmed)
+  }
+  return kept.length === 0 ? undefined : kept
+}
+
+/**
+ * ── ★★★ 复用 `validateCreateTask` 的判据，而不是在这里重写一份 ────────────────────
+ *
+ * 它回答的正是"这条质量任务能不能建"：质量 kind 必须有 objective + acceptance，
+ * 写类 kind（implementation / repair / integration）还必须有 inScope + verify。
+ *
+ * ★ 独立 import 会成环（`quality-gates.ts` → `types.ts`，而本文件也被它引），
+ *   所以调用方把结果**作为函数参数**传进来 —— 见下面 `assertTaskContract` 的签名。
+ *   不对：`profiles.ts` 本身**不**被 `quality-gates.ts` 引用（已核 import 方向），
+ *   所以这里可以直接 import。
+ */
+function assertTaskContract(input: {
+  path: string
+  id: string
+  kind: import('./types.ts').TaskKind | undefined
+  objective: string | undefined
+  acceptance: string[] | undefined
+  verify: string[] | undefined
+  inScope: string[] | undefined
+  reviewedTaskId?: string | undefined
+  deferLinkage?: boolean
+}): void {
+  /**
+   * ★ 延迟模式（种子图）：`reviewedTaskId` 的两条判据**全部**交给 `assertSeedLinkage`
+   *   对着整张图判，本层一条都不判。理由见下面那格注释 —— 本层是**空队**，
+   *   任何"指向存在吗"都必然假，而这个假会把整张合法的图拒掉。
+   */
+  if (input.deferLinkage === true) {
+    if (input.kind === undefined) return
+    /**
+     * ★ `assumeResolvable` 是**延迟契约**的显式表达，不是"造个假队骗过校验"：
+     *   本层只判形状，"这条引用最终指得中吗"由 `assertSeedLinkage` 对着整张图判。
+     *   不做这一步的话，空队会让**任何**合法引用都判 `does not exist` —— 那是
+     *   "这里本来就判不了"，不是"引用悬空"，而它的后果是把整张合法的图拒掉。
+     */
+    const team = input.reviewedTaskId === undefined
+      ? emptyTeamForContractCheck()
+      : withResolvableStub(emptyTeamForContractCheck(), input.reviewedTaskId)
+    const shapeVerdict = validateCreateTask(team, {
+      subject: input.id,
+      kind: input.kind,
+      ...input.objective === undefined ? {} : { objective: input.objective },
+      ...input.acceptance === undefined ? {} : { acceptance: input.acceptance },
+      ...input.verify === undefined ? {} : { verify: input.verify },
+      ...input.inScope === undefined ? {} : { inScope: input.inScope },
+      ...input.reviewedTaskId === undefined ? {} : { reviewedTaskId: input.reviewedTaskId },
+    })
+    if (!shapeVerdict.ok) {
+      throw new Error(`${input.path}: profile task "${input.id}" is not a valid ${input.kind} task — ${shapeVerdict.error}`)
+    }
+    return
+  }
+  if (input.kind === undefined) return
+  /**
+   * ★ 这里用的是一支**空队**，不是真的队 —— 因为在本函数的调用点，队还没建。
+   *   `validateCreateTask` 对 `team` 的读取只有四处（已逐行核）：
+   *   `team.halted`、以及 `reviewedTaskId`/`sourceTaskId`/repair 重复 三处 `team.tasks` 查找。
+   *
+   * ★★ 这段话此前写着「前三者本路径**都不产生**（种子任务没有 linkage）」——
+   *   **已被推翻**：`reviewedTaskId` 现在**就是**种子图的一格（见
+   *   `NormalizedProfileTask.reviewedTaskId` 那段为什么推翻）。
+   *
+   * ⇒ 处理方式：传 `undefined` 给校验器，即**在这一层跳过**"指向的任务存在吗"那一条。
+   *   理由是那条判据在本层**判不了**（种子 id 要先经 `seedToActual` 才变成 `tN`，
+   *   而映射表还没建）；它会在 `initializeProfileTeam` 落盘前由同一个
+   *   `validateCreateTask` 用**真实队伍**再判一次 —— 那条路不会漏。
+   *   ★ 这里若硬造一个假 team.tasks 去骗过校验，验的就不是产品行为了。
+   */
+  const verdict = validateCreateTask(emptyTeamForContractCheck(), {
+    subject: input.id,
+    kind: input.kind,
+    ...input.objective === undefined ? {} : { objective: input.objective },
+    ...input.acceptance === undefined ? {} : { acceptance: input.acceptance },
+    ...input.verify === undefined ? {} : { verify: input.verify },
+    ...input.inScope === undefined ? {} : { inScope: input.inScope },
+    /**
+     * ★ 延迟判：本函数一次只看得到**一条**任务，而 `reviewedTaskId` 可以指向
+     *   本任务**之后**才出现的那条。而 `emptyTeam.tasks` 是**空的**，所以任何真 id
+     *   都会被判 `does not exist` —— 那不是"引用悬空"，是"这里本来就判不了"。
+     * ⇒ 这一格**整条不传**：本层只判形状（objective/acceptance/…），
+     *   `reviewedTaskId` 的「填了没」与「指向存在吗」两条都交给 `assertSeedLinkage`
+     *   对着**整张图**判。
+     */
+  })
+  if (!verdict.ok) {
+    throw new Error(`${input.path}: profile task "${input.id}" is not a valid ${input.kind} task — ${verdict.error}`)
+  }
+}
+
+/** 一支只装了一条桩任务的队：用于让"指向存在吗"在**延迟模式**下不误报。 */
+function withResolvableStub(team: TeamState, id: string): TeamState {
+  return { ...team, tasks: [makeStubTask(id)] }
+}
+
+/** 桩任务：本层只读 `id`，其余字段不参与判定。 */
+function makeStubTask(id: string): TeamState['tasks'][number] {
+  return { id, subject: id, status: 'pending', dependencies: [], attempt: 0, createdAt: 0, updatedAt: 0 }
+}
+
+/**
+ * ★ 本层只用来判"形状"的空队：队还没建，`team.tasks` 自然是空的。
+ *   「指向存在吗」那一类判据在这里**必然假**，所以它们全部推迟（见 `assertSeedLinkage`）。
+ */
+function emptyTeamForContractCheck(): TeamState {
+  return {
+    name: 'contract-check',
+    id: 'contract-check',
+    captainSessionId: 'contract-check',
+    createdAt: 0,
+    members: [],
+    tasks: [],
+    taskSeq: 0,
+  }
+}
+
+/**
+ * ★ 种子 linkage 的**整图**校验（`reviewedTaskId` 必须指向本图里真的有的种子 id）。
+ *
+ * ★ 为什么单独一支：`normalizeTask` 一次只看一条，而引用可以指向后面那条。
+ *   把它塞进单条归一化要么漏（读不到未来），要么逼作者按顺序写图 —— 后者是一条
+ *   **没人会猜到**的暗规则，违反了会得到 `does not exist` 而图其实是对的。
+ *
+ * ★ 为什么种子层也判：等落盘后再判（`validateCreateTask`）那条路**也在**，
+ *   但那时错误信息里 `t5` 与 `implementation` 两套 id 混在一起，离原因很远。
+ *   在这里判，人能看见自己写下的那两个名字。
+ */
+function assertSeedLinkage(tasks: NormalizedProfileTask[], profileName: string): void {
+  const ids = new Set(tasks.map((task) => task.id))
+  for (const task of tasks) {
+    if (task.kind !== 'review') {
+      if (task.reviewedTaskId !== undefined) {
+        throw new Error(
+          `profile "${profileName}" task "${task.id}": reviewedTaskId is only meaningful on a review task (kind is "${task.kind}")`,
+        )
+      }
+      continue
+    }
+    if (task.reviewedTaskId === undefined) {
+      throw new Error(`profile "${profileName}" task "${task.id}": review tasks require reviewedTaskId`)
+    }
+    if (!ids.has(task.reviewedTaskId)) {
+      throw new Error(
+        `profile "${profileName}" task "${task.id}": reviewedTaskId "${task.reviewedTaskId}" is not a task in this plan (have: ${[...ids].join(', ')})`,
+      )
+    }
+  }
 }
 
 function normalizeDependencies(value: unknown, path: string, taskId: string): string[] {

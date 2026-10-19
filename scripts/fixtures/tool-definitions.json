@@ -335,12 +335,76 @@
               },
               "type": "array"
             },
+            "quality": {
+              "additionalProperties": false,
+              "description": "Quality mode: generate the standard DAG instead of writing five tasks by hand. Mutually exclusive with tasks.",
+              "properties": {
+                "analyst": {
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "implementer": {
+                  "type": "string"
+                },
+                "inScope": {
+                  "description": "REQUIRED: replaces the generator placeholder. Derive from the real workspace.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "integrator": {
+                  "type": "string"
+                },
+                "reviewer": {
+                  "type": "string"
+                },
+                "tester": {
+                  "type": "string"
+                },
+                "verify": {
+                  "description": "REQUIRED: replaces the generator placeholder. Use commands that actually exist in this repo.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "goal",
+                "implementer",
+                "reviewer",
+                "inScope",
+                "verify"
+              ],
+              "type": "object"
+            },
             "tasks": {
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "acceptance": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "assignee": {
                     "type": "string"
+                  },
+                  "coverageOf": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "deliverables": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
                   },
                   "dependencies": {
                     "items": {
@@ -355,8 +419,62 @@
                     "description": "Local reference used by dependencies in this plan; the result maps it to a durable task id.",
                     "type": "string"
                   },
+                  "inScope": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "description": "Quality kind. Omit for ordinary work. A quality kind requires objective + acceptance (plus inScope + verify for implementation/repair/integration).",
+                    "enum": [
+                      "requirements",
+                      "implementation",
+                      "verification",
+                      "review",
+                      "repair",
+                      "integration",
+                      "work"
+                    ],
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "The model that runs THIS task. Recorded on the task record so the result keeps a single, answerable attribution.",
+                    "type": "string"
+                  },
+                  "nonGoals": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "objective": {
+                    "type": "string"
+                  },
+                  "outOfScope": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reasoning_effort": {
+                    "type": "string"
+                  },
+                  "reviewedTaskId": {
+                    "description": "For kind=review: the seed task id (from this plan) being reviewed.",
+                    "type": "string"
+                  },
+                  "round": {
+                    "type": "number"
+                  },
                   "subject": {
                     "type": "string"
+                  },
+                  "verify": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
                   }
                 },
                 "required": [
@@ -369,8 +487,7 @@
             }
           },
           "required": [
-            "members",
-            "tasks"
+            "members"
           ],
           "type": "object"
         },

@@ -296,6 +296,25 @@ export interface QualityGraphDraft {
     inScope?: string[];
     verify?: string[];
     coverageOf?: string[];
+    /**
+     * ── ★★★ 审查任务要审的是哪条（这一格此前**缺**，于是生成器产出的图自己过不了校验）──
+     *
+     * MEASURED（本轮，我直接拿生成器的输出去喂 `create({plan})`）：
+     *   `profile task "review-round-1" is not a valid review task — review tasks require reviewedTaskId`
+     *
+     * ★ 而 `validateCreateTask`（`:1052`）对 review 的要求是**两条**：
+     *   非空 + 指向的队伍里**真的存在**那条任务。
+     *   所以这一格必须填**种子图里那条任务的 id**（`implementation`），
+     *   它会在 `initializeProfileTeam` 里经 `seedToActual` 换成真实 id —— 与 `dependencies` 同一条路。
+     *
+     * ★ 这是"生成器与校验器不同源"的第三个实例（前两个：契约字段无处可放、
+     *   `inScope: ['src/']` 硬编码违反它自己第 4 条规则）。它们共同的形态是：
+     *   **一段代码生产的东西，另一段代码拒绝接收，而两者之间没有夹具**。
+     */
+    reviewedTaskId?: string;
+    /** 同 `reviewedTaskId`，但用于 `repair`：这些 finding 从哪里来。 */
+    sourceTaskId?: string;
+    sourceFindingIds?: string[];
 }
 export declare const DEFAULT_REVIEW_ACCEPTANCE: readonly ["The latest implementation meets the user goal", "No unresolved blocker or high findings"];
 export declare const DEFAULT_REVIEW_OBJECTIVE = "Review whether the latest implementation satisfies the user goal";

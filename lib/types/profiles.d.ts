@@ -91,6 +91,55 @@ export interface NormalizedProfileTask {
     assignee?: string;
     dependencies: string[];
     sourceIndex: number;
+    /**
+     * ── ★ 契约字段：`kind` 决定一条任务走不走质量门，其余是质量门要求的入参 ──────────
+     *
+     * 与 `TaskDraft`（`tools/shared/entities.ts`）逐键同名，因为本结构**直接喂** `makeTask`。
+     * 不给默认值：`undefined` ⇒ `makeTask` 不写这一格 ⇒ 与"改造前建的种子任务"同形
+     * （见 `entities.ts:5524` 那段「`kind` **不传**」的注释 —— 本改造不推翻它，
+     *  只是让**想传的时候**传得进去）。
+     *
+     * ★ `reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+     *   **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+     *   而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。
+     */
+    kind?: import('./types.ts').TaskKind;
+    objective?: string;
+    acceptance?: string[];
+    verify?: string[];
+    inScope?: string[];
+    outOfScope?: string[];
+    deliverables?: string[];
+    nonGoals?: string[];
+    coverageOf?: string[];
+    round?: number;
+    model?: string;
+    reasoningEffort?: string;
+    /**
+     * ── ★★★ 审查任务要审的是哪条（**推翻**了本结构此前"这一格不该在这里"的裁定）──────
+     *
+     * OLD（此前写在 `:142-145`，逐字）：
+     *   「`reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+     *     **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+     *     而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。」
+     *
+     * ★ 为什么推翻：
+     *   ① **"系统生成物"这个前提是错的。** `defaultQualityDeliveryGraph()`
+     *      （`quality-gates.ts:2520`）本身就在**建队之前**生成一张含 review 的完整 DAG，
+     *      而 `validateCreateTask`（`:1052`）要求 review 必须带 `reviewedTaskId`。
+     *      ⇒ 那个函数产出的图**自己过不了自己的校验**（实测原文：
+     *      `profile task "review-round-1" is not a valid review task — review tasks require reviewedTaskId`）。
+     *      只要这一格不存在，"生成一个标准质量图"这条路就永远走不通。
+     *   ② **"不同轴"这个理由站不住。** 建队时本来就把种子 id 映射成 `tN`
+     *      （`entities.ts:5497 seedToActual`），而 `dependencies` 一直在用这套映射。
+     *      让 `reviewedTaskId` 走**同一套**映射，它就在同一个轴上 —— 反例见
+     *      `entities.ts:5562` 那段：不换名会写出一个永远指不中的引用。
+     *   ③ 悬空引用现在也**不会静默**：`validateCreateTask` 会逐字拒
+     *      `reviewed task "xxx" does not exist`。
+     *
+     * ★ 语义：填的是**种子 id**（模板 id），不是 `tN`。
+     */
+    reviewedTaskId?: string;
 }
 /** A fully validated, topologically ordered team profile. */
 export interface NormalizedTeamProfile {
