@@ -6223,6 +6223,18 @@ export function applyQualityFollowUp(team: TeamState, closed: TeamTask): { creat
         ? undefined
         : idBySubject.get(draft.reviewedTaskId) ?? draft.reviewedTaskId,
     }, now)
+    /**
+     * ── ★★★ 独立性读数**随任务落盘**（2026-10-20，补 t6）────────────────────────────
+     *
+     * ★★ 为什么不在 `makeTask` 的入参里传：`TaskDraft` 不收这一格
+     *   （与 `reviewed` 那一格的取舍同源 —— 见 `create-task.ts` 里那段
+     *   「刻意不交给 makeTask」的注释）。★ 而这里**必须**写，因为
+     *   `planQualityFollowUp` 在**生成那一刻**算出了它，之后**再也算不回来**。
+     *
+     * ★ 三态如实落盘（含 `undecidable` 与其 `why`）——
+     *   一个只写 `not-independent` 的实现会让"判不了"与"独立"在盘上同形。
+     */
+    if (draft.reviewIndependence !== undefined) next.reviewIndependence = draft.reviewIndependence
     team.tasks.push(next)
     created.push(next)
   }

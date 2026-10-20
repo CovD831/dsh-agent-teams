@@ -282,6 +282,12 @@ export interface PlannedFollowUpTask {
   sourceTaskId?: string
   sourceFindingIds?: string[]
   reviewedTaskId?: string
+  /**
+   * ★★★ 这次审查的**独立性读数**（2026-10-20，补 t6）——
+   *   在**生成那一刻**算，因为那是它唯一能被确定的时刻
+   *   （之后 `assignee` 可能被改，而"生成时指没指人"是一个**历史事实**）。
+   */
+  reviewIndependence?: IndependenceReading
 }
 
 export interface PlanQualityFollowUpResult {
@@ -2437,6 +2443,107 @@ function withoutScopeConflicts(
   return outOfScope.filter((pattern) => !conflicting.has(pattern))
 }
 
+/**
+ * ── ★★★ 「这次审查**独立**吗」—— 一条**可读的**读数（2026-10-20，补 t6）──────────────
+ *
+ * ── 它补的是什么（MEASURED：一个静默的兜底）────────────────────────────────────
+ *
+ * `schedulableAssignee(preferred, team, forbidden)` 找不到可用的人时**返回 `undefined`**，
+ * 而 `makeTask` 对 `assignee === undefined` 的处理是**直接不写这一格**
+ * （`src/tools/shared/entities.ts`：`...draft.assignee === undefined ? {} : { assignee: draft.assignee }`）
+ * ⇒ 那条 review 任务落进**共享池**，**谁都能领，包括刚写完它的实现者**。
+ *
+ * ★★ 于是"这次审查其实是自审"这件事，在读数上**不可见**。
+ *   而我们在 `unmeasured` 上极严（`registry.ts` 甚至为"判据开火了但被放过"专门加了
+ *   `observedBlockers`），却在这一格没有对应读数 —— 同一个纪律，两个不同的落实程度。
+ *
+ * ── 参考（外部，市场调研逐字，两个插件独立做了同一件事）─────────────────────────
+ *
+ *   `portable-dsh-multi-agent-plugin`：独立性三档（审查者≠计划者≠作者，且**不同 provider**），
+ *     做不到时**命名拒绝** `INDEPENDENCE_REQUIRED`
+ *   `dsh-switchman`：做不到时声明 `DOWNGRADED`
+ *   ★★ 两者的共同点：**降级必须可读**。
+ *
+ * ── 三态，且三者**不同形** ────────────────────────────────────────────────────
+ *
+ *   `independent`   —— 审查者**在生成时**就被指到一个不是实现者的人
+ *   `not-independent` —— 审查者就是实现者（或生成时压根没指人 ⇒ 共享池）
+ *   `undecidable`   —— 读不出实现者是谁（实现任务没有跑到过终态的 execution）
+ *
+ * ★★ 为什么 `not-independent` 不并进 `undecidable`：
+ *   前者是一个**结论**（补救动作：给这条 review 指名一个别的成员），
+ *   后者是"判不了"（补救动作：去查那条实现任务为什么没有 execution）。
+ *   ★ 合并会让读的人去做另一件事 —— 本仓记账最久的形态。
+ *
+ * ── ★ 它**不做**硬拒绝（刻意的边界）────────────────────────────────────────────
+ *
+ * 单人团队里"没人可指"是**结构事实**，硬拒会把那种队直接死锁。
+ * ⇒ 这一轮只做**可读**：让"这次独立性如何"随任务记录交出去，由读的人决定要不要信。
+ *   ★ 而它**不是**"先软后硬"的临时状态 —— "降级必须可读"本身就是终态的设计
+ *     （`DOWNGRADED` 那两个先例就是这么用的）。
+ */
+export type ReviewIndependence = 'independent' | 'not-independent' | 'undecidable'
+
+export interface IndependenceReading {
+  readonly status: ReviewIndependence
+  /** 审查者是谁；生成时没指人 ⇒ 缺席（**不是**空串）。 */
+  readonly reviewer?: string
+  /** 实现者是谁；读不出 ⇒ 缺席。 */
+  readonly implementer?: string
+  /** 人话成因（`not-independent` / `undecidable` 时在场）。 */
+  readonly why?: string
+}
+
+/**
+ * 判一条 review / requirements 任务的**独立性**。
+ *
+ * ★ 纯函数：只读传入的两格（与 `artifactBindingOf` / `testFileBaselineOf` 同一条纪律）。
+ *
+ * @param reviewer - 生成时指给它的审查者（`assignee`）。**缺席 = 落进共享池**。
+ * @param implementer - 它审的那件事的实现者。**读不出 ⇒ 缺席**。
+ */
+export function independenceOf(
+  reviewer: string | undefined,
+  implementer: string | undefined,
+): IndependenceReading {
+  /**
+   * ★ 先判"读不出实现者" —— 因为在这一支里，即使审查者**在场**，
+   *   我们也说不出"他是不是那个人"。★ 顺序不能反：反过来会把
+   *   "审查者 ≠ 未知的人"读成 `independent`（一个**恒真**的判断）。
+   */
+  if (implementer === undefined || implementer === '') {
+    return {
+      status: 'undecidable',
+      ...reviewer === undefined || reviewer === '' ? {} : { reviewer },
+      why: 'the identity that did the work this review judges could not be read, so whether the reviewer is independent of it cannot be decided',
+    }
+  }
+  /**
+   * ── ★★ 一个**缺席的审查者**在这里**不是** `undecidable` ────────────────────────
+   *
+   * `assignee === undefined` ⇒ 这条任务落进**共享池** ⇒ **包括实现者在内的任何人**都能领它。
+   * ⇒ 那不是"判不了"，那是一个**结论**："它的独立性没有被保证。"
+   *   ★ 把这一支读成 `undecidable` 会让它看起来像"基础设施故障"，
+   *     而真相是**设计上的一个缺口** —— 两者的补救动作不同。
+   */
+  if (reviewer === undefined || reviewer === '') {
+    return {
+      status: 'not-independent',
+      implementer,
+      why: 'no reviewer was named when this review was generated, so it went to the shared pool where the implementer can claim it — its independence is not guaranteed',
+    }
+  }
+  if (reviewer === implementer) {
+    return {
+      status: 'not-independent',
+      reviewer,
+      implementer,
+      why: `"${reviewer}" would also do the work this review judges — the same identity may not review its own work`,
+    }
+  }
+  return { status: 'independent', reviewer, implementer }
+}
+
 export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQualityFollowUpResult {
   const empty = { created: [] as PlannedFollowUpTask[], tasks: [] as PlannedFollowUpTask[] }
   const kind = taskKindOf(closed)
@@ -2556,6 +2663,19 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
     kind: 'review',
     subject: `review-round-${nextRound}`,
     assignee: reviewer,
+    /**
+     * ── ★★★ 独立性读数：在**生成这一刻**算，并随任务落盘（2026-10-20，补 t6）────────
+     *
+     * ★ 为什么在生成时算、不留给下游：
+     *   `reviewer` 是 `undefined` 时，那条任务进共享池 ⇒ 之后**谁领的都算数**
+     *   ⇒ 真相（"生成时没指人"）在那一刻之后**就查不回来了**。
+     *   而 `assignee` 后来被改成什么，与"它生成时独立吗"是两个量。
+     *
+     * ★★ 而没有这一格时，这个缺口是**静默**的：`reviewer === undefined`
+     *   与"指了一个恰好等于实现者的人"在盘上**都是**"assignee 缺席 / 等于实现者"
+     *   —— 但它们**不是同一件事**（一个能靠改派修，一个不能）。
+     */
+    reviewIndependence: independenceOf(reviewer, implementer),
     dependencies: [repair.id ?? `repair-round-${nextRound}`],
     round: nextRound,
     objective: sanitizeReviewObjective(closed.objective, DEFAULT_REVIEW_OBJECTIVE),

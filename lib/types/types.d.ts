@@ -757,6 +757,41 @@ export interface TeamTask {
     reviewedTaskId?: string;
     reviewedAttempt?: number;
     /**
+     * ── ★★★ 这次审查**独立**吗（2026-10-20，补 t6）─────────────────────────────────
+     *
+     * ── 它补的是什么（MEASURED：一个静默的兜底）──────────────────────────────────
+     *
+     * 生成器 `planQualityFollowUp` 找不到可用的人时，`schedulableAssignee` 返回 `undefined`
+     * ⇒ `makeTask` **直接不写 `assignee`** ⇒ 那条 review 任务落进**共享池**，
+     *   **谁都能领，包括刚写完它的实现者**。
+     *   ⇒ 于是"这次审查其实是自审"这件事，在读数上**不可见**。
+     *
+     * ── 三态，且三者**不同形**（读法各不相同，补救动作也各不相同）────────────────
+     *
+     *   `independent`     —— 生成时就被指到一个不是实现者的人
+     *   `not-independent` —— 审查者就是实现者，**或生成时压根没指人**（⇒ 共享池）
+     *     ★★ 后者是一个**结论**（"它的独立性没有被保证"），**不是**"判不了"
+     *   `undecidable`     —— 读不出实现者是谁（那条实现没有跑到过终态的 execution）
+     *
+     * ★★ 为什么它**不**并进 `assignee` 那一格：`assignee` 是"派给谁"，
+     *   而这是"这次审查的独立性如何"。★ 一条**后来被改指**的任务，
+     *   它的独立性会随 `assignee` 变 —— 而 `independent` / `not-independent`
+     *   在写入那一刻是**一个事实**，两者不是同一个量。
+     *
+     * ── ★ 它**不做**硬拒绝（刻意的边界）────────────────────────────────────────────
+     *
+     * 单人团队里"没人可指"是**结构事实**，硬拒会把那种队直接死锁。
+     * ⇒ 只做**可读**：让"这次独立性如何"随任务记录交出去，由读的人决定要不要信。
+     *   ★ 参考（外部）：`portable-dsh-multi-agent-plugin` 的 `INDEPENDENCE_REQUIRED`、
+     *     `dsh-switchman` 的 `DOWNGRADED` —— **两者的共同点：降级必须可读**。
+     */
+    reviewIndependence?: {
+        readonly status: 'independent' | 'not-independent' | 'undecidable';
+        readonly reviewer?: string;
+        readonly implementer?: string;
+        readonly why?: string;
+    };
+    /**
      * ── ★★★ t97（吸收上游 #161 的 **S1**）：这份判决**绑定到了哪些字节** ──────────────
      *
      * 上游 #161 的原始缺陷（逐字）：
