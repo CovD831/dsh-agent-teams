@@ -56,6 +56,8 @@ import {
   sanitizeReviewObjective,
   normalizeBlankOptionalTaskFields,
   taskKindOf,
+  /** ★ 2026-10-20：`add_task` 落盘契约段裁决用（与 `create_task` 同一个投影）。 */
+  gateEvaluationRecordOf,
 } from './state.ts'
 import { appendTaskEvidence, repairCompletionVerdict } from './quality-gates.ts'
 /**
@@ -112,7 +114,12 @@ import { register as register_restart } from './tools/restart.ts'
  *   都不影响语义；放在末尾是为了让 diff 只多两行。
  */
 import { register as register_review_plan } from './tools/review-plan.ts'
-import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, makeTask, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf } from './tools/shared/entities.ts'
+import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, makeTask, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf,
+  /**
+   * ── ★★★ 2026-10-20：`add_task` 路线跑契约判据门所需的四个符号（需求 §13）──────
+   * ★ 与 `create_task` 用**同一个**实现、**同一套**注入 —— 不新造第二条路径。
+   */
+  rejectOnContractGates, runVerifyCommand, loadVerifyCommandRules } from './tools/shared/entities.ts'
 // ── ★ t39：对外接口不变 ─────────────────────────────────────────────────────
 // 这两个类型此前【声明在 tools.ts 里】，外部（src/index.ts）从这里 import。
 // 拆分之后它们的家在 tools/shared/entities.ts —— 而【对外接口不许变】，
@@ -2156,8 +2163,64 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
             requireExplicitKind: true,
           })
           if (!validation.ok) throw new Error(validation.error ?? 'edited task violates the quality contract')
+          /**
+           * ── ★★★ 2026-10-20：`add_task` 路线**终于跑契约判据门**（需求 §13 的核心诉求）────
+           *
+           * ── 它补的是什么（MEASURED，就在本轮）──────────────────────────────────────
+           *
+           * 需求 §13 逐字记过：「`edit_plan` 的 `add_task` 路径**完全不跑任何契约门**」，
+   *     并给了一句预言：「**任何碰 `src/` 的任务必然产出 `lib/` 改动**，这不是偶然，
+   *     是结构性的。代价每次都是"一个成员的完整实现 + 一次契约修订 + 一次重来"。」
+           *
+           * ★★ 而本轮**真的又栽了同一件事，而且更贵**：
+           *   · 我用 `edit_plan` 建的 4 条 implementation 契约**全部**只声明了 `src/`、
+           *     没配对 `lib/` ⇒ `git-artifacts --check` 在每一条交付后变红
+           *   · 而 `t5` 更狠：它的 inScope 把**三个 claim 点**（`claim.ts:98` /
+           *     `scheduler.ts:891` / `reassign.ts:117`）与**臂的落点**（`scripts/`）
+           *     全留在外面 ⇒ 那条契约**在结构上不可满足** ⇒ 成员只能正确地选择 `failed`，
+           *     交付零代码。那是一次**完整的实现 + 一次失败记账**，只为了一个本可以在
+           *     建契约那一刻就报出来的缺格。
+           *
+           * ── 为什么此前没接：一层**类型上的**障碍，不是设计取舍 ─────────────────────
+           *
+           * `rejectOnContractGates` 是 **async**（它可能注入 `execVerifyCommand` 跑命令），
+           * 而这里以前是同步 push。⇒ 现在把它 `await` 在 push **之前**：
+           *   ★ 位置与 `validateCreateTask` 同序 —— 一条不合格的任务
+           *     **一个字节都不该被构造出来**，也不该占掉一个 id。
+           *
+           * ★★ 与上面那道 `validateCreateTask` 的分工（两层防的是不同的事）：
+           *   `validateCreateTask`  —— **契约合法吗**（kind 要哪些格、格式对不对）
+           *   契约判据门            —— **这份契约可判吗 / 可诚实完成吗**
+           *     （`contract.build-artifact-scope` 的 blocker 逐字点名
+           *      「declares no build artifact under "lib/" … **can never be completed honestly**」）
+           *   ⇒ 两层缺一不可，就像上面 kind 那两层一样。
+           *
+           * ── 与 `create_task` 用**同一个**实现、**同一套**注入 ──────────────────────
+           *
+           * ★ 不新造第二条"跑契约门"的路径（两条路径会在超时/退出码语义上慢慢分叉，
+           *   而那种分叉在日志里同形 —— 本仓记账过）。
+           */
+          const pendingTask = makeTask({ id: `t${fresh.taskSeq + 1}`, ...draft })
+          const contractGateSurface = await rejectOnContractGates(
+            ctx,
+            { team: fresh, task: pendingTask, creating: true },
+            'edit_plan.add_task',
+            stateRoot,
+            {
+              execVerifyCommand: (command: string): Promise<number> => runVerifyCommand(workspace, command),
+              loadRules: () => loadVerifyCommandRules(workspace),
+            },
+          )
+          /**
+           * ★ 与 `create_task` 同一落点：把契约段的裁决落盘到这条任务。
+           *   ★★ 只在**真的求值过**时才写 —— 一个恒在场的空记录会让
+           *     「这一步没被检查」与「检查了且没事」同形。
+           */
+          if (contractGateSurface !== undefined) {
+            ;(pendingTask.gateEvaluations ??= {}).contract = gateEvaluationRecordOf(contractGateSurface.gates)
+          }
           fresh.taskSeq += 1
-          fresh.tasks.push(makeTask({ id: `t${fresh.taskSeq}`, ...draft }))
+          fresh.tasks.push(pendingTask)
         } else if (mutation.action === 'remove_task') {
           const task = requireTask(fresh, mutation.taskId)
           const dependent = fresh.tasks.find((candidate) => candidate.dependencies.includes(task.id))

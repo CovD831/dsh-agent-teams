@@ -682,3 +682,86 @@ function positionOutcome(evaluation) {
   if (Array.isArray(evaluation.blockers) && evaluation.blockers.length > 0) return 'blocked'
   return `malformed:${JSON.stringify({ ok: evaluation.ok, blockers: evaluation.blockers, unmeasured: evaluation.unmeasured })}`
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 接线臂（★★★ 2026-10-20）：`edit_plan` 的 `add_task` **真的会跑这道门**
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 接线臂：`edit_plan` 的 add_task 路线真的跑契约门（需求 §13 的核心诉求）', async () => {
+  /**
+   * ── 它补的是什么（MEASURED，本轮真实的代价）──────────────────────────────────
+   *
+   * 需求 §13 逐字记过：`edit_plan` 的 `add_task` 路径**完全不跑任何契约门**。
+   * ★★ 而本轮**真的又栽了同一件事，而且更贵**：
+   *
+   *   · 用 `edit_plan` 建的 **4 条** implementation 契约**全部**只声明 `src/`、
+   *     没配对 `lib/` ⇒ 每一条交付后 `git-artifacts --check` 变红
+   *   · `t5` 更狠：它的 inScope 把**三个 claim 点**与**臂的落点**全留在外面
+   *     ⇒ 那条契约**在结构上不可满足** ⇒ 成员只能正确地选择 `failed`，交付零代码
+   *
+   * ⇒ 一次完整的实现 + 一次失败记账，只为了一个本可以在**建契约那一刻**就报出来的缺格。
+   *
+   * ── 为什么必须走**真实工具路径**，而不是再调一次 `gate()` ────────────────────
+   *
+   * 上面 23 条臂钉的是**判据本体**（`gate()` 是纯函数，它们全绿的时候，
+   * add_task 路线照样可以不跑它 —— 那就正是"判据写了但没接线"）。
+   * ★★ 这一条问的是**接线**：一次真实的 `agent_teams_edit_plan(add_task)` 调用，
+   * 带着一份只声明 `src/` 的 implementation 契约 —— 它**必须被拒**。
+   *
+   * ★ 定向突变：把 `src/tools.ts` 里 `rejectOnContractGates` 那一段删掉 ⇒ 本臂红。
+   */
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const ws = mkdtempSync(join(tmpdir(), 'gate-addtask-'))
+  await createTeamDir(join(ws, '.agent-teams'), {
+    id: 'team', name: 'GateTest', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 0,
+    phase: 'staged',
+    members: [{ id: '', name: 'w1', role: 'w', provider: 'p', model: 'm', reasoningEffort: 'default', joinedAt: 1, status: 'idle' }],
+    tasks: [],
+  })
+  const tools = new Map()
+  const ctx = {
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    tools: { register(t) { tools.set(t.name, t) } },
+    subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'm', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'm' },
+    agents: { list: () => [], get() { return undefined } }, on() { return () => {} }, effect(s) { return s() }, inject() { return () => {} },
+  }
+  registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+  const call = async (name, args) => (await tools.get(name).execute(args, {
+    agent: { id: 'captain-session', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} },
+    signal: new AbortController().signal,
+  }))
+
+  /** ① 只声明 `src/` ⇒ **必须被拒**，且拒绝语要点名缺 `lib/`。 */
+  await assert.rejects(
+    () => call('agent_teams_edit_plan', {
+      team_id: 'team',
+      operations: [{
+        action: 'add_task', kind: 'implementation', subject: 'bad impl', objective: 'x',
+        inScope: ['src/gates/index.ts'], acceptance: ['a'], verify: ['pnpm typecheck'],
+      }],
+    }),
+    (error) => {
+      const message = String(error.message)
+      assert.match(message, /contract\.build-artifact-scope/, '★ 拒绝语必须指名是哪条判据')
+      assert.match(message, /no build artifact under "lib\/"/, '★ 且必须点名缺的是 lib/ 下的产物')
+      return true
+    },
+    '★★★ add_task 路线必须跑契约门 —— 否则"声明了 src/ 却漏 lib/"这件事要等到交付那一刻才被发现',
+  )
+
+  /** ② 配对 `lib/` ⇒ **必须放行**（否则上一条可以靠"恒拒"通过 —— 反向半边）。 */
+  const ok = await call('agent_teams_edit_plan', {
+    team_id: 'team',
+    operations: [{
+      action: 'add_task', kind: 'implementation', subject: 'good impl', objective: 'x',
+      inScope: ['src/gates/index.ts', 'lib/gates/index.js'], acceptance: ['a'], verify: ['pnpm typecheck'],
+    }],
+  })
+  assert.equal(ok.status, 'staged', '★ 配对 lib/ 的契约必须放行 —— 否则这条臂测不出"在分辨"')
+  assert.equal(ok.tasks, 1, '★ 而且它真的被加进去了')
+})
