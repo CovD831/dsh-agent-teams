@@ -5934,6 +5934,11 @@ export async function initializeProfileTeam(input: {
   inlinePlan?: import('../../profiles.ts').TeamProfileConfig
   description?: string
   staged: boolean
+  /**
+   * ★★★ 队伍形态（2026-10-20，用户裁定乙方案）。缺席 ⇒ 不落这一格
+   *   ⇒ 成员提示落回条件式那条（= 本格上线前的行为）。
+   */
+  shape?: 'dispatch' | 'flat'
 }): Promise<{ committed: true; state: TeamState }> {
   const profile = resolveTeamProfile(input.inlinePlan === undefined ? input.config.profiles : { [input.profileName]: input.inlinePlan }, input.profileName, input.config.maxMembers)
   const selections: Awaited<ReturnType<typeof resolveMemberLlmSelection>>[] = []
@@ -5963,6 +5968,24 @@ export async function initializeProfileTeam(input: {
       ...profile.reviewPolicy === undefined ? {} : { reviewPolicy: profile.reviewPolicy },
     },
     ...profile.reviewPolicy === undefined ? {} : { reviewPolicy: profile.reviewPolicy },
+    /**
+     * ── ★★★ 形态落盘（2026-10-20，用户裁定乙方案）────────────────────────────────
+     *
+     * 它决定 `capabilities.ts` 发给成员的**框架提示**用哪一条
+     * （`TEAM_DISPATCH_MEMBER_PROMPT` vs `TEAM_MEMBER_PROMPT`）。
+     *
+     * ★★ 为什么这一格**必须落盘**而不是每次读人设文本去猜：
+     *   `81d08df` 那笔修复给的是一句**条件句** ——「若你的人设说要派，
+     *   就派」。而"人设说要派"这件事**没有可靠来源**：
+     *   8 个队里只有 2 个的人设提到了它，其余 5 个（含本轮那个）全是早期形态，
+     *   而后果是三个成员的会话烧穿 100 万 token。
+     *   ⇒ 一个**声明**比一句**猜测**可读：它能被 grep、被普查、被 status 投影。
+     *
+     * ★ profile 路径（`input.shape === undefined` 且来自配置 profile）：
+     *   不写这一格 ⇒ 缺席 ⇒ 成员提示落回条件式那条 = **今天的行为**。
+     *   这是刻意的：profile 的形态由 profile 自己定义，不经由建团参数改写。
+     */
+    ...input.shape === undefined ? {} : { shape: input.shape },
     captainSessionId: input.captain.id,
     createdAt: now,
     ...input.staged ? { phase: 'staged' as const, planReviewState: 'awaiting_review' as const } : {},

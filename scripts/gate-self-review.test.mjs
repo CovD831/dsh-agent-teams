@@ -185,6 +185,7 @@ async function stagedTeam(workspace) {
     name: 'SelfReviewTeam',
     approval: 'required',
     plan: {
+      shape: 'flat',
       members: [{ name: 'dev' }, { name: 'rev' }],
       tasks: [
         {

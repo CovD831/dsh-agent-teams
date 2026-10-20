@@ -262,6 +262,7 @@ test('臂 6 ★ 端到端臂：真跑 create({plan}) ⇒ 契约进【盘上的�
     name: 'ContractTeam',
     approval: 'required',
     plan: {
+      shape: 'flat',
       members: [{ name: 'worker' }],
       tasks: [
         {
@@ -338,6 +339,7 @@ test('臂 7 ★ quality 模式：一张图从生成器走到【盘上】，且�
     name: 'QualityTeam',
     approval: 'required',
     plan: {
+      shape: 'flat',
       members: [{ name: 'dev' }, { name: 'rev' }],
       quality: {
         goal: 'ship the parser',
@@ -385,6 +387,7 @@ test('臂 7 ★ quality 模式：一张图从生成器走到【盘上】，且�
     () => call('agent_teams_create', {
       name: 'BothTeam',
       plan: {
+        shape: 'flat',
         members: [{ name: 'dev' }],
         tasks: [{ id: 'a', subject: 's', assignee: 'dev' }],
         quality: { goal: 'g', implementer: 'dev', reviewer: 'dev', inScope: ['s'], verify: ['v'] },
@@ -396,7 +399,7 @@ test('臂 7 ★ quality 模式：一张图从生成器走到【盘上】，且�
   await assert.rejects(
     () => call('agent_teams_create', {
       name: 'NoScopeTeam',
-      plan: { members: [{ name: 'dev' }], quality: { goal: 'g', implementer: 'dev', reviewer: 'dev' } },
+      plan: { shape: 'flat', members: [{ name: 'dev' }], quality: { goal: 'g', implementer: 'dev', reviewer: 'dev' } },
     }),
     /inScope/,
     '★ 不覆盖占位 inScope/verify ⇒ 拒（占位值不许静默落盘成一条真实任务的契约）',
@@ -428,6 +431,7 @@ test('臂 8 ★ quality 模式：不给 analyst 也必须能建出队（且回�
     name: 'NoAnalystTeam',
     approval: 'required',
     plan: {
+      shape: 'flat',
       members: [{ name: 'dev' }, { name: 'rev' }],
       quality: {
         goal: 'ship the parser',
@@ -450,6 +454,7 @@ test('臂 8 ★ quality 模式：不给 analyst 也必须能建出队（且回�
     name: 'WithAnalystTeam',
     approval: 'required',
     plan: {
+      shape: 'flat',
       members: [{ name: 'dev' }, { name: 'rev' }, { name: 'ana' }],
       quality: {
         goal: 'ship the parser',

@@ -381,6 +381,14 @@
               ],
               "type": "object"
             },
+            "shape": {
+              "description": "REQUIRED: \"dispatch\" = durable members spawn a one-shot worker per task (the specified form; avoids burning a member session on every task); \"flat\" = members implement their own tasks (the earlier form). This selects the framework prompt a member receives; personas are still written by the caller.",
+              "enum": [
+                "dispatch",
+                "flat"
+              ],
+              "type": "string"
+            },
             "tasks": {
               "items": {
                 "additionalProperties": false,
@@ -487,7 +495,8 @@
             }
           },
           "required": [
-            "members"
+            "members",
+            "shape"
           ],
           "type": "object"
         },

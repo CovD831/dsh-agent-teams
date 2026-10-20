@@ -388,6 +388,16 @@ test('臂 8 ★ 形态通路：内联 plan 的成员能带 executionPrompt，且
     name: 'InlinePromptTeam',
     approval: 'automatic',
     plan: {
+      /**
+       * ★★ `shape` 是**必填**（2026-10-20，用户裁定乙方案）—— 见
+       *   `scripts/gate-team-shape.test.mjs` 的臂 6 与 `src/tools/create.ts` 的注释。
+       *   ⇒ 这个臂原本不传它，于是 create 被宿主 schema 拒（`missing required
+       *   property "plan.shape"`）—— ★ 那不是回归，是**必填在起作用**。
+       *   ★ 而这里选 `'flat'` 而不是 `'dispatch'`：这个臂测的是
+       *     「成员能带 executionPrompt 且它到你成员记录」这条**通路**，
+       *     与人设要不要派工无关；选 flat 让它与臂 1~5 的语境一致。
+       */
+      shape: 'flat',
       members: [
         { name: 'ledger', role: 'task-ledger', executionPrompt: prompt },
         { name: 'plain' },

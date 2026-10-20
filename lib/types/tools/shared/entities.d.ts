@@ -2366,6 +2366,11 @@ export declare function initializeProfileTeam(input: {
     inlinePlan?: import('../../profiles.ts').TeamProfileConfig;
     description?: string;
     staged: boolean;
+    /**
+     * ★★★ 队伍形态（2026-10-20，用户裁定乙方案）。缺席 ⇒ 不落这一格
+     *   ⇒ 成员提示落回条件式那条（= 本格上线前的行为）。
+     */
+    shape?: 'dispatch' | 'flat';
 }): Promise<{
     committed: true;
     state: TeamState;
