@@ -420,3 +420,45 @@ node scripts/gate-shape-execution.test.mjs      # 13 臂全绿（含一条真实
    "声明了、全员自己干"在读数上同形，而它们要求的动作相反。
 2. **`shape` 缺席（存量队）绝不默认成 `dispatch`** —— 那会让 8 个存量队里实测 5 个
    早期形态的队**看起来都符合规定**，一次静默的假绿。
+
+## 15. ★★ 「这个产物进主干了吗」必须在**树被回收之后**仍然答得出
+
+> 「有 78 个 `deliverableCommit`，而 `merge-base --is-ancestor` 只认出 4 个 ——
+>   另外 42 个是**手工按文件落盘**的，内容早就在主干里。」
+> —— 2026-10-20，本会话实测（可复跑，见 `docs/WORKTREE-BASE-DEFECT.md`）
+
+**判据**:上一轮清点把这条记为「`deliverableCommit` 仍无读者」。★ **那句话不准确**：
+`scheduler.ts` 的 `collectUpstreamBaselines` 与 `worktree.ts` 的 `resolveWorktreeBaseline`
+都在读它。真正的缺口是**另一个问句**：这个队的产物有多少进了主干。
+而实测证明它**必须**被回答 —— 只看 `--is-ancestor` 会把 42/78 报成"没合流"。
+
+**现状**:✅ 已实现（2026-10-20）—— `absorbPlanOf` 抽出 + `status.deliverable_landing` 出口。
+
+**证据**:
+```bash
+node --test scripts/gate-deliverable-landing.test.mjs   # 8 臂全绿
+node --input-type=module -e "
+import { deliverableLandingFor } from './lib/worktree.js'
+import { readTeamSync } from './lib/state.js'
+const t = readTeamSync('.agent-teams','agent-teams-refactor')
+console.log(deliverableLandingFor({repo:process.cwd(),tasks:t.tasks}))"
+# agent-teams-hardening 17/31 · agent-teams-refactor 23/34
+# mutation-quality 1/8 · overnight-registration-hardening 5/5  ⇒ 合计 46/78
+```
+
+★★ 三条纪律：
+
+1. **判据只有一份**。`judgeWorktreeReclaimable` **调** `absorbPlanOf`，不是复制它。
+   两份吸收判据必然分叉，而分叉之后「回收时算已吸收、交付时说没合流」会成为一个
+   新的、更难查的不一致。★ 这一条由臂 4 钉住（对同一棵树对拍两条路径）。
+
+2. **四态的依据必须可读**。`ancestor` / `content` / `files` / `contained` 的
+   **复核动作不同**（查 merge / 查 cherry-pick / 逐文件比对 / 查历史可达性），
+   所以 `how` 随读数一起交出，不许合流成一个布尔。
+
+3. **`unreadable` 不许并进 `not-landed`**。前者去查"这个 commit 怎么没了"，
+   后者去合流 —— 补救动作相反。★★ 而**主干读不到**时整份 `unmeasured`，
+   绝不落成"零条未合流"（那会让"一次比较都没发生"读成"全部已合流"）。
+
+★ 剩下那一半**本轮没做**：调度器仍把上游 commit 当基线传下去，而**不检查它进没进主干**。
+见 `docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条。

@@ -19,7 +19,7 @@ import { identityOfTeam, liveRefsOf } from '../members.ts'
  *   ★ 它与 `moduleFreshness`（进程那一支）**并列而不合并** —— 见下面那段长注释。
  */
 import { describeBaselineFreshness, gitChangedPaths, worktreeBaselineFreshness } from '../harness-compat.ts'
-import { worktreeDirName } from '../worktree.ts'
+import { deliverableLandingFor, worktreeDirName } from '../worktree.ts'
 import { CAPTAIN_KEY, acknowledgeMailbox, buildCoverageMatrix, canDeclareDelivery, describeQualityLoop, failureKindOf, taskKindOf, withTeamLock } from '../state.ts'
 /**
  * ── ★★★ N5 / t8：计划审查环的读数 ────────────────────────────────────────────────
@@ -300,6 +300,26 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             team_shape: { type: 'string', required: true },
             shape_execution: { type: 'string', required: true },
             shape_violations: { type: 'array', required: true, items: { type: 'string' } },
+            /**
+             * ── ★★★ 2026-10-20：**哪些产物还没进主干**（`deliverableCommit` 的第二个问句）──
+             *
+             * `docs/WORKTREE-BASE-DEFECT.md` 曾记「`deliverableCommit` 零读者」——
+             * ★ 那句话**已经过期**（`scheduler.ts` 与 `worktree.ts` 都在读它）。
+             * 真正缺的是交付那一刻的那一问：**这个队的产物，有多少已经进了主干？**
+             *
+             * MEASURED（本仓 78 个产物）：只问 `--is-ancestor` ⇒ 4 个"已合流"；
+             * 按四态口径 ⇒ **46 个**。⇒ 只问祖先会把 42 份早已落盘的工作报成"没合流"。
+             *
+             * ★ 三态在**值**上不同形：`measured` / `unmeasured`（主干读不到）；
+             * 而"这个队没有产物"是 `measured` + `total: 0`，**不是** unmeasured。
+             */
+            /**
+             * ★ 它是 `JSON.stringify` 过的**文本**（与上面 `gate_evaluation` 同一做法）：
+             *   `DeliverableLandingReadout` 是 interface（无隐式索引签名）⇒ 直接塞对象
+             *   过不了 `Record<string, JsonValue>`。★ 用文本而不是 `as unknown as JsonValue`：
+             *   后者会被"按字段访问"的人当成对象用，而它其实只是序列化后的字符串。
+             */
+            deliverable_landing: { type: 'string', required: true },
             description: { type: 'string' },
             phase: { type: 'string' },
             /**
@@ -1358,6 +1378,16 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           team_shape: describeTeamShape(team.shape, shapeExecution),
           shape_execution: shapeExecution.status,
           shape_violations: shapeExecution.status === 'measured' ? [...shapeExecution.violations] : [],
+          /**
+           * ── ★★★ 「哪些产物还没进主干」────────────────────────────────────────────
+           *
+           * ★ 恒在场（`measured` + `total: 0` 是"这个队没有产物"这条**结论**，
+           *   而字段缺席会让它与"这一格不存在"同形）。
+           * ★★ 逐条读数由 `absorbPlanOf` 算 —— **与 worktree 回收判据同一份**，
+           *   而不是第二份（两份必然分叉，而分叉之后"回收时算已吸收、交付时说没合流"
+           *   会成为一个新的、更难查的不一致）。
+           */
+          deliverable_landing: JSON.stringify(deliverableLandingFor({ repo: workspace, tasks: team.tasks })),
           halted: loop.halted,
           escalated: loop.escalated,
           loop_state: loop.state,

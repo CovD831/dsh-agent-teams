@@ -22,8 +22,47 @@
 | 调度器建树时不传任何上游信息 | `src/scheduler.ts:913 createTaskWorktree({ repo: workspace, taskId: ticket.taskId, teamId: team.id })` |
 | 只有两种 kind 建树 | `src/types.ts:195 KINDS_NEEDING_WORKTREE = ['implementation','repair']` |
 | 提交在树里做 | `src/tools/update-task.ts:1703 commitWorktree({...})` → `:1711 task.deliverableCommit = committed.commit` |
-| **没有任何合回主干的动作** | `grep -rn "deliverableCommit" src/` 只有两处：`:1711` 写、`src/types.ts:684` 声明。**零读者**。 |
+| **没有任何合回主干的动作** | `grep -rn "deliverableCommit" src/` **有读者**：`scheduler.ts` 的 `collectUpstreamBaselines`（交给下游当基线）与 `worktree.ts` 的 `resolveWorktreeBaseline`（短 id → 完整对象名）。★★ 而「这个产物进主干了吗」这**一问**当时仍然没有出口 —— 2026-10-20 补上（见下一节）。 |
 | 唯一的"合流"是判据，不是动作 | `src/worktree.ts:1170 const absorbed = isAncestor \|\| contentAbsorbed \|\| filesAbsorbed \|\| containedAbsorbed` —— 只回答"能不能删这棵树"，不负责把它合进去 |
+
+---
+
+## ★★★ 2026-10-20 更正：`deliverableCommit` **不是"零读者"**，而缺口是另一个问句
+
+上面那张表里「**零读者**」那句话**已经过期**（写它的时候是真的，之后有了读者）。
+按本仓纪律，一条读数的结论会随机制上线而改变含义 —— 留着旧措辞会让下一个人
+去补一个**早已不需要**的读侧。
+
+**实测（可复跑）**：
+```bash
+node --input-type=module -e "
+import { deliverableLandingFor } from './lib/worktree.js'
+import { readTeamSync } from './lib/state.js'
+const t = readTeamSync('.agent-teams', 'agent-teams-refactor')
+console.log(deliverableLandingFor({ repo: process.cwd(), tasks: t.tasks }))"
+```
+
+本仓 78 个 `deliverableCommit` 的实况：
+
+| 口径 | 读数 |
+|---|---|
+| `merge-base --is-ancestor <commit> HEAD` | **4 个** |
+| 四态口径（`absorbPlanOf`：ancestor / content / files / contained） | **46 个** |
+| 其中 `not-landed` | 32 个 |
+| `unreadable` | 0 个 |
+
+⇒ ★★ **只问"是不是祖先"会把 42 份早已落盘的工作报成"没合流"**（93% 的误报）。
+那不是保守 —— 那是一句**关于没有发生过的事情的主张**，而读的人会去
+「重新合并」已经合进去的东西。
+
+**而它为什么此前答不出**：吸收判据住在 `judgeWorktreeReclaimable` 里，而那个函数
+读**那棵树的 HEAD 与 `git status`** ⇒ 树被回收之后，它只能答"没有这棵树"，
+不是"这份产物在哪"。⇒ 2026-10-20 把判据抽成 `absorbPlanOf({repo, commit, trunk})`，
+**`judgeWorktreeReclaimable` 现在调它**（不是复制它），于是"树还在"与"树已回收"
+两种情形问的是**同一份判据**。
+
+**出口**：`agent_teams_status` 的 `deliverable_landing` 那一格（三态 + 逐条 `how`
++ 逐条成因）。臂见 `scripts/gate-deliverable-landing.test.mjs`。
 
 ---
 
@@ -155,12 +194,18 @@ t4  commandsRun 自相矛盾      ~:800 schema
 2. **把依赖产物先合进来再建树**：调度器在 `needsWorktree` 分支里，
    对本任务的直接上游做 `git cherry-pick` / `merge`，失败则**拒绝派发**并说明
    冲突在哪（而不是让下游在旧代码上闷头干）。
-3. **让 `deliverableCommit` 有读者**：现在它对调度器完全不可见。
-   哪怕只是"下游建树时若上游有未合入的 commit 就报 `unmeasured`"，
-   也比让两个任务都记 `completed` 而主干什么都没有要好。
+3. ~~**让 `deliverableCommit` 有读者**~~ —— ✅ **已成事实**（`scheduler.ts` 与
+   `worktree.ts` 都在读它）。而本条真正指出的那件事是「**派活前要看上游合入了没有**」，
+   它仍然没做：调度器把上游 commit 当基线传下去，但**不检查它进没进主干**。
 
-★ 三者都需要一个**能判断"合入了没有"**的读数；而那个读数已经存在于
-`src/worktree.ts:1170` 的 `absorbed` 三元组里 —— 它今天只用于"能不能删"，没有被用于"派活前检查"。
+★ 三者都需要一个**能判断"合入了没有"**的读数。那个读数**已经存在**，而 2026-10-20
+起它有了第二个入口：
+```
+absorbPlanOf({ repo, commit, trunk })   ← 四态吸收判据（ancestor/content/files/contained）
+  ├─ judgeWorktreeReclaimable 用它回答「能不能删这棵树」
+  └─ deliverableLandingFor     用它回答「这份产物进主干了吗」（status 的 deliverable_landing）
+```
+★ 而它**仍然没有**被用于「派活前检查」—— 那是剩下那一半，**本轮没做**。
 
 ---
 

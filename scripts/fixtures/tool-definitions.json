@@ -1764,6 +1764,9 @@
           "deliverable": {
             "type": "boolean"
           },
+          "deliverable_landing": {
+            "type": "string"
+          },
           "delivery": {
             "additionalProperties": false,
             "properties": {
@@ -2430,7 +2433,8 @@
         "required": [
           "team_shape",
           "shape_execution",
-          "shape_violations"
+          "shape_violations",
+          "deliverable_landing"
         ],
         "type": "object"
       }

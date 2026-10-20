@@ -35,6 +35,7 @@
  * 建不出来时返回 `{ ok:false, reason }`，且 reason 必须说清是"隔不了"
  * （不是 git 仓库、没有提交）—— **不能与"不需要隔离"同形**（契约 §3.4）。
  */
+import type { TeamTask } from './types.ts';
 export interface WorktreeResult {
     ok: true;
     /** Absolute path of the isolated working directory. */
@@ -819,6 +820,46 @@ export interface TrunkReading {
     readonly source: 'explicit' | 'main-worktree-branch';
 }
 /**
+ * ── ★★★ 「这份产物进主干了吗」—— 四选一的**吸收判据**（2026-10-20 从 `judgeWorktreeReclaimable` 抽出）
+ *
+ * ── 为什么要抽出来 ────────────────────────────────────────────────────────────
+ *
+ * 这条判据此前**只能通过一棵还在盘上的 worktree** 问（`judgeWorktreeReclaimable`
+ * 读它的 HEAD 与 `git status`）。而 MEASURED（本仓 78 个 `deliverableCommit`）：
+ * ```
+ *   不是 HEAD 祖先的          74 个
+ *   其中所属树**早已被回收**    绝大多数
+ * ```
+ * ⇒ 交付那一刻要问「哪些产物还没进主干」，而**那个命令对这些产物只能答
+ *   "没有这棵树"** —— 那不是"这份产物在哪"的答案。
+ *
+ * ⇒ 抽成一个只吃 `{repo, commit, trunk}` 的入口：**树没了也能问**，
+ *   而它**仍然是同一份判据**（`judgeWorktreeReclaimable` 现在调它，不是复制它）。
+ *   ★ 这一条是硬约束：两份吸收判据必然分叉，而分叉之后
+ *     "回收时算已吸收、交付时说没合流"会成为一个新的、更难查的不一致。
+ *
+ * ── 四种形态（逐一保留原判据的语义，一个字都没改）────────────────────────────
+ *
+ *   `'ancestor'`  —— `commit` 是主干的祖先（真的 merge 进去了）
+ *   `'content'`   —— 不是祖先，而这次提交的改动与主干**顶端那次**逐内容等价（patch-id）
+ *   `'files'`     —— 它碰过的每个文件在主干**顶端**都存在且逐字节相同（手工落盘）
+ *   `'contained'` —— 它碰过的每个文件的内容都在主干**历史**里，且主干顶端那些文件还在
+ *
+ * ★ 四种**不是**同一件事，所以 `how` 会随裁决一起交出去（复核动作不同）。
+ * ★★ 三态纪律：任一格**读不到** ⇒ 那一形态**不算命中**（绝不当成"通过"）。
+ */
+export declare function absorbPlanOf(options: {
+    /** 主仓库根。 */
+    repo: string;
+    /** 要问的那份产物（**完整对象名或能解析的短 id**）。 */
+    commit: string;
+    /** 主干的那个 commit（`resolveTrunkRef` 已核验过的）。 */
+    trunk: string;
+}): {
+    absorbed: boolean;
+    how?: 'ancestor' | 'content' | 'files' | 'contained';
+};
+/**
  * 判一个 worktree 能不能回收。
  *
  * @param repo - 主仓库根。
@@ -855,3 +896,92 @@ export declare function judgeWorktreeReclaimable(options: {
 export declare function describeReclaimability(verdict: WorktreeReclaimability): string;
 /** 读一个文件是否是 worktree 指针（诊断用；不判断存在性）。 */
 export declare function isWorktreePointer(file: string): boolean;
+/**
+ * ── ★★★ 它补的是哪一格 ────────────────────────────────────────────────────────
+ *
+ * `deliverableCommit` **不是"零读者"**（`docs/WORKTREE-BASE-DEFECT.md` 那句已过期）：
+ *   · `scheduler.ts` 的 `collectUpstreamBaselines` 把它交给下游当基线
+ *   · `worktree.ts` 的 `resolveWorktreeBaseline` 把短 id 解析成完整对象名
+ * ⇒ 缺的是**另一个问句**：**这个队的产物，有多少已经进了主干？**
+ *
+ * MEASURED（2026-10-20，本仓 78 个 `deliverableCommit`，可复跑）：
+ * ```
+ *   merge-base --is-ancestor <commit> HEAD          ⇒   4 个（5%）
+ *   而按 absorbPlanOf 的四态口径                     ⇒  46 个（59%）
+ *     其中：ancestor 4 · contained 42
+ *   部分吸收 23 个 · 无源码改动 9 个
+ * ```
+ * ⇒ ★★ **只问"是不是祖先"会把 42 份早已落盘的工作报成"没合流"** —— 那不是保守，
+ *   那是一句**关于没有发生过的事情的主张**，而读的人会去"重新合并"已经合进去的东西。
+ *   ★ 这正是本仓记账最久的形态：**一次读数说「没合流」，而东西早就在了。**
+ *
+ * ── 为什么不能只靠 `pnpm reclaim:worktrees` 回答 ──────────────────────────────
+ *
+ * `judgeWorktreeReclaimable` 要**那棵树还在盘上**（它读 worktree 的 HEAD 与
+ * `git status`）。而 74 个非祖先产物里，**绝大多数所属的树早已被回收** ——
+ * 那个命令对它们的回答是"没有这棵树"，不是"这份产物在哪"。
+ * ⇒ 交付那一刻要问的东西，**必须在树没了之后仍然答得出**。
+ *    ★ 这就是 {@link absorbPlanOf} 被从 `judgeWorktreeReclaimable` 里抽出来的理由：
+ *      **同一份判据**，而不是第二份。
+ */
+export type DeliverableLandingStatus = 'landed' | 'not-landed' | 'unreadable';
+/** 一条产物（一个 `deliverableCommit`）的合流读数。 */
+export interface DeliverableLanding {
+    readonly taskId: string;
+    /** 任务记录里那个**短** id（原样交出：读的人要能拿去 `git show <id>`）。 */
+    readonly commit: string;
+    readonly status: DeliverableLandingStatus;
+    /**
+     * ★ `landed` 时：它是**怎么**被判为落盘的 —— 四种依据的复核动作不同
+     *   （查 merge / 查 cherry-pick / 逐文件比对 / 查历史可达性），所以不许合流。
+     */
+    readonly how?: 'ancestor' | 'content' | 'files' | 'contained';
+    /** `unreadable` / `not-landed` 时的成因（人话）。 */
+    readonly why?: string;
+    /** 这次提交碰过的**源码**文件数（构建产物已排除）。 */
+    readonly sourceFiles?: number;
+}
+/** 一个队的产物合流读数（交付那一刻要的那一格）。 */
+export interface DeliverableLandingReadout {
+    /**
+     * ★ 三态：
+     *   `measured`   —— 读了（哪怕 `total: 0` 也是一个**结论**："这个队没有可交付的产物"）
+     *   `unmeasured` —— 主干读不到 / 仓库读不到 ⇒ **整份判不了**（与"零条未合流"不同形）
+     */
+    readonly status: 'measured' | 'unmeasured';
+    readonly total: number;
+    readonly landed: number;
+    readonly notLanded: number;
+    readonly unreadable: number;
+    /** 每一条的逐条读数（读的人要能复核，而不是只读三个数）。 */
+    readonly entries: readonly DeliverableLanding[];
+    /** `unmeasured` 时的成因。 */
+    readonly why?: string;
+}
+/**
+ * 把逐条读数折成一份队的读数。
+ *
+ * ★ 纯函数：`entries` 由调用方算（与 `shapeExecutionOf` / `summariseDeliveries`
+ *   同一条分工 —— I/O 在调用方，折数在这里）。
+ *
+ * ★★ 两个"零"**不同形**：
+ *   · 主干读不到 ⇒ `unmeasured`（整份判不了）
+ *   · 这个队**没有产物** ⇒ `measured` + `total: 0`（一个结论，不是一次失败）
+ */
+export declare function summariseDeliverableLanding(entries: readonly DeliverableLanding[], options?: {
+    readonly trunkUnreadable?: string;
+}): DeliverableLandingReadout;
+/**
+ * 读一个队的**产物合流读数**（I/O 那一半）。
+ *
+ * ★ 逐条用 {@link absorbPlanOf}（**与回收判据同一份**），而不是另写一套。
+ *
+ * ★★ `unreadable` 与 `not-landed` **不同形**：
+ *   · commit 解析不出（树被回收成不可达对象、gc 过）⇒ `unreadable`
+ *   · 解析得出、读得到改动，而主干没有这份工作 ⇒ `not-landed`
+ *   两者的补救动作相反：前者去查"这个 commit 怎么没了"，后者去合流。
+ */
+export declare function deliverableLandingFor(options: {
+    readonly repo: string;
+    readonly tasks: readonly TeamTask[];
+}): DeliverableLandingReadout;
