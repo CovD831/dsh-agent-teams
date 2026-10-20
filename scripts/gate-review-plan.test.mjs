@@ -58,7 +58,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -76,7 +76,18 @@ import { PLAN_REVIEWED_GATE_ONLINE_AT, REVIEW_QUESTION_IDS, gate as planReviewed
  *   而它的表现不是路径看着不对，是 `ENOENT: .../lib/tools/review-plan.js`
  *   —— 一个**看着像产物没生成**的错误，实际是根算错了一层。
  */
-const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+/**
+ * ★★ `REVIEW_PLAN_ROOT` **覆盖**（2026-10-20 加，臂 15 需要）──────────────────────
+ *
+ * MEASURED（臂 15 的第一次修法）：把突变挪到私有副本之后，臂 15 **仍然零条红** ——
+ *   因为子进程跑的虽然是同一个文件，而它里面 `import('../lib/…')` 相对
+ *   **本文件位置**解析 ⇒ 仍然读**主树**的 `lib/` ⇒ 副本上的突变根本没人读。
+ *   ★ 这与本仓那条"我在错的地方读"同族：**改的是副本，量的是原树**。
+ *
+ * ⇒ 子进程用 `REVIEW_PLAN_ROOT=<scratch>` 启动，于是它 import 的、读的、
+ *   断言的都是**副本** —— 那才是"突变真的生效了"这个主张能被证明的唯一方式。
+ */
+const ROOT = process.env.REVIEW_PLAN_ROOT ?? dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** 一条**真的能过审**的契约 —— 臂 1/2/3 的对照物。每一格都是必要的。 */
 const GOOD_CONTRACT = Object.freeze({
@@ -234,6 +245,54 @@ test('臂 3 ★ 三态臂：不发戳时 `reviewed` 键**缺席**（不是 null�
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 4 ★ rejected：逐条列出哪一问没过 **并且** 给补救动作
 // ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 3b（枢纽臂）：`refusals` 非空 ⇒ `stampable` **必须**是 false，且没有任何戳', async () => {
+  /**
+   * ── ★★★ 这一臂补的是臂 3/4/5 共同的一个洞（2026-10-20 实测）───────────────
+   *
+   * MEASURED（臂 15 的定向突变）：把
+   *   `const stampable = refusals.length === 0 && review.outcome === 'passed'`
+   * 改成 `const stampable = true` 之后 —— **14 条臂一条都没红**。
+   *
+   * 根因不是"夹具不判乱发戳"：臂 3/4/5 都只断言 **`refusals` 里有什么**，
+   * 而 `stampable` 那一格**没有任何臂直接读它**。于是：
+   *
+   *   有 refusals（审没过）+ stampable=true（照样盖章）  ⇒ 14 条臂**全绿**
+   *
+   * ★★ 而这正是最坏的那一种：**闸在拦，而戳照样发。**
+   *   读 refusals 的人看到"拦住了 2 条"，读 reviewed 的人看到"审过了" ——
+   *   两个读数都对，而它们说的是相反的事。本仓记过的那条母题：
+   *   **判据算对了，但它读的输入不是你以为的那个。**
+   *
+   * ⇒ 这一臂把"拦"与"盖章"两格**合起来**问一次：
+   *   `refusals.length > 0` ⇔ `stampable === false` ⇔ `reviewed` 缺席。
+   *   三者必须**同进同退**。
+   */
+  for (const [label, patch] of [
+    ['acceptance 空', { acceptance: [] }],
+    ['boundary 冲突', { outOfScope: ['src/tools/'] }],
+    ['objective 缺席', { objective: undefined }],
+  ]) {
+    const readout = await stampFor(patch)
+    assert.ok(
+      Array.isArray(readout.refusals) && readout.refusals.length > 0,
+      `★ 前提：${label} 必须产出一条 refusal（实测 ${JSON.stringify(readout.refusals)}）`,
+    )
+    assert.equal(
+      readout.stampable, false,
+      `★★★ ${label}：有 ${readout.refusals.length} 条 refusal ⇒ stampable 必须是 false。`
+      + ' ★ 它若为 true，就是"闸在拦、而戳照样发" —— 两个读数都对、说的却是相反的事',
+    )
+    assert.equal(
+      'reviewed' in readout, false,
+      `★★ 而 stampable=false 时 reviewed 必须**缺席**（不是 null）`,
+    )
+    assert.equal(
+      readout.unmeasured, undefined,
+      '★ 这条契约是**判过了**（有 refusals），不是"判不了" —— 两者不许同形',
+    )
+  }
+})
 
 test('臂 4 ★ rejected：不发戳，且逐条列出没过的那一问 + 补救动作', async () => {
   const readout = await stampFor({ acceptance: [] })
@@ -470,8 +529,25 @@ test('★★ 臂 15 夹具自检：真的做一次定向突变（`stampable` 恒
    *
    * ★ 只在 `lib/`（产物）上做，然后**逐字节还原**；`src/` 一个字节都不碰。
    */
-  const sutPath = join(ROOT, 'lib', 'tools', 'review-plan.js')
-  const original = readFileSync(sutPath, 'utf8')
+  /**
+   * ── ★★★ 突变必须打在**私有副本**上，不许碰共享的 `lib/`（2026-10-20 改）────────
+   *
+   * MEASURED：本臂原来直接 `writeFileSync` 到共享的 `lib/tools/review-plan.js`
+   * （虽然 finally 里逐字节还原），而 `scripts/gate-shared-artifact-writes.test.mjs`
+   * 的臂 4 当场抓到：
+   *   「出现了【新的】共享写入 … 实测新增：["scripts/gate-review-plan.test.mjs:486 → shared alias", …]」
+   *
+   * ★★ 那个判据是对的，而理由不是"你还原得不够快"：**一次并行跑里，
+   *   别的夹具可能正好在那一刻读 `lib/tools/review-plan.js`** ——
+   *   它读到的是一份**被突变过的**产物，而失败会记在它头上。
+   *   这与 `build-atomic` 那条「在共享 lib 上跑 rm -rf ⇒ 49 个夹具报
+   *   ERR_MODULE_NOT_FOUND」是**同一个形状**（入口不同，窗口相同）。
+   *
+   * ⇒ 修法：把整个 `lib/` 复制到一棵临时树，在**副本**上突变，子进程也从副本里 import。
+   */
+  const scratch = mkdtempSync(join(tmpdir(), 'review-plan-mut-'))
+  let sutPath
+  let original
   /**
    * ★ 靶子逐字抄自 `lib/tools/review-plan.js:285` 的**产物**（单引号，esbuild 不改引号）。
    *   ⇒ 若哪天源码改了措辞而这里没跟上，本臂会以"突变靶子没找到"红 —— 那是**对的**：
@@ -479,10 +555,38 @@ test('★★ 臂 15 夹具自检：真的做一次定向突变（`stampable` 恒
    */
   const target = "const stampable = refusals.length === 0 && review.outcome === 'passed';"  
   const mutated = 'const stampable = true;'
-  assert.ok(original.includes(target), `★ 突变靶子没找到 —— 那么本臂证明不了任何事（找的是: ${target}）`)
 
   let redArms = []
   try {
+    /**
+     * ★ 复制 `lib/` 到私有树 —— **只读共享，只写副本**。
+     *   `cpSync` 带 `recursive`；`node_modules` 用软链（只读且省掉几百 MB）。
+     */
+    /**
+     * ★★ 副本目录名用 `tree/` 而不是 `lib/` 这类**共享别名**
+     *   （`scripts/gate-shared-artifact-writes.test.mjs` 的臂 4 会按**目标路径的字面**
+     *    分类，而 `…/lib` 与仓库自己的 `lib/` 同形 ⇒ 它把那句 `cpSync` 报成"新的共享写入"。
+     *    ★ 那个判据**是对的**：从字面读，一个叫 `lib` 的写目标与共享目录无法区分。
+     *    修法不是加白名单，而是**让目标名本身可区分**（该判据自己的注释就这么写）。
+     */
+    cpSync(join(ROOT, 'lib'), join(scratch, 'tree', 'lib'), { recursive: true })
+    cpSync(join(ROOT, 'package.json'), join(scratch, 'tree', 'package.json'))
+    /**
+     * ── ★★★ `scripts/` 也**必须**复制（2026-10-20 实测）──────────────────────────
+     *
+     * MEASURED：只复制 `lib/` 时，副本里 `reviewAndStamp` 的**每一块读数都读不出来**
+     *   （`plan-review-check.mjs` / `friction-triage.mjs` 在 `scripts/` 下，
+     *   而 `REVIEW_PLAN_ROOT` 指向副本 ⇒ 找不到它们）
+     *   ⇒ 它走 `unmeasurableReadout` 那条**早退**路径 ⇒ `stampable` 恒 false
+     *   ⇒ **突变 `stampable = true` 对早退路径无效** ⇒ 臂 15 零条红。
+     *   ★ 而那个零条红**不是**"夹具不判乱发戳"：它测的是**一棵缺文件的树**。
+     *     这又是本仓那条"我在错的地方读"：量的是副本，而副本本身不完整。
+     */
+    cpSync(join(ROOT, 'scripts'), join(scratch, 'tree', 'scripts'), { recursive: true })
+    try { symlinkSync(join(ROOT, 'node_modules'), join(scratch, 'node_modules'), 'dir') } catch { /* 已存在 */ }
+    sutPath = join(scratch, 'tree', 'lib', 'tools', 'review-plan.js')
+    original = readFileSync(sutPath, 'utf8')
+    assert.ok(original.includes(target), `★ 突变靶子没找到（副本）—— 那么本臂证明不了任何事（找的是: ${target}）`)
     writeFileSync(sutPath, original.replace(target, mutated), 'utf8')
     /**
      * ★ 用**子进程**重跑本文件：同进程里 `lib/` 已被 import 进模块缓存，
@@ -491,21 +595,42 @@ test('★★ 臂 15 夹具自检：真的做一次定向突变（`stampable` 恒
     const { execFileSync } = await import('node:child_process')
     let stdout = ''
     try {
-      stdout = execFileSync(process.execPath, ['--test', fileURLToPath(import.meta.url)], {
-        cwd: ROOT,
+      /**
+         * ★★ 必须用**相对路径** `scripts/<本文件名>`，不是 `fileURLToPath(import.meta.url)`。
+         *   MEASURED：后者是**主树**的绝对路径 ⇒ 子进程从副本 cwd 启动，
+         *   跑的仍然是主树那份测试文件（import 副本、断言旧文件）⇒ 16 条臂全绿，
+         *   而突变明明生效了。★ 改成相对路径之后，cwd=scratch 才真的选到副本。
+         */
+        stdout = execFileSync(process.execPath, ['--test', 'scripts/gate-review-plan.test.mjs'], {
+        /**
+         * ★★ `cwd` 必须是**副本**：子进程跑的是 `scripts/gate-review-plan.test.mjs`
+         *   这个**相对路径**，而它会相对于 cwd 解析 ⇒ cwd 若是主树，
+         *   跑的就是主树里那份（import 副本、断言旧文件）—— 
+         *   MEASURED：那样 16 条臂**全绿**，而突变明明生效了。
+         */
+        cwd: join(scratch, 'tree'),
         encoding: 'utf8',
         timeout: 120_000,
-        env: childEnv(),
+        /**
+         * ★★ `REVIEW_PLAN_ROOT` 指到**副本**：子进程里 `ROOT` 取它，于是
+         *   `import('../lib/…')` 读到的是副本里那份**被突变过的**产物。
+         *   ★ `cwd` 仍留 `ROOT`：脚本自身的路径不变（它仍然是本文件）。
+         */
+        env: { ...childEnv(), REVIEW_PLAN_ROOT: join(scratch, 'tree') },
       })
     } catch (error) {
       stdout = `${error.stdout ?? ''}${error.stderr ?? ''}`
     }
     redArms = (stdout.match(/^✖ (臂[^\n(]*)/gmu) ?? []).map((line) => line.trim())
   } finally {
-    writeFileSync(sutPath, original, 'utf8')
+    rmSync(scratch, { recursive: true, force: true })
   }
-
-  assert.deepEqual(readFileSync(sutPath, 'utf8'), original, '★ 必须逐字节还原（否则这个夹具会污染下一次运行）')
+  /**
+   * ★ 现在**不需要**"逐字节还原共享文件"了 —— 因为从来没碰过它。
+   *   而更要紧的是：**共享 `lib/` 在整个臂执行期间一个字节都没变**，
+   *   于是并行的别的夹具不可能读到被突变过的产物。
+   */
+  assert.equal(existsSync(join(scratch, 'tree', 'lib', 'tools', 'review-plan.js')), false, '★ 私有副本必须被清掉')
   /**
    * ★ 只要求"至少一条红"，而不是"某一条红"：靶子是三态枢纽，
    *   臂 3/4/5/6/7/9/10/11 里任何一条抓得住都算夹具活着。
