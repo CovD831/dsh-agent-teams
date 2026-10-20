@@ -301,3 +301,55 @@ test('★ 臂 6：存量清单与 `baseline-known-failures.json` 的口径一致
     + '★ 修法：让两处同源，而不是各自维护一份',
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 2026-10-20：`_verified_at` 的**格式**是隐含契约，写不对就让整份基线静默失效
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 7：盘上那份真实 `baseline-known-failures.json` 必须**读得出来**（不是"看着像有的"）', async () => {
+  /**
+   * ── 这一臂是队长自己踩出来的 ──────────────────────────────────────────────────
+   *
+   * MEASURED（2026-10-20）：队长把 pin 从 18 条补到 36 条时，为了让出处可读，
+   * 把 `_verified_at` 从 `"ba32130（…）"` 改成了 `"2026-10-20（队长把 pin 与盘面对齐…）"`
+   * —— **一个日期**。而 `pinRefFromVerifiedAt`（`src/quality-gates.ts:1421`）逐字：
+   *
+   *     if (/^[0-9a-f]{7,40}$/i.test(head)) return head
+   *     if (/^refs\/[\w./-]+$/.test(head)) return head
+   *     return undefined
+   *
+   * ⇒ `baselinePin()` 返回 `undefined` ⇒ **整份基线读不出来**
+   *   ⇒ 29 条存量红重新变回 `undecidable` ⇒ 完成门对每一条任务都说
+   *     「whether it is new could not be measured」。
+   *
+   * ★★★ 而**后果的形状最贵**：pin 清单从 18 条补到 36 条，本意是**放宽**
+   *   （让存量红不再挡住完工），结果因为一个字段格式写错，反而**更严**了。
+   *   ⇒ 「我改了一个让人能过关的东西」与「我把所有的路都堵死了」
+   *     在一次提交里同形 —— 而唯一的区别是那个字段读不读得出来。
+   *
+   * ── 为什么这一臂直接读盘上的文件 ──────────────────────────────────────────────
+   *
+   * 其余臂用的是内存夹具（`{knownFailures, _verified_at}` 现造），
+   * 而**真实那份文件**此前没有任何臂在读 —— 于是它可以在所有臂都绿的情况下失效。
+   * ⇒ 这一臂问的是："**盘上那份**，`baselinePin()` 读得出来吗？"
+   */
+  const { baselinePin, baselineReadout } = await import('../lib/quality-gates.js')
+
+  /**
+   * ★ 用产品自己的读取路径，不是在这里重写一遍格式判断。
+   *   （重写一遍就多了一份真值，而两份会分叉 —— 本仓记了十几次的那种。）
+   */
+  const pin = baselinePin()
+  assert.ok(
+    pin !== undefined,
+    '★★★ `baselinePin()` 必须读得出盘上那份清单。'
+    + '读不出 ⇒ 所有存量红变回 undecidable ⇒ 完成门对**每一条**任务都说"判不了"'
+    + '（实测：pin 从 18 补到 36 却反而更严，根因就是 `_verified_at` 被写成日期）。\n'
+    + '★ 正确形状：`"<7-40位hex>（任意说明）"` 或 `"refs/…"` —— 十六进制串必须在**开头**。',
+  )
+  assert.equal(typeof pin.at, 'string', '★ `at`（参照物）必须解析得出来')
+  assert.ok(pin.at.trim() !== '', '★ `at` 不许是空串')
+  assert.equal(typeof pin.by, 'string', '★ `by`（谁钉的）必须在')
+  assert.ok(pin.by.trim() !== '', '★ `by` 不许是空串')
+  assert.ok(pin.names.length > 0, '★ 清单必须有内容')
+})

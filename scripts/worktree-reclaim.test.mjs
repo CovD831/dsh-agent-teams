@@ -3457,3 +3457,103 @@ test('★★★ W1 臂 7（接线臂）：两处生产调用点都**显式**把�
       `★★ ${label} 必须**先解析再传** —— 只传一个字面量等于把缺陷换个位置`)
   }
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★★ G8 臂（2026-10-20）：一条**非终态**任务的树，planReclaim 连判都不判
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★★ G8 臂 1（安全 · 端到端）：`in_progress` 任务的树**不出现在任何清单里**', async () => {
+  /**
+   * ── 这一臂钉的是什么（MEASURED，t15 独立复核）────────────────────────────────
+   *
+   * `planReclaim` 此前只做 `listWorktrees(repo)` —— **裸目录枚举**，
+   * 它不知道"这棵树属于哪条任务、那条任务做完了没有"。于是：
+   *
+   * ```
+   *   任务 in_progress ⇒ scanTerminalWorktrees: scanned=0（连判都不判）
+   *                    ⇒ planReclaim:          judge ⇒ reclaimable=1（会删）
+   * ```
+   *
+   * ⇒ **`pnpm reclaim:worktrees:apply` 会删掉一个成员正在写的目录。**
+   *
+   * ── 为什么判据本身不改 ────────────────────────────────────────────────────────
+   *
+   * `judgeWorktreeReclaimable` 回答的是「这棵树的产物**被吸收了吗**」，
+   * 而"这棵树**还有人用吗**"是**另一个问题**。对一棵刚建、HEAD 仍是上游祖先的树，
+   * `ancestor` 这个答案**是真的** —— 判据没错，错的是**调用路径**把两个问题
+   * 当成了一个。这是 `docs/DEFECT-VERIFY-RERUN-WRONG-CWD.md` 里 A/B/本缺陷
+   * 同一族的第三、四例。
+   *
+   * ── 三态（本臂测两条）────────────────────────────────────────────────────────
+   *
+   *   给了 `tasks` ⇒ 活任务的树**跳过**（连 keep 都不算 —— 是"没人问过它"）
+   *   没给 `tasks` ⇒ 保持旧行为（裸目录枚举），★ 而那是**调用方的选择**
+   */
+  const f = fixture()
+  try {
+    /** 一棵**位于主干顶端**的树：判据对它一定答 `reclaimable`（ancestor）。 */
+    const live = f.worktreeAt(f.head(), 'task-g8probe-t1')
+    const tasks = [{ id: 't1', teamId: 'g8probe', status: 'in_progress', dependencies: [] }]
+
+    /**
+     * ① 旧行为（不传 tasks）—— **必须**能复现缺陷，否则这一臂测不到东西。
+     *    ★ 这一条是"反向半边在上一代"：若 ② 绿而 ① 也绿，那说明判据根本没答 reclaimable，
+     *      于是 ② 的绿是**假的**（它不是因为过滤才不出现在清单里）。
+     */
+    const legacy = planReclaim({ repo: f.repo, mainRef: 'main', tasks: undefined })
+    assert.equal(
+      legacy.reclaimable.some((entry) => entry.worktree === live), true,
+      '★ 前提：不传 tasks 时这棵树**必须**被判 reclaimable —— 否则 ② 的绿是假的',
+    )
+
+    /** ② 修好之后：给了 tasks ⇒ **完全不出现在任何一栏**。 */
+    const fixed = planReclaim({ repo: f.repo, mainRef: 'main', tasks })
+    for (const [label, list] of [
+      ['reclaimable', fixed.reclaimable],
+      ['keep', fixed.keep],
+      ['undecidable', fixed.undecidable],
+    ]) {
+      assert.equal(
+        list.some((entry) => entry.worktree === live), false,
+        `★★ 活任务的树不许出现在 ${label} 里 —— `
+        + '它既不是"可清"、也不是"保留"、也不是"判不了"，而是【没人问过它】',
+      )
+    }
+
+    /**
+     * ③ ★★★ 而**删除动作**也必须没发生。
+     *   判据对 ≠ 调用它的那条路对 —— 这一格是本仓记过的那条。
+     */
+    const applied = planReclaim({ repo: f.repo, mainRef: 'main', tasks, apply: true })
+    assert.equal(applied.removed.length, 0, `★★ 一个都不许删。实测：${JSON.stringify(applied.removed)}`)
+    assert.ok(existsSync(live), '★★★ 树必须还在 —— 这是这一臂的全部意义')
+  } finally {
+    f.done()
+  }
+})
+
+test('★★★★ G8 臂 2（三态臂）：终态任务的树**仍然**参与判定（不许把所有树都跳过）', async () => {
+  /**
+   * ★ 反向半边。只测"活任务被跳过"会让一个**把所有树都跳过**的实现也通过 ——
+   *   而那与"planReclaim 什么都不做"同形（回收功能被静默关掉）。
+   *   ⇒ 必须有一条终态任务的树，它**照常**被判、照常出现在清单里。
+   */
+  const f = fixture()
+  try {
+    const done = f.worktreeAt(f.head(), 'task-g8probe-t2')
+    const tasks = [{ id: 't2', teamId: 'g8probe', status: 'completed', dependencies: [] }]
+
+    const result = planReclaim({ repo: f.repo, mainRef: 'main', tasks })
+    /**
+     * ★ 它必须**出现在某一个**清单里（reclaimable / keep / undecidable 之一）。
+     *   哪一栏取决于判据，而这一臂只问"它有没有被问过"。
+     *   ★ 若实现改成"凡是任务列表里出现过的一律跳过"，这条会红。
+     */
+    const appeared = result.reclaimable.some((e) => e.worktree === done)
+      || result.keep.some((e) => e.worktree === done)
+      || result.undecidable.some((e) => e.worktree === done)
+    assert.equal(appeared, true, '★★ 终态任务的树必须被判定（出现在某一栏里）—— 不许连它也跳过')
+  } finally {
+    f.done()
+  }
+})

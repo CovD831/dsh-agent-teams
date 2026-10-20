@@ -63,13 +63,20 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { reviewAndStamp } from '../../lib/tools/review-plan.js'
-import { validateCreateTask, isReviewedCheckVerdict } from '../../lib/quality-gates.js'
-import { TEAM_TOOL_NAMES, MEMBER_TOOL_NAMES, CAPTAIN_TOOL_NAMES } from '../../lib/tool-names.js'
-import { registerAgentTeamsTools } from '../../lib/tools.js'
-import { PLAN_REVIEWED_GATE_ONLINE_AT, REVIEW_QUESTION_IDS, gate as planReviewedGate } from '../../lib/gates/dispatch/plan-reviewed.js'
+import { reviewAndStamp } from '../lib/tools/review-plan.js'
+import { validateCreateTask, isReviewedCheckVerdict } from '../lib/quality-gates.js'
+import { TEAM_TOOL_NAMES, MEMBER_TOOL_NAMES, CAPTAIN_TOOL_NAMES } from '../lib/tool-names.js'
+import { registerAgentTeamsTools } from '../lib/tools.js'
+import { PLAN_REVIEWED_GATE_ONLINE_AT, REVIEW_QUESTION_IDS, gate as planReviewedGate } from '../lib/gates/dispatch/plan-reviewed.js'
 
-const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+/**
+ * ★ 本文件现在住在 `scripts/`（**移动前**在 `scripts/tools/`）——
+ *   所以根目录是**两层**而不是三层。
+ *   MEASURED（移动时踩到）：多算一层会让 ROOT 变成 `/Users/abab/Desktop`，
+ *   而它的表现不是路径看着不对，是 `ENOENT: .../lib/tools/review-plan.js`
+ *   —— 一个**看着像产物没生成**的错误，实际是根算错了一层。
+ */
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** 一条**真的能过审**的契约 —— 臂 1/2/3 的对照物。每一格都是必要的。 */
 const GOOD_CONTRACT = Object.freeze({
@@ -78,8 +85,8 @@ const GOOD_CONTRACT = Object.freeze({
   objective: 'f-0395：这道闸只会拒、不会带人过 —— 不做的话，被它拦下的每一次派发都只能手写 JSON 自签',
   inScope: ['src/tools/review-plan.ts'],
   outOfScope: ['src/types.ts'],
-  acceptance: ['`node --test scripts/tools/review-plan.test.mjs` 的通过数必须从 12 涨到 13'],
-  verify: ['node --test scripts/tools/review-plan.test.mjs'],
+  acceptance: ['`node --test scripts/gate-review-plan.test.mjs` 的通过数必须从 12 涨到 13'],
+  verify: ['node --test scripts/gate-review-plan.test.mjs'],
   dependencies: [],
 })
 

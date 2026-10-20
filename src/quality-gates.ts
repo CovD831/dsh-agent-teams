@@ -1560,7 +1560,7 @@ function openHighFindings(findings: readonly ReviewFinding[] | undefined): Revie
  * ★ 注意这**没有**让判定更宽：`at/by` 读不到 ⇒ `undefined` ⇒ 调用方仍【保守地拒】。
  *   它只是把"我凭什么说它是存量"这件事**从注释搬进了读数**。
  */
-interface BaselinePin {
+export interface BaselinePin {
   readonly names: readonly string[]
   /** 那次测量所基于的 commit / ref（从 `_verified_at` 的行首取）。 */
   readonly at: string
@@ -1624,7 +1624,27 @@ function localPluginRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)))
 }
 
-function baselinePin(): BaselinePin | undefined {
+/**
+ * ── ★★★ 导出它：让**盘上那份真实清单**可以被一条臂直接问出来 ──────────────────────
+ *
+ * MEASURED（2026-10-20）：本函数此前是模块私有 ⇒ 没有任何臂能问
+ * "盘上那份 `baseline-known-failures.json` 读得出来吗"。于是它可以
+ * **在所有臂都绿的情况下失效** —— 而队长就是这么把它写坏的：
+ * 把 `_verified_at` 从 `"ba32130（…）"` 改成 `"2026-10-20（…）"`，
+ * `pinRefFromVerifiedAt` 逐字只接受 `^[0-9a-f]{7,40}$` 或 `^refs\//`，
+ * ⇒ 返回 `undefined` ⇒ **整份基线读不出来** ⇒ 29 条存量红变回 `undecidable`
+ * ⇒ 完成门对每一条任务都说"判不了"。
+ *
+ * ★★ 而后果的方向是反的，这正是它难发现的原因：
+ *   pin 从 18 条补到 36 条，本意是**放宽**（存量红不再挡完工），
+ *   结果因为一个字段格式写错，反而**更严**了。
+ *   ⇒ 「改了一个让人能过关的东西」与「把所有路都堵死」在同一次提交里同形。
+ *
+ * ★ 导出之后，`scripts/gate-baseline-increment.test.mjs` 的臂 7 直接调它问盘上那份 ——
+ *   用的是**产品自己的读取路径**，而不是在夹具里重写一遍格式判断
+ *   （重写就多一份真值，而两份会分叉）。
+ */
+export function baselinePin(): BaselinePin | undefined {
   try {
     const raw = readFileSync(join(localPluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'), 'utf8')
     const parsed = JSON.parse(raw) as { knownFailures?: unknown; _verified_at?: unknown; _pinned_by?: unknown }

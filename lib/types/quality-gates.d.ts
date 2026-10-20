@@ -657,6 +657,73 @@ export declare function checkTaskPremises(input: {
 }, root?: string): PremiseFailure[];
 export declare function validateCreateTask(team: TeamState, input: CreateTaskInput): ValidateCreateTaskResult;
 /**
+ * ── ★★★ 「这次交付有没有新增失败」—— 三态，而三态必须不同形（t19）──────────────
+ *
+ * ★★ 而它是本仓那条跨层规则的直接应用（`docs/GATE-REGISTRY.md` 规则一）：
+ *   「正确的分界不是『能不能读到那个东西』，而是『这件事可不可判定』。」
+ * ```
+ * no-new-failures  ⇒ 可判定: 这次 verify 的失败【逐条都在基线里】⇒ 允许 completed
+ * new-failures     ⇒ 可判定: 至少一条【不在基线里】⇒ 只能 failed
+ * undecidable      ⇒ ★ 读不到证据（没有 failures 明细 / 读不到基线清单）
+ *                    ⇒ 退回旧行为（仍拒）—— 因为"没能测量"不得读成"没事"
+ * ```
+ *
+ * ★ 而它要的是【集合比对】：同一个命令在三次运行里给出过 47 / 14 / 14 条失败
+ *   （本会话实测）⇒ ★ 计数不是证据，只有【哪几条】是。
+ */
+/**
+ * 读【钉住的基线已知失败】清单（`scripts/fixtures/baseline-known-failures.json`，t18 的产物）。
+ *
+ * ★ 三态而非布尔：读得到 ⇒ 名字数组 + **它是谁钉的**；读不到 / 形状不对 ⇒ `undefined`（= 判不了）。
+ *   ⇒ ★ 而调用方拿 `undefined` 时必须【保守】（仍拒）——
+ *     把"读不到清单"读成"清单是空的"就等于说"仓库里没有存量红"，而那是错的。
+ *
+ * ── ★★★ 为什么返回值里必须带上「基线是什么」（t19 验收第 5 条）────────────────────
+ *
+ * 判据说「这几条失败**在基线里**」时，它引用的是一个**参照物**。
+ * ★ 而一个说不出自己参照物是什么的判断，读的人**无从核它**：
+ *   基线是哪一次测的？那时的仓库存量红是哪几条？—— 两个问题都必须有答案，
+ *   否则"存量"这个词在这句话里只是一个**承诺**，而不是一个事实。
+ *
+ * ⇒ 所以这里连同名单一起交出那两格（`_verified_at` / `_pinned_by`）：
+ *     · `at`      —— 那次测量所基于的 commit（`_verified_at` 的行首 ref）
+ *     · `by`      —— 谁钉的（`_pinned_by`）
+ *   ★ 而**任何一格读不出来** ⇒ 整份判不了（不是"那一格空着"）：
+ *     一个说不出参照物的基线，与一个说不清在哪测出来的读数**同形** ——
+ *     而"同形"正是本仓那条纪律要拦的东西。
+ *
+ * ★ 注意这**没有**让判定更宽：`at/by` 读不到 ⇒ `undefined` ⇒ 调用方仍【保守地拒】。
+ *   它只是把"我凭什么说它是存量"这件事**从注释搬进了读数**。
+ */
+export interface BaselinePin {
+    readonly names: readonly string[];
+    /** 那次测量所基于的 commit / ref（从 `_verified_at` 的行首取）。 */
+    readonly at: string;
+    /** 谁钉的（`_pinned_by`）。 */
+    readonly by: string;
+}
+/**
+ * ── ★★★ 导出它：让**盘上那份真实清单**可以被一条臂直接问出来 ──────────────────────
+ *
+ * MEASURED（2026-10-20）：本函数此前是模块私有 ⇒ 没有任何臂能问
+ * "盘上那份 `baseline-known-failures.json` 读得出来吗"。于是它可以
+ * **在所有臂都绿的情况下失效** —— 而队长就是这么把它写坏的：
+ * 把 `_verified_at` 从 `"ba32130（…）"` 改成 `"2026-10-20（…）"`，
+ * `pinRefFromVerifiedAt` 逐字只接受 `^[0-9a-f]{7,40}$` 或 `^refs\//`，
+ * ⇒ 返回 `undefined` ⇒ **整份基线读不出来** ⇒ 29 条存量红变回 `undecidable`
+ * ⇒ 完成门对每一条任务都说"判不了"。
+ *
+ * ★★ 而后果的方向是反的，这正是它难发现的原因：
+ *   pin 从 18 条补到 36 条，本意是**放宽**（存量红不再挡完工），
+ *   结果因为一个字段格式写错，反而**更严**了。
+ *   ⇒ 「改了一个让人能过关的东西」与「把所有路都堵死」在同一次提交里同形。
+ *
+ * ★ 导出之后，`scripts/gate-baseline-increment.test.mjs` 的臂 7 直接调它问盘上那份 ——
+ *   用的是**产品自己的读取路径**，而不是在夹具里重写一遍格式判断
+ *   （重写就多一份真值，而两份会分叉）。
+ */
+export declare function baselinePin(): BaselinePin | undefined;
+/**
  * ── ★ 这一条判据【已搬到注册表】────────────────────────────────────────────────
  *
  * 重跑 verify 的逻辑现在在 `src/gates/completion/verify-rerun.mjs`，由

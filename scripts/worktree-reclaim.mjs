@@ -101,7 +101,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -467,8 +467,71 @@ function removeWorktreeFallback({ repo, worktree }) {
  * ★ `apply: false`（默认）⇒ **绝不删除任何东西**，只报清单与预计回收。
  * ★ `apply: true` ⇒ 删之前**仍然打印清单**，让日志里能对上"预计"与"实际"。
  */
-export function planReclaim({ repo = REPO_ROOT, mainRef, staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes } = {}) {
-  const worktrees = listWorktrees(repo)
+/**
+ * ── ★★★ 哪些 worktree 目录**属于一条还没结束的任务**（G8 的判据本体）──────────────
+ *
+ * @returns `undefined` ⇒ 调用方**没给** `tasks`（"我不知道任务状态"，不是"没有活任务"）；
+ *          否则返回一个谓词：给定 worktree 绝对路径，答它是不是**活任务**的树。
+ *
+ * ★★ `undefined` 与"返回一个恒假谓词"必须不同形：
+ *   前者是"没人问过"，后者是"问过了，没有一条是活的"。
+ *   把它们合成一个，会让"CLI 没接线"与"所有任务都做完了"在读数上同形 ——
+ *   而那正是本仓记了一路的那类合流。
+ *
+ * ★ 为什么按 `worktreeDirName` 反推而不是解析路径字符串：
+ *   命名规则只有一处真值（`src/worktree.ts:193`），自己拼一遍会在团队前缀那一位分叉
+ *   —— `scripts/worktree-reclaim.mjs:129-133` 的注释已经为同一个理由写过一次。
+ */
+function liveWorktreeIdsOf(repo, tasks) {
+  if (tasks === undefined) return undefined
+  const root = join(repo, '.agent-teams', 'worktrees')
+  const live = new Set()
+  for (const task of tasks ?? []) {
+    if (isTerminalTask(task)) continue
+    if (typeof task?.id !== 'string' || task.id === '') continue
+    const path = join(root, worktreeDirName(task.teamId, task.id))
+    live.add(path)
+  }
+  return (path) => live.has(path)
+}
+
+export function planReclaim({ repo = REPO_ROOT, mainRef, staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes, tasks } = {}) {
+  /**
+   * ── ★★★ G8：一条**非终态**任务的树，连判都不判（2026-10-20 补）──────────────
+   *
+   * ── 缺陷（t15 独立复核实测）──────────────────────────────────────────────────
+   *
+   * `listWorktrees(repo)` 是**裸目录枚举** —— 它不知道"这棵树属于哪条任务、
+   * 那条任务做完了没有"。于是：
+   *
+   * ```
+   *   任务 in_progress ⇒ scanTerminalWorktrees: scanned=0（连判都不判）
+   *                    ⇒ planReclaim:          judge ⇒ reclaimable=1（会删）
+   * ```
+   *
+   * ⇒ **`pnpm reclaim:worktrees:apply` 会删掉一个成员正在写的目录。**
+   *
+   * ── 为什么判据本身不改 ────────────────────────────────────────────────────────
+   *
+   * `judgeWorktreeReclaimable` 回答的是「这棵树的产物**被吸收了吗**」，
+   * 而"这棵树**还有人用吗**"是**另一个问题**。对一棵刚建、HEAD 仍是上游祖先的树，
+   * `ancestor` 这个答案**是真的** —— 判据没错，错的是**调用路径**把两个问题
+   * 当成了一个。这与 `docs/DEFECT-VERIFY-RERUN-WRONG-CWD.md` 里的 A/B/本缺陷
+   * 是同一族的第三、四例：**判据算对了，但它读的输入不是你以为的那个。**
+   *
+   * ── 三态：给了 tasks / 没给 tasks ─────────────────────────────────────────────
+   *
+   *   给了 `tasks`   ⇒ 按 `scanTerminalWorktrees` 的**同一口径**过滤（非终态跳过）
+   *   没给 `tasks`   ⇒ **保持今天的行为**（裸目录枚举），但那是一条**明确的选择**：
+   *                    调用方要为自己的调用负责。★ 而 CLI 那条路**现在必须给** ——
+   *                    见下面的 `assertLiveTasksKnown`。
+   *
+   * ★ 为什么用"跳过"而不是"判成 keep"：跳过意味着它**不出现在任何清单里**，
+   *   而 keep 会出现在 `keep` 那一栏 —— 后者会让读的人以为"判据说它该留着"，
+   *   而真相是"没人问过它"。这与 `scanTerminalWorktrees:629` 的口径逐字一致。
+   */
+  const liveTaskIds = liveWorktreeIdsOf(repo, tasks)
+  const worktrees = listWorktrees(repo).filter((path) => liveTaskIds === undefined || !liveTaskIds(path))
   /**
    * ── ★★★ W1：整份计划**只解析一次**主干引用 ──────────────────────────────────────
    *
@@ -703,6 +766,51 @@ export function recordReclaim({ repo = REPO_ROOT, result, reason }) {
   }
 }
 
+/**
+ * ── ★★★ 盘上**所有**团队的任务，以及读不出来的那些队（G8）──────────────────────────
+ *
+ * @returns `{ tasks, unreadable }`：
+ *   `tasks`      —— 所有能读到的 team.json 里的任务（每条的 `id` 已带 `teamId`，
+ *                   见下）；
+ *   `unreadable` —— 读不出来的队名。★ **不许静默跳过**：
+ *                   "读不到"与"没有活任务"在删除决策上后果相反。
+ *
+ * ★★ 为什么每条任务要补 `teamId`：`worktreeDirName(teamId, taskId)` 的目录名
+ *   带团队前缀（`task-<team>-<id>`），而 `team.json` 里的任务**不带 teamId**
+ *   （它就是那个文件所属的队）。⇒ 在这里补，而不是在 `planReclaim` 里猜。
+ *   ★ 而 `teamId` 缺失时目录名会退化成 `task-<id>`（`src/worktree.ts:193` 的
+ *     "不给 teamId 时保持旧形状"）—— 那会让活树匹配不上而被误删。
+ *     所以这里**一定**补上，并用真正的 `state.id`（sanitize 过的目录名），不是文件里的 name。
+ */
+function readAllTeamTasks(repo) {
+  const root = join(repo, '.agent-teams')
+  const tasks = []
+  const unreadable = []
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    /** ★ 整个状态目录不存在 ⇒ 没有队、也没有树。这**不是**"读不到"。 */
+    return { tasks, unreadable }
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === 'archive' || entry.name === 'worktrees') continue
+    const file = join(root, entry.name, 'team.json')
+    if (!existsSync(file)) continue
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const id = typeof parsed?.id === 'string' && parsed.id !== '' ? parsed.id : entry.name
+      for (const task of Array.isArray(parsed?.tasks) ? parsed.tasks : []) {
+        if (task === null || typeof task !== 'object') continue
+        tasks.push({ ...task, teamId: id })
+      }
+    } catch {
+      unreadable.push(entry.name)
+    }
+  }
+  return { tasks, unreadable }
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 if (process.argv[1] && import.meta.url.endsWith(basenameSafe(process.argv[1]))) {
   const off = process.env[RECLAIM_OFF_ENV] === '1' || process.env[RECLAIM_OFF_ENV] === 'true'
@@ -720,7 +828,31 @@ if (process.argv[1] && import.meta.url.endsWith(basenameSafe(process.argv[1]))) 
    */
   const trunkFlagIndex = process.argv.indexOf('--trunk')
   const trunkFlag = trunkFlagIndex >= 0 ? process.argv[trunkFlagIndex + 1] : undefined
-  const result = planReclaim(trunkFlag === undefined ? { apply } : { apply, mainRef: trunkFlag })
+  /**
+   * ── ★★★ G8：CLI **必须**把任务状态交给 planReclaim（2026-10-20 补）────────────
+   *
+   * MEASURED（t15 独立复核）：不加这一条时，`--apply` 会删掉一个 `in_progress`
+   * 任务的树 —— 因为 `planReclaim` 只做裸目录枚举，它不知道"这棵树还有人用"。
+   *
+   * ★ 为什么在 CLI 侧读 team.json 而不是让 `planReclaim` 自己读：
+   *   `planReclaim` 是一个**纯计划函数**（它现在的入参里连 `tasks` 都是可选的）。
+   *   让它在内部去扫盘会把"读状态"与"算计划"两件事缠在一起，而它们是
+   *   两个可以分别失败的动作：盘读不到 ≠ 没有活任务。
+   *   ⇒ CLI 负责读，读不到就**明确拒绝 apply**（见下面那段）。
+   */
+  const liveTasks = readAllTeamTasks(REPO_ROOT)
+  if (apply && liveTasks.unreadable.length > 0) {
+    console.log(`✘ 拒绝执行 --apply：有 ${liveTasks.unreadable.length} 个 team.json 读不出来`
+      + `（${liveTasks.unreadable.slice(0, 3).join(', ')}${liveTasks.unreadable.length > 3 ? ', …' : ''}）。`)
+    console.log('  ★ 读不到任务状态时，"这棵树属于一条活任务"这件事**判不了** ——')
+    console.log('    而判不了不等于可以删。先修好那些 team.json，或改用 --dry-run 看清单。')
+    process.exit(2)
+  }
+  const result = planReclaim({
+    apply,
+    tasks: liveTasks.tasks,
+    ...trunkFlag === undefined ? {} : { mainRef: trunkFlag },
+  })
   console.log(`回收扫描：${result.scanned} 个 worktree`)
   /**
    * ★★★ 主干引用这一行是**必须打的**：一份说不出"拿谁比的"的回收清单，
