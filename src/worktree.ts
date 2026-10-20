@@ -77,8 +77,32 @@ export interface WorktreeResult {
  * ⇒ 三态各自有名，且读不到那一态必须带 `why`。
  */
 export type UpstreamBaselineReading =
-  /** 上游提交了，且那个 commit 在这个仓库里解析得出。 */
-  | { readonly kind: 'committed'; readonly taskId: string; readonly commit: string }
+  /**
+   * 上游提交了，且那个 commit 在这个仓库里解析得出。
+   *
+   * ── ★★★ `landed`（2026-10-20 加）：**这份产物进主干了吗** ─────────────────────
+   *
+   * 三态，而三者**不同形**：
+   *   `'landed'`      —— 主干**今天**拿着这份工作（四种吸收形态之一，见 `absorbPlanOf`）
+   *   `'not-landed'`  —— 读到并核过，主干没有这份工作 ⇒ ★ **下游正在旧代码上干活**
+   *   `'unreadable'`  —— 核不了（commit 读不出、主干读不到）
+   *
+   * ★★ 为什么它必须在这里（`docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条）：
+   *   此前调度器把上游 commit 当基线传下去，而**从不问它进没进主干**。
+   *   实测（本仓 78 个产物）：`--is-ancestor` 只认出 4 个，而四态口径认出 46 个
+   *   ⇒ 若按前者报"没合流"，那是 **42 份误报**。
+   *   ★ 而这一格**只报告、不改基线**：改基线是另一条改动，而"先让事实可读"
+   *     是本仓一贯的顺序（否则你无法判断那条改动到底修好了什么）。
+   */
+  | {
+    readonly kind: 'committed'
+    readonly taskId: string
+    readonly commit: string
+    readonly landed?: 'landed' | 'not-landed' | 'unreadable'
+    /** `landed` 时的依据；`not-landed` / `unreadable` 时是成因。 */
+    readonly how?: 'ancestor' | 'content' | 'files' | 'contained'
+    readonly why?: string
+  }
   /** 上游没有 `deliverableCommit` —— 它没提交（或它的 kind 本来就不建树）。 */
   | { readonly kind: 'not-committed'; readonly taskId: string }
   /** 上游声称有产物，**读不到**：commit 解析不出 / 连任务记录都不在。 */
@@ -508,7 +532,22 @@ export function resolveWorktreeBaseline(options: {
       continue
     }
     const full = resolved.value.trim()
-    readings.push({ kind: 'committed', taskId: upstream.taskId, commit: full })
+    /**
+     * ── ★★★ 这一份产物**进主干了吗**（与 `judgeWorktreeReclaimable` **同一份判据**）──
+     *
+     * ★ 只报告、不改基线：`usable` 照旧收它 —— 一个"还没合流"的上游产物
+     *   仍然是下游应当看见的最新代码（它比主干 HEAD 新）。★ 把它排除会导致
+     *   下游在**更旧**的代码上干活，方向反了。
+     */
+    const plan = absorbPlanOf({ repo, commit: full, trunk })
+    readings.push({
+      kind: 'committed',
+      taskId: upstream.taskId,
+      commit: full,
+      landed: plan.absorbed ? 'landed' : 'not-landed',
+      ...plan.how === undefined ? {} : { how: plan.how },
+      ...plan.absorbed ? {} : { why: 'its committed work is not in the trunk under any of the four absorption forms (ancestor / content / files / contained)' },
+    })
     usable.push({ taskId: upstream.taskId, commit: full })
   }
 
@@ -719,6 +758,21 @@ export function describeBaseline(resolution: BaselineResolution): string {
   }
   if (unreadable.length > 0) {
     parts.push(`unreadable: ${unreadable.map(entry => entry.kind === 'unreadable' ? `${entry.taskId} (${entry.why})` : entry.taskId).join('; ')}`)
+  }
+  /**
+   * ── ★★★ 上游产物**没进主干** ⇒ 必须说出来 ─────────────────────────────────────
+   *
+   * ★ 它与 `diverged` **不同形**（两者补救动作相反）：
+   *   `diverged` 是"从这条基线**到达不了**那个上游"（历史分叉）；
+   *   这一格是"**主干**上没有那份工作"（下游照着它干活是对的，而合流还没发生）。
+   *   ⇒ 合成一句会让读的人去查历史，而真正该做的是去合流。
+   */
+  const notLanded = committed.filter(entry => entry.kind === 'committed' && entry.landed === 'not-landed')
+  if (notLanded.length > 0) {
+    parts.push(
+      `NOT yet in the trunk: ${notLanded.map(entry => `${entry.taskId}@${entry.commit.slice(0, 12)}`).join(', ')}`
+      + ' — its committed work has not been absorbed by the trunk under any of the four forms, so the trunk alone does not yet contain it',
+    )
   }
   if (resolution.diverged.length > 0) {
     parts.push(`NOT visible from that baseline (diverged history): ${resolution.diverged.map(entry => `${entry.taskId}@${entry.commit.slice(0, 12)}`).join(', ')}`)

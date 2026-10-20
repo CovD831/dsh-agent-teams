@@ -319,3 +319,58 @@ test('★ 臂 5（接线臂）：`agent_teams_status` 真的交出 `deliverable_
   assert.equal(landing.unreadable, 1, '★ 那个假 commit 必须落 unreadable（与 not-landed 不同形）')
   assert.equal(landing.notLanded, 0, '★★ 它**不是** not-landed —— 两者补救动作相反')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 6（★★★ 派活那一半）：上游产物没进主干 ⇒ 基线读数**必须说出来**
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 6：`resolveWorktreeBaseline` 对上游产物给出 landed/not-landed，且说得出', async () => {
+  /**
+   * ── 它补的是哪一格（`docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条）────────────
+   *
+   * 调度器此前把上游 commit 当基线传下去，而**从不问它进没进主干**
+   * ⇒ 下游可能在"上游的活还没合流"的世界上干活，而**没有任何读数**说这件事。
+   *
+   * ★★ 而这一格**只报告、不改基线**：把没合流的上游排除会导致下游在**更旧**的
+   *   代码上干活 —— 方向反了。所以 `usable` 照收它，只是把事实说出来。
+   *
+   * 定向突变：把 `landed` 恒写成 `'landed'` ⇒ 本臂红。
+   */
+  const { resolveWorktreeBaseline, describeBaseline } = await import(join(ROOT, 'lib', 'worktree.js'))
+  const repo = repoFixture()
+  git(repo, ['checkout', '-q', '-b', 'side'])
+  writeFileSync(join(repo, 'src-e.ts'), 'upstream work\n')
+  git(repo, ['add', '-A'])
+  git(repo, ['commit', '-qm', 'upstream work'])
+  const side = git(repo, ['rev-parse', 'HEAD'])
+  git(repo, ['checkout', '-q', '-'])
+  const trunk = git(repo, ['rev-parse', 'HEAD'])
+
+  /** ① 没合流 ⇒ `not-landed`，且基线**仍然**取它（不因"没合流"而退回主干）。 */
+  const unresolved = resolveWorktreeBaseline({ repo, trunk, upstream: [{ taskId: 't1', deliverableCommit: side }] })
+  assert.equal(unresolved.source, 'upstream', '★ 基线仍然取上游产物（它有比主干更新的代码）')
+  assert.equal(unresolved.upstream[0].landed, 'not-landed', '★★ "没进主干"必须读得出来')
+  assert.match(describeBaseline(unresolved), /NOT yet in the trunk/, '★★ 那句人话必须说出来')
+  assert.match(describeBaseline(unresolved), /t1@/, '★ 且必须指名是哪条上游')
+
+  /** ② 合流之后 ⇒ `landed`，而那句"还没进主干"**必须消失**。 */
+  git(repo, ['merge', '-q', '--no-ff', 'side', '-m', 'merge side'])
+  const merged = resolveWorktreeBaseline({ repo, trunk: git(repo, ['rev-parse', 'HEAD']), upstream: [{ taskId: 't1', deliverableCommit: side }] })
+  assert.equal(merged.upstream[0].landed, 'landed', '★ 合流之后 ⇒ landed')
+  assert.ok(['ancestor', 'content', 'files', 'contained'].includes(merged.upstream[0].how), '★ 依据必须可读')
+  assert.doesNotMatch(describeBaseline(merged), /NOT yet in the trunk/, '★★ 合流之后那句话必须消失（否则它永远在喊）')
+})
+
+test('★★ 臂 6b（对照臂）：上游**没提交**时不许报"没合流" —— 两者不同形', async () => {
+  /**
+   * ★ `not-committed`（上游没产出）与 `not-landed`（产出了、还没合流）
+   *   是两件事，补救动作完全不同（前者等它做完，后者去合流）。
+   *   定向突变：把 `not-committed` 也报成 "NOT yet in the trunk" ⇒ 本臂红。
+   */
+  const { resolveWorktreeBaseline, describeBaseline } = await import(join(ROOT, 'lib', 'worktree.js'))
+  const repo = repoFixture()
+  const trunk = git(repo, ['rev-parse', 'HEAD'])
+  const r = resolveWorktreeBaseline({ repo, trunk, upstream: [{ taskId: 't1' }] })
+  assert.equal(r.upstream[0].kind, 'not-committed')
+  assert.doesNotMatch(describeBaseline(r), /NOT yet in the trunk/, '★★ 没提交 ≠ 没合流')
+})

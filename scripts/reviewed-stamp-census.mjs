@@ -108,6 +108,58 @@ export function findTeamFiles(dir, depth = 0) {
 }
 
 /**
+ * ── ★★★ 一条戳**绑没绑定它审过的字节**（2026-10-20 加的第二维）──────────────────
+ *
+ * ── 为什么它是独立的一维，而不是并进 `impossible` ──────────────────────────────
+ *
+ * `at` 是一个**数字**，而数字可以被随意改写。MEASURED（2026-10-20，盘上 90 条）：
+ *
+ *   · 90 条的 `at` 早于门上线，且**全部**同时早于它们自己的 `createdAt`
+ *   · 其中 85 条集中在 `agent-teams-refactor`，`at - createdAt` 恒为 **-365 天 ±0.4 天**
+ *     ⇒ 一次批量回填把**年份**写错了一年
+ *   · 而它们的 `why` 是**逐条真写的**（83/85 条互不相同）
+ *   ⇒ ★★ **审查是真的，只有那个数字是错的。** 而"数字错了"这件事**只可能被一个数字
+ *     发现** —— 因为戳**不指向任何东西**：`{at, by, checks[]}` 里没有一格说"我审的是什么"。
+ *
+ * ── 所以这一维问的是一个 `at` 回答不了的问题 ──────────────────────────────────
+ *
+ *   `bound`    —— 戳带着 `reviewedArtifacts` ⇒ "它审的是什么"是**可核的事实**
+ *   `unbound`  —— 没有那一格 ⇒ ★ **不是"没问题"，是"没法核对"**
+ *   ★ 两者**绝不同形**：一个无绑定的戳即使 `at` 完全合理，也只能说"它自称审过"。
+ *
+ * ★ 而与 `at` 的关系是**交叉**的，不是从属：一个 `bound` 的戳如果 `at` 早于门，
+ *   那仍然是不可能（可判定的事实）；一个 `unbound` 的戳如果 `at` 合理，那它是
+ *   "自称审过、无从核对"。⇒ 两维各自给出读数，由读者合起来判。
+ */
+export function bindingOf(stamp, task) {
+  /**
+   * ★ 只看**戳自己带没带**绑定（这是 `quality-gates.ts` 的 `ArtifactBinding` 同一套口径：
+   *   `unbound` = 早于内容绑定）。★ 不在这里去读磁盘核摘要 —— 那是 `artifactBindingOf`
+   *   的事，而普查是**只读元数据**的一次扫描，不该去读 90 个文件的字节。
+   */
+  const artifacts = task?.reviewedArtifacts
+  if (Array.isArray(artifacts) && artifacts.length > 0) {
+    return {
+      binding: 'bound',
+      boundCount: artifacts.length,
+      why: `the stamp carries ${artifacts.length} reviewed artifact digest(s)`,
+    }
+  }
+  /**
+   * ★ 空数组与"没有这一格"在这里**同读**成 `unbound`，而这不是合流：
+   *   两者都不足以核对"它审的是什么"（零个摘要核不出任何东西）。
+   *   ★ 差别在写侧（`create_task` / `update_task` 都不写空数组），
+   *     而普查读的是**能不能核对**，不是"当初是哪一种写坏的"。
+   */
+  return {
+    binding: 'unbound',
+    why: Array.isArray(artifacts)
+      ? 'the stamp carries an empty reviewed-artifact list, so there is nothing to check it against'
+      : 'the stamp carries no reviewed artifacts, so what it judged cannot be checked at all',
+  }
+}
+
+/**
  * 一条戳的三态读数。
  *
  *   `impossible` —— `at` 是一个数，且**早于门上线时刻**（这条路当时还不存在）
@@ -164,6 +216,11 @@ export function censusOf(stateDir, { activeOnly = false } = {}) {
       if (task?.reviewed === undefined || task.reviewed === null) continue
       stamped += 1
       const verdict = classifyStamp(task.reviewed)
+      /**
+       * ★ 第二维（2026-10-20）：这个戳**绑没绑定它审过的字节**。
+       *   与 `verdict` 并列，**不并进它** —— 见 `bindingOf` 的文档。
+       */
+      const binding = bindingOf(task.reviewed, task)
       stamps.push({
         team: teamName,
         taskId: typeof task.id === 'string' ? task.id : '(no id)',
@@ -171,13 +228,17 @@ export function censusOf(stateDir, { activeOnly = false } = {}) {
         createdAt: task.createdAt,
         by: task.reviewed.by,
         ...verdict,
+        ...binding,
       })
     }
     teams.push({ team: teamName, readable: true, tasks: tasks.length, stamped })
   }
 
-  const counts = { stamps: stamps.length, impossible: 0, plausible: 0, unreadable: 0 }
-  for (const stamp of stamps) counts[stamp.verdict] += 1
+  const counts = { stamps: stamps.length, impossible: 0, plausible: 0, unreadable: 0, bound: 0, unbound: 0 }
+  for (const stamp of stamps) {
+    counts[stamp.verdict] += 1
+    counts[stamp.binding] += 1
+  }
 
   return {
     ran: true,
@@ -185,8 +246,18 @@ export function censusOf(stateDir, { activeOnly = false } = {}) {
     gateOnlineAtIso: new Date(PLAN_REVIEWED_GATE_ONLINE_AT).toISOString(),
     teams,
     counts,
+    /**
+     * ★ 逐条清单**必须交出去**（2026-10-20 补）：夹具要按 `binding` 过滤，
+     *   而此前它只交 `impossible` / `unreadable` 两个**已过滤**的子集。
+     *   ★★ 少了这一格，一条按 `binding` 断言的臂会拿到 `undefined`、
+     *     于是 `(result.stamps ?? []).filter(...)` 恒为空 ⇒ **那条臂永远绿**。
+     *     MEASURED：本文件中招过一次（第一版臂 8 写完之后 8/8 全绿 ——
+     *     而它本该红）。
+     */
+    stamps,
     impossible: stamps.filter((stamp) => stamp.verdict === 'impossible'),
     unreadable: stamps.filter((stamp) => stamp.verdict === 'unreadable'),
+    unbound: stamps.filter((stamp) => stamp.binding === 'unbound'),
   }
 }
 
@@ -223,6 +294,13 @@ function main() {
   process.stdout.write(`    impossible  : ${result.counts.impossible}   ← stamped before this gate existed\n`)
   process.stdout.write(`    plausible   : ${result.counts.plausible}\n`)
   process.stdout.write(`    unreadable  : ${result.counts.unreadable}   ← at is not a finite number\n`)
+  /**
+   * ★ 第二维必须**单独一行**：一个 untouched-by-time 的戳如果无绑定，
+   *   它仍然是"自称审过、无从核对" —— 而把这一维并进上面三行会让它读不出来。
+   */
+  process.stdout.write(`  binding (can the stamp be checked against bytes?)\n`)
+  process.stdout.write(`    bound       : ${result.counts.bound}   ← carries reviewed-artifact digests\n`)
+  process.stdout.write(`    unbound     : ${result.counts.unbound}   ← ★ "cannot be checked", NOT "fine"\n`)
 
   if (result.counts.impossible > 0) {
     process.stdout.write(`\nimpossible stamps:\n`)

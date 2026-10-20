@@ -71,11 +71,31 @@ export interface WorktreeResult {
  * ⇒ 三态各自有名，且读不到那一态必须带 `why`。
  */
 export type UpstreamBaselineReading = 
-/** 上游提交了，且那个 commit 在这个仓库里解析得出。 */
+/**
+ * 上游提交了，且那个 commit 在这个仓库里解析得出。
+ *
+ * ── ★★★ `landed`（2026-10-20 加）：**这份产物进主干了吗** ─────────────────────
+ *
+ * 三态，而三者**不同形**：
+ *   `'landed'`      —— 主干**今天**拿着这份工作（四种吸收形态之一，见 `absorbPlanOf`）
+ *   `'not-landed'`  —— 读到并核过，主干没有这份工作 ⇒ ★ **下游正在旧代码上干活**
+ *   `'unreadable'`  —— 核不了（commit 读不出、主干读不到）
+ *
+ * ★★ 为什么它必须在这里（`docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条）：
+ *   此前调度器把上游 commit 当基线传下去，而**从不问它进没进主干**。
+ *   实测（本仓 78 个产物）：`--is-ancestor` 只认出 4 个，而四态口径认出 46 个
+ *   ⇒ 若按前者报"没合流"，那是 **42 份误报**。
+ *   ★ 而这一格**只报告、不改基线**：改基线是另一条改动，而"先让事实可读"
+ *     是本仓一贯的顺序（否则你无法判断那条改动到底修好了什么）。
+ */
 {
     readonly kind: 'committed';
     readonly taskId: string;
     readonly commit: string;
+    readonly landed?: 'landed' | 'not-landed' | 'unreadable';
+    /** `landed` 时的依据；`not-landed` / `unreadable` 时是成因。 */
+    readonly how?: 'ancestor' | 'content' | 'files' | 'contained';
+    readonly why?: string;
 }
 /** 上游没有 `deliverableCommit` —— 它没提交（或它的 kind 本来就不建树）。 */
  | {

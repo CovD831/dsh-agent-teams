@@ -462,3 +462,92 @@ console.log(deliverableLandingFor({repo:process.cwd(),tasks:t.tasks}))"
 
 ★ 剩下那一半**本轮没做**：调度器仍把上游 commit 当基线传下去，而**不检查它进没进主干**。
 见 `docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条。
+
+## 16. ★★ 一个戳必须能核对它审过什么，否则它只是一句自称
+
+> 「一份『五问齐全、why 写得很漂亮、`at` 指向一年前』的戳能**一路通过**。
+>   门问的是「五问都答了吗」，而**不是**「这份记录有可能是真的吗」。」
+> —— `src/gates/dispatch/plan-reviewed.ts` 的文件头（2026-10-19）
+
+**判据**:2026-10-20 的实测把「90 个不可能戳」这件事的**性质**说清了：
+
+```
+90 个不可能戳 · 全部同时早于它们自己的 createdAt
+其中 85 个在 agent-teams-refactor，at - createdAt 恒为 -365 天 ±0.4 天
+★★ 而它们的 why 是逐条真写的（83/85 条互不相同）
+```
+⇒ **审查是真的，只有那个数字错了**（一次批量回填把年份写错了一年）。
+★★ 而这件事暴露了更根本的一格：**改一个 `at` 就能让它"合法"，而改数字的成本是零**
+⇒ `at` 本身不是一个能承重的证据。
+
+更狠的读数：`node scripts/reviewed-stamp-census.mjs --active` ⇒ **118 个戳，0 个 bound**。
+即"**没有任何一份戳能核对它审过什么**"。
+
+**现状**:✅ 已实现前一阶段（2026-10-20）—— 戳在落盘时绑定它审过的字节。
+
+| 落点 | 状态 |
+|---|---|
+| `update_task` 落判决时写 `reviewedArtifacts` | ✅ 早已有（t97） |
+| **`create_task` 落戳时写 `reviewedArtifacts`** | ✅ **2026-10-20 补上** |
+| 普查多一维 `bound` / `unbound` | ✅ `scripts/reviewed-stamp-census.mjs` |
+| 臂 8 从"零个不可能戳"改成"戳必须可核" | ✅ 且现在钉的是**逐条清单**，不是计数 |
+
+**证据**:
+```bash
+node scripts/reviewed-stamp-census.mjs --active   # bound: 0 / unbound: 118
+node --test scripts/gate-plan-reviewed-stamp.test.mjs   # 8 臂
+```
+
+★★ 三条纪律：
+
+1. **`at` 不是证据**。一个可以自由改写的数字，不能用来回答"这份记录有可能是真的吗"。
+   能承重的是"它绑过哪些字节的摘要"—— 那个改起来要**同时**改字节。
+
+2. **历史那 118 份是已知的、不会自愈的**。它们被逐条钉在
+   `gate-plan-reviewed-stamp.test.mjs` 的 `KNOWN_UNBOUND_STAMPS` 里
+   ⇒ **只许变短**。★ 想把它清空之前先回答：那 118 份怎么变成可核的？
+   改 `at` 不是答案。
+
+3. **`unmeasured` 与 `unbound` 都是"判不了"，不是"没问题"**。普查里
+   `unreadable`（at 不是数）与 `unbound`（没有绑定）**各占一格**，
+   谁都不并进 `plausible`。
+
+★ 剩下那一半：**历史 118 份戳仍然无绑定**。它们不可能被事后绑定
+（字节早已变过），所以正确的处置是让它们**显式地**读成 `unbound`
+—— 那已经做到了，而且由臂 8 逐条钉住。
+
+## 17. ★★ 派活那一刻必须知道「上游产物进主干了吗」
+
+> 「调度器把上游 commit 当基线传下去，而**从不问它进没进主干**。」
+> —— 本会话对 `docs/WORKTREE-BASE-DEFECT.md` 处置方向第 3 条的核实
+
+**判据**:实测（本仓 78 个 `deliverableCommit`）：`--is-ancestor` 只认出 4 个，
+而四态口径认出 46 个 ⇒ 若按前者报"没合流"，那是 **42 份误报**。
+★ 而调度器此前**一个都不问**：下游可能在"上游的活还没合流"的世界上干活，
+而没有任何读数说这件事。
+
+**现状**:✅ 已实现（2026-10-20）—— `BaselineResolution.upstream[].landed` 三态 + `describeBaseline` 说出来。
+
+```
+baseline is upstream deliverable t3@6bc6c936e8c9
+  — NOT yet in the trunk: t3@6bc6c936e8c9 — its committed work has not been
+    absorbed by the trunk under any of the four forms, so the trunk alone
+    does not yet contain it
+```
+
+**证据**:`node --test scripts/gate-deliverable-landing.test.mjs`（10 臂，含派活那一半）
+
+★★ 三条纪律：
+
+1. **只报告、不改基线**。把"还没合流"的上游排除会让下游在**更旧**的代码上干活
+   —— 方向反了。`usable` 照旧收它，只是把事实说出来。
+
+2. **`not-committed` 与 `not-landed` 不同形**。前者是"上游没产出"（等它做完），
+   后者是"产出了、还没合流"（去合流）。合并会让补救动作指向错的方向。
+
+3. **`diverged` 与 `not-landed` 也不同形**。前者是"从这条基线**到达不了**那个上游"
+   （历史分叉），后者是"**主干**上没有那份工作"。★ 合成一句会让读的人去查历史，
+   而真正该做的是去合流。
+
+★ 剩下那一半：**基线仍然不会因为"没合流"而改变**。那是另一条改动
+（要不要在派活前强制合流 / 拒绝派发），本轮**没做** —— 而它现在**有读数可依**了。

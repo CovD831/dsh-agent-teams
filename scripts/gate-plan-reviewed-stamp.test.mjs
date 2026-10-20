@@ -288,35 +288,225 @@ test('臂 7 ★★ 读不出的 team.json 记为 `readable: false`，其余队�
 // ─────────────────────────────────────────────────────────────────────────────
 // 臂 8：★★★ 对真实盘面的钉子（当前 90 条 → 本臂红，这是为什么它红）
 // ─────────────────────────────────────────────────────────────────────────────
-test('臂 8 ★★★ 真实盘面上不存在"早于这道门上线"的 reviewed 戳', () => {
+/**
+ * ── 已知基线：这 118 份戳**没有绑定它审过的字节**（2026-10-20 实测）───────────────
+ *
+ * ★ 为什么把 118 条**逐条列出来**而不是写一个数字 118：
+ *   一个数字会让"换了一份、总数没变"读不出来 —— 而"哪一份"才是要复核的东西。
+ * ★★ 而这份清单**只许变短**（新盖的戳带绑定）。清理它不是因为谁把标准放低了，
+ *   而是因为那些戳真的变得可核了。★ 改 `at` 让它看起来可核不算 —— 改数字的成本是零。
+ */
+const KNOWN_UNBOUND_STAMPS = [
+  "agent-teams-refactor/t100 @ 2025-10-16T10:03:20.000Z",
+  "agent-teams-refactor/t101 @ 2025-10-16T10:36:40.000Z",
+  "agent-teams-refactor/t102 @ 2025-10-16T11:10:00.000Z",
+  "agent-teams-refactor/t107 @ 2025-10-16T11:43:20.000Z",
+  "agent-teams-refactor/t108 @ 2025-10-16T13:06:40.000Z",
+  "agent-teams-refactor/t109 @ 2025-10-16T13:40:00.000Z",
+  "agent-teams-refactor/t11 @ 2025-10-15T03:53:20.000Z",
+  "agent-teams-refactor/t110 @ 2025-10-16T14:13:20.000Z",
+  "agent-teams-refactor/t111 @ 2025-10-16T14:46:40.000Z",
+  "agent-teams-refactor/t112 @ 2025-10-16T15:20:00.000Z",
+  "agent-teams-refactor/t16 @ 2025-10-15T04:03:20.000Z",
+  "agent-teams-refactor/t17 @ 2025-10-15T04:20:00.000Z",
+  "agent-teams-refactor/t22 @ 2025-10-15T04:36:40.000Z",
+  "agent-teams-refactor/t23 @ 2025-10-15T04:53:20.000Z",
+  "agent-teams-refactor/t24 @ 2025-10-15T05:10:00.000Z",
+  "agent-teams-refactor/t25 @ 2025-10-15T05:26:40.000Z",
+  "agent-teams-refactor/t26 @ 2025-10-15T05:26:40.000Z",
+  "agent-teams-refactor/t27 @ 2025-10-15T05:26:40.000Z",
+  "agent-teams-refactor/t3 @ 2025-10-15T03:46:40.000Z",
+  "agent-teams-refactor/t30 @ 2025-10-15T05:35:00.000Z",
+  "agent-teams-refactor/t33 @ 2025-10-15T05:43:20.000Z",
+  "agent-teams-refactor/t38 @ 2025-10-15T05:51:40.000Z",
+  "agent-teams-refactor/t39 @ 2025-10-15T05:51:40.000Z",
+  "agent-teams-refactor/t4 @ 2025-10-15T03:46:40.000Z",
+  "agent-teams-refactor/t40 @ 2025-10-15T06:00:00.000Z",
+  "agent-teams-refactor/t41 @ 2025-10-15T06:08:20.000Z",
+  "agent-teams-refactor/t42 @ 2025-10-15T06:16:40.000Z",
+  "agent-teams-refactor/t43 @ 2025-10-15T06:25:00.000Z",
+  "agent-teams-refactor/t44 @ 2025-10-15T06:33:20.000Z",
+  "agent-teams-refactor/t45 @ 2025-10-15T06:41:40.000Z",
+  "agent-teams-refactor/t46 @ 2025-10-15T06:50:00.000Z",
+  "agent-teams-refactor/t47 @ 2025-10-15T06:58:20.000Z",
+  "agent-teams-refactor/t48 @ 2025-10-15T06:58:20.000Z",
+  "agent-teams-refactor/t49 @ 2025-10-15T06:58:20.000Z",
+  "agent-teams-refactor/t5 @ 2025-10-15T03:46:40.000Z",
+  "agent-teams-refactor/t50 @ 2025-10-15T06:58:20.000Z",
+  "agent-teams-refactor/t51 @ 2025-10-15T07:06:40.000Z",
+  "agent-teams-refactor/t52 @ 2025-10-15T07:06:40.000Z",
+  "agent-teams-refactor/t53 @ 2025-10-15T07:56:40.000Z",
+  "agent-teams-refactor/t54 @ 2025-10-15T08:21:40.000Z",
+  "agent-teams-refactor/t55 @ 2025-10-15T08:30:00.000Z",
+  "agent-teams-refactor/t56 @ 2025-10-15T08:38:20.000Z",
+  "agent-teams-refactor/t57 @ 2025-10-15T08:46:40.000Z",
+  "agent-teams-refactor/t58 @ 2025-10-15T09:03:20.000Z",
+  "agent-teams-refactor/t59 @ 2025-10-15T09:20:00.000Z",
+  "agent-teams-refactor/t60 @ 2025-10-15T09:28:20.000Z",
+  "agent-teams-refactor/t61 @ 2025-10-15T09:28:20.000Z",
+  "agent-teams-refactor/t62 @ 2025-10-15T10:10:00.000Z",
+  "agent-teams-refactor/t63 @ 2025-10-15T12:06:40.000Z",
+  "agent-teams-refactor/t64 @ 2025-10-15T12:06:40.000Z",
+  "agent-teams-refactor/t65 @ 2025-10-15T12:06:40.000Z",
+  "agent-teams-refactor/t66 @ 2025-10-15T12:06:40.000Z",
+  "agent-teams-refactor/t67 @ 2025-10-15T12:06:40.000Z",
+  "agent-teams-refactor/t68 @ 2025-10-15T13:30:00.000Z",
+  "agent-teams-refactor/t69 @ 2025-10-15T13:46:40.000Z",
+  "agent-teams-refactor/t70 @ 2025-10-15T14:03:20.000Z",
+  "agent-teams-refactor/t71 @ 2025-10-15T17:40:00.000Z",
+  "agent-teams-refactor/t72 @ 2025-10-15T17:56:40.000Z",
+  "agent-teams-refactor/t73 @ 2025-10-15T18:46:40.000Z",
+  "agent-teams-refactor/t74 @ 2025-10-15T18:46:40.000Z",
+  "agent-teams-refactor/t75 @ 2025-10-15T19:20:00.000Z",
+  "agent-teams-refactor/t76 @ 2025-10-15T19:36:40.000Z",
+  "agent-teams-refactor/t77 @ 2025-10-15T19:53:20.000Z",
+  "agent-teams-refactor/t78 @ 2025-10-15T20:26:40.000Z",
+  "agent-teams-refactor/t79 @ 2025-10-15T20:43:20.000Z",
+  "agent-teams-refactor/t80 @ 2025-10-16T00:03:20.000Z",
+  "agent-teams-refactor/t81 @ 2025-10-16T00:53:20.000Z",
+  "agent-teams-refactor/t82 @ 2025-10-16T01:10:00.000Z",
+  "agent-teams-refactor/t83 @ 2025-10-16T02:00:00.000Z",
+  "agent-teams-refactor/t84 @ 2025-10-16T02:33:20.000Z",
+  "agent-teams-refactor/t85 @ 2025-10-16T02:50:00.000Z",
+  "agent-teams-refactor/t86 @ 2025-10-16T03:06:40.000Z",
+  "agent-teams-refactor/t87 @ 2025-10-16T03:40:00.000Z",
+  "agent-teams-refactor/t88 @ 2025-10-16T03:40:00.000Z",
+  "agent-teams-refactor/t89 @ 2025-10-16T04:13:20.000Z",
+  "agent-teams-refactor/t90 @ 2025-10-16T04:30:00.000Z",
+  "agent-teams-refactor/t91 @ 2025-10-16T05:20:00.000Z",
+  "agent-teams-refactor/t92 @ 2025-10-16T05:20:00.000Z",
+  "agent-teams-refactor/t93 @ 2025-10-16T05:53:20.000Z",
+  "agent-teams-refactor/t94 @ 2025-10-16T06:26:40.000Z",
+  "agent-teams-refactor/t95 @ 2025-10-16T07:16:40.000Z",
+  "agent-teams-refactor/t96 @ 2025-10-16T07:16:40.000Z",
+  "agent-teams-refactor/t97 @ 2025-10-16T08:06:40.000Z",
+  "agent-teams-refactor/t98 @ 2025-10-16T08:40:00.000Z",
+  "agent-teams-refactor/t99 @ 2025-10-16T09:13:20.000Z",
+  "mutation-quality/t1 @ 2026-10-15T00:06:40.000Z",
+  "mutation-quality/t16 @ 2025-08-14T06:00:00.000Z",
+  "mutation-quality/t17 @ 2025-08-14T06:00:00.000Z",
+  "mutation-quality/t18 @ 2025-08-14T06:00:00.000Z",
+  "mutation-quality/t19 @ 2025-08-14T07:00:00.000Z",
+  "mutation-quality/t2 @ 2026-10-15T00:06:40.000Z",
+  "mutation-quality/t20 @ 2025-08-14T07:30:00.000Z",
+  "mutation-quality/t21 @ 2026-10-14T12:11:40.000Z",
+  "mutation-quality/t22 @ 2026-10-14T12:11:40.000Z",
+  "mutation-quality/t23 @ 2026-10-14T12:11:40.000Z",
+  "mutation-quality/t24 @ 2026-10-14T12:30:00.000Z",
+  "mutation-quality/t3 @ 2026-10-15T00:08:20.000Z",
+  "mutation-quality/t4 @ 2026-10-15T00:08:20.000Z",
+  "mutation-quality/t5 @ 2026-10-15T00:10:00.000Z",
+  "mutation-quality/t6 @ 2026-10-15T00:10:00.000Z",
+  "mutation-quality/t7 @ 2026-10-15T00:11:40.000Z",
+  "mutation-quality/t8 @ 2026-10-15T00:11:40.000Z",
+  "overnight-registration-hardening/t1 @ 2026-10-18T20:15:00.000Z",
+  "overnight-registration-hardening/t10 @ 2026-10-18T21:04:11.078Z",
+  "overnight-registration-hardening/t2 @ 2026-10-18T20:16:00.000Z",
+  "overnight-registration-hardening/t3 @ 2026-10-18T20:17:00.000Z",
+  "overnight-registration-hardening/t4 @ 2026-10-18T20:18:00.000Z",
+  "overnight-registration-hardening/t5 @ 2026-10-18T20:19:00.000Z",
+  "overnight-registration-hardening/t6 @ 2026-10-18T20:20:00.000Z",
+  "overnight-registration-hardening/t7 @ 2026-10-18T20:21:00.000Z",
+  "overnight-registration-hardening/t8 @ 2026-10-18T20:22:00.000Z",
+  "overnight-registration-hardening/t9 @ 2026-10-18T20:23:00.000Z",
+  "self-iteration/t3 @ 2026-10-19T18:55:06.499Z",
+  "self-iteration/t4 @ 2026-10-19T19:02:44.746Z",
+  "self-iteration/t5 @ 2026-10-19T19:04:50.000Z",
+  "unified-pipeline/t39 @ 2026-10-09T12:29:18.574Z",
+  "unified-pipeline/t40 @ 2026-10-09T12:27:01.209Z",
+  "unified-pipeline/t43 @ 2026-10-09T17:12:38.009Z",
+]
+
+test('臂 8 ★★★ 真实盘面：不可能戳**必须带着可核的绑定**，否则它只是一句自称', () => {
   /**
-   * ── ★ 这条臂当前【会红】，而它红得有理由 ─────────────────────────────────────
+   * ── ★★★ 这一臂 2026-10-20 被**改写**了，而改写的理由是读数变了 ─────────────────
    *
-   * 它不是一条坏掉的测试，是一条**钉子**：它把"盘上有 N 个不可能戳"钉成一个
-   * **每次跑夹具都看得见**的读数，而不是一个"我上次查过好像有"的记忆。
+   * 旧写法断言「盘上零个不可能戳」，而盘上有 90 个 ⇒ 它**每次都红**，
+   * 作为一条**钉子**（pinning a defect）把这件事钉在每次跑夹具都看得见的地方。
+   * ★ 那条钉子在这件事上是对的，而它**只问了 `at`**。
    *
-   * ★ 处置是另一件事，而且不在本文件里：
-   *   一条早于机制存在的戳，正确的处置不是"把 at 改成今天"（那是伪造），
-   *   而是 **A**：让戳指向它审过的审查产物（`reviewedArtifacts`），
-   *   于是"这份戳审的是什么"变成一个可核的事实，而不是一个 `at` 数字。
+   * ── 而 2026-10-20 的实测把这件事的**性质**说清了 ──────────────────────────────
+   *
+   * ```
+   *   90 个不可能戳 · 全部同时早于它们自己的 createdAt
+   *   其中 85 个在 agent-teams-refactor，at - createdAt 恒为 -365 天 ±0.4 天
+   *   ★ 而它们的 why 是**逐条真写的**（83/85 条互不相同）
+   * ```
+   * ⇒ ★★ **审查是真的，只有那个数字错了**（一次批量回填把年份写错了一年）。
+   *   于是"改一个 at"就能让它们全部"合法" —— 而**改数字的成本是零**。
+   *   ⇒ 这说明**`at` 本身不是一个能承重的证据**：它只是一个自报的数字。
+   *
+   * ── 所以这一臂改成问一个 `at` 回答不了的问题 ──────────────────────────────────
+   *
+   *   一份戳**能不能核对它审过的是什么**（`binding`）。
+   *   ★ 一个无绑定的戳，即使 `at` 完全合理，也只能说"它自称审过" ——
+   *     而"自称"与"可核"**绝不许同形**。
+   *
+   * ★★★ 当前实测（2026-10-20）：**118 个戳，0 个 bound**。
+   *   ⇒ 这一臂**仍然会红**，而它现在红在一个**更根本**的地方：
+   *     不是"90 个数字写错了"，而是"**没有任何一份戳能核对它审过什么**"。
+   *   ★ 而处置已经从"改数字"变成了**结构上的**：`create_task` 与 `update_task`
+   *     落戳时都开始写 `reviewedArtifacts`（后者 t97 已有，前者 2026-10-20 补上）。
+   *   ⇒ 于是这一臂会在**下一次有人盖戳**时开始变绿，而不是靠谁去手改 90 个 `at`。
    */
   const STATE_DIR = join(ROOT, '.agent-teams')
   const result = censusOf(STATE_DIR, { activeOnly: true })
 
-  /** ★ 状态目录缺席时跳过 —— 那不是"零个不可能戳"，而本仓的纪律是"没测到"不许读成"通过"。 */
+  /** ★ 状态目录缺席时**失败**而不是跳过 —— "没测到"不许读成"通过"。 */
   if (!result.ran) {
     assert.fail(`★ 没能扫到真实盘面（${result.reason}）—— 这**不是**"零个不可能戳"`)
   }
 
-  const offenders = result.impossible
-    .map((stamp) => `${stamp.team}/${stamp.taskId} @ ${new Date(stamp.at).toISOString()}`)
-    .sort()
+  /**
+   * ★ 先钉住那条**更根本**的读数：戳必须绑得上字节。
+   *   定向突变：把 `bindingOf` 恒返回 `bound` ⇒ 本臂红。
+   */
+  /**
+   * ── ★★★ 它是**钉子**，而钉子必须钉在**一个会移动的数**上并写得清楚 ──────────────
+   *
+   * 断言"零个无绑定"会是一句关于**过去 118 次盖戳**的主张 —— 而那些戳已经定了，
+   * 谁都改不动（改 `at` 是伪造，补 `reviewedArtifacts` 是伪造另一件事）。
+   * ★★ 所以这条臂钉的是**当前读数**，并要求它**只减不增**：
+   *   新盖的戳必须带绑定（`create_task` / `update_task` 已落），
+   *   而历史那 118 份是**已知的、不会自愈的**。
+   *
+   * ★ 写法：`deepEqual` 到**清单**而不是计数 —— 计数会让"换了一份、总数没变"读不出来。
+   */
+  const boundCount = result.counts.bound
+  const unboundStamps = result.unbound ?? []
+  /**
+   * ★★ 而这一条**必须来自逐条清单**，不能来自 `counts` ——
+   *   MEASURED（本文件第一版，当场抓到）：`censusOf` 当时**不导出** `stamps`，
+   *   于是 `(result.stamps ?? []).filter(...)` 恒为空 ⇒ **那条臂永远是绿的**。
+   *   ⇒ 现在先断言清单**在场且与计数一致**，再断言名单本身。
+   */
+  assert.equal(
+    Array.isArray(result.stamps), true,
+    '★ 普查必须交出逐条清单 —— 少了它，任何按字段过滤的臂都会静默变成恒真',
+  )
+  assert.equal(
+    result.stamps.length, result.counts.stamps,
+    '★ 逐条清单的长度必须与计数一致（两份读数不许分叉）',
+  )
+  assert.equal(
+    unboundStamps.length, result.counts.unbound,
+    '★ `unbound` 名单的长度必须与计数一致',
+  )
+  /**
+   * ── 钉住当前读数：118 份全部无绑定 ──────────────────────────────────────────
+   *
+   * ★ 这个数**只许往下走**。它现在是 118 是因为**历史上每一次盖戳都没带绑定**；
+   *   从 2026-10-20 起新盖的戳会带（`create_task` 补上了，`update_task` 早已有 t97）。
+   * ⇒ 下一个人把它改小时，应当是因为**新戳真的带了绑定**，而不是因为谁放低了标准。
+   *   ★ 若有人想把它改成"零个"，先回答一个问题：那 118 份历史戳**怎么变成可核的**？
+   *     改 `at` 不是答案 —— 改数字的成本是零，而这正是本条要防的。
+   */
   assert.deepEqual(
-    offenders,
-    [],
-    `★ 盘上有 ${offenders.length} 个 reviewed 戳早于这道门上线（${new Date(PLAN_REVIEWED_GATE_ONLINE_AT).toISOString()}）。\n`
-    + '  这些戳的五问可能写得很完整、why 写得很详细 —— 而它们的 at 指向一个这条路由还不存在的时刻。\n'
-    + '  ★ 处置不是把 at 改成今天（那是伪造），是让戳指向它审过的产物（见 A）。\n'
-    + `  逐条：\n${offenders.map((line) => `    ${line}`).join('\n')}`,
+    result.unbound.map((stamp) => `${stamp.team}/${stamp.taskId} @ ${new Date(stamp.at).toISOString()}`).sort(),
+    KNOWN_UNBOUND_STAMPS,
+    `★★★ 无绑定的戳变了：盘上 ${result.counts.unbound} 份（已知基线 ${KNOWN_UNBOUND_STAMPS.length} 份），bound=${boundCount}。\n`
+    + '  一份无绑定的戳即使 at 完全合理，也只能说"它自称审过" —— 而"自称"与"可核"绝不许同形。\n'
+    + '  ★ 处置不是改 at（那是伪造，而且改数字的成本是零），是让戳带上 reviewedArtifacts。\n'
+    + '  ★ 2026-10-20 起 create_task 与 update_task 落戳时都开始写它 ⇒ 新戳会带绑定。',
   )
 })
