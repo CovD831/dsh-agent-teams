@@ -59,3 +59,77 @@ export interface SignalsHealthRead {
  * @param readFile  注入的读文件函数（生产给 `fs/promises.readFile`；夹具注入内存版）。
  */
 export declare function readSignalsHealth(stateRoot: string, readFile: (path: string, encoding: 'utf8') => Promise<string>): Promise<SignalsHealthRead>;
+/**
+ * ── ★★★ N1.2：`deriveCollectionIndex` —— 给 `collection.cooldown` 一个**真实输入** ────
+ *
+ * ── 它修的是什么（MEASURED，本任务的由来）──────────────────────────────────────
+ *
+ *   `collection.cooldown` 在真实台账上 **39/39 判不了**，而那不是"判据坏了"：
+ *   它的 `requires = ['candidate', 'index']`，而**三个调用点一个都没传 `index`**
+ *   ⇒ `index === undefined` ⇒ 判据照规程答 `unmeasured`。
+ *   ★ 也就是说：那条判据**从来没有机会**回答它被造出来要回答的问题。
+ *
+ *   ⇒ 本函数把"盘上已有的信号"投影成 {@link CollectionIndex} 的形状：
+ *     三份（`seen` / `lastBySource` / `counts`）各自有**明确的来源**，不猜。
+ *
+ * ── ★★★ 为什么它住在 `evolution/` 而**不**住在 `gates/collection/` ─────────────
+ *
+ *   `shared.ts` 的注释逐字写着「判据不查库」——**判据层零 I/O 是载荷级不变量**
+ *   （`src/gates/runtime/stall.ts` 的注释：那条纯度是载荷，不是风格）。
+ *   而本函数要读 `signals.jsonl` ⇒ 它**必须**在 I/O 那一侧，即 `evolution/`。
+ *
+ * ── ★★★ 去重键的计算**注入**进来，不在这里重写一遍 ────────────────────────────
+ *
+ *   `dedupeKeyOf` 的真值在 `src/gates/collection/shared.ts`。
+ *   ★ 而 `evolution/` **不许** import `src/gates/**`（规格 §1 的单向原则，
+ *     `entities.ts` 那一侧也是这么绕的：把 `registry.evaluate` 包成回调传下去）。
+ *   ⇒ 所以这里收一个 `keyOf` 回调。**公式只有一份**，而依赖方向不变。
+ *   ★ 若在这里再写一遍 `kind.sort().join(',')`，就等于把"同一件事"的定义变成两份 ——
+ *     而两份会在某一天分叉，分叉的表现是"去重没拦住"（少采，且静默）。
+ *
+ * ── ★★ 三态：读不到 ≠ 空索引 ──────────────────────────────────────────────────
+ *
+ *   `signals.jsonl` **缺席** ⇒ `{ status: 'absent' }`，**不是**一个空索引。
+ *   ★ 空索引会被 cooldown 读成"这个来源从没说过话" ⇒ `ok` ⇒ **放行**
+ *     ⇒ "采集流水线还没开过"被读成"每条都是第一次，全都该采"。
+ *   ⇒ 缺席时调用方**不传** `index`，判据自己答 `unmeasured` —— 那是正确读数。
+ */
+export interface DerivedCollectionIndex {
+    /**
+     * ★ 三态：`'derived'`（读到了台账，哪怕零条）/ `'absent'`（文件还没有）。
+     * ★ `'derived'` + 零条 与 `'absent'` **不同形**（与 `readSignalsHealth` 同一条纪律）。
+     */
+    readonly status: 'derived' | 'absent';
+    /** 投影出来的索引（只在 `status === 'derived'` 时给调用方用）。 */
+    readonly index?: {
+        readonly seen: ReadonlySet<string>;
+        readonly lastBySource: ReadonlyMap<string, number>;
+        readonly counts: ReadonlyMap<string, number>;
+    };
+    /** 读到了几行（分母 —— 让"零条"可复核，而不是只说一句"空"）。 */
+    readonly rowsRead: number;
+    /** 坏行数（**跳过**，不整文件放弃 —— 与 `readSignalsHealth` 同一条纪律）。 */
+    readonly skippedMalformed: number;
+    /**
+     * ── ★★ 键**重建不出来**的行数（旧行：N1.2 之前没落 `candidate`）──────────────
+     *
+     * ★ 这些行**不参加去重**（它们确实没有那份原料），但**参加** cooldown
+     *   （它们的 `source`/`at` 是真的，见 `indexProjectionOf`）。
+     * ★ 与 `skippedMalformed` **不同形**：那些是坏数据；这些是好数据、只是当时没写全。
+     * ★ 必须报出来的理由：否则"去重在这批行上没生效"与"这批行本来不重复"同形 ——
+     *   而把这种同形拆开，正是本任务的全部工作。
+     */
+    readonly keysUnreconstructable: number;
+}
+/**
+ * 读 `signals.jsonl` 并投影成一份索引（**只读**；不写盘、不加锁）。
+ *
+ * @param stateRoot 状态根（`signalsPathOf` 拼路径 —— **不猜**）。
+ * @param readFile  注入的读文件函数（生产给 `fs/promises.readFile`）。
+ * @param keyOf     去重键的计算（**注入** —— 见文件头那一节）。
+ */
+export declare function deriveCollectionIndex(stateRoot: string, readFile: (path: string, encoding: 'utf8') => Promise<string>, keyOf: (candidate: {
+    readonly kind: readonly string[];
+    readonly component?: string;
+    readonly message: string;
+}) => string): Promise<DerivedCollectionIndex>;

@@ -83,6 +83,63 @@ export interface EvolutionSignal {
             readonly verdict: string;
         }[];
     };
+    /**
+     * ── ★★★ N1.1：**顶层**的 `collected` 三态（本任务要落盘的那一格）──────────────
+     *
+     * ── 为什么上面已经有 `collection.collected`，还要在顶层再来一格 ────────────────
+     *
+     *   上面那一格是**那次判据求值的原始结论**（`boolean | undefined`），
+     *   它活在 `collection` 对象里 ⇒ ★ **整个 `collection` 对象缺席时它也跟着消失**。
+     *   而 `collection` 恰好在"求值没跑"时缺席 ⇒ **"没跑"与"跑了但没记"同形**。
+     *
+     *   ⇒ 顶层这一格**永远在场**（`undefined` 写成 `null`，见 `withCollected`），
+     *     让盘上的每一行都能被回答「这条到底采没采」，而不必去问 `collection` 在不在。
+     *
+     * ── ★★★ 四值，不是三值 —— 而 `null` 与 `'unmeasured'` **必须是两件事** ─────────
+     *
+     *   · `'collected'`  ⇒ 判据放行，**真的采了**
+     *   · `'skipped'`    ⇒ 判据说**不采**（`ok === false`）—— 一个**决定**
+     *   · `'unmeasured'` ⇒ 判据说**判不了**（`unmeasured`）—— 一个**读数**，不是决定
+     *   · `null`         ⇒ ★ **这一行没有这一格**（存量 49 行、或写入方遗漏）
+     *
+     *   ★★ 把 `null` 与 `'unmeasured'` 合并是**这一格最容易犯的错**：
+     *     `null` 意味着"写入方没写"（**缺陷**，该修代码），
+     *     `'unmeasured'` 意味着"写了，读数是测不出来"（**事实**，该修判据的输入）。
+     *     两者补救动作完全相反 ⇒ 合并会把一个缺陷读成一个读数。
+     *
+     *   ★ 类型上的 `| null` 是刻意的：`JSON.stringify` 会**保留** `null`、**丢弃** `undefined`，
+     *     所以要让"这一格存在但为空"在盘上真的存在，只能用 `null`。
+     */
+    readonly collected?: 'collected' | 'skipped' | 'unmeasured' | null;
+    /**
+     * ── ★★★ N1.2：这条信号**当时的候选面** —— 让盘上的行能被**逐字重建**成去重键 ────
+     *
+     * ── 要回答的那个问题：「`deriveCollectionIndex` 凭什么重建 `seen`？」──────────
+     *
+     *   去重键是 `dedupeKeyOf({kind, component, message})` —— 三段。
+     *   而 `EvolutionSignal` 原本只落了 `kind`（**字符串** `'rejection'`）与 `message`：
+     *     · `kind` 那一段**不是**候选类别数组（是两个同名字段，N1.1 的由来）；
+     *     · `component` 那一段**整个没有落盘**（`source.where` 是别的东西）。
+     *   ★★ ⇒ 从旧行**拼不出**去重键。若索引端自己猜一个（用 `source.where` 当 component），
+     *     它算出的键与写端算出的键**永远不同** ⇒ `seen.has(key)` 恒假 ⇒
+     *     **去重永远不拦，而读数上一切正常**（`ok`，看起来在正常工作）。
+     *     这是本任务最贵的一格：一个**看起来接好了**、实则恒不命中的判据。
+     *
+     * ── ★ 所以落的是【候选面本身】，不是它的投影 ────────────────────────────────
+     *
+     *   落 `dedupeKey` 字符串也能让 `seen` 工作，但它把"键怎么算"**冻进了历史行**：
+     *   公式一变（比如加一段），存量行与新行就分属两个键空间，而这一点在盘上
+     *   **看不出来**。⇒ 落**原料**（`kind` 数组 + `component`），由读取端用
+     *   当前那一份 `dedupeKeyOf` 现算 —— 公式只有一个真值，且对存量行同样成立。
+     *
+     * ★ `component` 缺席 ⇒ **不写这一格**（不写空串：缺席与"有但是空的"是两件事）。
+     */
+    readonly candidate?: {
+        /** 候选类别（**数组**，进去重键的那一段）—— 与顶层 `kind` 是两个东西。 */
+        readonly kind: readonly string[];
+        /** 归属组件（进去重键的第二段）。★ 缺席 ⇒ 这一格不写。 */
+        readonly component?: string;
+    };
 }
 /** `.agent-teams/evolution/signals.jsonl` 的路径（由调用方给 `stateRoot`，**不猜**）。 */
 export declare function signalsPathOf(stateRoot: string): string;
@@ -228,6 +285,26 @@ export declare function collectionDecisionOf(evaluation: {
     }[];
 };
 /**
+ * ── ★★★ N1.1：把判据结论投影成**盘上那一格的四值** ──────────────────────────────
+ *
+ * ★ 这是一个**纯映射**（没有 I/O、没有判断）：它只回答"这三个内部状态各自该落成什么"。
+ *   把它单独拿出来，是为了让"落什么"只有一处真值 —— 而调用方只负责**调用它**。
+ *
+ * ── ★ 为什么 `false` 与 `undefined` 要落到**不同**的字面量 ──────────────────────
+ *
+ *   它们是两个不同的事实（见 `EvolutionSignal.collected` 的注释）：
+ *     `false`     ⇒ 判据**做了决定**：不采。补救动作 = 去看那条判据对不对。
+ *     `undefined` ⇒ 判据**没能决定**。补救动作 = 去看看它的输入缺了什么。
+ *   ★ 若两者都写成同一种字面量，则"判据判不了"会被读成"判据说别采" ——
+ *     而那是本仓记账最久的形态（一个读数被当成一个决定）。
+ *
+ * ★ `null` 在这条映射里**不会**出现：它是给"这一格根本没写"留的（存量行）。
+ *   本函数只要被调用，就一定写出三值之一 —— 这正是"键永远在场"的落点。
+ */
+export declare function collectedFieldOf(decision: {
+    readonly collected: boolean | undefined;
+}): 'collected' | 'skipped' | 'unmeasured';
+/**
  * ── ★★★ `observe()` —— 三个汇合点调用的**唯一**入口（规格 §1）──────────────────────
  *
  * ★★ 为什么要一个统一入口，而不是三处各写一遍：
@@ -258,7 +335,17 @@ export interface ObserveInput {
             readonly source?: string;
             readonly at: number;
         };
-        readonly index: {
+        /**
+         * ── ★★★ N1.2：`index` 在这里**必须是可选的** ────────────────────────────────
+         *
+         *   旧形状把它写成**必填** —— 而那恰恰是焊接的**类型面**：
+         *   调用方要么编一个空索引来满足类型（旧 `observe` 正是这么干的），
+         *   要么就得改类型。★ 必填的输入会让"我没有这个输入"在类型系统里**无法表达**，
+         *   于是它只能表现为"我有一个空输入" —— 而两者在读数上正好相反
+         *   （前者该 `unmeasured`，后者该 `ok`）。
+         *   ⇒ 改成可选后，`CollectionContext` 的三态才真的能传过来。
+         */
+        readonly index?: {
             readonly seen: ReadonlySet<string>;
             readonly lastBySource: ReadonlyMap<string, number>;
             readonly counts: ReadonlyMap<string, number>;
@@ -281,17 +368,80 @@ export interface ObserveInput {
     readonly where: string;
     /** ★ 原文，不改写。 */
     readonly message: string;
-    /** 信号类别（如 `unwired`）。★ 参与去重键。 */
+    /**
+     * ── ★★★ 这是**候选类别**（`['unwired']` 那种），进**去重键** ──────────────────
+     *
+     * ★★ 它与 `EvolutionSignal.kind`（`'rejection' | 'success' | 'insight'`）是
+     *   **两个不同的东西**，只是碰巧同名（N1.1 的由来）：
+     *     · 这一个：**这条信号属于哪一类缺陷** —— 进 `dedupeKeyOf` 的三段之一；
+     *     · 那一个：**这次采集是被谁触发的** —— 落在盘上的 `kind` 字段。
+     *   MEASURED（N1 之前）：写盘那一行硬编码了 `kind: 'rejection'`，
+     *   而本字段**整个被丢掉** ⇒ 去重键的 `kind` 段永远是同一个值 ⇒
+     *   不同类别的信号在去重时**同形**（少采）。
+     *   ★ 所以这里**不改名**（改名会动到三个调用点与既有夹具），
+     *   而是把**写盘那一格**改成可注入的 `signalKind` —— 两个名字各自归位。
+     */
     readonly kind: readonly string[];
     readonly component?: string;
     readonly tool?: string;
+    /**
+     * ── ★★★ N1.2：`collection.cooldown` 的**来源键** —— 不传 ⇒ 那条判据仍判不了 ──────
+     *
+     * ★ 三个调用点此前**一个都没传**它 ⇒ 即使 `index` 接上了，`cooldown` 仍答
+     *   `unmeasured`（"this signal carries no source"）⇒ 那个数**从 34 变成 34**，
+     *   只是理由从"没有索引"换成"没有来源"。⇒ 本任务必须同时接这一格。
+     *
+     * ★★ 口径由**计划 §2.1 裁定**，不让实现者临场定：传 `where`（粗粒度）。
+     *   两个选项的收益靶都算过（`where` ⇒ 挡 15；`where+gateId` ⇒ 挡 13）——
+     *   ⇒ 调用点因此只需传 `source: <这个 where 的字面量>`，
+     *     而**怎么拼**由 `sourceKeyOf`（`gates/collection/shared.ts`）一处说了算。
+     *   ★ 这里**不**由 `observe` 从 `input.where` 自动补：自动补会把
+     *     "调用方有没有想清楚来源是什么"这件事**藏起来** —— 而那正是本任务要拆的焊点。
+     */
     readonly source?: string;
     readonly gateId?: string;
+    /**
+     * ── ★★★ 写到盘上的 `EvolutionSignal.kind`（N1.1）────────────────────────────────
+     *
+     * ★ 缺省 `'rejection'`：三个调用点今天全都**不传**它 ⇒ 存量的
+     *   `by kind = {rejection: 46, insight: 2, success: 1}` **逐字不变**。
+     *   （★ 这是刻意的：本任务拆的是两格字段的焊点，**不**顺手改采集行为 ——
+     *     改了之后"这个数变了"就分不清是拆焊的功劳还是改行为的功劳。）
+     * ★ 而它一旦可注入，`success` / `insight` 那两条路就有了**真的落点**
+     *   （今天它们只能靠人手写补录产生）。
+     */
+    readonly signalKind?: 'rejection' | 'success' | 'insight';
     /** ★★ 机制活动 —— **转发**已有裁决，**不重算**（规格 §2 硬约束 3）。 */
     readonly mechanisms?: readonly {
         readonly gateId: string;
         readonly verdict: string;
     }[];
+    /**
+     * ── ★★★ N1.2：索引的**惰性**加载器 —— 由调用点注入，由本函数 await ────────────────
+     *
+     * ── 为什么不是一个现成的 `index`（那才是 `index` 这一格本来的样子）──────────────
+     *
+     *   三个调用点全都在**拒绝路径**上，而那里的纪律逐字是「拒绝必须**立刻**返回，
+     *   不许因为写台账而等待」（`create-task.ts` 那段注释与 `void observe(...)` 一起）。
+     *   ★ 取索引要读一次 `signals.jsonl`。若调用点 `await` 它再调 `observe`，
+     *     就是**把一次文件读塞进拒绝路径** —— 一次拒绝多一次磁盘等待，
+     *     而这条路径每轮要跑十几次。⇒ 纪要被破坏的形态正是本仓反复记过的：
+     *     "为了防止一个问题而引入另一个更贵的问题"。
+     *
+     *   ★ 所以这里收一个**函数**而不是值：调用点把它顺手交给 `void observe(...)`，
+     *     真正的读发生在**已经不被 await 的那一段里**。时序不变，索引照样有。
+     *
+     * ── ★ 为什么 `index` 与 `loadIndex` 两个形状都留着 ──────────────────────────────
+     *
+     *   `index` 给**已有索引**的调用方（夹具、未来的批处理），零 I/O；
+     *   `loadIndex` 给**生产路径**（它必须自己去盘上取）。
+     *   ★ 两个都在 ⇒ 优先级要写死：**显式 `index` 优先**（调用方已经拿到的东西不许被覆盖）。
+     */
+    readonly loadIndex?: () => Promise<{
+        readonly seen: ReadonlySet<string>;
+        readonly lastBySource: ReadonlyMap<string, number>;
+        readonly counts: ReadonlyMap<string, number>;
+    } | undefined>;
     /** 现在（毫秒）。★ 由调用方给，便于夹具复现。 */
     readonly now: number;
     /** 写失败时的告警出口（旁路，不参与裁决）。 */

@@ -7,7 +7,7 @@
 import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, makeTask, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
+import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, loadCollectionIndexFor, makeTask, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, gateEvaluationRecordOf, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TERMINAL_TASK_STATUSES, TaskKind, TeamTask } from '../types.ts'
 import { registry } from '../gates/index.ts'
@@ -614,6 +614,17 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               now: Date.now(),
               evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
                 registry.evaluate('collection' as never, context) as never,
+              /**
+               * ── ★★★ N1.2：`source` 与 `index` 同时接上（之前两格都没有）──────────────
+               *
+               * ★ `source` 取 `where` 的字面量（粗粒度，计划 §2.1 裁定）——
+               *   ★ 不给的话 `cooldown` 仍答 unmeasured（"carries no source"），
+               *     于是读数从 34 变 34，只是理由换了 ⇒ 看起来像修了。
+               * ★ `loadIndex` 惰性：本处 `void observe(...)` 不 await，
+               *   读盘发生在不被等待的那一段里 ⇒ 拒绝路径立刻抛（原时序不变）。
+               */
+              source: 'validateCreateTask',
+              loadIndex: async () => await loadCollectionIndexFor(stateRoot),
               warn: (note: string) => ctx.logger.warn(note),
             })
             throw new Error(contractMessage)

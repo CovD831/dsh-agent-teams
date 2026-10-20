@@ -158,3 +158,238 @@ export async function readSignalsHealth(
     totalLines: lines.length,
   }
 }
+
+/**
+ * ── ★★★ N1.2：`deriveCollectionIndex` —— 给 `collection.cooldown` 一个**真实输入** ────
+ *
+ * ── 它修的是什么（MEASURED，本任务的由来）──────────────────────────────────────
+ *
+ *   `collection.cooldown` 在真实台账上 **39/39 判不了**，而那不是"判据坏了"：
+ *   它的 `requires = ['candidate', 'index']`，而**三个调用点一个都没传 `index`**
+ *   ⇒ `index === undefined` ⇒ 判据照规程答 `unmeasured`。
+ *   ★ 也就是说：那条判据**从来没有机会**回答它被造出来要回答的问题。
+ *
+ *   ⇒ 本函数把"盘上已有的信号"投影成 {@link CollectionIndex} 的形状：
+ *     三份（`seen` / `lastBySource` / `counts`）各自有**明确的来源**，不猜。
+ *
+ * ── ★★★ 为什么它住在 `evolution/` 而**不**住在 `gates/collection/` ─────────────
+ *
+ *   `shared.ts` 的注释逐字写着「判据不查库」——**判据层零 I/O 是载荷级不变量**
+ *   （`src/gates/runtime/stall.ts` 的注释：那条纯度是载荷，不是风格）。
+ *   而本函数要读 `signals.jsonl` ⇒ 它**必须**在 I/O 那一侧，即 `evolution/`。
+ *
+ * ── ★★★ 去重键的计算**注入**进来，不在这里重写一遍 ────────────────────────────
+ *
+ *   `dedupeKeyOf` 的真值在 `src/gates/collection/shared.ts`。
+ *   ★ 而 `evolution/` **不许** import `src/gates/**`（规格 §1 的单向原则，
+ *     `entities.ts` 那一侧也是这么绕的：把 `registry.evaluate` 包成回调传下去）。
+ *   ⇒ 所以这里收一个 `keyOf` 回调。**公式只有一份**，而依赖方向不变。
+ *   ★ 若在这里再写一遍 `kind.sort().join(',')`，就等于把"同一件事"的定义变成两份 ——
+ *     而两份会在某一天分叉，分叉的表现是"去重没拦住"（少采，且静默）。
+ *
+ * ── ★★ 三态：读不到 ≠ 空索引 ──────────────────────────────────────────────────
+ *
+ *   `signals.jsonl` **缺席** ⇒ `{ status: 'absent' }`，**不是**一个空索引。
+ *   ★ 空索引会被 cooldown 读成"这个来源从没说过话" ⇒ `ok` ⇒ **放行**
+ *     ⇒ "采集流水线还没开过"被读成"每条都是第一次，全都该采"。
+ *   ⇒ 缺席时调用方**不传** `index`，判据自己答 `unmeasured` —— 那是正确读数。
+ */
+export interface DerivedCollectionIndex {
+  /**
+   * ★ 三态：`'derived'`（读到了台账，哪怕零条）/ `'absent'`（文件还没有）。
+   * ★ `'derived'` + 零条 与 `'absent'` **不同形**（与 `readSignalsHealth` 同一条纪律）。
+   */
+  readonly status: 'derived' | 'absent'
+  /** 投影出来的索引（只在 `status === 'derived'` 时给调用方用）。 */
+  readonly index?: {
+    readonly seen: ReadonlySet<string>
+    readonly lastBySource: ReadonlyMap<string, number>
+    readonly counts: ReadonlyMap<string, number>
+  }
+  /** 读到了几行（分母 —— 让"零条"可复核，而不是只说一句"空"）。 */
+  readonly rowsRead: number
+  /** 坏行数（**跳过**，不整文件放弃 —— 与 `readSignalsHealth` 同一条纪律）。 */
+  readonly skippedMalformed: number
+  /**
+   * ── ★★ 键**重建不出来**的行数（旧行：N1.2 之前没落 `candidate`）──────────────
+   *
+   * ★ 这些行**不参加去重**（它们确实没有那份原料），但**参加** cooldown
+   *   （它们的 `source`/`at` 是真的，见 `indexProjectionOf`）。
+   * ★ 与 `skippedMalformed` **不同形**：那些是坏数据；这些是好数据、只是当时没写全。
+   * ★ 必须报出来的理由：否则"去重在这批行上没生效"与"这批行本来不重复"同形 ——
+   *   而把这种同形拆开，正是本任务的全部工作。
+   */
+  readonly keysUnreconstructable: number
+}
+
+/**
+ * 一条信号在索引里的三份投影分别取什么。
+ *
+ * ★ 每一份的来源都写在这里，**不散落在实现里**（读的人要能一眼看出"这个数从哪来"）。
+ */
+interface IndexProjection {
+  /**
+   * 去重键（`seen` / `counts` 用）—— 由注入的 `keyOf` 算。
+   * ★ `undefined` ⇒ **这一行参加不了去重**（见 `indexProjectionOf` 的"算不出来就不算"）。
+   */
+  readonly key: string | undefined
+  /** 这个来源**是谁**（`lastBySource` 用）。★ 缺席 ⇒ 这一条不参与 cooldown 索引。 */
+  readonly source: string | undefined
+  /** 这一条**被采的时刻**（`lastBySource` 用）。 */
+  readonly at: number | undefined
+}
+
+/**
+ * 从一条原始行算出它的三份投影 —— ★ **保守**：算不出来就是 `undefined`，**不编**。
+ *
+ * ── ★★★ 这里曾经有一个真缺陷，而且它正是本文件头警告过的形态 ──────────────────
+ *
+ *   第一版这样重建去重键：
+ *     `kind`      ← `row.kind`            （**信号**类别 `'rejection'`）
+ *     `component` ← `row.source.where`    （**来源**位置）
+ *     `message`   ← `row.message`
+ *   而写端算的是 `dedupeKeyOf({kind: input.kind, component: input.component, message})`
+ *   ⇒ 写端 `unwired|contract|the message`，索引端 `rejection|validateCreateTask|the message`。
+ *
+ *   ★★ 两个键**永远不同** ⇒ `seen.has(key)` 恒假 ⇒ **去重永不命中**，
+ *      而读数上一切正常（每条都 `ok`，看起来判据在工作）。
+ *      MEASURED（探针实测）：`wantKey "unwired||same message" in seen? false`，
+ *      `seen ["rejection|probe|same message"]`。
+ *      ⇒ 这不是"去重判据坏了"，是**喂给它的索引不是它要的那个东西**。
+ *
+ * ── 修法：**新行**逐字重建，**旧行**如实承认重建不了 ──────────────────────────────
+ *
+ *   新行有 `candidate: {kind: string[], component?}`（N1.2 落盘的原料）⇒ 键**逐字**重建，
+ *   与写端算的是同一个（同一个 `keyOf`、同一份原料）。
+ *   ★ 旧行（N1.2 之前的 49 条）**盘上没有候选面**，而 `kind` 那一格装的是信号类别 ——
+ *     ⇒ **重建不出来**。三个选择里只有一个诚实：
+ *       ① 用 `row.kind` 硬凑  ⇒ 造一个**永远匹配不上**的键（第一版就是这么错的）
+ *       ② 跳过整行          ⇒ 连它的 `source`/`at` 也丢，cooldown 白丢 39 行真实历史
+ *       ③ **只要它真的有的**：`source`/`at` 留下（cooldown 能用），键留空（去重不用）
+ *     ⇒ 选 ③。而"有多少行是这种"必须**计数报出来**（`keysUnreconstructable`），
+ *       否则"去重在旧行上没生效"就是静默的 —— 那正是本任务在拆的东西。
+ *
+ * ★ 这也解释了为什么 acceptance 把存量与新行的 `keyPresent` 分成两个数：
+ *   同一件事在两个人群里的**可测性不同**，合成一个数就会读成"修好了"。
+ */
+function indexProjectionOf(line: string, keyOf: (candidate: {
+  readonly kind: readonly string[]
+  readonly component?: string
+  readonly message: string
+}) => string): IndexProjection | undefined {
+  let row: Record<string, unknown>
+  try {
+    row = JSON.parse(line) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  if (row === null || typeof row !== 'object') return undefined
+  const at = typeof row.at === 'number'
+    ? row.at
+    : typeof row.at === 'string' ? Date.parse(row.at) || undefined : undefined
+  const source = (row.source as { readonly where?: unknown } | undefined)?.where
+  /**
+   * ★ `source` / `at` 与 `message` 无关：**只要这一行有来源与时刻，它就参加 cooldown**。
+   *   ⇒ 先算这两份，键算不出来也照样返回（`key: undefined`）。
+   */
+  const projectionOf = (key: string | undefined): IndexProjection => ({
+    key,
+    source: typeof source === 'string' && source !== '' ? source : undefined,
+    at,
+  })
+  const candidate = row.candidate as { readonly kind?: unknown; readonly component?: unknown } | undefined
+  const message = typeof row.message === 'string' ? row.message : undefined
+  if (message === undefined) return projectionOf(undefined)
+  /**
+   * ★★ **只从 `candidate` 重建** —— 不从 `row.kind` 凑。
+   *   缺 `candidate`（N1.2 之前的行）⇒ `key: undefined`，如实不参加去重。
+   */
+  const rawKind = candidate?.kind
+  const kind = Array.isArray(rawKind)
+    ? rawKind.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  if (kind.length === 0) return projectionOf(undefined)
+  const rawComponent = candidate?.component
+  const key = keyOf({
+    kind,
+    ...typeof rawComponent === 'string' && rawComponent !== '' ? { component: rawComponent } : {},
+    message,
+  })
+  return projectionOf(key)
+}
+
+/**
+ * 读 `signals.jsonl` 并投影成一份索引（**只读**；不写盘、不加锁）。
+ *
+ * @param stateRoot 状态根（`signalsPathOf` 拼路径 —— **不猜**）。
+ * @param readFile  注入的读文件函数（生产给 `fs/promises.readFile`）。
+ * @param keyOf     去重键的计算（**注入** —— 见文件头那一节）。
+ */
+export async function deriveCollectionIndex(
+  stateRoot: string,
+  readFile: (path: string, encoding: 'utf8') => Promise<string>,
+  keyOf: (candidate: { readonly kind: readonly string[]; readonly component?: string; readonly message: string }) => string,
+): Promise<DerivedCollectionIndex> {
+  let text: string
+  try {
+    text = await readFile(signalsPathOf(stateRoot), 'utf8')
+  } catch {
+    /**
+     * ★★ 缺席 ⇒ **不**返回空索引（那会被 cooldown 读成"每条都是第一次"）。
+     *   ⇒ 明确答 `absent`，由调用方**不传** `index`。
+     */
+    return { status: 'absent', rowsRead: 0, skippedMalformed: 0, keysUnreconstructable: 0 }
+  }
+  const lines = text.split('\n').filter((line) => line.trim() !== '')
+  const seen = new Set<string>()
+  const counts = new Map<string, number>()
+  const lastBySource = new Map<string, number>()
+  let skippedMalformed = 0
+  /**
+   * ★★ `keysUnreconstructable`：**键重建不出来的行数**（旧行 —— N1.2 之前没有 `candidate`）。
+   *
+   *   为什么要一个计数：这些行**不参加去重**（它们确实没有那份原料），
+   *   于是"去重在这批行上没生效"。★ 若不报数，它就与"这批行本来就没有重复"同形 ——
+   *   而本任务的全部工作就是把这种"同形"拆开。
+   *   ★ 注意它**不是** `skippedMalformed`：那些行是好的、可读的、参与 cooldown 的，
+   *     只是缺一份当时没落的原料。合成一个数会把"坏数据"与"没写全"读成一件事。
+   */
+  let keysUnreconstructable = 0
+  for (const line of lines) {
+    const projection = indexProjectionOf(line, keyOf)
+    if (projection === undefined) {
+      skippedMalformed += 1
+      continue
+    }
+    /**
+     * ★ 键算不出来 ⇒ **这一行不进 `seen`/`counts`**，但它的 `source`/`at` 照旧进 `lastBySource`。
+     *   ⇒ 去重说"我没见过它"（真话：没有可比的键），cooldown 仍能用它的时间（也是真话）。
+     */
+    if (projection.key === undefined) {
+      keysUnreconstructable += 1
+    } else {
+      seen.add(projection.key)
+      counts.set(projection.key, (counts.get(projection.key) ?? 0) + 1)
+    }
+    /**
+     * ── ★★ `lastBySource` 取**最大** `at`，不是"最后一行" ──────────────────────
+     *
+     *   台账是**追加**的，但 `at` 不保证单调（信号可能被补录、夹具会伪造时间）。
+     *   ★ 取"最后一行"会让一条补录的老信号把窗口**往回拨** ——
+     *     而 cooldown 的全部意义就是"最近一次说话是什么时候"。
+     *   ★ 只在这一格上取 max 是**判据那边的要求**（它算 `candidate.at - last`）：
+     *     若 `last` 可能比真实最大值小，冷却窗就会被**低估** ⇒ 多采。
+     */
+    if (projection.source !== undefined && projection.at !== undefined) {
+      const previous = lastBySource.get(projection.source)
+      if (previous === undefined || projection.at > previous) lastBySource.set(projection.source, projection.at)
+    }
+  }
+  return {
+    status: 'derived',
+    index: { seen, lastBySource, counts },
+    rowsRead: lines.length,
+    skippedMalformed,
+    keysUnreconstructable,
+  }
+}

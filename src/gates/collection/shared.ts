@@ -105,6 +105,51 @@ export function dedupeKeyOf(candidate: Pick<CollectionCandidate, 'kind' | 'compo
 }
 
 /**
+ * ── ★★★ N1.2：信号「来源」的**唯一**口径 —— 写端与索引端都调这一个函数 ────────────
+ *
+ * ── 它修的是什么（MEASURED，本任务的第二处焊点）────────────────────────────────
+ *
+ *   `collection.cooldown` 的 `requires = ['candidate', 'index']`，而它还要读
+ *   `candidate.source` —— **三个调用点一个都没传 `source`** ⇒ 即使把 `index` 接上，
+ *   它仍然答 `unmeasured`（"this signal carries no source"）。
+ *   ★★ 也就是说：只接 `index` 会让 `unmeasured` 从 **34 变成 34**，
+ *     而原因从"没有索引"换成"没有来源" —— 读数不变，**看起来像修了**。
+ *     这正是本任务要防的那个形态（一个数没动，而它的解释换了）。
+ *
+ * ── ★★★ 为什么必须是【一个函数】，而不是两端各拼一次 ──────────────────────────
+ *
+ *   索引那一侧（`deriveCollectionIndex`）要从**盘上已有的行**重建 `lastBySource`；
+ *   写那一侧要算出 `candidate.source` 去查它。
+ *   ★ 若两处各拼一次字符串，它们会在某一天分叉 ——
+ *     而分叉的表现是**冷却窗永远不命中**（每一行都被读成"新的来源"⇒ 恒 ok）。
+ *     那与"cooldown 没接上"在读数上**同形**，于是没人会发现。
+ *
+ * ── ★ 为什么**只取 `where`**（粗粒度）—— 这是计划 §2.1 明写「必须由 N1 定下来」的那一格 ──
+ *
+ *   `docs/SELF-ITERATION-PLAN.md` §2.1 把两个选项与各自的收益靶都算出来了：
+ *     传 `where`（粗）              ⇒ 冷却 5 分钟窗会挡 **15** 条（当前语料复算 **18**）
+ *     传 `where + gateId`（细）     ⇒ 只挡 **13** 条（当前语料复算 **16**）
+ *   ★ 这里选**粗**的那一个，理由不是"数大好看"，而是两条：
+ *     ① 粗 == `scripts/evolution-readout.mjs` 打印的 **`wouldBlock` 第一行**（key=where）。
+ *        两者同一个口径 ⇒ **读数脚本能真的核对生产实现**，而不是拿两把尺子比。
+ *        细口径那一行也照印，作对照。
+ *     ② ★ 粒度越细，拦得越少。而本任务要防的**反面**正是"cooldown 装上了却永不拦"
+ *        （`wouldBlock` = 0 与整列 `unmeasured` 是**同一种静默**，只是换了个说法）。
+ *        ⇒ 在"可能多拦"与"可能永不拦"之间，取多拦那一边，并由读数把代价印出来。
+ *
+ *   ★ `gateId` / `tool` 仍在**参数形状**里（不是死代码）：台账 `source` 对象本来就有它们，
+ *     这个函数是"从台账那一格算键"的唯一入口；将来若要改细口径，只改这一处。
+ *     现在它们在**注释里明写被刻意排除**，而不是被悄悄忘掉。
+ */
+export function sourceKeyOf(source: {
+  readonly where: string
+  readonly gateId?: string
+  readonly tool?: string
+}): string {
+  return source.where
+}
+
+/**
  * `cooldown` 的窗口长度（毫秒）。
  *
  * ★ 依据 `docs/COLLECTION-POINT-AND-EVALUATORS.md` §1.2 行 2：「同一来源 N 分钟内 ⇒ 不采」

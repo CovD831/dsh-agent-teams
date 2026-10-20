@@ -65,8 +65,8 @@ export { LOOP_B_SUBJECTS, canLoopAAutoChange } from './types.ts'
 export { bucketsOf, collectionHealthOf } from './health.ts'
 export type { HealthRecord } from './health.ts'
 
-export { readSignalsHealth } from './read.ts'
-export type { SignalsHealthRead } from './read.ts'
+export { deriveCollectionIndex, readSignalsHealth } from './read.ts'
+export type { DerivedCollectionIndex, SignalsHealthRead } from './read.ts'
 
 export {
   CREATE_TASK_PARAM_KEYS,

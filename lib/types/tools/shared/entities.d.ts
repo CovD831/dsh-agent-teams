@@ -473,6 +473,36 @@ export declare function deriveScanDirs(changedFiles: readonly string[]): string[
 export declare function changedLineNumbers(workspace: string, base: string | undefined): Promise<number[] | undefined>;
 export declare function mergeRerunIntoCommandsRun(claimed: readonly CommandResult[] | undefined, reruns: readonly CommandResult[]): CommandResult[];
 export declare function stateRootOf(workspace: string, config: ToolsConfig): string;
+/**
+ * ── ★★★ N1.2：生产路径上取「采集索引」的**唯一**入口 ──────────────────────────────
+ *
+ * ── 它把三个各自会分叉的决定收成一处 ──────────────────────────────────────────────
+ *
+ *   ① **从哪读**：`deriveCollectionIndex(stateRoot, readFile, keyOf)` —— 读 `signals.jsonl`。
+ *   ② **键怎么算**：`dedupeKeyOf`（`gates/collection/shared.ts`）—— ★ **必须**是写端
+ *      用的那一个函数。若这里另拼一遍字符串，索引算出的键与写端算出的键永远不同
+ *      ⇒ 去重**永不命中**，而读数上一切正常（`ok`，看起来在工作）。
+ *   ③ **没有台账时怎么办**：`status: 'absent'` ⇒ 返回 **`undefined`**（**不是**空索引）。
+ *      ★ 空索引会被 `cooldown` 读成"这个来源从没说过话" ⇒ `ok` ⇒ 放行
+ *      ⇒ "采集流水线还没开过"被读成"每条都是第一次，全都该采"。
+ *
+ * ── ★★ 为什么返回 `undefined` 而不是一个 `{status}` 信封 ──────────────────────────
+ *
+ *   `ObserveInput.loadIndex` 的契约就是"给不出来 ⇒ `undefined`"，
+ *   而判据那边见到 `index === undefined` 会答 `unmeasured`（正确读数）。
+ *   ★ 中间再包一层信封只会造出第二个"三态"，而两个三态之间必须再定一次映射 ——
+ *     那正是本任务在拆的那种焊点。⇒ 这里直接塌成调用方唯一需要的那个形状。
+ *
+ * ── ★ 读失败（权限/坏盘）与"文件还没有"在这里**不分**：两者都答不出索引 ────────────
+ *   这不是偷懒：判据要的只是"能不能给出上一批已采信号"，两种原因都给不出。
+ *   ★ 而"为什么给不出"由 `deriveCollectionIndex` 的 `rowsRead`/`skippedMalformed`
+ *     那一侧承担（它不抛、只报），本函数不重述。
+ */
+export declare function loadCollectionIndexFor(stateRoot: string): Promise<{
+    readonly seen: ReadonlySet<string>;
+    readonly lastBySource: ReadonlyMap<string, number>;
+    readonly counts: ReadonlyMap<string, number>;
+} | undefined>;
 export declare function teamLockKey(stateRoot: string, teamId: string): string;
 export declare function captainLockKey(stateRoot: string, captainId: string): string;
 export declare function requireCaptainTeam(workspace: string, config: ToolsConfig, captain: Agent): Promise<TeamState>;
