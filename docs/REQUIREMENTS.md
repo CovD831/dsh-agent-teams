@@ -727,3 +727,58 @@ gate({task:{kind:'implementation', inScope:['src/artifacts.ts','src/state/tasks.
 被问一句可判定的话。可行形态是 `add_task` 的 `inScope` 声明**要求作者列出落点**，
 而"落点齐不齐"由**成员开工后的第一条读数**报出来（它一碰就超出 scope ⇒ 现有门就红）。
 ★ 这比造一个猜得出来就报、猜不出来就沉默的判据**诚实**。
+
+## 21. ★★★ 六件短板的最终交付（2026-10-20/21）—— 以及团队为什么停在半路
+
+**判据**:用户在 2026-10-20 要求「把这些都安排进 DAG 里」。团队 `shortfall-repair`
+（4 成员 / 7 任务）被建起来并跑到 t1/t2 完成、t3 产出后被上游拦截。
+
+**现状**:✅ **六件全部落地**，但其中**四件是队长自己做的**（团队停摆之后）。
+
+| # | 短板 | 谁做的 | 提交 | 臂 |
+|---|---|---|---|---|
+| ① | admission「已注册零求值点」的假话 | t1（architect） | `ad32ab4` | 文档三处 + 4 处同源假话（`36dd061`）|
+| ② | requirements 自审缝 | t3（integrator） | `ad32ab4` | 13 条（含反向半边）|
+| ③ | 重派必然复用已满会话 | 队长 | `44d119e` `52c3f6f` | 7 条 + 3 突变 |
+| ④ | 判据 outputs 无读者 | t2（researcher） | `docs/OUTPUTS-CONSUMER-AUDIT.md` | 机械自检 45=12+23+9+1 |
+| ⑤ | 测试文件无哈希基线 | 队长 | `b7d716e` | 7 条 + 4 突变 |
+| ⑥ | 判官独立性无可读读数 | 队长 | `67b0c69` | 6 条 + 3 突变 |
+
+**★★★ 团队停摆的直接原因：上游账号被限制**
+
+```
+wb API error (400): {"code":"upstream_content_policy_blocked",
+  "message":"账号存在异常行为，已被限制使用"}
+```
+四个成员**全部**路由到同一个 `wb` 账号 ⇒ 每一次成员回合都立即失败
+⇒ t3/t4/t6/t7 被自动标记 `failed`（**而 t3 的产物其实完整**）。
+
+★ 冷协议说法：这是**环境故障**，不是任务失败。它同时是「单点 provider」的代价 ——
+  一个有 4 个成员、7 条任务的队，因为一个账号被限制而**整体停摆**。
+
+**证据**（全部可复跑）:
+```bash
+node --test scripts/gate-test-file-baseline.test.mjs      # 7 臂
+node --test scripts/gate-review-independence.test.mjs     # 6 臂
+node --test scripts/gate-session-budget.test.mjs          # 7 臂
+node --test scripts/gate-self-review.test.mjs             # 13 臂
+pnpm test:gates   # 1760 tests / 1694 pass / 27 fail —— NOT in pin = 0
+```
+
+★★★ 三条值得留下的纪律：
+
+1. **「判不了」**不许并进**「通过」** —— 这条在六件里出现了**五次**
+   （`unmeasured` / `not-landed` / `unreadable` / `unknown` / `could-not-measure`）。
+   每一次的补救动作都不同，而合流会让读的人去做另一件事。
+
+2. **一条恒真的判据比没有判据更坏。** ③ 里最容易犯的是拿**累计** token 比阈值
+   （实测队长 4.03 亿 vs 窗口 100 万）—— 那会让 `full` 在任何真实队伍上永远为真。
+   ★ 臂 4 专门钉这一格，且用定向突变证明它真的会红。
+
+3. **第二份实现是本仓最贵的缺陷**。⑤ 里我**自己重写了一遍** Zstd 帧遍历器，
+   而它错了两次（magic 字节序、RLE 块长度）。⇒ 正确处置是**移进 `src/` 让两处共用**，
+   而不是"我这次写对了"。
+
+★ **没做的**（如实记账）：本插件**仍然没有**"给成员换一个干净会话"的能力 ——
+用户裁定本轮只做「读数 + 拒绝重派」。⇒ 撞上 `full` 的队伍今天只能**换成员**。
+而拒绝语已明写「Reassigning will NOT help」，不会让人误以为重派能解决。
