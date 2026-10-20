@@ -81,6 +81,11 @@ import {
   installMemberSelectionRuntime,
   installMemberDelegationGuard,
   memberActivity,
+  /** ★ 2026-10-20（t4）：会话预算 —— 读 + 判 + 两个可注入的常量。 */
+  memberSessionBudget,
+  judgeSessionBudget,
+  contextWindowOf,
+  sessionBudgetThresholdOf,
   resolveMemberLlmSelection,
   spawnMember,
   steerCaptainReport,
@@ -1944,7 +1949,52 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         const member = team.members.find(item => item.name === memberName && item.status !== 'removed')
         if (member === undefined || member.stopping === true || team.tasks.some(task => task.reassigning === true && task.assignee === memberName)) return false
         if (attemptId !== undefined && !team.tasks.some(task => task.attemptId === attemptId && task.assignee === memberName && (task.status === 'claimed' || task.status === 'in_progress'))) return false
-        if (member.id !== '') return deliverToMember(ctx, captain, member.id, text, signal, mode)
+        /**
+         * ── ★★★ 会话预算：**已经满了就不往里投**（2026-10-20，补 t4）─────────────────
+         *
+         * ── 它拦的是什么（MEASURED：插件推荐的动作必然失败）──────────────────────
+         *
+         * 下一行 `deliverToMember(…, member.id, …)` 把任务投进**这个成员已有的会话**，
+         * 而那个会话**永不重建**（`src/tools.ts:2023` 逐字：「已生成会话的成员
+         * **永远不会再跑** `spawnMember`」）。
+         * ⇒ ★ 一个已经烧穿上下文的成员被重派时，新任务进的是**同一个已死的会话**。
+         *   而本仓缺陷文档还推荐「reassign it or retry when ready」——
+         *   **插件推荐的动作必然失败**。
+         *
+         * ── ★ 三态各自不同形 ────────────────────────────────────────────────────
+         *
+         *   `ok`      ⇒ 照常投递
+         *   `full`    ⇒ **拒绝**，并指名是哪个成员、依据哪个读数
+         *   `unknown` ⇒ **照常投递，但留痕**（先软后硬：本仓那条纪律是"新机制先别误伤"）
+         *     ★★ 而它**必须留痕** —— 一个静默放行的 unknown 与 ok 同形，
+         *       那正是"重派必然撞死"能一直发生的原因。
+         *
+         * ★ 窗口大小从 `AGENT_TEAMS_CONTEXT_WINDOW` 读；**没配就不报比例**（不猜一个数）。
+         */
+        if (member.id !== '') {
+          const budget = judgeSessionBudget(
+            await memberSessionBudget(member.id, workspaceOf(captain)),
+            contextWindowOf(),
+            sessionBudgetThresholdOf(),
+          )
+          if (budget.verdict === 'full') {
+            /**
+             * ★ 拒绝语必须**可行动**：说清是谁、依据什么、以及**该做什么**。
+             *   ★★ 而"该做什么"这一格是本条最要紧的 —— 因为本插件今天
+             *     **没有**"给成员换一个干净会话"的能力（那是另一条改动）。
+             *     ⇒ 所以只能如实说"重派也没用"，而不是让人去撞一次墙。
+             */
+            throw new Error(
+              `member "${member.name}" cannot take more work: ${budget.why}. `
+              + '★ Reassigning will NOT help — a member\'s session is never recreated, so the new task would land in this same session. '
+              + 'Spawn a replacement member, or hand this task to one whose session still has room.',
+            )
+          }
+          if (budget.verdict === 'unknown') {
+            ctx.logger.warn(`agent-teams: session budget for "${member.name}" could not be judged (recorded, not rejected): ${budget.why}`)
+          }
+          return deliverToMember(ctx, captain, member.id, text, signal, mode)
+        }
         const selection = await resolveMemberLlmSelection(ctx, captain, {
           provider: member.provider, model: member.model, reasoningEffort: member.reasoningEffort, fallback: member.fallback,
         }, signal)

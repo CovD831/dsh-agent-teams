@@ -913,6 +913,19 @@ export declare const SESSION_BUDGET_UNREADABLE = "this member's session log coul
  * @param workspace - 用来推会话目录（slug 由它编码而来）。
  */
 export declare function memberSessionBudget(sessionId: string, workspace: string): Promise<SessionBudgetReadout>;
+/**
+ * ── ★ 阈值（多少比例算"满了"）—— 与窗口同一纪律：**可注入的常量，不是魔法数** ──────
+ *
+ * ★ 0.85 是一个**选择**，不是测量：留 15% 给"这一轮任务的输入 + 输出"。
+ *   ★★ 它与 `runtime.stall` 的 N 同一个形状 —— 一个写死的阈值在别的部署上
+ *     要么永远不响、要么吵个不停，而**两种都读不出来**。
+ *   ⇒ 环境变量可覆盖（`AGENT_TEAMS_SESSION_BUDGET_THRESHOLD`）。
+ */
+export declare const GUESSED_SESSION_BUDGET_THRESHOLD = 0.85;
+/** 从环境读阈值（缺省 ⇒ `GUESSED_SESSION_BUDGET_THRESHOLD`）。 */
+export declare function sessionBudgetThresholdOf(env?: {
+    readonly AGENT_TEAMS_SESSION_BUDGET_THRESHOLD?: string;
+}): number;
 export declare function contextWindowOf(env?: {
     readonly AGENT_TEAMS_CONTEXT_WINDOW?: string;
 }): number | undefined;

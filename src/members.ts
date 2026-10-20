@@ -2145,6 +2145,26 @@ export async function memberSessionBudget(
   return { status: 'read', totalTokens, peakInputTokens, steps }
 }
 
+/**
+ * ── ★ 阈值（多少比例算"满了"）—— 与窗口同一纪律：**可注入的常量，不是魔法数** ──────
+ *
+ * ★ 0.85 是一个**选择**，不是测量：留 15% 给"这一轮任务的输入 + 输出"。
+ *   ★★ 它与 `runtime.stall` 的 N 同一个形状 —— 一个写死的阈值在别的部署上
+ *     要么永远不响、要么吵个不停，而**两种都读不出来**。
+ *   ⇒ 环境变量可覆盖（`AGENT_TEAMS_SESSION_BUDGET_THRESHOLD`）。
+ */
+export const GUESSED_SESSION_BUDGET_THRESHOLD = 0.85
+
+/** 从环境读阈值（缺省 ⇒ `GUESSED_SESSION_BUDGET_THRESHOLD`）。 */
+export function sessionBudgetThresholdOf(
+  env: { readonly AGENT_TEAMS_SESSION_BUDGET_THRESHOLD?: string } = process.env as never,
+): number {
+  const raw = (env as Record<string, string | undefined>)['AGENT_TEAMS_SESSION_BUDGET_THRESHOLD']
+  if (raw === undefined || raw.trim() === '') return GUESSED_SESSION_BUDGET_THRESHOLD
+  const value = Number.parseFloat(raw.trim())
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : GUESSED_SESSION_BUDGET_THRESHOLD
+}
+
 export function contextWindowOf(env: { readonly AGENT_TEAMS_CONTEXT_WINDOW?: string } = process.env as never): number | undefined {
   const raw = (env as Record<string, string | undefined>)['AGENT_TEAMS_CONTEXT_WINDOW']
   if (raw === undefined || raw.trim() === '') return undefined
