@@ -43,6 +43,23 @@ import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
 /** ★ t87：采集层（采集形状的唯一实现；本文件是它的**调用方**）。 */
 import { observe } from '../../evolution/collect.ts'
+/**
+ * ── ★★★ t2：索引派生与去重键 ──────────────────────────────────────────────────
+ *
+ * ★★ 为什么是**静态** import 而不是 `loadCollectionIndexFor` 里的 `await import(...)`：
+ *
+ * MEASURED（t15 独立复核抓出，`scripts/gate-readout-uniform.test.mjs` 当场红）：
+ * 那两处**本地**动态 import 让 rolldown 把 client bundle 从 **1 chunk 拆成 3 个**
+ * （`Invalid value for option "output.file" - When building multiple chunks, the
+ * "output.dir" option must be used, not "output.file"`）⇒ 一个夹具的 write 路径失效。
+ *
+ * ★ 而它**不是**"动态 import 不好"—— `collect.ts` 与 `gates/index.ts` 本来就是
+ * 本文件的静态依赖（见上面那两条），这两条与它们同族；把它们写成动态的
+ * 唯一效果是**让打包器多拆一刀**，而拆出来的 chunk 没有任何人按名字加载。
+ * ⇒ 判据是"这个依赖是不是本来就在同一份产物里"：在 ⇒ 静态。
+ */
+import { deriveCollectionIndex } from '../../evolution/read.ts'
+import { dedupeKeyOf } from '../../gates/collection/shared.ts'
 /** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
 import type { GateEvaluation } from '../../gates/registry.ts'
 import type { GatePoint } from '../../gates/index.ts'
@@ -1406,8 +1423,6 @@ export async function loadCollectionIndexFor(stateRoot: string): Promise<{
   readonly lastBySource: ReadonlyMap<string, number>
   readonly counts: ReadonlyMap<string, number>
 } | undefined> {
-  const { deriveCollectionIndex } = await import('../../evolution/read.ts')
-  const { dedupeKeyOf } = await import('../../gates/collection/shared.ts')
   const derived = await deriveCollectionIndex(
     stateRoot,
     async (path, encoding) => {
