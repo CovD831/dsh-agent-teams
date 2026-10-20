@@ -99,23 +99,44 @@ console.log('files',files.length,'entries',n)
 console.log([...keys.entries()].sort((a,b)=>b[1]-a[1]))"
 ```
 
-实测（本机，2026-10-20）：
+实测（本机，2026-10-20）。★★ **这一格是唯一会随时间动的读数** ——
+因为它数的是**盘上正在被别的任务写的东西**：
 
-| 口径 | 落盘条目 | 键分布 |
+| 口径 | 21:29 那次 | 21:37 那次（+8 分钟，本队其他任务在落盘） |
 |---|---|---|
-| 全部 `team.json`（跳过 worktrees/） | **192** | verifyProbe 73 · atomicityReadout 63 · reruns 39 · reviewedReadout 13 · r5 3 |
-| 同上、**排除 `.agent-teams/archive/`** | **118** | verifyProbe **44** · atomicityReadout **35** · reruns 33 · r5 3 · reviewedReadout 3 |
-| 只数 S1 单段 `task.gateEvaluation` | 46 | reruns 42 · r5 3（另 1 条空 outputs） |
+| 全部 `team.json`（跳过 worktrees/） | 192 条 · verifyProbe 73 / atomicityReadout 63 / reruns 39 / reviewedReadout 13 / r5 3 | **196** 条 · verifyProbe 75 / atomicityReadout 65 / reruns 40 / reviewedReadout 13 / r5 3 |
+| 同上、**排除 `.agent-teams/archive/`** | 118 条 · verifyProbe **44** / atomicityReadout **35** / reruns 33 / r5 3 / reviewedReadout 3 | **122** 条 · verifyProbe **46** / atomicityReadout **37** / reruns 33 / r5 3 / reviewedReadout 3 |
+| 只数 S1 单段 `task.gateEvaluation` | 46 条 · reruns 42 / r5 3 | **46** 条 · 同左（这一格没动） |
 
 ★ **审计代理那句「117 条 / 44 / 35」是可以复现的**：排除 archive 后是 **118**（差 1
 是那个空 `outputs: {}`，`Object.keys` 计数为 0 ⇒ 若按"有键的条目"数就是 117）。
 ⇒ 那条读数**成立**，本文件把它固定在一条命令上，口径写明"排除 archive"。
 
+★★ **而这里有一条本文件必须自己说出来的纪律**：上面那两个数字（192 → 196，
+118 → 122）在 8 分钟内变了，**而它们都不是"错"**。⇒
+**本文件后面所有结论都不依赖这两个数**：§0 的 45 对 / 12 / 23 / 9 是**代码结构**
+的读数（`ok:true` 字面量 + `outputs[...]` 读取点），**不数盘上条目**。
+盘上那几行只是用来核对"审计代理那句话成不成立"，它成立，仅此而已。
+★ 一个会随时间漂的读数，只要**结论不钉在它上面**，就不是问题；
+  把结论钉在它上面才是 —— 那正是本仓记的"用一个会动的数当证据"。★
+
 ### 读数 ⑤ 判据层求值点 —— 顺带查出的一个**前提问题**
 
+★ 这一条的命令**必须剥掉注释**：仓里有 2 处 `evaluate('admission'` 在**注释**里，
+其中一处（`src/snapshot.ts:784`）是 t1 提交新增的、**引用这句话本身的注释** ——
+裸 grep 会把它数成"有调用点"，于是"零求值点"这个结论会**自己把自己证伪成假的**。
+（本仓记过同族的一次：`gate-producer-consumer.test.mjs` 文件头「臂 3 第一版没剥注释」。）
+
 ```bash
+# 代码级（非注释）的 admission 求值点数量：
+n=$(grep -rn "evaluate('admission'" src/ --include=*.ts | grep -vc "^\S*:[0-9]*: *\(\*\|//\)")
+echo "code-level admission evaluate call sites = $n"
+# → code-level admission evaluate call sites = 0        [exit 0]
+
+# 对照：全部文本命中 2 处，两处都在注释里
 grep -rn "evaluate('admission'" src/ --include=*.ts
-# → 零命中 [exit 1]
+# → src/snapshot.ts:784                （注释）
+# → src/client/activity-model.ts:1490  （注释）          [exit 0]
 ```
 
 `admission` 那 3 条判据（`absorb` / `checkpoint` / `convene`）在生产路径上
@@ -382,7 +403,7 @@ console.log('ran 条目:', JSON.stringify(r.ran.find(e=>e.id==='runtime.liveness
 | 键 | 为什么是 (b)：它有一个人读的出口，而那个出口有读者 |
 |---|---|
 | `contract.task-atomicity` 的 `atomicityReadout`（4 格） | `task-atomicity.ts:877-903` 的注释逐字：「"我看着 atomic"这句话没有信息量；"判别面 1 条、写域 1 组、并列动词 0 个"才有」。它是**语料**（`discriminatingSurfaces` / `scopeGroups` **明确不参与裁决**，`:849` 逐字「它们仍然**照常报出来**（它是读数），但**不参与裁决**」）。落盘 63 条/35 条是**攒语料**，不是欠账 |
-| `runtime.liveness` 的 `message` / `first_probe` / `alive` / `stuck` / `interval_complete` / `wait_ms` 等 | 它们**进 `blockers` 的文字**（`liveness.ts:593-604` 的告警整句），而 `blockers` 有读者（`update-task.ts:1597` 拼进拒绝措辞、`gate-view` 进 `abnormal[]`）。★ 唯一**没有**读者的子集是 `stuck_count` / `waited_count`（已归 (a)-3 与 (c)） |
+| `runtime.liveness` 的 `message` / `first_probe` / `alive` / `stuck` / `interval_complete`（5 对） | 它们**进 `blockers` 的文字**（`liveness.ts:593-604` 的告警整句），而 `blockers` 有读者（`update-task.ts:1597` 拼进拒绝措辞、`gate-view` 进 `abnormal[]`）。★ 唯一**没有**读者那两个计数已分开归档：`stuck_count` → (a)-3、`waited_count` → (c) |
 | `delivery.convergence` 的 `converged_members` / `converged_note` | `:327-333` 的注释：「让交付记录里留着门禁亲眼看过的成员状态」。而交付记录的人读出口是 `status` 的 `delivery` 那一格（`status.ts:1273-1292`，含 `blockers` / `unmeasured` / `gates_evaluated`）。★ `converged_members` 严格说是"名单"而人读的是"结论"—— 但它与 `blockers` 的名单**同源**（`:307-325` 逐成员拼的），⇒ 不算第二份真相 |
 | `delivery.coverage` 的 `goal_items` / `covered_goal_items` / `in_progress_goal_items` | `covered` 与 `inProgress` 都从 `rows` 过滤而来，而 `rows` 是**调用方给的矩阵**（`coverage.ts:216` `ctx.coverage`）—— 调用方（`status.ts:1119` 的 `buildCoverageMatrix`）**本来就有这份矩阵**，而且还渲染了（`renderStatus` 的 `Coverage:` 段，`entities.ts:6332`）⇒ 判据这一格是**同一份数据的转抄**，不是新事实 |
 | `completion.mutation` 的 9 个键 | ★ 全部是 `report` 的**分解**：`mutationScore = report.mutationScore`、`killed = report.totals.killed`…（`mutation.ts:815-820`）。`report` 本身由 `src/mutation/coverage.ts` 产出、在**判据之外**也有读者（`coverage.ts:605/628`），而判据的裁决用它拼 `blockers`（`:805-813`，含 `survivor:` 逐条）。⇒ 这些键是"把裁决的依据一并交出"的**人读**读数，不是给机器用的输入 |
@@ -390,7 +411,7 @@ console.log('ran 条目:', JSON.stringify(r.ran.find(e=>e.id==='runtime.liveness
 | `completion.r5` 的 `r5` | 落盘 3 条（全仓）/ 1 条。`r5` 是"父版本上红、修复版本上绿"的**两轮观测**（`r5.ts:640-687`）。★ 它**有**一个真实的人读出口：`task.gateEvaluations.completion.outputs.r5` 已经落盘，而 UI 读的是裁决 —— 与 `reviewedReadout` 同一形状。**但它比 `reviewedReadout` 弱**：`r5.evidence`（新增臂的名单）是判据自己说"这次是强证据还是弱证据"（`:665-684`）—— 那是 (a) 的候选，只是落盘样本只有 1 条，**不值得现在动**。⇒ 归 (b)，**并记一笔：样本到 10 条时重判** |
 
 ★ **这一档的纪律（本文件最重要的一条）**：
-**不许为了"消灭零读者"给 (b) 类接一个消费者。** 那会造出 22 个假接线，而假接线比
+**不许为了"消灭零读者"给 (b) 类接一个消费者。** 那会造出 23 个假接线，而假接线比
 零读者**更坏** —— 它让人以为有人在看。本仓对这件事有逐字的先例
 （`docs/ORPHAN-CENSUS.md` §5 第 6 条：「它不是"忘了接线"，而是**调用方写了一份自己的
 实现，而两份从没被比对过**」）。
@@ -431,12 +452,23 @@ console.log('ran 条目:', JSON.stringify(r.ran.find(e=>e.id==='runtime.liveness
 
 ★ **本次一律不做。** 本任务是只读施工单（见 §6 的 `src/` 零改动证明）。
 
+### 4.1 动作与缺陷的对应（★ 6 个缺陷 → 6 个动作，一一对上，不留缝）
+
+| 缺陷 | 由哪几行动作收敛 | 说明 |
+|---|---|---|
+| (a)-1 `shape_violations` 两份真相 | 序 1 + 序 2 | 序 1 收敛**算**的那一处，序 2 收敛**给人看**的那一处。★ 两者缺一：只做 1 ⇒ 机器读的是判据的、人读的还是没渲染；只做 2 ⇒ 渲染的是**重算**的那一份 |
+| (a)-2 `stalled_count` 恒不可见 | 序 3 | 一条动作同时修 `stalled_count` 与 `shape_violation_count`：两者都从 `outputs` 读、都进 `outcome` |
+| (a)-3 liveness `blocked` 支证据被丢 | 序 6 | ★ **只有这一个缺陷要动注册表** ⇒ 它是"必须单独立任务"的那一条 |
+| (a)-4 `verifyProbe` 被丢 | 序 4 | |
+| (a)-5 `verifiedChangedPaths` 被丢 | 序 5 | |
+| (a)-6 `reviewedReadout` / `absorbReport` / `conveneReport` | — **无动作** | ★ **刻意留空**：前两个的根因是「零求值点」（§1 读数⑤），归 T1；`reviewedReadout` 要等 UI 侧先声明 `outputs` 格（`activity-model.ts:1218`），那是另一个写域。★ 留空而不是"凑一个动作"，是因为凑出来的动作会变成下一个"接上了但没人读" |
+
 ---
 
 ## 5. 三条**不该做**的事（防止下一轮把这份清单读成"44 个洞"）
 
 ```
-✗ 不许给 (b) 类接线 —— 22 个假消费者比 22 个零读者更坏。
+✗ 不许给 (b) 类接线 —— 23 个假消费者比 23 个零读者更坏。
   判据：(b) 的那 23 个对各自都有一个人读的出口（§3.2 逐条给了），
         而接一个机器消费者会让"有人在看"变成一句假话。
 
@@ -455,11 +487,71 @@ console.log('ran 条目:', JSON.stringify(r.ran.find(e=>e.id==='runtime.liveness
 ## 6. 只读证明（本任务没有改 `src/`）
 
 ```bash
-git status --porcelain src/ lib/ scripts/
-# → （空）         [exit 0]
-
+# ① 我在本任务里改过的文件 —— 只有本文件（第一个是它自己）
 git status --porcelain docs/OUTPUTS-CONSUMER-AUDIT.md
-# → ?? docs/OUTPUTS-CONSUMER-AUDIT.md      （本文件 = 唯一新增）
+# →  M docs/OUTPUTS-CONSUMER-AUDIT.md          [exit 0]
+
+# ② 本文件【相对 HEAD】的差异 —— 全部是我下面的修正（§6 与 §4.1 是后来补的）
+git diff --stat docs/OUTPUTS-CONSUMER-AUDIT.md
+# → 1 file changed, 104 insertions(+), 12 deletions(-)   [exit 0]
+#   ★ 这个数会随我继续编辑而变，所以它**不**是证据；证据是 ③ 的【空输出】
+
+# ③ 我没有碰 src/ lib/ scripts/ 的【源码】—— 但 lib/ 里有一个文件是脏的，见下
+git status --porcelain src/ scripts/
+# → （空）                                     [exit 0]
+
+git status --porcelain lib/
+# →  M lib/git-artifact-stamp.json            [exit 0]
+```
+
+### ★★ 关于 `lib/git-artifact-stamp.json` 那一条（不是我改的，但必须记）
+
+```bash
+git diff lib/git-artifact-stamp.json
+# → -  "commit": "1eaaee1daf7a17bf695a7ac141276f7726ee9617"
+# → +  "commit": "36dd06198800d60524a5df1fa065af7caf66885f"
+# 而 36dd061 就是上面那条 commits 的 HEAD（21:15:03，t1 的收口提交）
+# mtime: Oct 20 21:38:29 —— 比 36dd061 晚 23 分钟 ⇒ 是某次 `pnpm build` 的产物
+```
+
+★ 这个文件是**构建产物**（`scripts/build-atomic.test.mjs:419` 的 `REQUIRED` 列表里有它；
+`gate-shared-artifact-writes.test.mjs` 逐字记着它是"共享产物"）。
+它记的是"lib/ 这一份产物是照着哪个 commit 构建的"。★ **我在本任务里没有跑过任何
+构建命令**（本任务全程只有 `node`、`grep`、`git status`、`git log`、`git diff`）⇒
+它上面那个 mtime 与我无关，那是**本队别的任务**在 21:38 跑构建时刷新的。
+⇒ 记在这里，因为下一轮复审跑 `git status` 会看到 `M lib/`，而它需要一个解释，
+且那个解释**不能**是"我改了 lib/"。
+
+```bash
+# ④ 本任务我真正动过的，只有本文件：
+git status --porcelain docs/OUTPUTS-CONSUMER-AUDIT.md
+# →  M docs/OUTPUTS-CONSUMER-AUDIT.md          [exit 0]
+```
+
+### ★★★ 一条必须如实记下来的读数：本文件**已经不是未跟踪的新文件**了
+
+```bash
+git log --oneline -1 -- docs/OUTPUTS-CONSUMER-AUDIT.md
+# → 36dd061 docs(admission): 补齐 4 处同源假话（t1 的 inScope 之外）—— UI 侧也在说「空段 / 未注册」
+```
+
+★ **`36dd061`（2026-10-20 21:15:03）把本文件一起提交了** —— 而那个提交是 **t1 的收口提交**
+（同时改了 `src/client/activity-model.ts` / `src/client/locales.ts` / `src/snapshot.ts`
+与它们 `lib/` 的产物）。⇒ 三件事必须说清楚，否则这份施工单的 §6 会读成一句假话：
+
+```
+① t1 的提交【不是我做的】—— 我在本任务里从未执行过 `git add` / `git commit`。
+   我在本次会话里对 src/ 的写入次数 = 0（③ 的空输出是证据）。
+   ★ 而"我没做"不是"它没发生"：那份提交里**确实**有本文件，而它把我的中间稿
+     （§3.2 里两个还没改的计数）固定进了历史。
+
+② ⇒ 所以本文件从"新增文件"变成了"相对 HEAD 改了 2 行"。
+   这 2 行就是 ② 里那两处计数措辞（23 / 5 对）。**没有第三个改动。**
+
+③ ★ 这条本身就是本仓记的那个形态的一个实例：
+   「一个文件的**当前内容**与它**被谁、在哪个提交里固定下来**是两件事」——
+   而只跑 `git status` 看到 `M` 而不是 `??` 的人，会以为"我改了一个已存在的文件"。
+   ⇒ 记在这里，因为下一轮复审会看见 `M`，而它需要一个解释。
 ```
 
 ★ 探针脚本 `probe-payload-keys.mjs` / `probe-payload-readers.mjs` 是**生成本文件读数用**的，

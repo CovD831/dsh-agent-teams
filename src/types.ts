@@ -416,17 +416,32 @@ export const GATE_INSERTION_POINTS: readonly GateInsertionPoint[] = [
  * | `contract` · `dispatch` · `completion` | ★ **任务级** | ✅ **会** |
  * | `delivery` | ⚠️ 团队级（`delivery.ts`：整个团队的交付，不是某条任务） | ❌ **永不** |
  * | `runtime` | ⚠️ 事件级（`evaluateRuntimeGates`：跨步骤的过程约束） | ❌ **永不** |
- * | `admission` | ★ **空段**：三条判据存在但**未注册**（`gates/admission/*.ts`） | ❌（真的 0 条） |
+ * | `admission` | ★ **已注册、零求值点**：三条判据进了 `ALL_GATES`，而全仓没有 `evaluate('admission', …)` 调用 ⇒ 一次都不会跑 | ❌ **永不**（不是任务级，且从来没被求值过） |
  *
  * ⇒ ★★ **不许为了"凑齐六段"而给 delivery/runtime 编一个 per-task 裁决** ——
  *   那会造出一个**错误的事实**。UI 必须把它们显示成"团队级/事件级，不在任务上"。
  *
- * ★★ 而"没有裁决"的**四种成因必须不同形**（这是 t81 的最终目的）：
- *   · 段**真的没判据**（`admission`）      ⇒ 显示 `0 条`
+ * ── ★★★ 2026-10-20 更正：`admission` 那一格此前写的是「**空段**」＋「三条判据**没有注册**」
+ *    —— **那句话是反的**，而它的坏法是"让下一个人不再去查这一格"。两个读数各自可复跑：
+ *
+ *      node --input-type=module -e "import {registry} from './lib/gates/index.js';
+ *        console.log(registry.count('admission'))"        ⇒ 3（**已注册**）
+ *      grep -rn "evaluate('admission'" src/ --include=*.ts ⇒ **空**（生产**零求值点**）
+ *
+ *    ★ 成因：三条判据的输入面（`producedDocuments` / `documentsRead` /
+ *      `observedDocumentChanged` / `currentRevisions`）在生产代码里**一个都没有产出**
+ *      —— 它们是为「自动成团」那个**还没实现**的入口设计的（`convene.ts` 文件头）。
+ *      复跑命令与完整更正见 `src/gates/index.ts` 里那三行的注释、
+ *      `docs/REQUIREMENTS.md` 第 18 条。
+ *
+ * ★★ 而"没有裁决"的**成因必须不同形**（这是 t81 的最终目的）：
+ *   · 段**有判据、而生产没求值点**（`admission`）⇒ 显示 `0 条` **并说明"没接线"**
  *   · 段**不是任务级事实**（`delivery`/`runtime`）⇒ 显示 `团队级`
  *   · 任务**还没走到**该段                ⇒ 显示 `未开始`
  *   · 走了、但**这一代没记**（retry 清过）  ⇒ 显示 `未落盘`
- *   ★ 四者混成一个 `○` 就是本仓记账最久的形态。
+ *   ★ 四者混成一个 `○` 就是本仓记账最久的形态。★ 而第一格尤其不许退化成
+ *     "没判据" —— `admission` 有 3 条判据，缺的是求值点与输入面，补救动作完全不同
+ *     （前者是接线，后者是删判据）。
  *
  * ★ 与 `gateEvaluation` 的关系：**并存**，不是替代。
  *   · `gateEvaluation` —— S1 的形状，**既有读者仍在依赖**（`snapshot.ts`、`status.ts`），
@@ -750,7 +765,11 @@ export interface TeamTask {
    *
    * ★ `gateEvaluation` **原样保留**（S1 的既有读者依赖它）；本字段是**并存**的按段版本。
    * ★ 只有任务级的三个段（`contract` / `dispatch` / `completion`）会出现；
-   *   `delivery` / `runtime` **永不出现**（团队级/事件级），`admission` 是空段。
+   *   `delivery` / `runtime` **永不出现**（团队级/事件级）。
+   *   ★ `admission` 也永不出现，而**成因与它们不同**：它**有 3 条判据（已注册）**，
+   *   只是全仓没有 `evaluate('admission', …)` 调用点 ⇒ **生产零求值点**
+   *   （复跑：`grep -rn "evaluate('admission'" src/ --include=*.ts` ⇒ 空；
+   *    `registry.count('admission')` ⇒ 3）。★ 它**不是**"空段/没判据"。
    * ★ 三种"缺席"**不同形**：键不在（没走到 / 不是任务级）vs 值在但 `ran: []`（走了、没判据跑）。
    */
   gateEvaluations?: GateEvaluationByPoint

@@ -933,6 +933,65 @@ export declare function defaultQualityDeliveryGraph(input: {
  *     而自审说的是后者。
  * · **审查者** = 本次更新的 `identity.name`（正在提交 verdict 的那个身份）。
  *
+ * ── ★★★ `requirements` 也在范围内（它此前被那一行 `!== 'review'` 放走了）───────────
+ *
+ * BEFORE：本函数对**任何** kind !== 'review' 的任务返回
+ *   `{ ok: true, undecidable: 'task X is requirements, not a review' }`
+ * ⇒ 而 `canDeclareDelivery`（本文件 ~`:2489`）对 requirements 的完成规则与 review
+ *   **逐字相同**：
+ *     `if ((kind === 'review' || kind === 'requirements') && item.verdict !== 'pass')`
+ *   ⇒ 于是"同一身份批准自己的产物"这件事，在 review 上被拒、在 requirements 上被放行。
+ *   ★ 而质量生成器默认 `analyst: spec.analyst ?? spec.implementer`
+ *     （`src/tools/create.ts:438`）—— **默认就由实现者写需求**，
+ *     所以这条缝不是"理论上的可能"，它是**默认路径**。
+ *
+ * ── ★★ requirements 的"作者"为什么要从【被治理的实现】读，而不是它自己的 `executions` ────
+ *
+ * 三个候选来源，只有第三个站得住：
+ *
+ *   ① requirements 自己的 `executions`（最近一条 completed 的 `by`）
+ *      ⇒ ★ **读不到**：`verdict=pass` 落盘的那一刻，这条任务**还没有** completed 的
+ *        execution（第一条 completed 恰恰是这一次收口本身）。拿它当证据，
+ *        判据在自己该说话的那一刻永远只会说"判不了"。
+ *
+ *   ② requirements 自己的 `assignee`
+ *      ⇒ ★ **不能用**，而理由不是"它不好读"，是它会让补救动作**指向自毁** ——
+ *        pass 一旦由另一个身份发出，生产流程会把这条 requirements 任务的 assignee
+ *        交给那个新身份（它要接着收敛下一轮）⇒ 于是判据下一刻读到的是
+ *        "作者 = 盖章的人"，**同一个 pass 会先绿后红**。一条判据若依赖一个
+ *        会因为它自己放行而改变的量，它就不是判据，而是回音。
+ *
+ *   ③ **被治理的实现**（本函数采用的）：`governed` = 队里 kind 是
+ *      `implementation` / `repair`、且**依赖闭包**里含这条 requirements 任务 id 的每一条
+ *      （复用 `dependencyClosureContains`，本文件 `:906`）。
+ *      ⇒ 它们最后一条 completed execution 的 `by`，就是"谁将要做 / 已经做了
+ *        这些需求所规定的工作"。而"同一身份既写需求又实现它"正是
+ *        `analyst === implementer` 那个形状要禁的东西 —— 判的是那个形状，不是纸面签名。
+ *      ★ 对**还没跑过**的实现任务（依赖闭包已建好、活还没干），
+ *        `assignee` 是盘上**唯一可读**的"谁会做它"的归属证据。
+ *        这是本函数唯一一处读 `assignee` —— 而它读的是**实现任务**的 `assignee`，
+ *        不是 requirements 的（见 ② 的不自毁理由）。
+ *
+ * ── requirements 的三态（与 review 同一套纪律，各自不同形）────────────────────
+ *
+ *   · 队里没有任何被治理的实现 ⇒ `{ ok: true, undecidable: … governs no implementation … }`
+ *     判不了，不许读成"通过"（"没有对象"≠"对象合格"）。
+ *   · 有被治理的实现、而每一条都读不出身份 ⇒ `{ ok: true, undecidable: … implementer could not be read }`
+ *   · 盖章者 ∈ 那些身份 ⇒ `{ ok: false, error: '<id> cannot pass: "<reviewer>" would also implement …' }`
+ *     ★ 措辞说 **"the same identity"**，不说 "the same name" —— 判的是身份，
+ *       而"名字相同"会把下一个读到这里的人送去查一张不存在的改名表。
+ *   · 否则 ⇒ `{ ok: true }`
+ *
+ * ── ★ 明确【没有】覆盖的：`verification` ───────────────────────────────────────────
+ *
+ * `verification` 也属于 `VERDICT_KINDS`（它的判决会记 `reviewedArtifacts`），但
+ * `canDeclareDelivery` 对它的完成**不要求** `verdict=pass`（只有 review / requirements 那一行）
+ * ⇒ 把"同一身份批准自己的 verdict"套到它身上，会拒绝一批**没有这条规则**的完成。
+ * 这是一个**单独的决定**，不是本函数的遗漏：它需要先回答"verification 的 pass
+ * 算不算一次自我批准"，而那个答案今天在仓库里**不存在**。这里如实说不知道，
+ * 而不是悄悄把它并进 requirements 那一支 —— 一条覆盖了自己说不清的 kind 的判据，
+ * 会把"我扩了范围"读成"我顺手修好了"。
+ *
  * ── ★★ 三态（与全仓纪律同源）───────────────────────────────────────────────────
  *
  * · 判得了  ⇒ `{ ok: true }` 或 `{ ok: false, error }`
@@ -953,8 +1012,8 @@ export declare function defaultQualityDeliveryGraph(input: {
  *   · 审查者 ≠ 实现者（13 条里的 9 条）
  *   · 实现者未知（上面 ③）
  *
- * @param team  本队当前状态（读被审任务的 `executions`）
- * @param task  正在被更新的那条任务（`kind=review` 且提交 `verdict`）
+ * @param team  本队当前状态（review 读被审任务的 `executions`；requirements 读治理到的实现任务）
+ * @param task  正在被更新的那条任务（`kind` 是 `review` 或 `requirements` 且提交 `verdict`）
  * @param reviewerName 提交这次判决的身份名（`identity.name`）
  */
 export declare function judgeSelfReview(input: {

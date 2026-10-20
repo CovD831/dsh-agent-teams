@@ -420,13 +420,29 @@ function buildQualityInlinePlan(
   spec: QualityPlanSpec,
 ): import('../profiles.ts').TeamProfileConfig {
   /**
-   * ★★ 三条**缺省回退**，每一条都对着生成器的一个真实缺口：
+   * ── ★★★ 三条**缺省回退**，每一条都对着生成器的一个真实缺口 ───────────────────────
    *
-   *   ① `analyst` 缺省 = `implementer` —— requirements 那条任务必须有 assignee，
-   *      否则 `normalizeTask` 逐字拒 `profile task "requirements-round-1" is missing an assignee`
-   *      （实测）。生成器把 `analyst` 留成可选，于是"不给 analyst"这条最自然的写法
-   *      会建不出队。⇒ 回退到 implementer：让提出要求的人与实现的人同一个人，
-   *      这是一支小队里最常见的形态，而且它是**可覆盖**的（给了 analyst 就用给的）。
+   *   ① `analyst` 默认 = `implementer` —— 这条回退**留着**，而它有两个各自独立的理由：
+   *
+   *      (a) `normalizeTask` 逐字拒一条没有 assignee 的 requirements 任务：
+   *          `profile task "requirements-round-1" is missing an assignee`（实测）。
+   *          生成器把 `analyst` 留成可选，于是"不给 analyst"这条最自然的写法会建不出队。
+   *
+   *      (b) `scripts/gate-plan-contract.test.mjs` 的臂 8 把这条回退**钉成绿的**
+   *          （正向：不给 analyst ⇒ requirements 落在 implementer；反向：给了 ⇒ 用给的）。
+   *          ⇒ 在这里改掉它，是去改一条别人已经裁定过的验收件。
+   *
+   *   ★★ 而 (a)(b) 只是"为什么不能改"，不是"这样安全"。**同一个身份**因此
+   *      既写需求、又将要实现它们 —— 而那正是 `judgeSelfReview`
+   *      （`quality-gates.ts`，requirements 那一支）现在**会拒绝**的形状。
+   *      所以这个默认值把每个质量队都摆在"必须换一个人来盖章"的位置上。
+   *
+   *   ⇒ 补救不是悄悄改回退（那会同时推翻 (a) 与 (b)），而是把这条要求
+   *     **写进生成出来的 requirements 任务的 `acceptance`**：
+   *       · 它在**建团的那一刻**就可见（队长读 plan 就看得到），
+   *       · 而不是等到人第一次 `update_task` 被拒才发现自己要换人。
+   *     ★ 一个只写在判据错误里的要求，它的读者是"已经撞上它的人"；
+   *       写进契约，读者才是"将要撞上它的人"。见下面的 `REQUIREMENTS_PASS_ACCEPTANCE`。
    *
    *   ② `tester` / ③ `integrator` 生成器已有回退（`tester ?? implementer`、
    *      `integrator ?? reviewer`）⇒ 这里**不重复**，重复会让两处回退漂移。
@@ -439,6 +455,26 @@ function buildQualityInlinePlan(
     ...spec.tester === undefined ? {} : { tester: spec.tester },
     ...spec.integrator === undefined ? {} : { integrator: spec.integrator },
   })
+  /**
+   * ── ★★★ 分析者与实现者是同一身份 ⇒ 在 requirements 的 acceptance 里明写"盖章要换人"──
+   *
+   * 判据（与 `judgeSelfReview` 的 requirements 支**逐字同源**）：需求写了、实现又要由
+   * 那个人做 ⇒ 那个人的 `verdict=pass` 会被拒。而这个文件里 `analyst ?? implementer`
+   * 正好把每支没点名 analyst 的队放进了这个形状。
+   *
+   * ★ 只追加**一行** acceptance，不动别的字段，也不改 `draft.acceptance` 的既有条目：
+   *   这是把一条**已经在判据里生效**的要求前移到建团那一刻，不是新增规则。
+   * ★ 三态：`spec.analyst` 显式给了且 ≠ implementer ⇒ 形状不成立 ⇒ **一个字都不加**
+   *   （多加一句会变成一条没人要的告诫）。
+   * ★ `acceptance` 是 `undefined` ⇒ **保持 undefined**（`?? []` 会把"生成器没给"
+   *   变成"给了一个空数组"，而两者在下游读取方眼里不同形）。
+   */
+  const analystDefaultsToImplementer = spec.analyst === undefined || spec.analyst === spec.implementer
+  /**
+   * ★ 这一行的措辞刻意点出 `analyst defaults to the implementer`：让它自己解释
+   *   "为什么这条要求出现在我的契约里"，而不是让读者去翻 `create.ts` 的注释。
+   */
+  const REQUIREMENTS_PASS_ACCEPTANCE = 'the pass on these requirements must be issued by an identity other than the one that will implement them (the analyst defaults to the implementer, so the author cannot approve its own requirements)'
   /**
    * ★ `id` 由**本工具**补，而不是让生成器产：生成器不知道调用方用什么 id 命名，
    *   而 `id` 是种子图内部的引用轴（`dependencies` / `reviewedTaskId` 都用它）。
@@ -454,6 +490,14 @@ function buildQualityInlinePlan(
      *   `inScope`/`verify`，凭空补上去会让它们多出生成器没打算有的契约格。
      */
     ...draft.kind === 'implementation' ? { inScope: [...spec.inScope], verify: [...spec.verify] } : {},
+    /**
+     * ★ 只有 requirements 那条、且只有"分析者 = 实现者"这个形状，才追加那一行。
+     *   ★ 追加在**末尾**（既有条目保持原顺序）—— 一组既有验收标准被重排，
+     *     会让逐条核对的读者以为内容也换了。
+     */
+    ...draft.kind === 'requirements' && analystDefaultsToImplementer && draft.acceptance !== undefined
+      ? { acceptance: [...draft.acceptance, REQUIREMENTS_PASS_ACCEPTANCE] }
+      : {},
   }))
   return { members: plan.members, tasks }
 }

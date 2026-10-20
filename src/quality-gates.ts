@@ -2937,6 +2937,65 @@ export function defaultQualityDeliveryGraph(input: {
  *     而自审说的是后者。
  * · **审查者** = 本次更新的 `identity.name`（正在提交 verdict 的那个身份）。
  *
+ * ── ★★★ `requirements` 也在范围内（它此前被那一行 `!== 'review'` 放走了）───────────
+ *
+ * BEFORE：本函数对**任何** kind !== 'review' 的任务返回
+ *   `{ ok: true, undecidable: 'task X is requirements, not a review' }`
+ * ⇒ 而 `canDeclareDelivery`（本文件 ~`:2489`）对 requirements 的完成规则与 review
+ *   **逐字相同**：
+ *     `if ((kind === 'review' || kind === 'requirements') && item.verdict !== 'pass')`
+ *   ⇒ 于是"同一身份批准自己的产物"这件事，在 review 上被拒、在 requirements 上被放行。
+ *   ★ 而质量生成器默认 `analyst: spec.analyst ?? spec.implementer`
+ *     （`src/tools/create.ts:438`）—— **默认就由实现者写需求**，
+ *     所以这条缝不是"理论上的可能"，它是**默认路径**。
+ *
+ * ── ★★ requirements 的"作者"为什么要从【被治理的实现】读，而不是它自己的 `executions` ────
+ *
+ * 三个候选来源，只有第三个站得住：
+ *
+ *   ① requirements 自己的 `executions`（最近一条 completed 的 `by`）
+ *      ⇒ ★ **读不到**：`verdict=pass` 落盘的那一刻，这条任务**还没有** completed 的
+ *        execution（第一条 completed 恰恰是这一次收口本身）。拿它当证据，
+ *        判据在自己该说话的那一刻永远只会说"判不了"。
+ *
+ *   ② requirements 自己的 `assignee`
+ *      ⇒ ★ **不能用**，而理由不是"它不好读"，是它会让补救动作**指向自毁** ——
+ *        pass 一旦由另一个身份发出，生产流程会把这条 requirements 任务的 assignee
+ *        交给那个新身份（它要接着收敛下一轮）⇒ 于是判据下一刻读到的是
+ *        "作者 = 盖章的人"，**同一个 pass 会先绿后红**。一条判据若依赖一个
+ *        会因为它自己放行而改变的量，它就不是判据，而是回音。
+ *
+ *   ③ **被治理的实现**（本函数采用的）：`governed` = 队里 kind 是
+ *      `implementation` / `repair`、且**依赖闭包**里含这条 requirements 任务 id 的每一条
+ *      （复用 `dependencyClosureContains`，本文件 `:906`）。
+ *      ⇒ 它们最后一条 completed execution 的 `by`，就是"谁将要做 / 已经做了
+ *        这些需求所规定的工作"。而"同一身份既写需求又实现它"正是
+ *        `analyst === implementer` 那个形状要禁的东西 —— 判的是那个形状，不是纸面签名。
+ *      ★ 对**还没跑过**的实现任务（依赖闭包已建好、活还没干），
+ *        `assignee` 是盘上**唯一可读**的"谁会做它"的归属证据。
+ *        这是本函数唯一一处读 `assignee` —— 而它读的是**实现任务**的 `assignee`，
+ *        不是 requirements 的（见 ② 的不自毁理由）。
+ *
+ * ── requirements 的三态（与 review 同一套纪律，各自不同形）────────────────────
+ *
+ *   · 队里没有任何被治理的实现 ⇒ `{ ok: true, undecidable: … governs no implementation … }`
+ *     判不了，不许读成"通过"（"没有对象"≠"对象合格"）。
+ *   · 有被治理的实现、而每一条都读不出身份 ⇒ `{ ok: true, undecidable: … implementer could not be read }`
+ *   · 盖章者 ∈ 那些身份 ⇒ `{ ok: false, error: '<id> cannot pass: "<reviewer>" would also implement …' }`
+ *     ★ 措辞说 **"the same identity"**，不说 "the same name" —— 判的是身份，
+ *       而"名字相同"会把下一个读到这里的人送去查一张不存在的改名表。
+ *   · 否则 ⇒ `{ ok: true }`
+ *
+ * ── ★ 明确【没有】覆盖的：`verification` ───────────────────────────────────────────
+ *
+ * `verification` 也属于 `VERDICT_KINDS`（它的判决会记 `reviewedArtifacts`），但
+ * `canDeclareDelivery` 对它的完成**不要求** `verdict=pass`（只有 review / requirements 那一行）
+ * ⇒ 把"同一身份批准自己的 verdict"套到它身上，会拒绝一批**没有这条规则**的完成。
+ * 这是一个**单独的决定**，不是本函数的遗漏：它需要先回答"verification 的 pass
+ * 算不算一次自我批准"，而那个答案今天在仓库里**不存在**。这里如实说不知道，
+ * 而不是悄悄把它并进 requirements 那一支 —— 一条覆盖了自己说不清的 kind 的判据，
+ * 会把"我扩了范围"读成"我顺手修好了"。
+ *
  * ── ★★ 三态（与全仓纪律同源）───────────────────────────────────────────────────
  *
  * · 判得了  ⇒ `{ ok: true }` 或 `{ ok: false, error }`
@@ -2957,8 +3016,8 @@ export function defaultQualityDeliveryGraph(input: {
  *   · 审查者 ≠ 实现者（13 条里的 9 条）
  *   · 实现者未知（上面 ③）
  *
- * @param team  本队当前状态（读被审任务的 `executions`）
- * @param task  正在被更新的那条任务（`kind=review` 且提交 `verdict`）
+ * @param team  本队当前状态（review 读被审任务的 `executions`；requirements 读治理到的实现任务）
+ * @param task  正在被更新的那条任务（`kind` 是 `review` 或 `requirements` 且提交 `verdict`）
  * @param reviewerName 提交这次判决的身份名（`identity.name`）
  */
 export function judgeSelfReview(input: {
@@ -2967,8 +3026,79 @@ export function judgeSelfReview(input: {
   reviewerName: string | undefined
 }): SelfReviewJudgement {
   const { team, task, reviewerName } = input
-  if (taskKindOf(task) !== 'review') {
-    return { ok: true, undecidable: `task ${task.id} is ${taskKindOf(task)}, not a review` }
+  const kind = taskKindOf(task)
+  /**
+   * ── ★★★ `requirements`：判的是"写需求的人会不会同时实现它"──────────────────────
+   *
+   * 这一支必须排在下面那条 `!== 'review'` 的早返回**之前** —— 而那条早返回此前
+   * 正是把 requirements 整类放走的那一行（见函数顶部文档的 BEFORE 一段）。
+   */
+  if (kind === 'requirements') {
+    if (reviewerName === undefined || reviewerName === '') {
+      /** ★ 与 review 支同一条纪律：身份读不出来 ⇒ 判不了，不是"通过"。 */
+      return { ok: true, undecidable: `the reviewer identity for ${task.id} could not be read` }
+    }
+    /**
+     * ★ `governed`：依赖闭包里含这条 requirements 的每一条实现/修复任务。
+     *   ★ 排除 `item.id === task.id` 是**防御性**的（requirements 不是写类 kind，
+     *     不该依赖自己），而一个自依赖的坏记录若出现在盘上，下面那句
+     *     `dependencyClosureContains` 会立刻返回真 —— 那样它会把自己算成自己的实现者。
+     */
+    const governed = team.tasks.filter((item) => {
+      const candidateKind = taskKindOf(item)
+      if (candidateKind !== 'implementation' && candidateKind !== 'repair') return false
+      if (item.id === task.id) return false
+      return dependencyClosureContains(team.tasks, item.dependencies ?? [], task.id)
+    })
+    if (governed.length === 0) {
+      return {
+        ok: true,
+        undecidable: `requirements ${task.id} governs no implementation in this team, `
+          + 'so the identity that would build it could not be read',
+      }
+    }
+    /**
+     * ★ 每条被治理任务的"作者"：最近一条 completed 的 `by`（= 真做完了它的人），
+     *   否则退回 `assignee`（= **还没跑**时盘上唯一可读的"谁会做它"）。
+     *   ★ 顺序不能反：一次重派之后 `assignee` 指向的是**下一个**人，
+     *     而"谁将会实现它"在已经有人做过的情形下应当是那个人 —— 与 review 支同源。
+     */
+    const identities: string[] = []
+    for (const item of governed) {
+      const completed = (item.executions ?? []).filter((entry) => entry.status === 'completed')
+      const by = completed.length === 0 ? undefined : completed[completed.length - 1]?.by
+      const identity = by === undefined || by === '' ? item.assignee : by
+      if (identity !== undefined && identity !== '') identities.push(identity)
+    }
+    const governedIds = governed.map((item) => item.id).join(', ')
+    if (identities.length === 0) {
+      return {
+        ok: true,
+        undecidable: `requirements ${task.id} governs ${governedIds}, but its implementer could not be read`,
+      }
+    }
+    if (identities.includes(reviewerName)) {
+      return {
+        ok: false,
+        error: `requirements ${task.id} cannot pass: "${reviewerName}" would also implement `
+          + `the work these requirements specify (${governedIds})`
+          + ' — the same identity may not approve its own requirements (captain protocol rule 7)',
+      }
+    }
+    return { ok: true }
+  }
+  if (kind !== 'review') {
+    /**
+     * ★ 这个早返回**留着**，而它的措辞必须**如实**：它说的不是"这不是一次审查"
+     *   （requirements 也会走到这里吗？不会 —— 上面那一支接住了它），
+     *   而是"这一条 kind 的产出，本插件没有可绑到作者身上的被判对象"。
+     *   ★ `verification` 落在这里，而那是**刻意的缺口**（见函数顶部的说明），
+     *     不是一个遗漏。
+     */
+    return {
+      ok: true,
+      undecidable: `task ${task.id} is ${kind}, which issues no judged output the plugin can bind to an author`,
+    }
   }
   if (reviewerName === undefined || reviewerName === '') {
     /**
