@@ -33,6 +33,12 @@ import {
   type StagedPlanMutation,
   type ToolsConfig,
 } from './tools.ts'
+/**
+ * ★★ t9：`TaskKind` 是**值域类型**，本文件只在 HTTP 边界做一次 `as TaskKind` 收窄 ——
+ *   ★ 而枚举校验**不在这里**：它在 `validateCreateTask`（经 `updateStagedPlan` 的消费点）。
+ *     在边界抄一份枚举就是同一条规则的第二个副本，而副本会分叉。
+ */
+import type { TaskKind } from './types.ts'
 import { installAgentTeamsGestureBoundary, registerAgentTeamsCommand } from './command.ts'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -584,15 +590,54 @@ function applyInner(ctx: Context, config: Config): void {
             }
           } else if (action === 'add_task') {
             if (typeof payload['subject'] !== 'string') throw new Error('subject is required')
+            /**
+             * ── ★★★ t9：HTTP 计划路由的 `kind` 通道（修前 `grep -c "payload\['kind'\]"` ⇒ 0）
+             *
+             * ★★ 修前这里只读 subject/dependencies/description/assignee 四格 ⇒
+             *   从 HTTP 进来的 `add_task` **结构性无法声明类型**，于是消费点只能猜 `'work'`。
+             *   ⇒ 两个生产者（本路由 + `edit_plan` 工具）**必须同时接线**，
+             *     否则"计划路线"从 HTTP 进来仍然静默。
+             *
+             * ── 反应必须一致：都拒（船长裁决逐字：「不许一个拒一个放」）───────────────
+             *
+             * ★ 拒绝**落在这里**（HTTP 边界，409 报文）而不是只靠 `updateStagedPlan` 里那一层：
+             *   两层都有，且**措辞同源**。HTTP 这一层的好处是调用方拿到的是**指名它缺什么**的
+             *   409，而不是一个从更深处冒出来的错误。
+             *
+             * ★ 而 `payload['kind']` 只做**存在性 + 类型**检查，枚举校验**不在这里抄一份**：
+             *   `validateCreateTask`（经 `updateStagedPlan` 的消费点）已经有一条
+             *   `unknown task kind "..."`。抄一份就是同一条枚举的两个副本，而副本会分叉。
+             */
+            if (typeof payload['kind'] !== 'string' || payload['kind'].trim() === '') {
+              throw new Error(
+                'kind is required for add_task: the plan route must not silently create a "work" task. '
+                + 'Send kind explicitly ("work" for ordinary work, or a quality kind such as "implementation").',
+              )
+            }
             mutation = {
               action,
               subject: payload['subject'],
               dependencies,
+              kind: payload['kind'] as TaskKind,
               ...typeof payload['description'] === 'string' || payload['description'] === null
                 ? { description: payload['description'] as string | null }
                 : {},
               ...typeof payload['assignee'] === 'string' || payload['assignee'] === null
                 ? { assignee: payload['assignee'] as string | null }
+                : {},
+              /**
+               * ★★ 契约四格同口径收：不给 ⇒ 键**不出现**（不是 `null`/`undefined`）——
+               *   与消费点 `?? undefined` 的读法一致，也与 `create_task` 同一形状。
+               */
+              ...typeof payload['objective'] === 'string' ? { objective: payload['objective'] } : {},
+              ...Array.isArray(payload['inScope'])
+                ? { inScope: (payload['inScope'] as unknown[]).filter((item): item is string => typeof item === 'string') }
+                : {},
+              ...Array.isArray(payload['acceptance'])
+                ? { acceptance: (payload['acceptance'] as unknown[]).filter((item): item is string => typeof item === 'string') }
+                : {},
+              ...Array.isArray(payload['verify'])
+                ? { verify: (payload['verify'] as unknown[]).filter((item): item is string => typeof item === 'string') }
                 : {},
             }
           } else if (action === 'remove_task') {

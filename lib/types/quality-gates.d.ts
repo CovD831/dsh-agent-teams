@@ -122,6 +122,32 @@ export interface CreateTaskInput {
      *   而"这条规则在它没被触碰时不该开火"是**规则自己的性质**。
      */
     inScopeTouched?: boolean;
+    /**
+     * ── ★★★ t9：这条路**要求**调用方显式声明 kind（三态，缺省落回今天的行为）────────────
+     *
+     * ★ 为什么需要这一格，而不是直接把 `?? 'work'` 删掉：
+     *   `create_task` 的 schema 里 `kind` **不在 `required`**，且它的 description 逐字写着
+     *   "Omission means work with no quality gates" —— 那是**被文档承认的**路径。
+     *   删掉缺省等于对它做一次产品语义变更，而本任务的范围是"计划路线不许静默造 work"。
+     *
+     * ★★ MEASURED（t9，推翻"`create_task` 自己补了 work 所以不受影响"这个前提）：
+     *   `src/tools/create-task.ts:536` 逐字是 `kind: input.kind as TaskKind | undefined`
+     *   —— 它把 `undefined` **原样**传进来。⇒ 本函数里任何"缺省即拒"的改动都**当场**
+     *   作用于 `create_task`。同理也作用于 `scripts/preflight-contracts.mjs`
+     *   这类不传 kind 的既有调用方（`scripts/` 不在 t9 写域）。
+     *
+     * ── 三态（与 `inScopeTouched` 同一种极性）───────────────────────────────────────
+     *
+     *     `undefined` ⇒ 没表态 ⇒ **落回今天的行为**（`?? 'work'`）
+     *     `true`      ⇒ 这条路要求显式声明 ⇒ `kind` 缺席即**拒绝**
+     *     `false`     ⇒ ★ 本格**不接受**（`false` 会读成"这条路明确不要求"，
+     *                    而那与 `undefined` 在效果上相同却携带一个假的声明）
+     *
+     * ★ 计划路线的消费点（`src/tools.ts` 的 add_task 分支）传 `true`。
+     *   于是"没人声明过类型"这件事**在它进来的那一刻**就被拒，
+     *   而不是被一个静默缺省读成 `'work'` 之后**再也分不出来**。
+     */
+    requireExplicitKind?: boolean;
 }
 export interface ValidateCreateTaskResult {
     ok: boolean;

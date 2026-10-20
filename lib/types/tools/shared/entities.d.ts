@@ -78,6 +78,44 @@ export type StagedPlanMutation = {
     description?: string | null;
     assignee?: string | null;
     dependencies: string[];
+    /**
+     * ── ★★★ t9：本条计划操作**显式声明**的任务类型 ────────────────────────────
+     *
+     * ★★ 而它**是可选的类型格，却对应必填的调用约束** —— 这两件事不矛盾：
+     *   `kind?: TaskKind` 之所以可选，是因为 `StagedPlanMutation` 是**五个动作共用的
+     *   一个联合类型**，而 `remove_task` / `update_member` 等分支根本不谈 kind。
+     *   把它标成必填会让那四个分支也得编一个值出来 —— 那正是"用类型骗过校验"。
+     *
+     * ★ 而"调用方必须给"这件事由**消费点**判（`src/tools/edit-plan.ts` 的 mapper
+     *   与 `src/tools.ts` 的 add_task 分支各判一次，措辞同源）。
+     *   ⇒ 类型可选 + 消费点必判，与 `CreateTaskInput.reviewed` 那一格是**同一种形状**。
+     *
+     * ── 为什么这一格必须存在（MEASURED，t9 修前）──────────────────────────────
+     *
+     *   修前本分支只有 subject/description/assignee/dependencies 四格，
+     *   而 `src/tools.ts` 把 `kind` **硬编码成 `'work'`**。
+     *   ⇒ 经 `edit_plan` / HTTP 计划路由加进来的任务**永远不是 quality kind**，
+     *     也就永远不需要质量契约 —— 而"这活根本没被人看过"这件事在数据上**不可见**。
+     *   ★ 更糟的是它**无法被表达**：`additionalProperties: false` 之下，
+     *     调用方连"我想声明它是什么"都传不进来（实测报文：
+     *     `"operations[0].kind" is not a declared property`）。
+     *   ⇒ 一个**不可表达**的意图与一个**没人表达**的意图，在数据上同形。
+     */
+    kind?: TaskKind;
+    /**
+     * ── ★★ 契约四格：与 `create_task` 同名的四格，走同一个 `validateCreateTask` ──
+     *
+     * ★ 为什么这四格必须一起进来：显式声明 quality kind 之后，
+     *   `validateCreateTask` 就会要求 objective+acceptance（质量类）
+     *   与 inScope+verify（写类）。若四格传不进来，quality kind 会被**100% 拒绝** ——
+     *   那不是"校验接上了"，那是"这条路被关死了"。
+     *   ★ 两条读数（`kind:'work'` 通过 / `kind:'implementation'` 带全契约通过）
+     *   必须**同时**成立，否则分不清是收紧了还是没接线。
+     */
+    objective?: string | null;
+    inScope?: string[] | null;
+    acceptance?: string[] | null;
+    verify?: string[] | null;
 } | {
     action: 'remove_task';
     taskId: string;

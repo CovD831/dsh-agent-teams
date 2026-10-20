@@ -1067,6 +1067,13 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "acceptance": {
+                "description": "Acceptance criteria. Required for quality kinds.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "action": {
                 "enum": [
                   "update_member",
@@ -1096,12 +1103,36 @@
                 "description": "Optional member-specific execution prompt.",
                 "type": "string"
               },
+              "inScope": {
+                "description": "Workspace-relative POSIX paths this task may change. Required for implementation/repair.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "description": "Required for add_task: the task kind must be declared explicitly — this route must not silently create a \"work\" task. A quality kind additionally requires objective + acceptance; implementation/repair also require inScope + verify.",
+                "enum": [
+                  "requirements",
+                  "implementation",
+                  "verification",
+                  "review",
+                  "repair",
+                  "integration",
+                  "work"
+                ],
+                "type": "string"
+              },
               "member_name": {
                 "description": "Member name for update_member or remove_member.",
                 "type": "string"
               },
               "model": {
                 "description": "Optional member model; defaults to the current staged route.",
+                "type": "string"
+              },
+              "objective": {
+                "description": "Required non-empty objective for quality kinds.",
                 "type": "string"
               },
               "provider": {
@@ -1123,6 +1154,13 @@
               "task_id": {
                 "description": "Task id for update_task or remove_task.",
                 "type": "string"
+              },
+              "verify": {
+                "description": "Verification commands. Required for implementation/repair.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
