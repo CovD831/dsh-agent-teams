@@ -783,7 +783,7 @@ export type GateState = 'passed' | 'skipped' | 'running' | 'registered' | 'pendi
  *
  * | 成因 | 什么情况 | 补救动作 |
  * |---|---|---|
- * | {@link SegmentAbsence.noGate} | ★ **该段真的没有判据**（`admission` 是空段） | 判据自己该接线（或删掉）—— **不是**任务的问题 |
+ * | {@link SegmentAbsence.noGate} | ★ **该段取不到任务级裁决**（`admission` 已注册 3 条判据，但**生产零求值点**；`registered > 0` 而任务级拿不到） | 判据该接线，或把它从任务级面上撤掉 —— **不是**任务的问题 |
  * | {@link SegmentAbsence.teamLevel} | ★ **不是任务级事实**（`delivery` 团队级 / `runtime` 事件级） | 去团队级/事件级的读数里看 —— **永远**不会出现在任务上 |
  * | {@link SegmentAbsence.notReached} | 任务**还没走到**那一段 | 等 —— 它会自己出现 |
  * | {@link SegmentAbsence.notRecorded} | 走了，但**这一代没记**（retry 清过） | ★ 想知道上一代说了什么 ⇒ 看**历史**（`executions[]`） |
