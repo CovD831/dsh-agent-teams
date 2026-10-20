@@ -1998,3 +1998,152 @@ export function shapeExecutionOf(
     .map((row) => row.name)
   return { status: 'measured', violations, rows }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 会话预算读数（2026-10-20，补 t4）：这个成员的会话**还能不能干活**
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 它补的是什么（MEASURED：插件推荐的动作必然失败）──────────────────────────
+ *
+ * 三段事实链（全部已核实）：
+ *
+ *   ① 成员一旦 spawn 过，会话**永不重建**。`src/tools.ts` 逐字：
+ *      「已生成会话的成员**永远不会再跑** `spawnMember`」
+ *   ② 下发路径是 `if (member.id !== '') return deliverToMember(...)`
+ *      ⇒ 直接投递到那个**旧会话**
+ *   ③ `src/tools/reassign.ts` 里**没有** `startMember`
+ *
+ * ⇒ ★ **一个已经烧穿上下文的成员被重派时，新任务进的是同一个已死的会话。**
+ *   而本仓缺陷文档（`docs/DEFECT-VERIFY-RERUN-WRONG-CWD.md`）还推荐
+ *   「reassign it or retry when ready」—— **插件推荐的动作必然失败**。
+ *
+ * 对照（真实发生）：`self-iteration-3` 三个成员**全部** `CONTEXT_WINDOW_EXCEEDED`
+ *   （101.9 / 102.5 / 103.1 万 token）。
+ *
+ * ── ★★ 一个已记账的坑：Node 的 zstd 只解第一帧 ─────────────────────────────────
+ *
+ * `session.v4.jsonl.zstd` 是**多帧追加**的，而 Node 的 `zstdDecompressSync`
+ * **静默只解第一帧**（不抛、不警告）。实测（本仓真实会话）：
+ *
+ *```
+ *   Node 内建   ⇒ 290 字节 / 1 行
+ *   zstd -dc    ⇒ 2,984,651 字节 / 1701 行      ← 差 1700 倍
+ *```
+ * ⇒ ★ 一个用它写的 token 计数器会得到**看起来像真的**的错数。
+ *   本模块**复用** `scripts/dispatch-shape-readout.mjs` 的 `splitZstdFrames`
+ *   （本仓唯一正确的实现，逐字节与 `zstd -dc` 对齐），而不是再写一遍 ——
+ *   ★ 我为了这件事**真的重复实现过**一次，而它错了两次（见那个 export 的注释）。
+ *
+ * ── 三态，且**读不到不许写成 0** ──────────────────────────────────────────────
+ *
+ *   `read`       —— 读到了；`totalTokens` 是**累计**消耗（含缓存重读）
+ *   `unmeasured` —— 会话读不出来（文件不在 / 帧遍历失败 / 没有可解析的记录）
+ *   `not-started` —— 这个成员还没有会话 id ⇒ **它不可能有消耗**
+ *
+ * ★★ 而 `unmeasured` 与"消耗是 0"**绝不同形**：前者要人去查为什么读不到，
+ *   后者是一个关于这个成员的结论。本仓记了十几次的那条合流。
+ */
+export type SessionBudgetReadout =
+  | {
+    readonly status: 'read'
+    /** **累计**消耗（`Σ totalTokens`，含 cacheRead）—— ★ 不是当前窗口占用量。 */
+    readonly totalTokens: number
+    /** 见过的**最大单次 inputTokens** —— 那才接近"当前窗口占用了多少"。 */
+    readonly peakInputTokens: number
+    /** assistant 记录数（token 读数的分母：缺一条就是下界）。 */
+    readonly steps: number
+  }
+  | { readonly status: 'unmeasured'; readonly reason: string }
+  | { readonly status: 'not-started' }
+
+/** 读不出会话时的成因（诊断面，不改变裁决）。 */
+export const SESSION_BUDGET_UNREADABLE = 'this member\'s session log could not be read, so how much context it has already spent cannot be counted'
+
+/**
+ * ── ★ 窗口大小从哪来：**读不到就说"只报用量、不报剩余"** ────────────────────────
+ *
+ * ★ 刻意**不**硬编码一个 1,000,000：那个数取决于模型与部署，而写死它会让
+ *   换模型之后这条判据**静默地**按错的窗口判（太宽松 = 不拦，太严 = 误拦）。
+ *   ★ 本仓先例：`src/evaluator/effect.ts` 的 `GUESSED_MIN_OBSERVATION_MS`
+ *     把它"是猜测"写进了名字里。这里更进一步：**拿不到就不报比例**。
+ *
+ * @returns 窗口上限；`undefined` ⇒ 调用方**只报用量**，不报"还剩多少"。
+ */
+export function contextWindowOf(env: { readonly AGENT_TEAMS_CONTEXT_WINDOW?: string } = process.env as never): number | undefined {
+  const raw = (env as Record<string, string | undefined>)['AGENT_TEAMS_CONTEXT_WINDOW']
+  if (raw === undefined || raw.trim() === '') return undefined
+  const value = Number.parseInt(raw.trim(), 10)
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * 会话预算的**判定**（纯函数）：这个成员还能不能接新活。
+ *
+ * ★ 纯函数：`totalTokens` / `window` 都由调用方给（与 `testFileBaselineOf` 同一条纪律）。
+ *
+ * ── 三态，且 `unknown` **不并进** `ok` ────────────────────────────────────────
+ *
+ *   `ok`      —— 读到了用量，且（若知道窗口）在阈值以内
+ *   `full`    —— 读到了用量，且**已知**超过阈值 ⇒ 调用方**拒绝**下发
+ *   `unknown` —— 读不到用量，或**不知道窗口** ⇒ ★ 不拒绝，但**留痕**
+ *
+ * ★★ 为什么 `unknown` 不拒绝：先软后硬 —— 本仓那条纪律是"新机制先别误伤"。
+ *   而它**必须留痕**：一个静默放行的 unknown 与 ok 同形，
+ *   那正是 t4 要防的东西（"重派必然撞死"之所以能一直发生，就是因为没有读数）。
+ */
+export type SessionBudgetVerdict = 'ok' | 'full' | 'unknown'
+
+export interface SessionBudgetJudgement {
+  readonly verdict: SessionBudgetVerdict
+  /** 人话成因（`full` / `unknown` 时在场）。 */
+  readonly why?: string
+  /** 用量占窗口的比例（**只有**两样都知道时才有 —— 缺席不是 0）。 */
+  readonly ratio?: number
+}
+
+/**
+ * 判一个成员的会话**还能不能接新活**。
+ *
+ * @param readout - 会话预算读数（三态）。
+ * @param window - 窗口上限；`undefined` ⇒ 不知道 ⇒ `unknown`（**不**猜一个数）。
+ * @param threshold - 比例阈值（0–1）。★ 它是**可注入的**，理由同
+ *   `runtime.stall` 的 N：一个写死的阈值在别的部署上要么永远不响、要么吵个不停，
+ *   而两种都读不出来。
+ */
+export function judgeSessionBudget(
+  readout: SessionBudgetReadout,
+  window: number | undefined,
+  threshold: number,
+): SessionBudgetJudgement {
+  if (readout.status === 'not-started') {
+    return { verdict: 'ok' }
+  }
+  if (readout.status === 'unmeasured') {
+    return {
+      verdict: 'unknown',
+      why: `the session budget could not be measured (${readout.reason}), so whether this member can take more work is not known`,
+    }
+  }
+  /**
+   * ★ 用 `peakInputTokens` 而不是 `totalTokens` 比阈值：
+   *   `totalTokens` 是**累计**消耗（含缓存重读），它早就超过窗口了（实测队长 4 亿），
+   *   而**窗口**限制的是**单次请求的 input**。
+   *   ★★ 拿累计量去比阈值会把每一个跑过几轮的成员都判成"满了" —— 那是一条**恒真**的判据。
+   */
+  if (window === undefined) {
+    return {
+      verdict: 'unknown',
+      why: `this member has spent ${readout.peakInputTokens} input tokens at its peak, but the context window size is not configured (set AGENT_TEAMS_CONTEXT_WINDOW), so whether it still fits cannot be decided`,
+    }
+  }
+  const ratio = readout.peakInputTokens / window
+  if (ratio >= threshold) {
+    return {
+      verdict: 'full',
+      why: `this member's session has already reached ${readout.peakInputTokens} input tokens at its peak, which is ${(ratio * 100).toFixed(1)}% of the ${window}-token window (threshold ${(threshold * 100).toFixed(0)}%) — a member's session is never recreated, so new work would be delivered into a session that is already this full`,
+      ratio,
+    }
+  }
+  return { verdict: 'ok', ratio }
+}

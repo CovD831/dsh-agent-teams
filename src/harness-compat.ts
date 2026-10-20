@@ -222,6 +222,122 @@ export function onAgentReady(ctx: Context, listener: (agent: Agent, vetoable: bo
 }
 
 /** Read child-owned history, excluding any descriptor inherited from a parent. */
+
+/**
+ * ── ★★★ Zstd 多帧遍历器（2026-10-21 从 `scripts/dispatch-shape-readout.mjs` **移进来**）──
+ *
+ * ── 为什么必须有一个：Node 的 `zstdDecompressSync` **静默只解第一帧** ────────────
+ *
+ * MEASURED（本仓真实会话，可复跑）：
+ * ```
+ *   node -e "zstdDecompressSync(readFileSync(p))"  ⇒ 290 字节 / 1 行
+ *   zstd -dc < p | wc -l                           ⇒ 1701 行
+ * ```
+ * 同一个文件，**差 1700 倍**，而且**不抛错、不警告**。
+ * ⇒ ★★ 一个用它写的 token 计数器会得到**看起来像真的**的错数 ——
+ *   本仓记账最贵的那种形态（"读到了，但读的不是你以为的那份"）。
+ *
+ * ── ★ 为什么**移进来**而不是各留一份 ────────────────────────────────────────────
+ *
+ * `src/` 从不 import `scripts/`（那是脚本目录，不进 `lib/` 产物）。
+ * 而 t4 的会话预算读数（`src/members.ts`）**必须**读会话 token。
+ * ⇒ 若两处各留一份，就是本仓记账过最贵的**第二份实现**。
+ *   ★ 而我为这件事**真的重复实现过一次**，并且**错了两次**：
+ *     ① 按大端比较 magic（实际要用 `readUInt32LE`）⇒ 一帧都进不去
+ *     ② RLE 块（type 1）的盘上长度写成 `blockType === 0 ? 1 : size`
+ *        ⇒ 而正确规则就在下面那一行（`blockType === 1 ? 1 : blockSize`）
+ *   ⇒ 移进来之后，`scripts/` 那份**从这里 import**，全仓只有一处。
+ *
+ * ── ★ 截断处理（原实现的语义，逐字保留）──────────────────────────────────────
+ *
+ * 会话文件可能正被写入（尾部半帧）。走到不完整的位置就**停下并记下偏移**，
+ * 把已完整的帧返回 —— 读数是**下界**，由调用方标出来，而不是整个读成
+ * `unmeasured`（那样会丢掉已经能读到的全部历史）。
+ *
+ * @param buffer - `session.v4.jsonl.zstd` 的**完整字节**。
+ * @returns 每一帧的字节切片 + 截断偏移（`null` = 完整读到最后）。
+ */
+/** Zstd 帧魔数 —— ★ **小端**读出才是这个值（`readUInt32LE`）。
+ *  ★★ 我第一版把它写成 `0x28B52FFD`（大端书写形式）⇒ 一帧都进不去。 */
+const ZSTD_MAGIC = 0xfd2fb528
+
+export function splitZstdFrames(buffer: Buffer): { frames: Buffer[]; truncatedAt: number | null } {
+  const frames = []
+  let offset = 0
+  let truncatedAt = null
+
+  while (offset < buffer.length) {
+    const start = offset
+    if (offset + 4 > buffer.length) {
+      truncatedAt = offset
+      break
+    }
+    const magic = buffer.readUInt32LE(offset)
+
+    // ── skippable frame（0x184D2A50..0x184D2A5F）：整段跳过，不含记录
+    if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) {
+      if (offset + 8 > buffer.length) {
+        truncatedAt = offset
+        break
+      }
+      const next = offset + 8 + buffer.readUInt32LE(offset + 4)
+      if (next > buffer.length) {
+        truncatedAt = offset
+        break
+      }
+      offset = next
+      continue
+    }
+
+    if (magic !== ZSTD_MAGIC) {
+      throw new Error(`未知魔数 0x${magic.toString(16)} @${offset}（多帧行走器不认这个字节）`)
+    }
+
+    let cursor = offset + 4
+    const descriptor = buffer[cursor] ?? 0
+    cursor += 1
+    const fcsFlag = descriptor >> 6
+    const singleSegment = (descriptor >> 5) & 1
+    const hasChecksum = (descriptor >> 2) & 1
+    const reservedBit = (descriptor >> 3) & 1
+    const dictFlag = descriptor & 3
+    if (reservedBit !== 0) throw new Error(`frame header reserved bit 非零 @${start}`)
+
+    if (!singleSegment) cursor += 1
+    cursor += [0, 1, 2, 4][dictFlag] ?? 0
+    cursor += (fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag]) ?? 0
+
+    let sawLast = false
+    while (!sawLast) {
+      if (cursor + 3 > buffer.length) {
+        truncatedAt = start
+        break
+      }
+      const header = (buffer[cursor] ?? 0) | ((buffer[cursor + 1] ?? 0) << 8) | ((buffer[cursor + 2] ?? 0) << 16)
+      cursor += 3
+      sawLast = (header & 1) === 1
+      const blockType = (header >> 1) & 3
+      const blockSize = header >>> 3
+      // ★ RLE 块（type 1）在盘上只占 1 个字节，不是 blockSize 个字节。
+      cursor += blockType === 1 ? 1 : blockSize
+    }
+    if (!sawLast) {
+      truncatedAt = start
+      break
+    }
+    if (hasChecksum) cursor += 4
+    if (cursor > buffer.length) {
+      truncatedAt = start
+      break
+    }
+
+    frames.push(buffer.subarray(start, cursor))
+    offset = cursor
+  }
+
+  return { frames, truncatedAt }
+}
+
 export function sessionOwnEvents(session: Session): readonly SessionEvent[] {
   const current = session as unknown as { ownEvents?: () => readonly SessionEvent[] }
   if (typeof current.ownEvents === 'function') return current.ownEvents.call(session)

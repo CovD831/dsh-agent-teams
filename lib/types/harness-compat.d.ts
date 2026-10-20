@@ -109,7 +109,10 @@ declare module '@deepseek-ai/dsh-llm' {
  * Keep the removed event's type confined to this audited compatibility seam.
  */
 export declare function onAgentReady(ctx: Context, listener: (agent: Agent, vetoable: boolean) => void): () => void;
-/** Read child-owned history, excluding any descriptor inherited from a parent. */
+export declare function splitZstdFrames(buffer: Buffer): {
+    frames: Buffer[];
+    truncatedAt: number | null;
+};
 export declare function sessionOwnEvents(session: Session): readonly SessionEvent[];
 /**
  * ── ★ 归属证据：这个成员【真的写过】哪些文件 ────────────────────────────────────
