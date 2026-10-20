@@ -326,6 +326,19 @@ export interface ResumeTeamResult {
     status: 'resumed' | 'already_running' | 'rejected';
     team?: TeamState;
     error?: string;
+    /**
+     * ── ★★★ 本次恢复**显式归零**了计划审查环（`planReviewRounds = 0` + 清 flag）─────
+     *
+     * ★ 调用方**必须**在这一个为真时把 `team.planReviewRounds` / `team.planReviewEscalated`
+     *   一起写回盘。只写 `halted` 会让归零**只存在于返回值里** ——
+     *   而那正是 2026-10-20 实测出来的缺陷：一个被文档承诺为"唯一出路"的动作，
+     *   在盘上什么都没改。
+     *
+     * ★ 为什么由本函数**说出来**而不是让调用方去比两边的 `rounds`：
+     *   "只有超轮才归零"这条规则住在这里；另一处比 round 就是第二份真相，
+     *   而两份真相会漂移（改一次规则就得记得改两处）。
+     */
+    clearedPlanReview?: true;
 }
 export type QualityLoopState = 'running' | 'halted' | 'escalated' | 'deliverable' | 'blocked';
 export interface QualityLoopSnapshot {

@@ -441,6 +441,19 @@ export interface ResumeTeamResult {
   status: 'resumed' | 'already_running' | 'rejected'
   team?: TeamState
   error?: string
+  /**
+   * ── ★★★ 本次恢复**显式归零**了计划审查环（`planReviewRounds = 0` + 清 flag）─────
+   *
+   * ★ 调用方**必须**在这一个为真时把 `team.planReviewRounds` / `team.planReviewEscalated`
+   *   一起写回盘。只写 `halted` 会让归零**只存在于返回值里** ——
+   *   而那正是 2026-10-20 实测出来的缺陷：一个被文档承诺为"唯一出路"的动作，
+   *   在盘上什么都没改。
+   *
+   * ★ 为什么由本函数**说出来**而不是让调用方去比两边的 `rounds`：
+   *   "只有超轮才归零"这条规则住在这里；另一处比 round 就是第二份真相，
+   *   而两份真相会漂移（改一次规则就得记得改两处）。
+   */
+  clearedPlanReview?: true
 }
 
 export type QualityLoopState = 'running' | 'halted' | 'escalated' | 'deliverable' | 'blocked'
@@ -2552,7 +2565,37 @@ export function resumeTeamState(team: TeamState, reason: string): ResumeTeamResu
   if (!nonemptyString(reason)) {
     return { ok: false, status: 'rejected', error: 'resume requires a non-empty reason' }
   }
-  if (team.halted !== true) {
+  /**
+   * ── ★★★ 2026-10-20：补上本函数**自己在注释里点名过的那个缺口** ────────────────────
+   *
+   * 下面那段长注释逐字写着：
+   * > 「**一个"已经超轮、但没被 halt"的 staged 团队，今天仍然没有解除路径**：
+   * >   `approve` 会拒、`edit_plan` 只会把轮次推得更高、`resume` 返回 `already_running` 不动它。」
+   *
+   * ⇒ MEASURED（本仓真实死锁，就在写这一段的前一小时）：一个 `phase='staged'`、
+   *   `planReviewRounds=5`、`planReviewEscalated=true`、**`halted` 为 undefined** 的队，
+   *   批准被拒（对），而错误信息指向 `resume` 这条"唯一出路" —— 而 `resume` 对它
+   *   答 `already_running` 且**一格都不动**。⇒ 那份计划**没有任何工具能放行**。
+   *
+   * ── 修法：把"已敲响计划审查上限"也算作**需要显式恢复的状态** ─────────────────
+   *
+   * ★ 它**不是**放宽：一个已经触顶的队本来就**不能开工**（`approve` 拒），
+   *   所以它事实上处于"停着"的状态 —— 只是 `halted` 那个布尔没有表达它。
+   *   把这一支并进来，等于让 `halted` 的语义从"被 halt"扩成
+   *   "**当前不允许开工**"，而解除它的动作**仍然**是那个带非空理由的人工原语。
+   *
+   * ★★ 而它**必须仍然要求非空理由**（上面第一行已经管了）——
+   *   解除一个触顶的计划是一个**决定**，不是一个清理动作。
+   *   理由会进 `agent-teams/team-resumed` 事件，于是"谁在什么时候放过了它"可查。
+   *
+   * ★ 安全边界与原来**逐字相同**：只有 `planLoopEscalated` 为真时才动那两格；
+   *   没超轮的队 ⇒ 一个字节都不变。
+   */
+  const roundsBefore = typeof team.planReviewRounds === 'number' && Number.isFinite(team.planReviewRounds)
+    ? Math.max(0, Math.floor(team.planReviewRounds))
+    : 0
+  const planLoopAlreadyEscalated = roundsBefore >= PLAN_REVIEW_MAX_ROUNDS || team.planReviewEscalated === true
+  if (team.halted !== true && !planLoopAlreadyEscalated) {
     return { ok: true, status: 'already_running', team }
   }
   /**
@@ -2580,13 +2623,27 @@ export function resumeTeamState(team: TeamState, reason: string): ResumeTeamResu
    *     而那要改 `src/tools/shared/entities.ts` / `src/tools/approve.ts` 的签名 ——
    *     **两者都不在 t8 的写域里**。⇒ 记录为已知缺口，不在这里假装解决。
    */
-  const rounds = typeof team.planReviewRounds === 'number' && Number.isFinite(team.planReviewRounds)
-    ? Math.max(0, Math.floor(team.planReviewRounds))
-    : 0
-  const planLoopEscalated = rounds >= PLAN_REVIEW_MAX_ROUNDS || team.planReviewEscalated === true
+  /**
+   * ★ 复用上面那一份读数（`roundsBefore` / `planLoopAlreadyEscalated`）而不是重算 ——
+   *   两份读数分叉会让"要不要解除"与"解除之后写什么"用不同的判据。
+   */
+  const rounds = roundsBefore
+  const planLoopEscalated = planLoopAlreadyEscalated
   return {
     ok: true,
     status: 'resumed',
+    /**
+     * ── ★★★ 2026-10-20：新增 `clearedPlanReview` 标记 ─────────────────────────────
+     *
+     * 调用方（`src/tools/resume.ts` / `create-task.ts`）必须据此把这两格**写回盘**。
+     * ★ 为什么需要这个标记而不是让调用方自己比 `fresh.planReviewRounds !== resumed.team.planReviewRounds`：
+     *   那种比法是**第二份真相** —— 它要知道"归零"这件事的规则（只有超轮才归零），
+     *   而那条规则只住在这个函数里。改一次规则就会让两处漂移。
+     * ⇒ 让**产生归零的那一方**说出来。
+     * ★★ 而它不是可有可无的美化：**没有它，归零只活在返回值里，从不落盘** ——
+     *    本仓 2026-10-20 实测的缺陷（一个"唯一出路"在生产上不存在）。
+     */
+    ...planLoopEscalated ? { clearedPlanReview: true as const } : {},
     team: planLoopEscalated
       ? {
         ...team,
