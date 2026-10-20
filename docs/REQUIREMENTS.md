@@ -695,3 +695,35 @@ for (const x of t.tasks) if (x.kind==='implementation') {
 
 ★ 处置：`lib/` 配对已逐条 `amend_task` 补上（t3/t4/t6）；`t5` 因已终态不可改，
 由 `t7` 的验收**明确裁定其失败性质**，并如实记「测试文件哈希基线至今未做」。
+
+---
+
+### ★★★ 而 2026-10-20 的修复只解决了**一半**（这条必须留在这里）
+
+`edit_plan` 的 `add_task` 路线现在**真的跑契约门**了（`src/tools.ts`，见提交 `4f831b3`）。
+★ 但它跑的是 `contract.build-artifact-scope`，**它只查 `src/` 有没有配对 `lib/`**。
+
+实测（两条，方向相反）：
+```bash
+# ① t5 的原契约 ⇒ 被拦
+gate({task:{kind:'implementation', inScope:['src/artifacts.ts','src/tools/update-task.ts','src/state/tasks.ts']}})
+⇒ ok:false「declares no build artifact under "lib/"…」
+
+# ② 配了 lib/，但**仍然**缺三个 claim 点与 scripts 落点 ⇒ **放行**
+gate({task:{kind:'implementation', inScope:['src/artifacts.ts','src/state/tasks.ts','lib/artifacts.js','lib/state/tasks.js']}})
+⇒ ok:true
+```
+
+⇒ ★★★ 也就是说：**`t5` 真正的毛病，这道门查不出来。**
+它的病是「**这件事的每个落点都在 scope 里吗**」，而 `build-artifact-scope` 只回答
+「**lockstep 产物配了吗**」。这是两个问题。
+
+★★ 而第二个问题**今天没有任何判据在问** —— 它需要一个更弱也更难的判据：
+从 `objective` / `acceptance` 里推出"会碰哪些路径"，而那件事
+**在判据层做不到**（判据不许猜，`requires.ts:611` 逐字写过"这一类如实推不出来（少报），
+而不是猜一个"）。
+
+⇒ 所以正确的处置是**承认它做不到**，并换一条路：让**契约的作者**在写 scope 时
+被问一句可判定的话。可行形态是 `add_task` 的 `inScope` 声明**要求作者列出落点**，
+而"落点齐不齐"由**成员开工后的第一条读数**报出来（它一碰就超出 scope ⇒ 现有门就红）。
+★ 这比造一个猜得出来就报、猜不出来就沉默的判据**诚实**。
