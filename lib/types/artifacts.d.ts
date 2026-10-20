@@ -127,3 +127,42 @@ export declare function snapshotReviewedArtifacts(workspace: string, patterns: r
  * @returns 一份 `DeliveryAudit`；**没有任何判决绑过路径** ⇒ `undefined`。
  */
 export declare function deliveryAuditFor(workspace: string, team: TeamState): Promise<DeliveryAudit | undefined>;
+/**
+ * ── ★★★ 工作区里【已存在的】测试文件（2026-10-20，补 t5）────────────────────────
+ *
+ * ── 为什么需要它 ────────────────────────────────────────────────────────────────
+ *
+ * `testFileBaselineOf` 要的是"开工那一刻这些测试文件是什么字节"。
+ * 而"这些"必须**先被枚举出来** —— 于是这一格回答：**哪些是测试文件**。
+ *
+ * ── ★ 两条口径，刻意写死在这里（而不是散在三处调用点）─────────────────────────
+ *
+ *   ① **只收已存在的文件**（`readdirSync` + `statSync`，不递归 symlink）
+ *      ⇒ 快照里**不会**出现"还没写的测试" ⇒ 于是**新写的测试不算 weakened**
+ *        （那是**加**，不是减 —— 见 `testFileBaselineOf` 的反面一节）
+ *   ② **按路径排序** ⇒ 同一棵树两次调用得到**逐字节相同**的清单
+ *      （不排序会让"清单顺序变了"看起来像"测试变了"）
+ *
+ * ── ★★ 边界：它扫的是【工作区的测试目录】，不是整个仓库 ──────────────────────────
+ *
+ *   实测本仓的测试全在 `scripts/**\/*.test.mjs`，没有别的形态。
+ *   ⇒ 扫 `scripts/` 一层浅递归，遇到目录就进、遇到 `*.test.mjs` 就收。
+ *   ★ 扫描上限与 `MAX_EXPANDED_ARTIFACTS` 同一纪律：**到界要报**，不静默截断。
+ */
+export declare function enumerateTestFiles(workspace: string, limit?: number): Promise<{
+    files: string[];
+    truncated: boolean;
+}>;
+/**
+ * 拍一份**测试文件基线**（开工那一刻的字节）。
+ *
+ * ★ 复用 `digestWorkspacePaths`（同一个 sha256、同一条"逃出工作区就拒"的纪律），
+ *   不新造第二条读字节的路径。
+ * ★★ 三态**原样往上传**：读不到 ⇒ `undefined`（**不是**空数组）。
+ *   调用方据此写不写 `testFileBaseline` —— 而写入侧缺席 = "没能拍"。
+ */
+export declare function snapshotTestFiles(workspace: string): Promise<{
+    baseline: readonly ArtifactDigest[] | undefined;
+    truncated: boolean;
+    gaps: readonly ArtifactScopeGap[];
+}>;

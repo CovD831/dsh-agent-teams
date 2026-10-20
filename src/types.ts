@@ -726,6 +726,32 @@ export interface TeamTask {
   deliverables?: string[]
   nonGoals?: string[]
   changedPaths?: string[]
+  /**
+   * ── ★★★ 开工那一刻，**已存在的测试文件**的字节摘要（2026-10-20，补 t5）──────────
+   *
+   * ── 它防的是什么（MEASURED：一条三条重判据都拦不住的路径）──────────────────
+   *
+   * 一个成员可以：
+   *   1. 真跑 `pnpm test` —— 退出码 0 是**真的**
+   *   2. 同一轮把 `expect(x).toBe(3)` 改成 `toBe(2)`
+   *   3. 三条判据全部沉默：
+   *      · `completion.verify-rerun` 不管（退出码确实是真的）
+   *      · `completion.r5` 不管（它只管**新增**测试的父/子红绿，这里没有新增）
+   *      · `completion.mutation` 不管（它是重活，且只在被触发时跑）
+   *
+   * ⇒ 我们花了很大代价建了"测试强不强"的三条重判据，而
+   *   **"测试被改松了没"这一道几乎零成本的关，没有任何人管**。
+   *
+   * ── 三态：缺席 **不等于** 空数组 ──────────────────────────────────────────────
+   *
+   *   · 有值   —— 开工时拍到了快照（可能是空数组：这条任务开工时工作区里没有测试文件）
+   *   · **缺席** —— **没能拍到**（读不到工作区 / 快照失败）
+   *     ★★ 缺席**绝不**读成"没有被改" —— 那正是"没测到并进通过"的同一形态。
+   *   · 该任务碰不到测试文件 ⇒ 判定为"不适用"，由比对侧区分（见 `testFileBaselineOf`）
+   *
+   * ★ 复用 `src/artifacts.ts` 的 sha256（`digestWorkspacePaths`），不新造一套。
+   */
+  testFileBaseline?: readonly ReviewedArtifact[]
   acceptanceResults?: AcceptanceResult[]
   commandsRun?: CommandResult[]
   /**

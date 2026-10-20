@@ -262,6 +262,89 @@ export type ArtifactDigestMap = Readonly<Record<string, string>>;
  * ★ 它与「什么都判不了」在补救动作上同形（都会让人去重做一次本来没问题的活）。
  * ⇒ 所以字节**一致**时必须报 `bound`。本函数**逐条比对**，不是"有就报"。
  */
+/**
+ * ── ★★★ 「已存在的测试文件被改松了吗」（2026-10-20，补 t5）────────────────────────
+ *
+ * ── 它防的是什么（MEASURED：一条三条重判据都拦不住的路径）────────────────────────
+ *
+ * ```
+ *   1. 真跑 `pnpm test`      —— 退出码 0 是**真的**
+ *   2. 同一轮改松断言       —— `expect(x).toBe(3)` → `toBe(2)`
+ *   3. 三条判据全部沉默：
+ *      · completion.verify-rerun  不管（退出码确实是真的）
+ *      · completion.r5            不管（它只管【新增】测试的父/子红绿）
+ *      · completion.mutation      不管（重活，且只在被触发时跑）
+ * ```
+ * ⇒ 我们花了很大代价建了「测试**强不强**」的三条重判据，而
+ *   「测试**被改松了没**」这一道几乎零成本的关，**没有任何人管**。
+ *   ★ 参考（外部，逐字）：`portable-dsh-multi-agent-plugin`
+ *     「Test files are pinned by hash, so they can't be weakened.」
+ *
+ * ── 三态，且三者**不同形** ────────────────────────────────────────────────────
+ *
+ *   `intact`       —— 开工时拍过快照，而每一个测试文件**逐字节没变**
+ *   `weakened`     —— 有测试文件的摘要变了（或被删了）⇒ **拒绝**，并指名是哪几个
+ *   `unmeasured`   —— **没能拍快照** / 没能读回 ⇒ ★ **绝不并进 `intact`**
+ *
+ * ★★ 为什么 `unmeasured` 不许并进 `intact`：那会让"我没能检查"与"检查了、没被改"
+ *   在读数上同形 —— 本仓记了十几次的那条合流，这一格是它最新的一次机会。
+ *   ★ 而它的**方向**是保守的：判不了**不拒绝**（先软后硬），但**如实报 unmeasured**。
+ *
+ * ── ★ 一个必须处理的**反面**：修复任务本来就可能要改测试 ────────────────────────
+ *
+ * 见 {@link TestFileBaselineReading.baselineWasEmpty} 与下面 `newFiles` 的处理：
+ * **新写的**测试文件不算"改松"（那是**加**，不是减）；只有**快照里存在而后来变了或没了**
+ * 的才算。★ 这个区分是本函数的核心，不是装饰 —— 没有它，每一个合法的
+ * "补一个测试"都会被拒，而那条判据会在第一天就被学会忽略。
+ */
+export type TestFileBaselineVerdict = 'intact' | 'weakened' | 'unmeasured';
+export interface TestFileBaselineReading {
+    readonly verdict: TestFileBaselineVerdict;
+    /** `weakened` 时：哪些**已存在**的测试文件被改了（或被删了）。 */
+    readonly weakened: readonly string[];
+    /** `unmeasured` 时的成因（人话）。 */
+    readonly why?: string;
+    /** 开工时快照里有几个测试文件（0 ⇒ 这条任务开工时工作区里没有测试文件）。 */
+    readonly baselineCount: number;
+}
+/**
+ * 比对**开工时的测试文件快照**与**现在**。
+ *
+ * ★ 纯函数：两份摘要都由调用方给（与 `artifactBindingOf` 同一条纪律）。
+ *
+ * @param baseline - 开工那一刻拍下的（`TeamTask.testFileBaseline`）。
+ *   **`undefined` 与 `[]` 必须不同形**：前者是"没能拍"（⇒ `unmeasured`），
+ *   后者是"拍了、当时一个测试文件都没有"（⇒ `intact`，且是一条**读数**）。
+ * @param current - 现在这些路径的字节（`digestWorkspacePaths` 的产出）。
+ *   **缺席**（`undefined`）⇒ 没能读回 ⇒ `unmeasured`，绝不读成"没被改"。
+ */
+export declare function testFileBaselineOf(baseline: readonly {
+    readonly path: string;
+    readonly digest: string;
+}[] | undefined, current: ReadonlyMap<string, string> | undefined): TestFileBaselineReading;
+/**
+ * ── ★ 一条任务**该不该**被拍测试文件快照（闸门，不是判据）──────────────────────
+ *
+ * ★ `write` 类 kind 才会碰文件。`review` / `requirements` 是只读判断，
+ *   给它们拍快照只会产生一份**永远用不上**的记录（而"一个没人读的读数"正是
+ *   本轮审计在清理的东西）。
+ * ★ 它的口径**就是** `WRITE_KINDS`（`['implementation', 'repair']`）——
+ *   ★★ 而这两个常量今天是**同一个集合**，不是巧合也不是疏忽：
+ *     `lib/` lockstep 与"会写测试文件"都只对真正改源码的那两类成立。
+ *   ★ 我**不**在这里另写一份 `['implementation','repair']` —— 两份会分叉，
+ *     而分叉之后"要拍快照"与"要建树"会给出不同的答案（本仓记账过多次）。
+ *
+ * ── ★ 一处如实标出的边界 ────────────────────────────────────────────────────────
+ *
+ * `integration` 也会写文件（它做合并），而它**不在**这个集合里
+ * ⇒ 它的测试文件基线**不会被拍** ⇒ 它的比对落 `unmeasured`（**不是** `intact`）。
+ * ★ 这是**已知且刻意**的：本轮先让"最常发生的路径"（成员在自己的树里改测试）
+ *   有读数；扩到 `integration` 是另一条改动，而它需要先想清"合并时改了上游的测试"
+ *   算不算 weakened（那是一个语义问题，不是一个开关）。
+ * ★★ 而三态保证了这件事**读得出来**：`unmeasured` 与 `intact` 不同形，
+ *   所以没人会把"integration 没被检查"读成"integration 的测试没被改"。
+ */
+export declare function shouldSnapshotTestFiles(kind: TaskKind | undefined): boolean;
 export declare function artifactBindingOf(reviewed: readonly ReviewedArtifact[] | undefined, current: ArtifactDigestMap): ArtifactBinding;
 /**
  * ── ★★★ t97（S1）：审计的**输入面** —— 「**当前**这些路径是什么字节」 ──────────────────

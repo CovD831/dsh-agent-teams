@@ -22,6 +22,8 @@ import { sessionLeadsTeam } from './lineage.ts'
 import { identityOfTeam, liveRefsOf } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
 import { createTaskWorktree, describeBaseline, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
+import { snapshotTestFiles } from './artifacts.ts'
+import { shouldSnapshotTestFiles } from './quality-gates.ts'
 import type { BaselineResolution, UpstreamTaskInput } from './worktree.ts'
 import { restartQueueFrom } from './tools/shared/entities.ts'
 import {
@@ -846,6 +848,18 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           return
         }
 
+        /**
+         * ── ★★★ 测试文件基线：**在锁外**拍（2026-10-20，补 t5）───────────────────────
+         *
+         * ★★ 理由与 `claim.ts` 那处逐字相同：`withTeamLock` 串行化**整个团队**的
+         *   写操作，而下面这个锁里要做的是"构造派工票"这件**关键路径**上的事。
+         *   在锁内遍历目录 + 读 200 个文件的字节，会把所有人一起拖住 ——
+         *   而这只是一条**记录**，不是裁决。
+         *
+         * ★ 口径：它拍的是"**即将派出去那一刻**"的字节（成员还没开工）
+         *   ⇒ 与"开工那一刻"的距离是一次锁等待，而那正是要的边界。
+         */
+        const testFileSnapshot = await snapshotTestFiles(workspace)
         const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async (): Promise<DispatchTicket | undefined> => {
           const fresh = await readTeam(stateRoot, team!.id)
           if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged') return undefined
@@ -888,7 +902,15 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             output: task.output, verdict: task.verdict, findings: task.findings,
             changedPaths: task.changedPaths, acceptanceResults: task.acceptanceResults, commandsRun: task.commandsRun,
           } : undefined
-          const attemptId = beginTaskAttempt(task, currentMember.name)
+          /**
+           * ★ 只在**写类 kind** 上写基线（与 `claim.ts` 同一口径）——
+           *   非写类传 `undefined` ⇒ 一个键都不写 = "没能拍"，**不是**"没有测试文件"。
+           */
+          const attemptId = beginTaskAttempt(
+            task,
+            currentMember.name,
+            shouldSnapshotTestFiles(task.kind) ? testFileSnapshot.baseline : undefined,
+          )
           // A recovered generation is parked before delivery. This makes each
           // (member, attempt) recovery idempotent even if every status poll
           // sees a disposed handle. Fresh pending work remains unparked so a

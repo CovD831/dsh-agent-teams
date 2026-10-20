@@ -9,6 +9,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { captainOpenTask, memberOpenTask, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, stateRootOf, stopTeamMemberActivations, teamLockKey, workspaceOf } from './shared/entities.ts'
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, invalidateTaskAttempt, readTeam, readUnreadMailbox, unsatisfiedDependencies, withTeamLock, writeTeam } from '../state.ts'
+import { snapshotTestFiles } from '../artifacts.ts'
+import { shouldSnapshotTestFiles } from '../quality-gates.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolsConfig } from './shared/entities.ts'
 
@@ -101,6 +103,19 @@ export function register(ctx: Context, scheduler: any, config: ToolsConfig): voi
           }
         }
 
+        /**
+         * ── ★★★ 测试文件基线：**在锁外**拍（2026-10-20，补 t5）───────────────────────
+         *
+         * ★★ 理由与 `claim.ts` / `scheduler.ts` 两处逐字相同：锁串行化**整个团队**的
+         *   写操作，而下面这段是"交接"这条关键路径。在锁内读 200 个文件的字节
+         *   会把所有人一起拖住 —— 而这只是一条**记录**。
+         *
+         * ★ 这一处**只在队长接管时**才会用到它（见下面 `target === CAPTAIN_KEY`），
+         *   而队长接管**也会改文件** ⇒ 它同样需要基线。
+         *   ★ 不预判 `target`：`target` 在锁内才由 `revoked` 定下来
+         *     （它可能在 `stopTeamMemberActivations` 之后变了）——预判就是第二份真相。
+         */
+        const testFileSnapshot = await snapshotTestFiles(workspace)
         await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
           const fresh = await requireFreshCaptainTeam(stateRoot, team.id, captain.id)
           const task = requireTask(fresh, args.task_id)
@@ -114,7 +129,15 @@ export function register(ctx: Context, scheduler: any, config: ToolsConfig): voi
             delete task.handoffFromMemberId
           }
           if (quiescenceError === undefined && target === CAPTAIN_KEY) {
-            beginTaskAttempt(task, CAPTAIN_KEY)
+            /**
+             * ★ 只在**写类 kind** 上写基线（三处同一口径）——
+             *   非写类传 `undefined` ⇒ 一个键都不写 = "没能拍"，**不是**"没有测试文件"。
+             */
+            beginTaskAttempt(
+              task,
+              CAPTAIN_KEY,
+              shouldSnapshotTestFiles(task.kind) ? testFileSnapshot.baseline : undefined,
+            )
             // The captain is already in the turn that requested takeover; there
             // is no later member claim handshake to move claimed -> in_progress.
             task.status = 'in_progress'

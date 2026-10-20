@@ -11,7 +11,7 @@
  *   ⇒ 搬出来不需要任何"内部耦合"的妥协。
  * ★ `state.ts` 仍**逐条再导出**它们 ⇒ 对外导出面不变（老消费者一字不改）。
  */
-import { type GateEvaluationRecord, type TaskStatus, type TeamTask } from '../types.ts';
+import { type GateEvaluationRecord, type ReviewedArtifact, type TaskStatus, type TeamTask } from '../types.ts';
 /**
  * The allowed task status transitions, keyed by current status.
  * Terminal statuses have no outgoing transitions.
@@ -71,8 +71,26 @@ export declare function gateEvaluationRecordOf(evaluation: {
 }): GateEvaluationRecord;
 /** Activate the task's current generation for one owner and return its capability id. */
 export declare function activateTaskAttempt(task: TeamTask, assignee: string): string;
-/** Start a fresh task generation for one owner. */
-export declare function beginTaskAttempt(task: TeamTask, assignee: string): string;
+/**
+ * Start a fresh task generation for one owner.
+ *
+ * ── ★★★ 2026-10-20：**测试文件基线**由调用方传进来，本函数保持纯 ──────────────────
+ *
+ * `baseline` 是**开工那一刻**测试文件的字节摘要。它必须在这里写进去，因为
+ * **这是"新一代开始"的唯一真值点**（下面的 `attempt` 自增就是它）。
+ *
+ * ★★ 为什么由调用方算、而不是在这里读盘：
+ *   本文件**零 `node:fs`**（`grep -c "node:fs" src/state/tasks.ts` ⇒ 0）——
+ *   一整个模块的纯度换来的是一条可读的边界："这里不会碰盘"。
+ *   而 `snapshotTestFiles` 是 async 且要 workspace ⇒ 让它进来会同时破坏两件事。
+ *   ⇒ 三个调用点（`claim.ts` / `scheduler.ts` / `reassign.ts`）各自 `await` 好再传。
+ *
+ * ── ★ 三态如实转交，**不许在这里圆** ────────────────────────────────────────────
+ *   · 传了数组（可能是空的）  ⇒ 写进去
+ *   · 传了 `undefined`        ⇒ **一个键都不写** = "没能拍"（**不是**"一个测试文件都没有"）
+ *   ★★ 那两者在 `testFileBaselineOf` 里是 `unmeasured` 与 `intact` 的**区别**。
+ */
+export declare function beginTaskAttempt(task: TeamTask, assignee: string, testFileBaseline?: readonly ReviewedArtifact[]): string;
 /**
  * Revoke the current worker immediately. Clearing its capability makes old
  * updates stale; a separate handoff generation serializes async quiescence.
