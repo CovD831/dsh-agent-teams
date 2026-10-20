@@ -169,6 +169,18 @@ import * as runtimeLiveness from './runtime/liveness.ts'
  */
 import * as runtimeStall from './runtime/stall.ts'
 /**
+ * ── 2026-10-20 ——— 已接：runtimeShapeExecution（runtime 位置的**第三条**判据）────────
+ *
+ *      id = 'runtime.shape-execution' · point = 'runtime'
+ *
+ * ★ 它补的是上一轮形态验证亲手撞上的那个缺口（`docs/SHAPE-VERIFICATION-PROBE-1.md`
+ *   §4 逐字）：「**`shape` 是一条声明，而"声明有没有被执行"今天没有读数。**
+ *   一个 `shape: 'dispatch'` 的队如果成员全都自己干活，**没有任何一条臂会红**。」
+ *
+ * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+ */
+import * as runtimeShapeExecution from './runtime/shape-execution.ts'
+/**
  * ── T4（t4 接线）——— 已接：判据「任务在原子粒度上可判吗」（contract 位置第三条）──────
  *
  *      id = 'contract.task-atomicity' · point = 'contract'
@@ -427,6 +439,20 @@ const ALL_GATES = [
    *   排除了 `blockers` 那一支 ⇒ 它**在类型上就拒绝不了**。
    */
   runtimeStall,
+  /**
+   * ── 2026-10-20 ——— 已接：runtimeShapeExecution（runtime 位置的第三条判据）──────────
+   *
+   * ★ 位置内的顺序 = liveness（这一次等待还在动吗）→ stall（这个任务是不是停下了）
+   *                → shape-execution（**这个队是不是按它声明的形态在干活**）。
+   *   ⇒ 前两条问的是"这一次/这一条"的进展，这一条问的是**队级的形态**：
+   *     它是最慢变的那一格，排在最后，读的人先看到具体的、再看到结构性的。
+   *
+   * ★★ 位置纪律（与 liveness / stall 逐字相同）：runtime 位置的任何裁决**只被记录**，
+   *   不参与控制流（契约 §5）。⇒ 一个声明了 dispatch 却全员自己干的队，
+   *   今天会**留下一条可读的违规记录**，而不会被拒绝派发 —— 那是刻意的：
+   *   一条判据第一次上线就否决，会把"我的读数可能有 bug"变成"所有队都停下来"。
+   */
+  runtimeShapeExecution,
   /**
    * T4（t4 接线）——— 已接：contractTaskAtomicity（contract 位置第三条）
    * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。

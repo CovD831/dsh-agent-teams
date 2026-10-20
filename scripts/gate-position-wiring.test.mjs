@@ -637,9 +637,11 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
    *   ★ 少了 `registered`，"没检查"与"这个位置本来就没判据"会同形。
    */
   assert.equal(created.runtime_gates?.evaluated, 0, '★ 这一轮没有任何一条运行判据适用 ⇒ evaluated=0，不是"跑了一条什么都对的判据"')
-  /** ★ t6：runtime 现在挂着**两条**（liveness + 新增的 `runtime.stall`）。
-   *  本行断言的实质是「**这个位置确实挂着判据**」（不是空的），数字随接线变。 */
-  assert.equal(created.runtime_gates?.registered, 2, '★ runtime 位置必须真的挂着判据（liveness + stall）')
+  /** ★ t6：runtime 现在挂着**三条**（liveness + `runtime.stall` + 2026-10-20 的
+   *  `runtime.shape-execution`）。
+   *  本行断言的实质是「**这个位置确实挂着判据**」（不是空的），数字随接线变 ——
+   *  ★ 而它必须是**精确数**：一个 `> 0` 会让"有人摘掉两条、只留一条"永远读不出来。 */
+  assert.equal(created.runtime_gates?.registered, 3, '★ runtime 位置必须真的挂着判据（liveness + stall + shape-execution）')
   assert.equal(
     (created.runtime_gates?.ran ?? []).filter((entry) => entry.verdict !== 'skipped').length,
     0,

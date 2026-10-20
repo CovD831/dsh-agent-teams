@@ -1684,3 +1684,317 @@ export function memberSubagents(
   }
   return { status: 'observed', subagents: attribution.byMember.get(memberId) ?? [] }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `shape: 'dispatch'` 的**执行判据**：这个成员到底派过几个临时 worker
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 一个成员**派出过几个临时 sub-agent**（2026-10-20，`shape` 的执行判据）──
+ *
+ * ── 它补的是什么（上一轮形态验证实测出来的缺口）────────────────────────────────
+ *
+ * `shape: 'dispatch'` 只声明了**意图**：这个队的成员是持久派工点，每任务拉一个临时
+ * worker。而"意图有没有被执行"**没有任何机械读数** ——
+ * 一个 `shape: 'dispatch'` 的队如果成员全都自己干活，今天没有任何判据会红。
+ *
+ * MEASURED（`docs/SHAPE-VERIFICATION-PROBE-1.md` §3.2）：
+ * ```
+ *   $ grep -n "subagentCount\|dispatches\|childSessions" src/types.ts   ⇒ 零命中
+ * ```
+ * ⇒ 那一轮验证"形态真的在用吗"靠的是**队长手工看会话文件**，而那**不是判据**。
+ *
+ * ── ★★ 数据源是真的存在，只是本插件从没读过它 ──────────────────────────────────
+ *
+ * 宿主在父会话里追加一条 `subagent/catalog` 事件，逐字长这样（实测，
+ * 见 `14f0a67e-…` 的 `session.v4.jsonl.zstd` 第 45 条）：
+ * ```
+ *   { type: 'subagent/catalog', data: { version: 0, childId: '48403c6f-…',
+ *     childCreatedAt: 1792475600384, mode: 'continuable',
+ *     label: 'Build dispatch-shape readout script' } }
+ * ```
+ * ⇒ **每派一个 worker 就多一条**。因此"派出过几个"是一个**可数的历史**，
+ *   而不是靠"当前有几个活着的子代理"去猜 —— 后者漏掉"派过又结束了"，
+ *   而那恰好是 dispatch 形态的常态（worker 用完即弃）。
+ *
+ * ★ 为什么**不**在 `team.json` 里加一个计数器：那需要一个新的**写**路径，
+ *   而写路径会引入"谁来写、什么时候写、写失败怎么办"三个新问题；而证据
+ *   已经由宿主落在会话里、且**只追加**。读侧推导不制造第二份真相。
+ *
+ * ── 三态，且**缺席不许并进 0** ─────────────────────────────────────────────────
+ *
+ *   `read`        —— 读到了；`dispatched` 是**累计**派出的 worker 数
+ *   `unmeasured`  —— 这个成员的会话读不出来（**不是**"它没派过"）
+ *   `not-started` —— 它还没有会话 id（没起来过）⇒ 它不可能派过
+ *
+ * ★★ 为什么 `unmeasured` 不许并进 0：那会让"我没能读它"与"它确实一个都没派"
+ *   在读数上同形 —— 而前者是**要人去查**的，后者是**形态没被执行**的证据。
+ *   本仓记了十几次的那条合流，这一格是它最新的一次机会。
+ */
+export type MemberDispatchReadout =
+  | {
+    readonly status: 'read'
+    /** 累计派出过的 worker 数（`subagent/catalog` 事件条数）。 */
+    readonly dispatched: number
+    /**
+     * ★ 形状坏掉的 catalog 条数（有 `subagent/catalog` 而 `childId` 读不出）。
+     *   它**不在** `dispatched` 里，但也不被静默丢掉 —— 于是
+     *   "读到 3 个 + 2 条读不出"与"读到 5 个"不同形。
+     */
+    readonly unreadableEvents: number
+    /** 最近一次派出的 worker；没派过 ⇒ 缺席（**不是**编一个空对象）。 */
+    readonly latest?: { readonly childId: string; readonly createdAt?: number; readonly label?: string }
+  }
+  /** 成员的会话读不到 ⇒ 判不了。★ 与"一个都没派"不同形。 */
+  | { readonly status: 'unmeasured'; readonly reason: string }
+  /** 成员还没有会话 id（没起来过）⇒ 它不可能派过。★ 与上面两者不同形。 */
+  | { readonly status: 'not-started' }
+
+/** 读不出会话事件时的成因（诊断面，不改变裁决）。 */
+export const DISPATCH_EVENTS_UNREADABLE = 'this member carries no readable session event log, so how many temporary workers it dispatched cannot be counted'
+
+/**
+ * 从**一个成员自己的会话事件**里数出它派出过几个 sub-agent。
+ *
+ * ★ 纯函数：不碰 `ctx`、不做 I/O。I/O 由调用方做（与 `attributeSubagents` /
+ *   `summariseExecutions` 同一条纪律）。
+ *
+ * ★ `undefined` 与 `[]` 必须不同形：前者是"读不到日志"（`unmeasured`），
+ *   后者是"读到了，确实一条 catalog 都没有"（`read` + `dispatched: 0`）。
+ */
+export function dispatchReadoutOf(events: readonly unknown[] | undefined): MemberDispatchReadout {
+  if (events === undefined) return { status: 'unmeasured', reason: DISPATCH_EVENTS_UNREADABLE }
+  const dispatched: Array<{ childId: string; createdAt?: number; label?: string }> = []
+  let unreadableEvents = 0
+  for (const raw of events) {
+    const event = raw as { type?: unknown; data?: unknown } | null
+    if (event === null || typeof event !== 'object') continue
+    if (event.type !== 'subagent/catalog') continue
+    const data = event.data as { childId?: unknown; childCreatedAt?: unknown; label?: unknown } | null
+    const childId = typeof data?.childId === 'string' ? data.childId.trim() : ''
+    /**
+     * ★ 缺 `childId` 的 catalog **不算派出**，但**要计数** ——
+     *   否则"一个坏事件把总数少算 1"与"它本来就少派了一个"同形。
+     */
+    if (childId === '') {
+      unreadableEvents += 1
+      continue
+    }
+    const createdAt = typeof data?.childCreatedAt === 'number' && Number.isFinite(data.childCreatedAt)
+      ? data.childCreatedAt
+      : undefined
+    const label = typeof data?.label === 'string' && data.label.trim() !== '' ? data.label.trim() : undefined
+    dispatched.push({ childId, ...createdAt === undefined ? {} : { createdAt }, ...label === undefined ? {} : { label } })
+  }
+  const latest = dispatched[dispatched.length - 1]
+  return {
+    status: 'read',
+    dispatched: dispatched.length,
+    unreadableEvents,
+    ...latest === undefined ? {} : { latest },
+  }
+}
+
+/**
+ * 读一个成员的**派工读数**（`shape` 的执行判据的输入面）。
+ *
+ * ★ I/O 在这里、判断在 {@link dispatchReadoutOf}：与 `memberLiveness` /
+ *   `memberSubagents` 同一分工。★ 读会话事件走的是 `sessionOwnEvents` ——
+ *   与 `observedChangedPaths` / `observedSpoke` 同一个入口（不是新造的读法）。
+ */
+export function memberDispatchReadout(ctx: Context, member: { readonly id: string }): MemberDispatchReadout {
+  /**
+   * ★ `id === ''` 是**可判定的事实**（"它没起来过"）：一个没有会话的东西
+   *   不可能派过 worker ⇒ `not-started`，与 `could-not-measure` 不同形。
+   */
+  if (member.id === '') return { status: 'not-started' }
+  const live = liveAgentOf(ctx, member.id)
+  if (live === undefined) return { status: 'unmeasured', reason: DISPATCH_EVENTS_UNREADABLE }
+  let events: readonly unknown[]
+  try {
+    events = sessionOwnEvents(live.session) as readonly unknown[]
+  } catch (error: unknown) {
+    return { status: 'unmeasured', reason: `${DISPATCH_EVENTS_UNREADABLE}: ${String(error)}` }
+  }
+  if (!Array.isArray(events)) return { status: 'unmeasured', reason: DISPATCH_EVENTS_UNREADABLE }
+  return dispatchReadoutOf(events)
+}
+
+/**
+ * ── ★★★ 一行派工读数：**这个成员干过活吗、以及它派过人吗** ────────────────────
+ *
+ * 两格**并列而不合并**，因为它们是两个不同的事实来源：
+ *   · `executedTasks` —— 读 `team.json` 的任务（谁名下有过跑到终态的任务）
+ *   · `dispatch`     —— 读**会话事件**（它派出过几个 worker）
+ *
+ * ★★ 合并成一个布尔会让三种完全不同的情形同形：
+ *     「干过活、也派过」 / 「干过活、一个都没派（形态没被执行）」 / 「我没能读到它的派工」
+ *   而它们的补救动作分别是：无需动作 / 去让人按形态派 / 去查为什么读不到。
+ */
+export interface MemberDispatchRow {
+  readonly name: string
+  /** 它名下跑到过终态的任务数（= 它**确实干过活**的可判定证据）。 */
+  readonly executedTasks: number
+  /** 派工读数（三态之一，见 {@link MemberDispatchReadout}）。 */
+  readonly dispatch: MemberDispatchReadout
+}
+
+/**
+ * 从**团队记录 + 一份派工读数函数**算出每行的派工读数。
+ *
+ * ★ 纯函数：`readoutOf` 由调用方注入（与 `strandedWorktrees(candidates, dirtyOf)`、
+ *   `attributeSubagents(refs, memberIds)` 同一分工）。⇒ 夹具可以在**不造会话**的前提下
+ *   把三态逐条喂进来 —— 那是这一格能被钉住的前提。
+ *
+ * @param members - 团队名册（`removed` 的成员不计：它们不会再被派活）。
+ * @param tasks - 团队任务（用来看谁**真的**干过活）。
+ * @param readoutOf - 成员 → 派工读数。
+ */
+export function memberDispatchRows(
+  members: readonly Pick<TeamMember, 'name' | 'status'>[],
+  tasks: readonly Pick<TeamTask, 'assignee' | 'status'>[],
+  readoutOf: (name: string) => MemberDispatchReadout,
+): MemberDispatchRow[] {
+  return members
+    .filter((member) => member.status !== 'removed')
+    .map((member) => ({
+      name: member.name,
+      executedTasks: tasks.filter((task) => task.assignee === member.name && TERMINAL_TASK_STATUSES.includes(task.status)).length,
+      dispatch: readoutOf(member.name),
+    }))
+}
+
+/**
+ * ── ★★★ `shape: 'dispatch'` 的**执行读数**：这个队的成员真的在派临时 worker 吗 ──
+ *
+ * 上一轮形态验证的结论（`docs/SHAPE-VERIFICATION-PROBE-1.md` §4）：
+ * **`shape` 是一条声明，而"声明有没有被执行"今天没有读数。**
+ * 一个 `shape: 'dispatch'` 的队如果成员全都自己干活，**没有任何一条臂会红**。
+ *
+ * ── 三态（缺席不许并进任何一种）────────────────────────────────────────────────
+ *
+ *   `not-applicable` —— 这个队不是 dispatch 形态（`shape` 是 `'flat'` 或**缺席**）
+ *                      ★ 缺席是存量队的合法状态，**不是** unmeasured：这一格对它们
+ *                        根本没有"该不该派"可言（见 `TeamState.shape` 的三态纪律）。
+ *   `measured`       —— 读了；`violations` 是**干过活却一个都没派**的成员名
+ *   `unmeasured`     —— 该说法的输入面读不到（有的成员派工读不出来）
+ *                      ★ 与"零违规"不同形：后者才能说"形态被执行了"
+ */
+export type ShapeExecutionReadout =
+  | { readonly status: 'not-applicable'; readonly reason: string }
+  | {
+    readonly status: 'measured'
+    /** 干过活却一个临时 worker 都没派的成员名（**空数组 = 读了、确实没有违规**）。 */
+    readonly violations: readonly string[]
+    /** 参与判定的成员行（读的人要能复核每一行，而不是只读一个结论）。 */
+    readonly rows: readonly MemberDispatchRow[]
+  }
+  | { readonly status: 'unmeasured'; readonly reason: string; readonly rows: readonly MemberDispatchRow[] }
+
+/**
+ * 把派工行折成"这个队的形态被执行了吗"。
+ *
+ * ★ 纯函数（行由调用方算）。★ 判定只读两格：`executedTasks > 0` 且 `dispatch.dispatched === 0`。
+ *   一个**没干过活**的成员不算违规 —— 它没有机会派工，把它算进去会让
+ *   "队里有一个还没开工的成员"读成"形态没被执行"。
+ */
+/**
+ * 一个队的 `shape` 执行读数 —— **I/O 在这里，判断在 {@link shapeExecutionOf}**。
+ *
+ * ★ 只有 `shape === 'dispatch'` 才去读会话：一个 flat / 缺席的队没有"该不该派工"
+ *   可言，读它只是白跑一轮 `ctx.agents` 枚举（面板是轮询的）。
+ *
+ * ★ 名册里查不到行 ⇒ 那一行走 `unmeasured`（**不**静默跳过）：
+ *   跳过会让"这个成员我没读到"与"这个成员没违规"同形。
+ */
+export function shapeExecutionFor(ctx: Context, team: TeamState): ShapeExecutionReadout {
+  if (team.shape !== 'dispatch') return shapeExecutionOf(team.shape, [])
+  const rows = memberDispatchRows(
+    team.members,
+    team.tasks,
+    (name) => {
+      const member = team.members.find((candidate) => candidate.name === name)
+      return member === undefined
+        ? { status: 'unmeasured', reason: `no roster row for "${name}"` }
+        : memberDispatchReadout(ctx, member)
+    },
+  )
+  return shapeExecutionOf(team.shape, rows)
+}
+
+/**
+ * ── ★★★ 把 `shape` 的**声明**与**执行**读成一句人能读的话（2026-10-20）───────
+ *
+ * `src/capabilities.ts:185` 与 `src/types.ts:1273` 早就引用了这个名字，而它
+ * **此前不存在** —— 那正是本仓记账的那类形态：注释里写好了去向，代码里没有那一步。
+ * ⇒ 现在它是真的，并且由 `agent_teams_status` 的 `team_shape` 那一格接上。
+ *
+ * ── ★★ 为什么"声明"与"执行"必须**两句话** ─────────────────────────────────────
+ *
+ * 上一轮形态验证的结论是：**声明有没有被执行，此前没有读数。**
+ * 把两者合成一句（例如"这是一个 dispatch 队，运作正常"）会让
+ * "声明了、也照做了"与"声明了、全员自己干"读起来一样。
+ *
+ * 三态 × 三态 = 九格，而以下四种**必须两两不同形**：
+ *
+ *   ① 声明 dispatch，执行合规（`dispatched > 0` 的人多于零）    ⇒ 「按形态在跑」
+ *   ② 声明 dispatch，全员自己干（`violations` 非空）             ⇒ 「形态没被执行」
+ *   ③ 声明 dispatch，读不到派工（`unmeasured`）                   ⇒ 「判不了」
+ *   ④ 未声明（存量队）/ `flat`                                   ⇒ 「没有这个说法」
+ */
+export function describeTeamShape(
+  shape: TeamState['shape'] | undefined,
+  execution: ShapeExecutionReadout,
+): string {
+  const declaration = shape === 'dispatch'
+    ? 'this team declared shape "dispatch" (each task is meant to run in a temporary worker)'
+    : shape === 'flat'
+      ? 'this team declared shape "flat" (its members do the work themselves)'
+      : 'this team carries no shape declaration (created before the shape field existed), so its intended form is undecidable'
+  /**
+   * ★ `not-applicable` 的两支成因**已经在 `declaration` 那一句里说完了**（flat / 缺声明），
+   *   再拼一遍 `reason` 会让同一句话读两遍（实测抓到的）。⇒ 这里只补一句"所以没有可查的"。
+   */
+  if (execution.status === 'not-applicable') return `${declaration} — so there is no dispatch claim to check against.`
+  if (execution.status === 'unmeasured') {
+    return `${declaration} — ★ but whether it is actually running that way could not be measured: ${execution.reason}.`
+  }
+  if (execution.violations.length === 0) {
+    const checked = execution.rows.filter((row) => row.executedTasks > 0).length
+    return checked === 0
+      ? `${declaration} — no member has finished a task yet, so there is nothing to check against it.`
+      : `${declaration} — held: all ${checked} member(s) that finished tasks also spawned temporary workers.`
+  }
+  return `${declaration} — ★★ NOT held: ${execution.violations.join(', ')} finished task(s) but spawned no temporary worker at all, so this team is doing the work itself while claiming the dispatch form.`
+}
+
+export function shapeExecutionOf(
+  shape: TeamState['shape'] | undefined,
+  rows: readonly MemberDispatchRow[],
+): ShapeExecutionReadout {
+  if (shape !== 'dispatch') {
+    return {
+      status: 'not-applicable',
+      reason: shape === 'flat'
+        ? 'this team declared shape "flat", so its members are expected to do the work themselves'
+        : 'this team carries no shape declaration (older team), so "each task runs in a temporary worker" was never claimed about it',
+    }
+  }
+  /**
+   * ★ 有任何一行的派工**读不出来** ⇒ 整份读数 `unmeasured`。
+   *   理由与 `delivery.coverage` 的那条一致：一个"我没能读它"的成员如果被跳过，
+   *   那么"形态被执行了"这句话就包括了**没被检查过的人** —— 而它读起来完全正常。
+   */
+  const unreadable = rows.filter((row) => row.executedTasks > 0 && row.dispatch.status === 'unmeasured')
+  if (unreadable.length > 0) {
+    return {
+      status: 'unmeasured',
+      rows,
+      reason: `the dispatch history of ${unreadable.map((row) => row.name).join(', ')} could not be read (${unreadable.map((row) => (row.dispatch as { reason?: string }).reason ?? 'no reason given').join('; ')}), so whether this dispatch team actually dispatched cannot be decided`,
+    }
+  }
+  const violations = rows
+    .filter((row) => row.executedTasks > 0 && row.dispatch.status === 'read' && row.dispatch.dispatched === 0)
+    .map((row) => row.name)
+  return { status: 'measured', violations, rows }
+}

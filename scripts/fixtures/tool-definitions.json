@@ -2348,6 +2348,15 @@
             "type": "object"
           },
           "runtime_gates": {},
+          "shape_execution": {
+            "type": "string"
+          },
+          "shape_violations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "stranded_work": {
             "additionalProperties": false,
             "properties": {
@@ -2411,10 +2420,18 @@
           "team_name": {
             "type": "string"
           },
+          "team_shape": {
+            "type": "string"
+          },
           "viewer": {
             "type": "string"
           }
         },
+        "required": [
+          "team_shape",
+          "shape_execution",
+          "shape_violations"
+        ],
         "type": "object"
       }
     },

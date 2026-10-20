@@ -193,6 +193,21 @@ const NEW_POSITION_GATES = [
   { binding: 'admissionAbsorb', id: 'admission.absorb', point: 'admission' },
   { binding: 'admissionCheckpoint', id: 'admission.checkpoint', point: 'admission' },
   { binding: 'admissionConvene', id: 'admission.convene', point: 'admission' },
+  /**
+   * ── 2026-10-20 ——— runtime 位置的**第三条** ────────────────────────────────────
+   *
+   * `runtime.shape-execution`：声明了 `shape: 'dispatch'` 的队，成员**真的**在派
+   * 临时 worker 吗。它补的是上一轮形态验证记下的缺口（`docs/SHAPE-VERIFICATION-PROBE-1.md`
+   * §4 逐字）：「`shape` 是一条声明，而"声明有没有被执行"今天没有读数。」
+   *
+   * ★ 登记的理由与上面几条**逐字相同**：这一行不是美化，而是"接线"在本表上的另一半
+   *   —— 不登记就会被臂 3 判为"绕过装配清单"。★ 而那条判定**是对的**：
+   *   它正是"判据装了但没接线"的机械读数。
+   *
+   * ✅ 反向半边：把它从 `ALL_GATES` 拿掉 ⇒ 臂 2 的期望值对不上 ⇒ 立刻红
+   *   （`scripts/gate-shape-execution.test.mjs` 的臂 5 钉的是同一件事的另一半）。
+   */
+  { binding: 'runtimeShapeExecution', id: 'runtime.shape-execution', point: 'runtime' },
 ]
 
 /** 登记表里某条判据挂在哪。 */
@@ -847,13 +862,18 @@ test('臂 3f ★ 集成臂：runtime 上"观察模式"与"不拒绝流程"是双
   const notApplicable = await registry.evaluate('runtime', { event: notAProbeEvent })
   assert.equal(notApplicable.evaluated, 0, `★ 不适用的事件（${notAProbeEvent}）⇒ 这一轮没有判据被求值`)
   /**
-   * ★ t6：`runtime` 位置现在有**两条**判据（liveness + 新增的 stall）。
+   * ★ t6：`runtime` 位置现在有**三条**判据（liveness + stall + 2026-10-20 的
+   *   `shape-execution`）。
    *   ★ 本行断言的是**「不适用 ≠ 位置为空」**这条性质，而不是那个具体数字 ——
    *     所以它随位置变满是正常的；
    *   该断言与断言值的两半分别是「注册数 > 0」（性质）与「= 本位置的条数」（当时快照），
    *     后者只与位置相关、与断言无关。
+   *
+   * ★★ 而那个"当时快照"每次加判据都要跟着改 —— 这不是夹具的毛病，是它**刻意**的：
+   *   一个只写 `> 0` 的断言会让"有人把 payload 一大半判据摘掉"永远读不出来。
+   *   ⇒ 每次加判据时同步这个数，就是"我知道自己往这个位置加了什么"的机械确认。
    */
-  assert.equal(notApplicable.registered, 2, '★ 而不适用 ≠ 位置为空：判据仍然注册着（runtime 现在两条：liveness + stall）')
+  assert.equal(notApplicable.registered, 3, '★ 而不适用 ≠ 位置为空：判据仍然注册着（runtime 现在三条：liveness + stall + shape-execution）')
   assert.deepEqual(notApplicable.blockers, [], '★ "没跑"不许在任何字段上读成"发现问题"')
 
   /** ② 不在观察 ⇒ 告警进 `blockers`。 */
@@ -1095,7 +1115,18 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
      *   而那四条**各自都声明了** ⇒ 若没声明，本条照样红。
      * ✅ 反向半边：把那四条从 `ALL_GATES` 拿掉 ⇒ `0 !== 4` ⇒ 立刻红。
      */
-    { admission: 3, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 2, collection: 4 },
+    /**
+     * ── ★★ 2026-10-20：`runtime` 位置 2 → 3（`runtime.shape-execution` 上线）──
+     *
+     * ★ **只改 `runtime` 这一格**，其余六个一字未动
+     *   （`admission: 3` / `contract: 3` / `dispatch: 3` / `completion: 4` /
+     *     `delivery: 2` / `collection: 4`）⇒ 证明这次加判据没有波及别处。
+     *
+     * ★★ **这不是放宽**：下面那一段仍要求每条判据声明 `requires`，
+     *   而新那条**声明了**（`['event', 'team']`）⇒ 若没声明，本条照样红。
+     * ✅ 反向半边：把它从 `ALL_GATES` 拿掉 ⇒ `3 !== 2` ⇒ 立刻红。
+     */
+    { admission: 3, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 3, collection: 4 },
     '★ 七位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })

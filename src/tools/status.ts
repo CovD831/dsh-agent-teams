@@ -10,7 +10,7 @@ import { TERMINAL_TASK_STATUSES } from '../types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, readPlanReview, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
-import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, describeStrandedWorktrees } from '../members.ts'
+import { memberActivity, memberLiveness, strandedWork, strandedWorktrees, describeStrandedWorktrees, describeTeamShape, shapeExecutionFor } from '../members.ts'
 import { sessionLeadsTeam } from '../lineage.ts'
 import { deliveryAuditFor } from '../artifacts.ts'
 import { identityOfTeam, liveRefsOf } from '../members.ts'
@@ -282,6 +282,24 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           properties: {
             team_id: { type: 'string' },
             team_name: { type: 'string' },
+            /**
+             * ── ★★★ 2026-10-20：这个队**声明了什么形态**、以及**它是不是真那样在跑** ──
+             *
+             * `src/capabilities.ts:185` 与 `src/types.ts:1273` 早就引用了一个叫
+             * `describeTeamShape` 的出口，而它**此前不存在** —— 注释里写好了去向、
+             * 代码里没有那一步（本仓记账的那类形态）。
+             * ⇒ 现在它真的存在，并且由这一格接上。
+             *
+             * ★★ 三格**并列而不合并**，因为它们是三个不同的事实：
+             *   `shape`            —— **声明**（缺席 = 存量队，判不了，**不是**任何一种）
+             *   `execution`        —— **执行读数**的三态（not-applicable / measured / unmeasured）
+             *   `execution_violations` —— 干过活却一个临时 worker 都没派的成员
+             *   ★ 把后两者合成一个布尔，"合规"与"我没能测"就会同形 —— 而那正是
+             *     上一轮形态验证记下的那个缺口。
+             */
+            team_shape: { type: 'string', required: true },
+            shape_execution: { type: 'string', required: true },
+            shape_violations: { type: 'array', required: true, items: { type: 'string' } },
             description: { type: 'string' },
             phase: { type: 'string' },
             /**
@@ -1302,6 +1320,13 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
         const planReview = await readPlanReview({ tasks: team.tasks })
         const loop = describeQualityLoop(team)
         /**
+         * ★★ 形态的执行读数**算一次、三处用**（声明 / 状态 / 违规名单）。
+         *   三次各算一遍会读三遍会话枚举 —— 而那不是风格问题：面板是轮询的，
+         *   每次多两遍 `ctx.agents.list()` 直接变成延迟。更糟的是三次读数可能落在
+         *   **不同的时刻**，于是"声明说在跑、违规名单却来自另一次读"这种矛盾自证不出来。
+         */
+        const shapeExecution = shapeExecutionFor(ctx, team)
+        /**
          * ★★★ N5 / t8：计划环的读数。**紧挨着 `describeQualityLoop`** —— 两个环同形并列，
          *   而它们读**不同的状态位**（`escalated` vs `planReviewEscalated`），
          *   把它们放在一起是为了让"谁读了哪一位"在源码里一眼可见
@@ -1316,6 +1341,23 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           team_name: team.name,
           description: team.description ?? '',
           phase: team.phase ?? 'running',
+          /**
+           * ── ★★★ 形态：声明 + 执行，两句话，不合并 ────────────────────────────────
+           *
+           * 见 `members.ts` 的 `describeTeamShape`。★ 这一格存在的理由是上一轮
+           * 形态验证的结论：**`shape` 是一条声明，而"声明有没有被执行"此前没有读数。**
+           * 一个 `shape: 'dispatch'` 的队如果成员全都自己干活，没有任何东西会红。
+           *
+           * ★ 三态在**值**上不同形：
+           *   `shape_execution` = `'not-applicable'` ⇒ 这个队没有这个说法
+           *                     = `'measured'`       ⇒ 读了（`shape_violations` 才是结论）
+           *                     = `'unmeasured'`     ⇒ 判不了（**不是**"没有违规"）
+           * 而 `shape_violations` **恒在场**（空数组 = 读了、确实没有违规）——
+           *   字段缺席会让"没违规"与"这一格不存在"同形。
+           */
+          team_shape: describeTeamShape(team.shape, shapeExecution),
+          shape_execution: shapeExecution.status,
+          shape_violations: shapeExecution.status === 'measured' ? [...shapeExecution.violations] : [],
           halted: loop.halted,
           escalated: loop.escalated,
           loop_state: loop.state,

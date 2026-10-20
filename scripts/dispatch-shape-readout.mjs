@@ -1000,14 +1000,29 @@ function buildReadout() {
     group: 'dispatch',
     question: '每个成员派了几个临时 sub-agent —— 台账里有这一格吗？',
     command: `node -e 'const t=require("./${TEAM_FILE}");console.log(Object.keys(t.members[0]).join(","))'`,
+    /**
+     * ── 2026-10-20：这一条**仍然如实报 unmeasured**，而它报的已经不再是缺口 ────────
+     *
+     * 本轮落了 `runtime.shape-execution`（判据）+ `agent_teams_status` 的三格
+     * （`team_shape` / `shape_execution` / `shape_violations`）⇒ "派了几个"**现在有读数了**，
+     * 但读数**不在 `team.json` 的成员记录里**：它由会话里的 `subagent/catalog` 事件
+     * 在**读侧推导**（见 `src/members.ts` 的 `dispatchReadoutOf`）。
+     *
+     * ★ 所以这一条的裁决**不变**（"台账里没有这一格"仍然成立），而它的 `why` 变了：
+     *   以前那句话是"缺的是一条记录"，现在要补一句"**证据在别处，且已经有判据在读它**"。
+     * ★★ 这正是本仓记账的那条纪律：**一个读数的结论会随机制上线而改变含义** ——
+     *   留着旧措辞会让下一个人以为缺口还在，并去"补一个早已不需要的计数器"。
+     */
     reading: dispatchLikeKeys.length === 0
       ? `unmeasured（member 记录里没有派工计数格。已查全部键：${[...memberKeyUnion].sort().join(', ')}）`
+        + '；★ 而派工数**现在有读侧推导**：见 agent_teams_status 的 shape_execution 那一格'
       : `找到计数格 ${dispatchLikeKeys.join(', ')}（读数见下一条）`,
     expect: 'member 记录里存在一个可求和的派工计数格（如 dispatches / subagentCount）',
     means: '★ 这是"官方计数器"的那一格：它不存在，就意味着**没有任何一份台账**能回答"派了几个"。',
     verdict: dispatchLikeKeys.length === 0 ? VERDICT.unmeasured : VERDICT.confirmed,
     why: dispatchLikeKeys.length === 0
-      ? '★ 缺的**不是一个数，是一条记录**：`team.json` 的 `members[]` 只有 id / name / role / provider / model / reasoningEffort / executionPrompt / joinedAt / status [/runtimeSetup]。没有 `dispatches`、没有 `subagentCount`、没有子会话 id 列表。任务记录里也只有 `assignee`（人类可读的名字），没有"这一次由哪个临时 sub-agent 执行"的字段。⇒ 本脚本**不打印 0**，因为 0 会读成"一个都没派"。'
+      ? '★ 缺的**不是一个数，是一条记录**：`team.json` 的 `members[]` 只有 id / name / role / provider / model / reasoningEffort / executionPrompt / joinedAt / status [/runtimeSetup]。没有 `dispatches`、没有 `subagentCount`、没有子会话 id 列表。⇒ 本脚本**不打印 0**，因为 0 会读成"一个都没派"。'
+        + ' ★★ **2026-10-20 更新**：这个缺口**已在读侧补上**，而没有在台账里加计数器 —— `src/members.ts` 的 `dispatchReadoutOf` 从父会话的 `subagent/catalog` 事件数出累计派出数，由 `runtime.shape-execution` 判据与 `status` 的 `shape_execution` 那一格消费。⇒ 本条**仍然报 unmeasured**（台账里确实没有这一格），但它的含义已从"缺口"变成"这一格的证据在别处"。'
       : null,
     value: { memberRecordKeys: [...memberKeyUnion].sort(), dispatchLikeKeys },
   }))

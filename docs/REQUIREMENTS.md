@@ -374,3 +374,49 @@ node scripts/plan-review-check.mjs --help                       # （相邻的 C
 2. **"自动补齐"与"提示"是两件事**，不要顺手把 `lib/` 塞进 `inScope` ——
    那会让 `inScope` 从"这次要改什么"退化成"这次可能会碰到什么"，而它现在是
    `changedPaths ⊆ inScope` 那条判据的唯一真值来源。
+
+## 14. ★★★ `shape` 是声明，所以必须有一条判据问「声明被执行了吗」
+
+> 「你这个建团 是用早期插件的形态建的 而不是后来我规定的形态
+>   而且关于这个问题 其实我已经做过修复了 但显然并没有起效」
+> —— 用户 2026-10-20（`docs/DEFECT-TEAM-SHAPE-FALLBACK.md` 逐字）
+
+**判据**:上一轮形态验证自己写下的结论（`docs/SHAPE-VERIFICATION-PROBE-1.md` §4 逐字）：
+「**`shape` 是一条声明，而"声明有没有被执行"今天没有读数。** 一个 `shape: 'dispatch'`
+的队如果成员全都自己干活，**没有任何一条臂会红**。」
+★ 那正是本条存在的理由：**乙方案让"派临时工"成为可能，而"有没有真的派"仍然只能靠人看会话文件。**
+
+**现状**:✅ 已实现（2026-10-20）—— 判据 `runtime.shape-execution` + 三格 `status` 出口。
+
+```
+声明在哪   team.json 的 shape（乙方案，d52c9c4）
+执行证据   宿主写在父会话里的 subagent/catalog 事件（每派一个 worker 多一条）
+           ★ 不是"当前活着的子代理"—— 后者漏掉"派过又结束了"，而那正是 dispatch 的常态
+读数出口   agent_teams_status 的 team_shape / shape_execution / shape_violations
+判据       runtime.shape-execution（只报告，不拒绝 —— runtime 位置纪律，契约 §5）
+```
+
+★★ **三态，且三者两两不同形**（这是本条的要害，不是形式）：
+```
+measured        —— 读了（violations 空 = 真的没有违规）
+unmeasured      —— 派工读不到（★ 绝不并进"零违规"）
+not-applicable  —— flat / 缺声明（存量队：这一格对它根本没有"该不该派"可言）
+```
+★ 判定只认两格同时成立：**干完过活**（名下有终态任务）**且一个 worker 都没派**。
+只看"没派"会把还没开工的成员判成违规，而那会立刻教会人忽略这条判据。
+
+**证据**:
+```bash
+node scripts/gate-shape-execution.test.mjs      # 13 臂全绿（含一条真实路径臂）
+# 真实读数（dispatch-shape-probe 队）：
+#   ledger  executedTasks=1  dispatched=1（worker 48403c6f）⇒ violations=[]
+#   inspector executedTasks=0 ⇒ 不计（没机会派工）
+```
+9 次定向突变，8 次打红（第 9 次暴露了一条只断言总数、不断言"非 catalog 事件不算数"的
+弱臂 —— 已补强后打红）。
+
+★★ 两条纪律：
+1. **"声明"与"执行"是两句话**，不许合成一句 —— 合成之后"声明了、也照做了"与
+   "声明了、全员自己干"在读数上同形，而它们要求的动作相反。
+2. **`shape` 缺席（存量队）绝不默认成 `dispatch`** —— 那会让 8 个存量队里实测 5 个
+   早期形态的队**看起来都符合规定**，一次静默的假绿。

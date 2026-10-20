@@ -63,7 +63,7 @@ import { dedupeKeyOf } from '../../gates/collection/shared.ts'
 /** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
 import type { GateEvaluation } from '../../gates/registry.ts'
 import type { GatePoint } from '../../gates/index.ts'
-import { installMemberSelectionRuntime, resolveMemberLlmSelection, validateMemberLlmSelections } from '../../members.ts'
+import { installMemberSelectionRuntime, resolveMemberLlmSelection, shapeExecutionFor, validateMemberLlmSelections } from '../../members.ts'
 import { resolveTeamProfile } from '../../profiles.ts'
 import { createTeamDir } from '../../state.ts'
 import { sessionLeadsTeam, type LiveSessionRef } from '../../lineage.ts'
@@ -5231,6 +5231,25 @@ export async function evaluateRuntimeGates(
     ? teamWaitObservations(team, clock(), event)
     : undefined
   /**
+   * ── ★★★ `shape` 的执行读数（2026-10-20）：这个队真的在派临时 worker 吗 ────────────
+   *
+   * 见 `src/gates/runtime/shape-execution.ts` 的文件头。★ 注入在这里而不是调用点的理由，
+   * 与上面 `waits` 逐字相同：本函数是六处 runtime 调用点**唯一**的求值点 ——
+   * 在六处各自拼一份，就是六份会慢慢分叉的东西。
+   *
+   * ★★ 三态，且**只有 dispatch 队才去读会话**：
+   *   · `team.shape !== 'dispatch'` ⇒ `not-applicable`（**不读会话**，不做无谓的 I/O）
+   *   · 是 dispatch ⇒ 逐成员读派工（`memberDispatchReadout`）并折成违规名单
+   *   · 读不出来 ⇒ `unmeasured`（**不**圆成"零违规"）
+   *
+   * ★ 为什么这一格**不是**由判据自己读：契约 §2「判据不 import I/O」。会话事件只有
+   *   `ctx.agents` 那头读得到，而判据层拿不到 `ctx` —— 与 `waits` / `observedChangedPaths`
+   *   完全同一条分工。
+   */
+  const shapeExecution = team === undefined || typeof team !== 'object' || !Array.isArray(team.tasks) || typeof team.id !== 'string'
+    ? undefined
+    : shapeExecutionFor(ctx, team)
+  /**
    * ── ★ 输入面：本入口是**六处** runtime 调用点唯一的求值点，所以核对也在这里 ────
    *
    * → 八处调用点里六处（`member-dispatched` / `task-created` / `task-update` /
@@ -5252,6 +5271,7 @@ export async function evaluateRuntimeGates(
     ...source,
     ...wait === undefined ? {} : { wait },
     ...waits === undefined ? {} : { waits },
+    ...shapeExecution === undefined ? {} : { shapeExecution },
     event,
   })
   let evaluation
@@ -5260,6 +5280,7 @@ export async function evaluateRuntimeGates(
       ...source,
       ...wait === undefined ? {} : { wait },
       ...waits === undefined ? {} : { waits },
+      ...shapeExecution === undefined ? {} : { shapeExecution },
       event,
     })
   } catch (error: unknown) {
