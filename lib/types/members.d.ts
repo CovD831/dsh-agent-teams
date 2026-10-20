@@ -899,6 +899,20 @@ export declare const SESSION_BUDGET_UNREADABLE = "this member's session log coul
  *
  * @returns 窗口上限；`undefined` ⇒ 调用方**只报用量**，不报"还剩多少"。
  */
+/**
+ * 读一个成员的**会话预算**（I/O 那一半）。
+ *
+ * ★ 数据源：`~/.dsh/sessions/<slug>/<sessionId>/session.v4.jsonl.zstd`。
+ *   `slug` 是 cwd 的编码形式（`--Users-abab-Desktop-agent-teams-dev--`）——
+ *   与 `scripts/dispatch-shape-readout.mjs` 的 `projectSlugFor` **同一口径**。
+ *
+ * ★★ 帧遍历用 `splitZstdFrames`（`harness-compat.ts`，本仓唯一正确的实现）——
+ *   **不用** `zstdDecompressSync`：它静默只解第一帧（实测 1 行 vs 1701 行）。
+ *
+ * @param sessionId - 成员会话 id（`''` ⇒ `not-started`）。
+ * @param workspace - 用来推会话目录（slug 由它编码而来）。
+ */
+export declare function memberSessionBudget(sessionId: string, workspace: string): Promise<SessionBudgetReadout>;
 export declare function contextWindowOf(env?: {
     readonly AGENT_TEAMS_CONTEXT_WINDOW?: string;
 }): number | undefined;

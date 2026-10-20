@@ -19,7 +19,10 @@ import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
 import { createUserMessage, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
-import { guardSubagentCreation, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMember, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents, usesManagedActivations, type MemberStartSpec, type MemberToolFilter } from './harness-compat.ts'
+import { homedir } from 'node:os'
+import { readFile } from 'node:fs/promises'
+import { zstdDecompressSync } from 'node:zlib'
+import { guardSubagentCreation, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMember, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents, splitZstdFrames, usesManagedActivations, type MemberStartSpec, type MemberToolFilter } from './harness-compat.ts'
 import { markMailboxDelivered, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from './state.ts'
 import { mailboxPrompt } from './mailbox.ts'
 import { appendTeamEvent, captainSessionOf, liveAgentOf } from './events.ts'
@@ -2070,6 +2073,78 @@ export const SESSION_BUDGET_UNREADABLE = 'this member\'s session log could not b
  *
  * @returns 窗口上限；`undefined` ⇒ 调用方**只报用量**，不报"还剩多少"。
  */
+/**
+ * 读一个成员的**会话预算**（I/O 那一半）。
+ *
+ * ★ 数据源：`~/.dsh/sessions/<slug>/<sessionId>/session.v4.jsonl.zstd`。
+ *   `slug` 是 cwd 的编码形式（`--Users-abab-Desktop-agent-teams-dev--`）——
+ *   与 `scripts/dispatch-shape-readout.mjs` 的 `projectSlugFor` **同一口径**。
+ *
+ * ★★ 帧遍历用 `splitZstdFrames`（`harness-compat.ts`，本仓唯一正确的实现）——
+ *   **不用** `zstdDecompressSync`：它静默只解第一帧（实测 1 行 vs 1701 行）。
+ *
+ * @param sessionId - 成员会话 id（`''` ⇒ `not-started`）。
+ * @param workspace - 用来推会话目录（slug 由它编码而来）。
+ */
+export async function memberSessionBudget(
+  sessionId: string,
+  workspace: string,
+): Promise<SessionBudgetReadout> {
+  /**
+   * ★ `id === ''` 是**可判定的事实**（"它没起来过"）⇒ 它不可能有消耗。
+   *   与 `could-not-measure` 不同形（同 `memberLiveness` 的 `never-spawned` 口径）。
+   */
+  if (sessionId === '') return { status: 'not-started' }
+  const slug = `--${workspace.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
+  const file = join(homedir(), '.dsh', 'sessions', slug, sessionId, 'session.v4.jsonl.zstd')
+  let buffer: Buffer
+  try {
+    buffer = await readFile(file)
+  } catch (error: unknown) {
+    return { status: 'unmeasured', reason: `${SESSION_BUDGET_UNREADABLE}: ${String((error as { message?: unknown })?.message ?? error)}` }
+  }
+  let frames: Buffer[]
+  try {
+    frames = splitZstdFrames(buffer).frames
+  } catch (error: unknown) {
+    return { status: 'unmeasured', reason: `${SESSION_BUDGET_UNREADABLE}: frame walk failed: ${String((error as { message?: unknown })?.message ?? error)}` }
+  }
+  if (frames.length === 0) {
+    return { status: 'unmeasured', reason: `${SESSION_BUDGET_UNREADABLE}: the session file contains no complete zstd frame` }
+  }
+  let text = ''
+  for (const frame of frames) {
+    try { text += zstdDecompressSync(frame).toString('utf8') } catch { /* 单帧失败 ⇒ 读数是下界，不掀翻整份 */ }
+  }
+  /**
+   * ── 口径与 `scripts/dispatch-shape-readout.mjs` **逐字相同** ────────────────────
+   *   `assistant/message` 的 `data.usage.totalTokens`（= in + out + cacheRead）
+   *   ⇒ 它算的是**累计消耗**；而 `peakInputTokens` 才是"当前窗口占用"的近似。
+   */
+  let totalTokens = 0
+  let peakInputTokens = 0
+  let steps = 0
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    let record: { type?: unknown; data?: { usage?: { totalTokens?: unknown; inputTokens?: unknown } } }
+    try { record = JSON.parse(line) } catch { continue }
+    if (record.type !== 'assistant/message') continue
+    const usage = record.data?.usage
+    if (usage === undefined || typeof usage.totalTokens !== 'number') continue
+    steps += 1
+    totalTokens += usage.totalTokens
+    if (typeof usage.inputTokens === 'number') peakInputTokens = Math.max(peakInputTokens, usage.inputTokens)
+  }
+  /**
+   * ★ 一条 assistant 记录都没有 ⇒ **没能测量**（不是"消耗是 0"）——
+   *   那正是本仓最贵的那条纪律，这里再钉一次。
+   */
+  if (steps === 0) {
+    return { status: 'unmeasured', reason: `${SESSION_BUDGET_UNREADABLE}: no assistant/message record with usage was found in ${frames.length} frame(s)` }
+  }
+  return { status: 'read', totalTokens, peakInputTokens, steps }
+}
+
 export function contextWindowOf(env: { readonly AGENT_TEAMS_CONTEXT_WINDOW?: string } = process.env as never): number | undefined {
   const raw = (env as Record<string, string | undefined>)['AGENT_TEAMS_CONTEXT_WINDOW']
   if (raw === undefined || raw.trim() === '') return undefined
