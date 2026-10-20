@@ -172,7 +172,22 @@ function readingOf(spec) {
  *   偏移**，把已完整的帧返回 —— 读数是**下界**，由调用方标出来，而不是整个读成
  *   `unmeasured`（那样会丢掉已经能读到的全部历史）。
  */
-function splitZstdFrames(buffer) {
+/**
+ * ── ★★★ 导出它，好让**别的**消费者复用同一份帧遍历器（2026-10-21）──────────────
+ *
+ * MEASURED（本轮 t4 的实现现场）：我为了"读会话用了多少 token"**自己写了一遍**
+ * 帧头解析，而它错了两次：
+ *   · 第一次把 Zstd 的 magic 按大端比较（`0x28B52FFD`）—— 实际要用 `readUInt32LE`
+ *     读出 `0xFD2FB528` ⇒ **一帧都进不去**
+ *   · 第二次把 RLE 块（type 1）的盘上长度写成 `blockType === 0 ? 1 : size`
+ *     ⇒ 而**本函数下面那一行**逐字写着正确的规则
+ *
+ * ⇒ ★★ 本仓记账过最贵的那一类缺陷：**第二份实现**。而它这次的代价是
+ *   两次错误的帧遍历、以及差点把一个**静默少数**的 token 计数器交付出去
+ *   （Node 内建只解第一帧：同一个文件 1 行 vs 1701 行）。
+ *   ⇒ 所以把它导出，让下一个需要它的人**先用这份**，而不是再写一遍。
+ */
+export function splitZstdFrames(buffer) {
   const frames = []
   let offset = 0
   let truncatedAt = null
