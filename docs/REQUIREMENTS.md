@@ -551,3 +551,44 @@ baseline is upstream deliverable t3@6bc6c936e8c9
 
 ★ 剩下那一半：**基线仍然不会因为"没合流"而改变**。那是另一条改动
 （要不要在派活前强制合流 / 拒绝派发），本轮**没做** —— 而它现在**有读数可依**了。
+
+## 19. ★★ `pnpm build` 在 worktree 里**不可复现** —— 而它出现在**每一个** implementation 任务的 verify 里
+
+> 「`lib/client.js` 那 484 行**全部是构建路径污染**。功能等价，但**产物不可复现** ——
+>   同一份 `src/` 在两台机器 / 两个 worktree 上构建出的 `lib/client.js` 字节不同。」
+> —— integrator 在 t3 的开工报告里实测报出（2026-10-20）
+
+**判据**:`tsdown.config.ts` 的 CSS Modules 配置逐字是 `cssModules: { pattern: '[hash]_[local]' }`，
+而那个 `hash` 由 **`filename`（绝对路径）** 决定 ⇒ **同一个 worktree 路径不同，CSS 类名 radix 全变**。
+
+实测（两条，方向相反，缺一不可）：
+```
+在 worktree 里 build：git diff lib/client.js | grep -c 'task-shortfall-repair-t3'  ⇒ 8
+                      归一化（抹掉绝对根路径 + CSS hash）后逐字节比                    ⇒ IDENTICAL
+在【主树】里 build：  git diff --numstat lib/client.js                              ⇒ 空（0 行）
+                      归一化后                                                       ⇒ IDENTICAL
+```
+⇒ ★★ **主树可复现，worktree 不可复现。** 这不是缺陷，是 worktree 的固有属性。
+
+**现状**:⚠️ 已知、未修。本轮**刻意不修**，理由有两条：
+- 根治要动 `tsdown.config.ts`，而那个文件**不在任何任务的 inScope 里**；
+- 更要紧：**同轮既改产物生成规则、又改产物本身，会让「新增失败 = 0」这个读数不可信**。
+
+**证据**:
+```bash
+grep -n "pattern: '\\[hash\\]_\\[local\\]'" tsdown.config.ts
+git status --short lib/ | grep -v 'lib/client.js'    # 除 client.js 外应当为空
+```
+
+★★ 三条纪律：
+
+1. **`lib/client.js` 不许进任何任务的交付物。** 它对只碰 `src/quality-gates.ts` 这类文件的任务
+   完全无关，而它 484 行的路径噪音会把真正的功能改动埋掉。
+2. **`git-artifacts --check` 在 worktree 里会红，而那个红是"可解释的"** ——
+   判据必须能区分「产物真的不一致」与「client.js 的路径污染」，
+   否则每一个 implementation 任务都会撞同一条红，然后学会忽略它。
+3. **它解释了「worktree 里 verify 全绿」与「合进主树后全绿」之间的那道缝** ——
+   每个 worktree 都生成一份字节不同的产物，而合并时只有最后那份进主干。
+
+★ 下一条独立任务：让 CSS 命名不依赖绝对路径（或设 `sourcemapBasePath` 类的东西），
+然后**一次性重建**所有人的 `lib/client.js`。
