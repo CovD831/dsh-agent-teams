@@ -592,3 +592,53 @@ git status --short lib/ | grep -v 'lib/client.js'    # 除 client.js 外应当�
 
 ★ 下一条独立任务：让 CSS 命名不依赖绝对路径（或设 `sourcemapBasePath` 类的东西），
 然后**一次性重建**所有人的 `lib/client.js`。
+
+## 20. ★★★ 契约在**建的那一刻**写窄，会让成员正确地选择失败 —— 而那不是成员的错
+
+> 「未实现一行代码 —— 契约在结构上不可满足，按任务书「Do NOT guess a file set」停下并上报。」
+> —— `t5`（测试文件哈希基线）的交付报告，2026-10-20
+
+**判据**:`t5` 的 `inScope` 是 `src/artifacts.ts` · `src/tools/update-task.ts` · `src/state/tasks.ts`，
+而它要做的两件事里有**两件在结构上做不到**（逐条实测）：
+
+```
+claim 时快照必须挂在三个 claim 点：
+  src/tools/claim.ts:98       beginTaskAttempt(...)
+  src/scheduler.ts:891        beginTaskAttempt(...)
+  src/tools/reassign.ts:117   beginTaskAttempt(...)
+  ⇒ 三个全在 inScope 之外
+而臂的落点：scripts/gate-*.test.mjs（实测 119 个）⇒ 也在 inScope 之外
+```
+
+⇒ ★★ 它**只能**加一个"可选参数"，而 scope 内没有任何调用方能传它
+⇒ 基线永远不存在 ⇒ 比对永远落"拿不到" ⇒ **一条看起来装好、永不生效的判据**。
+
+**现状**:⚠️ 已记账，未修。根因是**我用 `edit_plan` 建的契约**，而
+`grep -c "rejectOnContractGates" src/tools.ts` ⇒ **0** —— 那条路线不跑契约门
+（需求 §13 已逐字记录过同一件事，而我在同一会话里又踩了一次）。
+
+**证据**:
+```bash
+node --input-type=module -e "import {readTeamSync} from './lib/state.js'
+const t=readTeamSync('.agent-teams','shortfall-repair')
+for (const x of t.tasks) if (x.kind==='implementation') {
+  const s=(x.inScope??[]).some(p=>p.startsWith('src/')), l=(x.inScope??[]).some(p=>p.startsWith('lib/'))
+  if (s&&!l) console.log(x.id, x.status)
+}"
+# 修复前：t1 completed · t4 pending · t5 failed · t6 pending  ← 4 条
+```
+
+★★★ 三条纪律：
+
+1. **一个成员因"契约不可满足"而 `failed`，不能与"做砸了"同形。**
+   `t5` 的选择是对的（宁可失败，也不造一个恒 `unmeasured` 的空壳），
+   而 `failed` 这个状态**区分不了**这两件事 —— 于是它会被读成"它没做成"。
+
+2. **`edit_plan` 的 `add_task` 必须跑契约门。** 这是 §13 的核心诉求，
+   而本轮 4/4 条 implementation 契约都缺 `lib/` 配对，全部由这条缺口造成。
+
+3. **写 scope 时要问「这件事的**每个落点**都在里面吗」**，而不只是"要改哪个文件"。
+   `t5` 的教训不是"t5 很难"，是"我把落点数少了一半"。
+
+★ 处置：`lib/` 配对已逐条 `amend_task` 补上（t3/t4/t6）；`t5` 因已终态不可改，
+由 `t7` 的验收**明确裁定其失败性质**，并如实记「测试文件哈希基线至今未做」。
