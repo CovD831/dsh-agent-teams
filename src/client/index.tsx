@@ -27,6 +27,7 @@ import { SessionIdAction } from './SessionIdAction.tsx'
 import {
   FOLDERS_MAIN_KEY, PROBE_SLOT_NAME,
   noteProbeRegistrationError, noteProbeSelection, noteProbeSelectionAccepted, noteProbeSelectionError,
+  ROOM_MAIN_KEY,
 } from './folders-probe.tsx'
 /**
  * ★★★ t111：真的**文件夹面板**（v5 第一层）。
@@ -35,6 +36,11 @@ import {
  *   ⇒ 本轮只把**组件**换掉，判据载体一个都没动。
  */
 import { FoldersPanel } from './folders-panel.tsx'
+/**
+ * ★★★ 2026-10-22：**房间**（需求 §27）。与文件夹**并存**，不是替换 ——
+ * 理由见 `folders-probe.tsx` 的 `ROOM_MAIN_KEY` 注释（11 条臂钉在 FoldersPanel 上）。
+ */
+import { RoomPanel } from './room-panel.tsx'
 /**
  * ── ★★★ t118：这个**浏览器标签页**里是否已经为"呈现工作区"切过一次面板 ─────────────
  *
@@ -358,6 +364,39 @@ export function apply(ctx: ClientContext): void {
           },
         }),
       }, FoldersPanel)
+    } catch (error: unknown) {
+      noteProbeRegistrationError(error instanceof Error ? error.message : String(error))
+      return () => {}
+    }
+  })
+
+  /**
+   * ── ★★★ 2026-10-22：第二个 `main` key —— **房间**（需求 §27）───────────────────
+   *
+   * 形状与上面那个**逐字相同**（`{ name: 'main', key }` + 空 `inject` 面）：
+   * 上面那一段已经用真实宿主演到过「无会话时注册得进去 / `selectPanel` 之后真的被渲染」
+   * ⇒ ★ 本层**不需要重新论证地基**，只需要证明"房间也是同一个形状"。
+   *
+   * ★★ 它**不出现在**默认路径上：`main` 一次只显示一个 key，而"哪个 key 默认"
+   *   是一个**产品决策**（要不要让房间取代文件夹页？）⇒ 见 §27.5 的待裁定。
+   *   本轮只保证：**这个 key 注册得进去、且被选中时真的渲染**。
+   *
+   * ★ 注册失败**仍收进可读的格子** —— 与上面那个逐字同源：
+   *   "注册失败"与"注册了但没显示"同形，而两者补救动作相反。
+   */
+  ctx.slots.inject(PROBE_SLOT_NAME as 'main', () => {
+    try {
+      return ctx.slots.register({
+        name: PROBE_SLOT_NAME as 'main',
+        key: ROOM_MAIN_KEY,
+        /** ★ 房间同样是纯表现：数据来自模块级 `/state` 快照，`inject` 留空面。 */
+        inject: (): { openConversation: () => void } => ({
+          openConversation: () => {
+            noteSelectPanelCall('room-open', null)
+            ctx.layout.selectPanel(null)
+          },
+        }),
+      }, RoomPanel)
     } catch (error: unknown) {
       noteProbeRegistrationError(error instanceof Error ? error.message : String(error))
       return () => {}

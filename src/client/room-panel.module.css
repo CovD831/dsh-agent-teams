@@ -1,0 +1,262 @@
+/**
+ * ── ★★★ 房间的像素风（需求 §27）—— 沿用 `folders-panel.module.css` 那一套纪律 ─────────
+ *
+ * ★★ **不引第二套视觉语言**：无圆角 / 硬阴影（0 blur）/ 等宽字体 / 整数网格 /
+ *   只用宿主语义 token。三份 CSS 各写一套调色板 = 三份会漂移的真相。
+ *
+ * ── 为什么是"等距房间"而不是"一张平面图"──────────────────────────────────────
+ *
+ * 用户的参照是**经营类 / 像素游戏的房间**（`ypyik0669/claude-web` 的网吧用 16×8 的
+ * 等距格子）。等距的好处是**同一屏能放下更多工位**且"墙"能立起来 ——
+ * 而本插件一个工作区实测会住 8 个队 / 35 个人（`roomPlanOf` 的真实语料臂）。
+ * ★ 而**本文件只做正投影（top-down）**：先让"谁在哪"可读，等距是下一层的事。
+ *   ★★ 理由与 §27.4 同一条：先让读数对，再谈观感。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.room {
+  --room-tile: 46px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 100%;
+  padding: 20px 24px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  image-rendering: pixelated;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  padding-bottom: 8px;
+  /* ★ 2px 硬分区线（游戏 UI 的写法，同 folders-panel）。 */
+  border-bottom: 2px solid var(--dsw-alias-border-l2);
+}
+
+.title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* ★ 三个计数各自一格（无圆角 + 2px 硬边）。 */
+.meta {
+  flex: none;
+  padding: 1px 7px;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-radius: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.meta:last-child {
+  margin-left: auto;
+}
+
+/* ── 地板 ───────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★ 地板是一个 grid：**一格 = 一个工位**。
+ * ★★ 于是"房间多大"在 DOM 上也是可数的（`data-room-cols` / `data-room-rows`），
+ *   而不是只有一个模糊的容器高度。
+ */
+.floor {
+  position: relative;
+  display: grid;
+  gap: 0;
+  align-self: flex-start;
+  /* ★ 硬边地板框：2px 实线，无圆角。 */
+  border: 2px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* ★ 一格地板：交替色形成"地砖" —— 像素风的地面就是**两种色交替的方格**。 */
+.tile {
+  width: var(--room-tile);
+  height: var(--room-tile);
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 62%, transparent);
+}
+
+.tile:nth-child(2n) {
+  background: color-mix(in srgb, var(--dsw-alias-bg-layer-2) 42%, transparent);
+}
+
+/* ★ 属于某个团队的地板格子：底色带一点团队色（第二层提示，**不是**唯一的分界）。 */
+.tile[data-tile-team=''] {
+  background: color-mix(in srgb, var(--dsw-alias-bg-mask-2) 55%, transparent);
+}
+
+/* ── 小人 ───────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★ 小人是**绝对定位**在地板上的层：位置由 `left/top` 的整像素偏移给出
+ *   （`--seat-col` / `--seat-row` 由内联样式提供）。
+ * ★★ 为什么不用 grid 放置：地板格与小人必须能**独立排布** ——
+ *   否则"一个格子里两个人"会把格子的尺寸撑歪，而那正是 §27 要避免的"看不清谁在哪"。
+ */
+.actorLayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.actor {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  width: var(--room-tile);
+  height: var(--room-tile);
+  box-sizing: border-box;
+  padding: 3px 2px 2px;
+  /* ★ 定位：座位坐标是 1-based，减 1 换成 0-based 的格子偏移。 */
+  left: calc((var(--seat-col, 1) - 1) * var(--room-tile));
+  top: calc((var(--seat-row, 1) - 1) * var(--room-tile));
+  pointer-events: auto;
+}
+
+/* ★ 头：一个小方块。 */
+.actorHead {
+  width: 8px;
+  height: 8px;
+  background: var(--dsw-alias-label-secondary);
+}
+
+/* ★ 身体：比头宽的方块（像素小人的最小可辨识形状 = 一头 + 一身）。 */
+.actorBody {
+  width: 12px;
+  height: 10px;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+/**
+ * ★ 屏幕：`working` 时亮成业务色 —— 这是"在干活"最一眼可见的信号。
+ * ★★ 而它**不是唯一信号**：`data-actor-doing` 才是判据读的那一格。
+ */
+.actorScreen {
+  position: absolute;
+  right: 4px;
+  top: 6px;
+  width: 6px;
+  height: 5px;
+  background: var(--dsw-alias-bg-mask-3);
+}
+
+.actor[data-actor-doing='working'] .actorScreen {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.actor[data-actor-doing='working'] .actorBody {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+/* ★ `idle`：坐着但屏幕不亮（用中庸色，不抢眼）。 */
+.actor[data-actor-doing='idle'] .actorBody {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+/**
+ * ★★ `not-spawned`：**没有椅子** —— 一个空心框。
+ *   与 `idle` **必须不同形**：它连会话都没有，而"闲着"是有的。
+ */
+.actor[data-actor-doing='not-spawned'] .actorHead,
+.actor[data-actor-doing='not-spawned'] .actorBody {
+  background: transparent;
+  border: 1px dashed var(--dsw-alias-border-l2);
+}
+
+/* ★ `away`：椅子空着（虚线的身形）。 */
+.actor[data-actor-doing='away'] .actorHead,
+.actor[data-actor-doing='away'] .actorBody {
+  background: color-mix(in srgb, var(--dsw-alias-border-l2) 40%, transparent);
+}
+
+/**
+ * ★★ `unknown`：一个**问号**色的身形 —— **读不到**，不是闲着。
+ *   补救动作相反（去看宿主 / 什么都不用做），所以它必须看得出来。
+ */
+.actor[data-actor-doing='unknown'] .actorHead,
+.actor[data-actor-doing='unknown'] .actorBody {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--dsw-alias-border-l2) 0 2px,
+    transparent 2px 4px
+  );
+}
+
+/* ★ 名字：像素风里名字是**标签**，压在小人下面。 */
+.actorName {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ── 图例与通知 ─────────────────────────────────────────────────────────────── */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 2px solid var(--dsw-alias-border-l2);
+  border-radius: 0;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 10px;
+}
+
+.legendName {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 700;
+}
+
+.legendRows {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/**
+ * ★★ 两种通知**共用一套样式但不同措辞**（`data-room-notice` 区分）：
+ *   `unknown`（读不到）与 `empty`（确实没有）的补救动作相反，
+ *   所以它们**不许**用同一句话 —— 而样式可以共用（那是观感，不是读数）。
+ */
+.notice {
+  margin: 0;
+  padding: 18px 20px;
+  border: 2px dashed var(--dsw-alias-border-l2);
+  border-radius: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ★ 减少动效偏好下不引入动画（本面板本来就没有）。 */
+@media (prefers-reduced-motion: reduce) {
+  .actor,
+  .tile {
+    transition: none;
+    animation: none;
+  }
+}

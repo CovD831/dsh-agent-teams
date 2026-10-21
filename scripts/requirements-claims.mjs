@@ -365,6 +365,18 @@ export const PROBES = Object.freeze({
   },
 
   /**
+   * §27.2：一个工作区 = 一间房间 —— 筛队函数存在，且**按 workspace 过滤**。
+   * ★ 问句是"一个房间会不会混进另一个工作区的队"，不是"有没有画房间"。
+   */
+  'room-is-per-workspace'(root) {
+    const text = readFileSync(join(root, 'src', 'client', 'room-plan.ts'), 'utf8')
+    /** ★ 必须真的比较 `team.workspace === workspace`（不许用"取第一个工作区"糊过去）。 */
+    if (!/team\.workspace === workspace/.test(text)) return false
+    /** ★ 而"房间按团队分段"必须落在 `roomPlanOf` 里（几何分界，不靠颜色）。 */
+    return /fromRow/.test(text) && /toRow/.test(text)
+  },
+
+  /**
    * §26.5：`create_task` 与 `edit_plan` **两条路线**的 `inScope` 说明都要求列出每一个落点。
    *
    * ★★ 问句是"两条路线的提示是否**同源**" —— 只改一条会让换路线写契约的人
@@ -713,14 +725,39 @@ export const CLAIMS = Object.freeze([
   },
   // ── §27 统一入口要图形化到"能看懂在干什么" ───────────────────────────────
   {
-    id: 'R27.1', section: 27, status: 'gap',
-    claim: '成员级图形化：**每个成员**在界面上的"在干什么"来自既有事实（不是新开的数据通道）',
-    check: { kind: 'probe', probe: 'graphical-view-reads-existing-facts' },
-    note: '★ 用户 2026-10-22 逐字否决了"像素文件夹"：「单纯的像素文件夹其实没有意义」。'
-      + '★★ 探针问的是"有没有一个成员级的可读投影、且它的来源是既有字段" —— '
-      + '而"画得好不好看"**不进判据**（本机没有视觉模型）。'
-      + '⚠️ 场景①（工作区=房间）与场景②（照抄网吧）**是产品决策**，待用户裁定；'
-      + '本判据对两案同样成立（都要求成员级读数来自既有事实）。',
+    id: 'R27.1', section: 27, status: 'met',
+    claim: '成员级图形化：**每个成员**在房间里的"在干什么"来自既有事实（不是新开的数据通道）',
+    check: { kind: 'file', path: 'src/client/room-plan.ts' },
+    note: '★ 2026-10-22 落地：`room-plan.ts`（纯函数：团队 → 房间几何 + 站位 + doing）'
+      + ' + `room-panel.tsx`（只管画）。判据 `scripts/gate-room-plan.test.mjs` 9 臂，'
+      + '含 3 条反向半边（同名成员不许合并 / 渲染层不许自己判 liveness / 按工作区筛队必须生效）。'
+      + '★★ 全部读数来自既有字段：`liveness` 五态 · `currentTask` · `done/total`。零新数据通道。',
+  },
+  {
+    id: 'R27.2', section: 27, status: 'met',
+    claim: '一个工作区 = 一间房间；团队之间**几何可分**（不靠颜色）',
+    check: { kind: 'probe', probe: 'room-is-per-workspace' },
+    note: '★ 用户裁定（§27.3 逐字）：「一个工作区（或者说一个项目）就是一个房间」。'
+      + '★ 团队的边界落在**几何**上（各自行段 + 中间过道）—— 只靠颜色是错的：'
+      + '色弱看不出、截图也说不清。',
+  },
+  {
+    id: 'R27.3', section: 27, status: 'gap',
+    claim: '房间页是**默认入口**（还是与文件夹页并存，由用户选）',
+    check: { kind: 'manual' },
+    note: '⚠️ **待用户裁定**：`main` 一次只显示一个 key。'
+      + '当前实现是**两个 key 并存**（`agent-teams/folders` + `agent-teams/room`），'
+      + '房间**没有**被设为默认。'
+      + '★ 为什么不当场替换：`gate-folders-panel` 的 11 条臂钉在 `FoldersPanel` 上，'
+      + '直接换会让它们失去落点（"失去落点"与"那条判据不适用"同形）。',
+  },
+  {
+    id: 'R27.4', section: 27, status: 'gap',
+    claim: '画面从**正投影**升级到**等距房间**（经营类/像素游戏的房间观感）',
+    check: { kind: 'manual' },
+    note: '★ 当前是**正投影**（一格一个工位，地板 grid + 小方块）：先让"谁在哪、在干什么"可读。'
+      + '★★ 参照物用 16×8 的**等距**格子 + 墙 + 光照 + 24×24 角色 —— 那是下一层，'
+      + '而它属于**观感**，按 §27.4 的纪律不进判据。',
   },
   // ── §26 2026-10-22 的六个落地 ────────────────────────────────────────────
   {

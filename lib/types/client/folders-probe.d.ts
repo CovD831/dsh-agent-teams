@@ -39,6 +39,24 @@ export declare function resetProbeCounts(): void;
  */
 export declare const FOLDERS_MAIN_KEY = "agent-teams/folders";
 /**
+ * ── ★★★ 2026-10-22：**房间**是第二个 `main` key（需求 §27，用户裁定）────────────
+ *
+ * 用户原话：「一个工作区（或者说一个项目）就是一个**房间**」；而他对文件夹的评语是
+ * 「**单纯的像素文件夹其实没有意义啊**」。
+ *
+ * ★★ 为什么是**新增一个 key**，而不是把 `FoldersPanel` 换掉：
+ * ```
+ * `scripts/gate-folders-panel.test.mjs` 的 11 条臂把 `FoldersPanel` 钉在
+ * `FOLDERS_MAIN_KEY` 上（含"面板 import 了 noteProbeRender"这条反向半边的落点）。
+ * ⇒ 直接替换会让那 11 条**失去落点**，而"失去落点"与"那条判据不适用"同形。
+ * ⇒ 所以：**两个 key 并存**，由用户/路由选哪个被激活。
+ *   ★ 而"哪一个是默认"是一个**产品决策**，本轮不替用户定 —— 见 §27.5。
+ * ```
+ * ★ 房间面板同样喂 `noteProbeRender`（用下面这个 key）⇒ 它也有自己的渲染读数，
+ *   于是"房间页出现过没有"可编程判，而不是只能靠截图。
+ */
+export declare const ROOM_MAIN_KEY = "agent-teams/room";
+/**
  * 官方保留的 key —— ★ **反向半边**用的对照物。
  *
  * ★ 为什么需要它：若我们的 key 与 `conversation` **行为相同**，

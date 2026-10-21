@@ -43,8 +43,15 @@ import type { MainPanelId, UsePanelInfo } from '@deepseek-ai/dsh-client-ui-layou
 export interface SelectPanelCall {
     /** The panel id passed to `selectPanel`; `null` means "back to the conversation". */
     readonly panelId: string | null;
-    /** Where the call came from — two different routes must stay distinguishable. */
-    readonly from: 'return-entry' | 'folder-open';
+    /**
+     * Where the call came from — ★ **每一条路线都必须可区分**。
+     *
+     * ★★ `room-open` 是 2026-10-22 加的（需求 §27 的房间页）：房间页的"回会话"出口
+     *   与文件夹页的那一条**不是同一条路线**（它们是两个 `main` key）。
+     *   ⇒ 合成 `folder-open` 会让"从房间出去了"与"从文件夹出去了"在账本上同形，
+     *     而两者的补救动作不同（前者说明房间页可用，后者说明文件夹页还在）。
+     */
+    readonly from: 'return-entry' | 'folder-open' | 'room-open';
 }
 /** ★ 记一次调用（两个入口共用这一个账本 —— 它们的**方向**不同，靠 `from` 分开）。 */
 export declare function noteSelectPanelCall(from: SelectPanelCall['from'], panelId: string | null): void;
