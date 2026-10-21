@@ -85,10 +85,24 @@ export interface RoomPlan {
     /** ★ 房间是空的（没有任何团队）—— 与"读不到"**不同形** */
     readonly empty: boolean;
 }
-/** 一行放几个工位。★ 参照物用 6；这里 4 —— 房间按**团队**分区，一行太长会让团队界限模糊。 */
-export declare const SEATS_PER_ROW = 4;
-/** 房间至少几行（一个人也没有时也不画成一条线）。★ "空房间"与"没有房间"不同形。 */
-export declare const MIN_ROWS = 3;
+/**
+ * 一行放几个工位。
+ *
+ * ★★ MEASURED（2026-10-22，第二版截图）：先写了 4，画出来是**一条窄带** ——
+ *   因为一行 4 格 × 16px = 64px 宽，而一个 24×24 的小人比一格还宽 1.5 倍。
+ *   参照物用 **6**（`map.ts` 逐字 `SEATS_PER_ROW = 6`），且整间房 **34 列**。
+ * ⇒ 改成 6：一行 6 格 = 96px，装得下 6 个并排的小人，且团队之间仍有过道可分。
+ */
+export declare const SEATS_PER_ROW = 6;
+/**
+ * 房间至少几排深。
+ *
+ * ★★ MEASURED（第三版截图）：写 3 时房间是"一条薄地板 + 一片墙"，不像房间。
+ *   参照物 `MIN_DEPTH = 18`（它要放服务区与走道）—— 我们不要那么多，
+ *   但**房间必须有纵深**，否则墙会压过地板、眼睛读到的是"一堵墙"。
+ * ★ 8 是折中：两个团队（约 5 排）+ 走道之后仍有空余，看起来像一间屋子而不是一条走廊。
+ */
+export declare const MIN_ROWS = 8;
 /** 读一个人的"在做什么"。★ 五态映射，**不许**把 could-not-measure 折进 idle。 */
 export declare function doingOf(member: Pick<ActivityMember, 'liveness'>): RoomActorDoing;
 /**

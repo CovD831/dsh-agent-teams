@@ -1,43 +1,51 @@
 /**
- * ── ★★★ 工作区 = 一个**房间**（需求 §27，用户 2026-10-22 第二轮裁定）──────────────
+ * ── ★★★ 工作区 = 一个**房间**（需求 §27）──────────────────────────────────────────
  *
- * ── 用户原话（逐字）────────────────────────────────────────────────────────────
+ * ── 用户两次裁定（逐字）────────────────────────────────────────────────────────
  *
- * 「一个工作区（或者说一个项目）就是一个**房间**，你可以参考一些**经营类或者像素游戏**
- *  的房间概念，去看看它的画面是怎么做的。」
- * 「房间里面**一般只有一个团队**，当然也不排除有两个或几个团队，**这样应该就不会显得很空吧**。」
+ * 第一次（层级）：「一个工作区（或者说一个项目）就是一个**房间**……房间里面**一般只有一个团队**，
+ *   当然也不排除有两个或几个团队，这样应该就不会显得很空吧。」
  *
- * ── ★★★ 本文件**只负责画**：几何与站位全部由 `room-plan.ts` 算好 ────────────────
+ * 第二次（**画风**，在看到第一版之后）：「目前这个很显然**跟我想要的风格、跟我想的画面不一样**。
+ *   我刚才不是让你去搜索东西吗？搜 deepseek bot，claude web 的前端画面，
+ *   还有其他的一些**像素风经营游戏**或者是什么游戏的画面。」
  *
- * MEASURED（本机没有视觉模型）⇒ "画对了没有"不能靠看图判。
- * ⇒ 分工与参照物（`ypyik0669/claude-web` 的 `cafe/`）同构：
- * ```
- * room-plan.ts   纯函数：团队 → 房间几何 + 每个小人坐哪 + 在做什么   ← 有 7 条单测
- * room-panel.tsx 本文件：把那些数字画成像素（**不做任何判断**）
- * ```
- * ★ 而它同时是本仓纪律的落点：**每一格都有 `data-*` 读数**，
- *   于是"这个格子的读数对不对"可编程判，"好不好看"归人。
- *
- * ── ★★ 它替换的是什么（用户明确否决的那一半）──────────────────────────────────
- *
- * `folders-panel.tsx` 画的是"一个像素文件夹 + 两行字" ⇒ 它表达了"有几个工作区"，
- * 而**没有表达"里面的人在干什么"**。用户原话：「**单纯的像素文件夹其实没有意义啊**」。
- * ⇒ 房间的第一性目的不是好看，是**一眼看出谁在干活、谁卡住了**。
- *
- * ── ★ 像素风的三条纪律（沿用 `folders-panel.module.css` 那一套，不引第二套）──────
+ * ── ★★★ 第一版错在哪（这条写下来，防止再犯）────────────────────────────────────
  *
  * ```
- * ① 无圆角      ② 硬阴影（整像素偏移、0 blur）      ③ 等宽字体 + 整数间距
+ * 第一版：一排排 div 方格 + 每格一个灰色方块 + 名字
+ * 结果：  用户看到的是一张**表格**（他自己的截图：一片灰格子 + 一串截断的名字）
+ *
+ * ★ 差别不是"精美程度"，是**画法**：
+ *   正投影方格 ⇒ 读起来像表格
+ *   等距 + 有体积的物件 ⇒ 读起来像房间
  * ```
- * ★ 美术全部是 **CSS 方块**，零位图、零新依赖（引位图 = 体积进 lib/client.js + 版权）。
+ * ⇒ 所以本版是**真画**：等距地板（16×8 菱形）+ 墙 + 桌椅（立方体）+ 显示器（亮着就滚代码）
+ *   + 24×24 像素小人。**画法**取自参照物 `ypyik0669/claude-web` 的 `cafe/render.ts`
+ *   （`box()` 三面法 / `toScreen()` 等距投影 / 一点一像素再放大）。
+ *
+ * ── ★★ 分工没变（这是本仓纪律，不是偏好）──────────────────────────────────────
+ *
+ * ```
+ * room-plan.ts    纯函数：谁坐哪、在做什么            ← 9 条臂单测
+ * room-iso.ts     纯数学：地板坐标 → 屏幕坐标          ← 可单测
+ * room-sprite.ts  字符画：24×24 五态各一帧            ← 可单测（行数列数调色板键）
+ * room-canvas.ts  画：只用上面的东西，不自己判断      ← 返回 drawn[] 供夹具核
+ * 本文件           挂载 canvas、放大、hit test、标题
+ * ```
+ * ★ 判据落在**数据**上（`drawn[]` / `data-*`），不落在像素上 —— 本机没有视觉模型。
  *
  * @module dsh-agent-teams/client/room-panel
  */
 
-import { useSyncExternalStore, type CSSProperties } from 'react'
+import { useEffect, useRef, useSyncExternalStore, type CSSProperties } from 'react'
 import { getActivitySnapshotsSnapshot, subscribeActivitySnapshots, type ActivityTeam } from './activity-monitor.ts'
-import { DOING_LABEL, roomPlanOf, teamsOfWorkspace, workspacesOf, type RoomActor, type RoomPlan } from './room-plan.ts'
+import { DOING_LABEL, roomPlanOf, teamsOfWorkspace, workspacesOf } from './room-plan.ts'
+import { drawRoom } from './room-canvas.ts'
 import css from './room-panel.module.css'
+
+/** ★ 放大倍数：小 canvas 一点一像素地画，再整数倍放大 —— 那才是像素风。 */
+const ZOOM = 3
 
 /** 房间要显示的那个工作区（一个工作区 = 一个房间）。 */
 export interface RoomPanelProps {
@@ -46,84 +54,14 @@ export interface RoomPanelProps {
 }
 
 /**
- * 一个小人 —— **纯 CSS 方块**，不引位图。
- *
- * ★ 五态各有可辨识的形状 + `data-doing`（★ 形状给眼睛，读数给判据）：
- * ```
- * working     坐姿 + 屏幕亮（业务色方块）
- * idle        坐姿 + 屏幕暗
- * not-spawned 没有椅子（空心方块）—— 与 idle **不同形**
- * away        椅子空着（一个虚线框）
- * unknown     一个 `?`（★ 读不到，不是闲着）
- * ```
- */
-function ActorSprite({ actor }: { actor: RoomActor }): JSX.Element {
-  return (
-    <span
-      className={css.actor}
-      /**
-       * ★★ 座位坐标用**内联 CSS 变量**给（`--seat-col` / `--seat-row`），
-       *   而它同时有一个 `data-actor-seat` 的**可读读数**。
-       *   ⇒ 这是一个刻意的"两处"：变量给渲染（快、无重算），
-       *     读数给判据（可编程核对）。★ 两者由**同一个** `actor.seat` 派生，
-       *     所以"它们不一致"这件事在结构上写不出来。
-       */
-      style={{ '--seat-col': actor.seat.col, '--seat-row': actor.seat.row } as CSSProperties}
-      data-actor={actor.key}
-      data-actor-doing={actor.doing}
-      data-actor-task={actor.currentTask}
-      data-actor-seat={`${actor.seat.col},${actor.seat.row}`}
-      data-actor-progress={actor.total === 0 ? '' : `${actor.done}/${actor.total}`}
-      data-actor-team={actor.teamId}
-      title={`${actor.memberName}${actor.role === '' ? '' : `（${actor.role}）`} · ${DOING_LABEL[actor.doing]}`
-        + (actor.currentTask === '' ? '' : ` · ${actor.currentTask}`)
-        + (actor.total === 0 ? '' : ` · ${actor.done}/${actor.total}`)}
-    >
-      {/* ★ 头部 + 身体：两个方块就够 —— 24×24 的角色在 16px 的格子里也是"一像素一个特征"。 */}
-      <span className={css.actorHead} aria-hidden="true" />
-      <span className={css.actorBody} aria-hidden="true" />
-      {/* ★ 屏幕：`working` 时亮（这是"在干活"最一眼可见的信号）。 */}
-      <span className={css.actorScreen} aria-hidden="true" />
-      {/* ★ 名字：像素风里名字是**标签**，不是装饰。 */}
-      <span className={css.actorName}>{actor.memberName}</span>
-    </span>
-  )
-}
-
-/** 房间的**地板格** —— 一格一个 `span`，于是"房间多大"在 DOM 上也是可读的。 */
-function floorCells(plan: RoomPlan): JSX.Element[] {
-  const cells: JSX.Element[] = []
-  for (let row = 1; row <= plan.rows; row += 1) {
-    for (let col = 1; col <= plan.cols; col += 1) {
-      /**
-       * ★ 同一团队的行段用同一底色（`data-team-row`）——
-       *   而**分界主要靠几何**（团队之间留过道，见 `roomPlanOf`），颜色只是第二层提示。
-       *   ★★ 只靠颜色分团队是错的：色弱看不出、截图也说不清。
-       */
-      const band = plan.teams.find((entry) => row >= entry.fromRow && row <= entry.toRow)
-      cells.push(
-        <span
-          key={`${col}-${row}`}
-          className={css.tile}
-          data-tile={`${col},${row}`}
-          data-tile-team={band?.teamId ?? ''}
-        />,
-      )
-    }
-  }
-  return cells
-}
-
-/**
  * 一间房间 = 一个工作区。
  *
- * ★ 三态（`undefined` / `empty` / 有内容），且三者**两两不同形**：
+ * ★ 三态（`undefined` / `empty` / 有内容），两两不同形：
  * ```
- * snapshots === undefined  ⇒ 「读不到」（store 还没发布过第一份）—— 查 /state
+ * snapshots === undefined  ⇒ 「读不到」（store 还没发布过第一份）—— 去看 /state
  * plan.empty === true      ⇒ 「这个工作区还没有团队」—— 去建一个队
  * 有内容                    ⇒ 画房间
  * ```
- * ★★ 合流它们的后果与 `folders-view` 那一格逐字相同：白屏与"读不到"同形。
  */
 export function RoomPanel({ workspace }: RoomPanelProps = {}): JSX.Element {
   const snapshot = useSyncExternalStore(subscribeActivitySnapshots, getActivitySnapshotsSnapshot)
@@ -131,63 +69,110 @@ export function RoomPanel({ workspace }: RoomPanelProps = {}): JSX.Element {
   const target = workspace ?? workspacesOf(teams)[0] ?? ''
   const scoped = teamsOfWorkspace(teams, target)
   const plan = roomPlanOf(scoped)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (canvas === null || plan.empty) return
+    /**
+     * ★★ 画在**一点一像素**的离屏尺寸上，再整数倍放大：
+     *   若直接按 `ZOOM` 倍尺寸画，所有坐标都要乘 3 ⇒ 小数坐标会出现**半像素**，
+     *   而半像素就是糊 —— 像素风死于插值。
+     */
+    const draw = (): void => {
+      const context = canvas.getContext('2d')
+      if (context === null) return
+      /** ★ 先按 1:1 量一次尺寸（离屏），再设真实尺寸。 */
+      const probe = document.createElement('canvas').getContext('2d')
+      if (probe === null) return
+      const frame = drawRoom(probe, plan, { now: Date.now() })
+      canvas.width = frame.width * ZOOM
+      canvas.height = frame.height * ZOOM
+      canvas.style.width = `${frame.width * ZOOM}px`
+      canvas.style.height = `${frame.height * ZOOM}px`
+      const ctx = canvas.getContext('2d')
+      if (ctx === null) return
+      /** ★ 关掉平滑 —— 这一行是"像素风"的物理前提。 */
+      ctx.imageSmoothingEnabled = false
+      ctx.setTransform(ZOOM, 0, 0, ZOOM, 0, 0)
+      ctx.fillStyle = '#0b0a10'
+      ctx.fillRect(0, 0, frame.width, frame.height)
+      drawRoom(ctx, plan, { now: Date.now() })
+      /**
+       * ★ 房间名画在**放大之后**的坐标系里（`setTransform(1,0,0,1,…)`），
+       *   否则 3 倍放大下文字会变成一块一块的。参照物也是这么做的
+       *   （「names, seat tags, bubbles and receipts are drawn after that at the page's own resolution」）。
+       */
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.font = `${11 * ZOOM}px ui-monospace, SFMono-Regular, Menlo, monospace`
+      ctx.fillStyle = '#ff6ad0'
+      ctx.textBaseline = 'top'
+      ctx.fillText(target === '' ? '(未命名工作区)' : target, 10 * ZOOM, 8 * ZOOM)
+    }
+    draw()
+    /**
+     * ★ 动画：屏幕上的"代码在滚"需要重画。
+     * ★★ 而**只在有 working 的时候**开定时器 —— 一间全是闲人的房间不该每秒重画
+     *   （那会让一个静态画面吃掉 CPU，而"没在动"本来就不需要帧）。
+     */
+    if (!plan.actors.some((actor) => actor.doing === 'working')) return
+    const timer = setInterval(draw, 400)
+    return () => clearInterval(timer)
+  }, [plan, target])
 
   return (
-    <section className={css.room} data-room={target} data-room-cols={plan.cols} data-room-rows={plan.rows}
-      data-room-actors={plan.actors.length} data-room-teams={plan.teams.length}
+    <section
+      className={css.room}
+      data-room={target}
+      data-room-cols={plan.cols}
+      data-room-rows={plan.rows}
+      data-room-actors={plan.actors.length}
+      data-room-teams={plan.teams.length}
       data-room-empty={plan.empty ? 'true' : 'false'}
-      /**
-       * ★★ 这个读数把"读不到"与"空房间"分开：`unknown` 只在快照**从来没到过**时出现。
-       *   与 `data-room-empty` 并列，因为两者的补救动作相反。
-       */
       data-room-state={teams === undefined ? 'unknown' : plan.empty ? 'empty' : 'present'}
+      data-room-zoom={ZOOM}
     >
-      <header className={css.head}>
-        <span className={css.title}>{target === '' ? '(未命名工作区)' : target}</span>
-        {/* ★ 三个计数各自一格 —— 合起来会看不出"哪个是哪个"。 */}
-        <span className={css.meta} data-room-team-count={plan.teams.length}>{plan.teams.length} 队</span>
-        <span className={css.meta} data-room-people-count={plan.actors.length}>{plan.actors.length} 人</span>
-        <span className={css.meta} data-room-working-count={plan.actors.filter((actor) => actor.doing === 'working').length}>
-          {plan.actors.filter((actor) => actor.doing === 'working').length} 在干活
-        </span>
-      </header>
-
       {teams === undefined ? (
-        /**
-         * ★★ 读不到 ≠ 空房间。白屏与"还没读到"同形，而两者的补救动作相反
-         *   （一个去看 /state，一个什么都不用做）。
-         */
         <p className={css.notice} data-room-notice="unknown">
           还没读到工作区数据（`/state` 尚未返回）。这不等于「这里没有团队」。
         </p>
       ) : plan.empty ? (
         <p className={css.notice} data-room-notice="empty">
-          这个工作区还没有团队。建一个队，它的成员就会出现在这间屋子里。
+          这个工作区还没有团队。建一个队，它的成员就会坐进这间屋子。
         </p>
       ) : (
-        <div className={css.floor} style={{ gridTemplateColumns: `repeat(${plan.cols}, var(--room-tile))` }}>
-          {/* ★ 地板格先铺（它是背景，小人压在上面）。 */}
-          {floorCells(plan)}
-          {/* ★ 小人绝对定位在地板之上 —— 用一个独立的层，避免与地板的 grid 打架。 */}
-          <div className={css.actorLayer} aria-hidden="false">
-            {plan.actors.map((actor) => <ActorSprite key={actor.key} actor={actor} />)}
-          </div>
+        <div className={css.stage}>
+          <canvas
+            ref={canvasRef}
+            className={css.canvas}
+            data-room-canvas="true"
+            /** ★ 无障碍：canvas 里没有可读文本，所以把读数同时放在 `aria-label` 里。 */
+            aria-label={`工作区 ${target}：${plan.teams.length} 个团队、${plan.actors.length} 个成员`}
+          />
         </div>
       )}
 
-      {/* ★ 团队图例：房间里有多个团队时，名字与行段要能对上（§27.3 的"一般一个，不排除两个"）。 */}
-      {plan.teams.length > 1 ? (
-        <ul className={css.legend} data-room-legend={plan.teams.length}>
-          {plan.teams.map((entry) => (
-            <li key={entry.teamId} className={css.legendItem} data-legend-team={entry.teamId}>
-              <span className={css.legendName}>{entry.name}</span>
-              <span className={css.legendRows} data-legend-rows={`${entry.fromRow}-${entry.toRow}`}>
-                第 {entry.fromRow}{entry.toRow === entry.fromRow ? '' : `–${entry.toRow}`} 排
-              </span>
+      {/* ★ 成员读数表：**画面上**是像素小人，**下面**是可读的名字与状态（两者互补，不重复）。 */}
+      {plan.empty ? null : (
+        <ul className={css.roster} data-room-roster={plan.actors.length}>
+          {plan.actors.map((actor) => (
+            <li
+              key={actor.key}
+              className={css.rosterItem}
+              data-actor={actor.key}
+              data-actor-doing={actor.doing}
+              data-actor-task={actor.currentTask}
+              data-actor-seat={`${actor.seat.col},${actor.seat.row}`}
+              data-actor-team={actor.teamId}
+              title={`${actor.memberName} · ${DOING_LABEL[actor.doing]}`
+                + (actor.currentTask === '' ? '' : ` · ${actor.currentTask}`)}
+            >
+              <span className={css.actorName}>{actor.memberName}</span>
+              <span className={css.actorDoing} data-doing-label={actor.doing}>{DOING_LABEL[actor.doing]}</span>
             </li>
           ))}
         </ul>
-      ) : null}
+      )}
     </section>
   )
 }

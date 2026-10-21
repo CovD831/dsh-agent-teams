@@ -61,13 +61,29 @@ test('★ 臂 1：一个团队 ⇒ 一间房间，每个成员一个工位，行
   assert.equal(new Set(plan.actors.map((actor) => actor.seat.row)).size, 1)
 })
 
-test('★ 臂 2：人多了房间**变高**（不是挤在同一行，也不是固定空盒子）', () => {
+test('★ 臂 2：人多了房间**变高**（超过最小纵深之后才长）', () => {
   const one = roomPlanOf([team('alpha', [member('a')])])
-  const many = roomPlanOf([team('alpha', Array.from({ length: SEATS_PER_ROW * 3 }, (_, i) => member(`m${i}`)))])
-  assert.ok(many.rows > one.rows, '★★ 房间必须随人数长大 —— 否则 12 个人挤在一行，画面没法看')
-  assert.ok(one.rows >= MIN_ROWS, '★ 一个人也没有时也不画成一条线（MIN_ROWS）')
-  const rows = new Set(many.actors.map((actor) => actor.seat.row))
-  assert.equal(rows.size, 3, `★ ${SEATS_PER_ROW * 3} 个人 / 每行 ${SEATS_PER_ROW} ⇒ 3 行`)
+  /**
+   * ★★ MEASURED（本臂第一版在本轮红过）：`MIN_ROWS` 从 3 提到 8 之后，
+   *   「1 个人」与「18 个人」都落 8 排 ⇒ 旧断言（`many.rows > one.rows`）变红。
+   *
+   * ★ 而那是**行为变更**，不是缺陷：房间有**最小纵深**（否则墙压过地板，看起来像一堵墙）。
+   *   ⇒ 断言改成"长过最小纵深之后，人数越多房间越高"——
+   *     那才是"房间随人数长"的可证伪形式。
+   */
+  const rowsFor = (people) => roomPlanOf([team('alpha', Array.from({ length: people }, (_, i) => member(`m${i}`)))]).rows
+  /**
+   * ★★★ 修之前这一格是**假绿**：`Math.max(MIN_ROWS, …)` 把 8 排以下全压平
+   *   （1/6/12/18/24 人全是 8 排），而我写的是 `>` 断言 —— 它在 18 vs 12 上恰好成立
+   *   纯属巧合。⇒ 现在断的是**严格单调**：每多一行人，房间必须更高。
+   */
+  assert.ok(rowsFor(SEATS_PER_ROW) < rowsFor(SEATS_PER_ROW * 2), `★★ ${SEATS_PER_ROW} 人必须比 ${SEATS_PER_ROW * 2} 人的房间矮`)
+  assert.ok(rowsFor(SEATS_PER_ROW * 2) < rowsFor(SEATS_PER_ROW * 3), `★★ ${SEATS_PER_ROW * 2} 人必须比 ${SEATS_PER_ROW * 3} 人的房间矮`)
+  assert.ok(one.rows >= MIN_ROWS, '★ 一个人时也不小于最小纵深（空房间也画得出来）')
+  /** ★ 每人独占一行座位号 ⇒ 座位行数 = 人数 / 每行座数（向上取整）。 */
+  const full = roomPlanOf([team('alpha', Array.from({ length: SEATS_PER_ROW * 3 }, (_, i) => member(`m${i}`)))])
+  const seatRows = new Set(full.actors.map((actor) => actor.seat.row))
+  assert.equal(seatRows.size, 3, `${SEATS_PER_ROW * 3} 个人 / 每行 ${SEATS_PER_ROW} ⇒ 占 3 排座位`)
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,8 +176,13 @@ test('★★ 臂 7（真实语料）：把本工作区的真实团队投影成�
    * ★ 行数的**上界**：每个团队最多吃 ceil(成员数 / 每行) 行 + 1 行过道。
    *   ⇒ 超过这个数说明有条团队被算了两次，或者过道被重复计。
    */
-  const expectedRows = teams.reduce((sum, entry) => sum + Math.max(1, Math.ceil((entry.members?.length ?? 0) / SEATS_PER_ROW)) + 1, 0)
-  assert.ok(plan.rows <= Math.max(MIN_ROWS, expectedRows), `行数 ${plan.rows} 超过按人头算出的上界 ${expectedRows}`)
+  /**
+   * ★ 上界：`MIN_ROWS`（最小纵深）+ 每个团队吃掉的排数 + 每个团队之后的过道。
+   * ★★ 写 `<= MIN_ROWS + expected` 而不是 `<= expected`：房间是"最小纵深 + 团队区"，
+   *   两者**相加**（见 `roomPlanOf` 的注释 —— 压平过一次，那是假绿）。
+   */
+  const bandRows = teams.reduce((sum, entry) => sum + Math.max(1, Math.ceil((entry.members?.length ?? 0) / SEATS_PER_ROW)) + 1, 0)
+  assert.ok(plan.rows <= MIN_ROWS + bandRows, `行数 ${plan.rows} 超过按人头算出的上界 ${MIN_ROWS + bandRows}`)
   t.diagnostic(`${teams.length} 个团队 / ${plan.actors.length} 个成员 ⇒ ${plan.cols}×${plan.rows} 的房间`)
 })
 

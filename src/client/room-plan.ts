@@ -82,11 +82,25 @@ export interface RoomPlan {
   readonly empty: boolean
 }
 
-/** 一行放几个工位。★ 参照物用 6；这里 4 —— 房间按**团队**分区，一行太长会让团队界限模糊。 */
-export const SEATS_PER_ROW = 4
+/**
+ * 一行放几个工位。
+ *
+ * ★★ MEASURED（2026-10-22，第二版截图）：先写了 4，画出来是**一条窄带** ——
+ *   因为一行 4 格 × 16px = 64px 宽，而一个 24×24 的小人比一格还宽 1.5 倍。
+ *   参照物用 **6**（`map.ts` 逐字 `SEATS_PER_ROW = 6`），且整间房 **34 列**。
+ * ⇒ 改成 6：一行 6 格 = 96px，装得下 6 个并排的小人，且团队之间仍有过道可分。
+ */
+export const SEATS_PER_ROW = 6
 
-/** 房间至少几行（一个人也没有时也不画成一条线）。★ "空房间"与"没有房间"不同形。 */
-export const MIN_ROWS = 3
+/**
+ * 房间至少几排深。
+ *
+ * ★★ MEASURED（第三版截图）：写 3 时房间是"一条薄地板 + 一片墙"，不像房间。
+ *   参照物 `MIN_DEPTH = 18`（它要放服务区与走道）—— 我们不要那么多，
+ *   但**房间必须有纵深**，否则墙会压过地板、眼睛读到的是"一堵墙"。
+ * ★ 8 是折中：两个团队（约 5 排）+ 走道之后仍有空余，看起来像一间屋子而不是一条走廊。
+ */
+export const MIN_ROWS = 8
 
 /** 读一个人的"在做什么"。★ 五态映射，**不许**把 could-not-measure 折进 idle。 */
 export function doingOf(member: Pick<ActivityMember, 'liveness'>): RoomActorDoing {
@@ -144,7 +158,8 @@ export function roomPlanOf(teams: readonly ActivityTeam[]): RoomPlan {
         currentTask: member.currentTask ?? '',
         done: member.done ?? 0,
         total: member.total ?? 0,
-        seat: { col: offsetCol + 1, row: fromRow + offsetRow },
+        /** ★ 从第 **2** 列开始：第 1 列是贴墙的走道（否则第一排人贴着墙，像被塞进去的）。 */
+        seat: { col: offsetCol + 2, row: fromRow + offsetRow },
         groupIndex,
         teamId: team.teamId,
       })
@@ -155,9 +170,27 @@ export function roomPlanOf(teams: readonly ActivityTeam[]): RoomPlan {
   }
 
   return {
-    /** ★ 列数固定为一行座位数 —— 房间往**下**长（与参照物 `rows` 的取舍一致）。 */
-    cols: SEATS_PER_ROW,
-    rows: Math.max(MIN_ROWS, cursor - 1),
+    /**
+     * 列数。
+     *
+     * ★★ 第一版直接用了 `SEATS_PER_ROW` ⇒ 房间是 4 格宽的**一条**，看起来像表格列。
+     *   参照物 `COLS = 34`（它要放服务区、走道、VIP 房）—— 我们不要那么多家具，
+     *   但**房间必须有"空的地方"**，否则它只是把工位框起来了。
+     * ⇒ `SEATS_PER_ROW + 2`：左右各留一格**空地**（墙与第一排工位之间要能走人）。
+     */
+    cols: SEATS_PER_ROW + 2,
+    /**
+     * 排数。
+     *
+     * ★★ MEASURED（本行修之前）：`Math.max(MIN_ROWS, cursor - 1)` 把 8 排以下的
+     *   结果**全压平** ⇒ 1 人、6 人、12 人、18 人、24 人**都是 8 排**。
+     *   于是"房间随人数长"这句话在低人数区间**是假的**，而它测不出来
+     *   （因为本仓真实语料是 35 人 / 8 队，正好落在压平区之外）。
+     * ⇒ 改成**相加**：最小纵深是**底色**，团队区在它之上继续长。
+     *   即 `MIN_ROWS + 团队实际吃掉的排数` —— 这样两个量各自可读，
+     *   而"人多房间就高"在任何人数上都成立。
+     */
+    rows: MIN_ROWS + Math.max(0, cursor - 1),
     actors,
     teams: teamBands,
     /** ★ 没有任何团队 = 真·空房间。与 `roomPlanOf(undefined)` 不同形（那个根本不该被调用）。 */
