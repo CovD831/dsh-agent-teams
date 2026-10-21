@@ -450,7 +450,42 @@ console.log('ran 条目:', JSON.stringify(r.ran.find(e=>e.id==='runtime.liveness
 | 5 | `create_task` 用 `verifiedChangedPaths` 初始化 `task.changedPaths` | `src/tools/create-task.ts:1027` | 中（改变落盘内容） | 无 | ⚠️ 需要先证明判据在 `create_task` 上真的开火了 |
 | 6 | **注册表在 `blocked`/`unmeasured` 支也收证据** | `src/gates/registry.ts:849-890` | ★ **高**（22 条判据共用的接口） | 无，但波及面最大 | ❌ 单独立任务，不进本次 |
 
-★ **本次一律不做。** 本任务是只读施工单（见 §6 的 `src/` 零改动证明）。
+★ **本轮施工单只是一个只读产出**（见 §6 的 `src/` 零改动证明）。
+
+---
+
+## 4.2 ★★★ 已落地的三条（2026-10-21）
+
+| 序 | 动作 | 提交 | 臂 |
+|---|---|---|---|
+| 1 | `status` 的 `shape_violations` 改读**判据产出**，不再重算 | `d419f83` | 臂 9（`gate-shape-execution`）|
+| 2 | `renderStatus` 渲染 `team_shape` / `shape_execution` / `shape_violations` | `17c753b` | 臂 10（同上）|
+| 3 | `runtime` 的 `outcome` 拼上 `stalled_count` / `shape_violation_count` | `809d9c1` | 臂 6（`gate-runtime-record-tristate`）|
+
+★★ 三件共同的一件事：**新增了一个「这一份是谁算的 / 有没有渲染」的读数**，
+而不是只把数字接通：
+
+```
+  序 1  ⇒ shape_source: 'judgment-gate' | 'status-recomputed'
+  序 2  ⇒ renderStatus 里两行（声明 / 执行），且零违规不打印噪音
+  序 3  ⇒ outcome 里 "[stalled_count=1]"，而 notChecked 时**一个计数都没有**
+```
+
+★★★ 而序 3 有一条我**写错了期望、被实测纠正**的记录值得留：
+
+臂 6 的第一版断言「没有停下 ⇒ **不得**出现计数」，而它红了。
+实测：`runtime.stall` 在没停下时**也**返回 `stalled_count: 0`（`examined: 1` 证明它真查过）
+⇒ 那是**测到的零**，不是"没测到"。
+⇒ 于是臂拆成三条：①有停下=1 ②查过没停下=0 ③**全 skipped** ⇒ `notChecked:` 且无计数。
+★ "我的期望错了"这件事本身是读数 —— 差一点把一个**正确的实现**按一个**错误的期望**改坏。
+
+### 剩下的（**未做**，各自有理由）
+
+| 序 | 动作 | 为什么没做 |
+|---|---|---|
+| 4 | `verifyProbe` 对照 | 需要一条能红的臂；而两次退出码不一致的成因还没查清 |
+| 5 | `verifiedChangedPaths` 初始化 `changedPaths` | 需先证明判据在 `create_task` 上真的开火了 |
+| 6 | 注册表在 `blocked`/`unmeasured` 支也收证据 | ★ 22 条判据共用的接口，**波及面最大** ⇒ 单独立任务 |
 
 ### 4.1 动作与缺陷的对应（★ 6 个缺陷 → 6 个动作，一一对上，不留缝）
 
