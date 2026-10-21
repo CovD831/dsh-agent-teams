@@ -334,6 +334,37 @@ export const PROBES = Object.freeze({
   },
 
   /**
+   * §27：图形化界面是否**从既有事实**投影出"每个成员在干什么"。
+   *
+   * ★★ 问句是"数据来源"而不是"画出来没有"：
+   * ```
+   * 错的做法：为小人新开一条后端投影（`memberSprite` / `cafeSeat` 之类）
+   *           ⇒ 界面上看到的与判据读到的变成**两份真相**
+   * 对的做法：doing ← task.status · lastAction ← commandsRun / output
+   *           · stuck ← runtime.liveness 的 blocked（★ 已有判据，不许另算）
+   * ```
+   * ★ 而"画得好不好看"**不在判据里** —— 本机没有视觉模型，判它必然靠人看图。
+   */
+  'graphical-view-reads-existing-facts'(root) {
+    /**
+     * ★ 这条当前是**缺口**（`src/client/folders-panel.tsx` 只表达"有几个工作区"）。
+     *   探针照实答"这件事成立吗" —— 成立需要同时看到：
+     *   ① 一个成员级的投影函数（纯函数，可单测）
+     *   ② 它读的字段是既有的（`status` / `commandsRun` / `liveness`）
+     * ★ 只要还没写，它答 false ⇒ claim 落 `gap-open`。★ 这是**待办**，不是失败。
+     */
+    for (const relative of ['src/client/folders-panel.tsx', 'src/client/member-panel.tsx']) {
+      const file = join(root, relative)
+      if (!existsSync(file)) continue
+      const text = stripComments(readFileSync(file, 'utf8'))
+      const projectsMembers = /(membersFromSnapshot|memberSpritesOf|seatPlanOf)/.test(text)
+      const readsExisting = /task\.status|commandsRun|doing/.test(text)
+      if (projectsMembers && readsExisting) return true
+    }
+    return false
+  },
+
+  /**
    * §26.5：`create_task` 与 `edit_plan` **两条路线**的 `inScope` 说明都要求列出每一个落点。
    *
    * ★★ 问句是"两条路线的提示是否**同源**" —— 只改一条会让换路线写契约的人
@@ -679,6 +710,17 @@ export const CLAIMS = Object.freeze([
     note: '臂：把一条 `met` 的 file 证据改成不存在的路径 ⇒ 必须报 `gone`；'
       + '把一条 `gap` 的证据人为弄得成立 ⇒ 必须报 `claim-stale`；'
       + '一个拼错的探针名 ⇒ 必须报 `gone`（不许静默变绿）。12 臂，5 条是反向半边。',
+  },
+  // ── §27 统一入口要图形化到"能看懂在干什么" ───────────────────────────────
+  {
+    id: 'R27.1', section: 27, status: 'gap',
+    claim: '成员级图形化：**每个成员**在界面上的"在干什么"来自既有事实（不是新开的数据通道）',
+    check: { kind: 'probe', probe: 'graphical-view-reads-existing-facts' },
+    note: '★ 用户 2026-10-22 逐字否决了"像素文件夹"：「单纯的像素文件夹其实没有意义」。'
+      + '★★ 探针问的是"有没有一个成员级的可读投影、且它的来源是既有字段" —— '
+      + '而"画得好不好看"**不进判据**（本机没有视觉模型）。'
+      + '⚠️ 场景①（工作区=房间）与场景②（照抄网吧）**是产品决策**，待用户裁定；'
+      + '本判据对两案同样成立（都要求成员级读数来自既有事实）。',
   },
   // ── §26 2026-10-22 的六个落地 ────────────────────────────────────────────
   {
