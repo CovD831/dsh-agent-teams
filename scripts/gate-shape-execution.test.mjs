@@ -431,3 +431,56 @@ test('★★★ 臂 9：`status` 在判据跑过时**读它的产出**（`shape_
     '★★ `status-recomputed` 与 `judgment-gate` 必须可区分（否则两份真相又合流了）',
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 10（★★★ 2026-10-21）：`renderStatus` 必须**真的渲染**那三格
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 10：`renderStatus` 真的渲染形态三格（schema 说 required，呈现面不许一个字都没有）', async () => {
+  /**
+   * ── 它补的是什么（MEASURED，施工单序 2 / `OUTPUTS-CONSUMER-AUDIT` (a)-1 后半）──
+   *
+   * 那三格进了返回值、**也进了 schema（`required: true`）**，
+   * 而 `renderStatus` **一个字都没渲染** —— 实测：传进去什么都不打印。
+   *
+   * ★★ 本仓记账过同一条（`deployment` / `plan_review` 各记过一次）：
+   *   **一个只在返回值里、而人看不见的读数，与它不存在是同一件事。**
+   *   ★ 而这里更哑：schema 承诺了 `required: true`，呈现面却是空的。
+   *
+   * 定向突变：把 `Shape:` / `Shape execution:` 那两行删掉 ⇒ 本臂红。
+   */
+  const { renderStatus } = await import('../lib/tools/shared/entities.js')
+  const base = {
+    team_name: 'T', viewer: 'captain', members: [], tasks: [],
+    captain_inbox: [], member_inboxes: {}, mailbox_warnings: [], mailbox_warning_count: 0,
+  }
+
+  /** ① 三格都在 ⇒ 必须**都**出现在渲染里。 */
+  const rendered = renderStatus({
+    ...base,
+    team_shape: 'declared dispatch — held',
+    shape_execution: 'measured',
+    shape_source: 'judgment-gate',
+    shape_violations: ['ledger'],
+  })
+  assert.match(rendered, /Shape: declared dispatch — held/, '★★ 声明必须渲染（否则人看不见）')
+  assert.match(rendered, /Shape execution: measured/, '★★ 执行读数必须渲染')
+  assert.match(rendered, /source: judgment-gate/, '★★ 来源必须渲染 —— 否则两份真相在屏幕上合流')
+  assert.match(rendered, /violations: ledger/, '★★ 违规名单必须点名')
+
+  /**
+   * ② **反向半边**：没有违规时**不打印**那句（否则每一行都拖着 `— ★ violations: `
+   *   会让人学会忽略它 —— 而"没有违规"与"这一格不存在"由**别的**字段表达）。
+   */
+  const clean = renderStatus({
+    ...base, team_shape: 'held', shape_execution: 'measured', shape_source: 'judgment-gate', shape_violations: [],
+  })
+  assert.doesNotMatch(clean, /violations:/, '★★ 零违规不打印噪音（它是 `shape_execution` 那一格的事）')
+
+  /**
+   * ③ 三格**全缺席**（老调用方 / 判据与 status 都没算）⇒ 渲染里一行都不加。
+   *   ★ 这是"不适用不报"，与"读了、没违规"不同形。
+   */
+  const bare = renderStatus({ ...base })
+  assert.doesNotMatch(bare, /Shape/, '★ 三格缺席 ⇒ 不加行（不是加一行空的）')
+})

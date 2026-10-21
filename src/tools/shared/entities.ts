@@ -6317,6 +6317,23 @@ export function renderStatus(value: JsonValue): string {
     coverage?: { goal_item: string; status: string; task_ids: string[] }[]
     delivery?: { ok: boolean; blockers: string[]; unmeasured?: string }
     /**
+     * ── ★★★ 队伍形态三格（2026-10-21，施工单序 2）────────────────────────────────
+     *
+     * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-1 前半）：
+     * 这三格进了返回值、**也进了 schema（`required: true`）**，
+     * 而 `renderStatus` **一个字都没渲染** —— 实测：传进去什么都不打印。
+     *
+     * ★★ 这正是本仓记账过的那条（`deployment` / `plan_review` 各记过一次）：
+     *   **一个只在返回值里、而人看不见的读数，与它不存在是同一件事。**
+     *   ★ 而它更哑的地方在这里：schema 说 `required: true` ——
+     *     声明面承诺了"一定有"，而呈现面**一个字都没有**。
+     */
+    team_shape?: string
+    shape_execution?: string
+    shape_violations?: string[]
+    /** ★ 这一份数字是谁算的（`judgment-gate` / `status-recomputed`）。 */
+    shape_source?: string
+    /**
      * ★ 部署状态（t34 的格）。**必须渲染出来** —— 见下面那段 MEASURED。
      */
     deployment?: { status: string; message: string; loaded?: string; on_disk?: string }
@@ -6353,6 +6370,23 @@ export function renderStatus(value: JsonValue): string {
     ...team.profile === undefined ? [] : [`Profile: ${team.profile.name}${team.profile.task_planning ? ` [${team.profile.task_planning}]` : ''}${team.profile.protocol ? ` — ${team.profile.protocol}` : ''}`],
     ...team.loop_summary ? [`Loop: ${team.loop_state ?? ''} — ${team.loop_summary}`.replace(/^Loop:  — /u, 'Loop: ')] : [],
     `Viewing as: ${team.viewer}`,
+    /**
+     * ── ★★★ 形态：**声明**与**执行**两行，不合并（施工单序 2）──────────────────────
+     *
+     * ★ 为什么两行而不是一行：`team_shape` 是**声明**（"这个队是 dispatch 形态"），
+     *   `shape_execution` 是**执行读数**（"它是不是真那样在跑"）。
+     *   合成一行会让"声明了、也照做了"与"声明了、全员自己干"读起来一样 ——
+     *   而那两件事要求的动作相反。
+     *
+     * ★★ `shape_source` 也渲染：读的人必须知道这一份是**判据算的**还是
+     *   `status` 自己重算的 —— 否则两份真相在屏幕上又合流了。
+     */
+    ...team.team_shape === undefined ? [] : [`Shape: ${team.team_shape}`],
+    ...team.shape_execution === undefined ? [] : [
+      `Shape execution: ${team.shape_execution}`
+      + `${team.shape_source === undefined ? '' : ` (source: ${team.shape_source})`}`
+      + `${team.shape_violations === undefined || team.shape_violations.length === 0 ? '' : ` — ★ violations: ${team.shape_violations.join(', ')}`}`,
+    ],
     `Members (${team.members.length}):`,
     ...team.members.map((member) => {
       const route = member.provider && member.model ? ` · ${member.provider}/${member.model}` : ''
