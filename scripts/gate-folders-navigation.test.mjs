@@ -195,3 +195,71 @@ test('★★ 臂 10（只增不改）：回入口是**新文件**，既有视图
   const offending = imports.filter((s) => !allowed.has(s))
   assert.deepEqual(offending, [], `★ 零新依赖；实测多出 ${JSON.stringify(offending)}`)
 })
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 2026-10-22：**「回到工作区」跳的是房间**（需求 §27）──────────────────────
+ *
+ * 用户实测报告：「我现在点击回到工作区，它还是以前的**界面**」。
+ * 根因：回入口跳的是 `FOLDERS_MAIN_KEY`（文件夹页），而房间是**另一个 main key**。
+ *
+ * ★★ 而用户同时裁定了**不许**把房间设成默认入口：
+ *   「其实**不能**设置成默认入口，因为更多的工作可能都是在目前这个界面完成的。
+ *     而我们做的那个聚合页面，它只是**在一个等待期间可以去看**」
+ *   ⇒ 改的只是**这个入口的目标**，启动期默认面板一个字不动（臂 11 反过来钉住这点）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+test('★★★ 臂 11：「回到工作区」跳的是**房间** key，而不是文件夹页', async () => {
+  const { ROOM_MAIN_KEY } = await import('../lib/client/folders-probe.js')
+  resetSelectPanelLog()
+  /**
+   * ★ 走**真实组件路径**：`index.tsx` 在 `shell.overlay` 上注册的那个面，
+   *   它的 `selectPanel` 就是 `ctx.layout.selectPanel`。
+   *   而这里用**注入的**记录器（组件签名就是这么设计的），断言它收到的是 `ROOM_MAIN_KEY`。
+   */
+  const entry = readFileSync(ENTRY, 'utf8')
+  const code = entry.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '')
+  assert.match(
+    code, /selectPanel\(ROOM_MAIN_KEY as unknown as MainPanelId\)/,
+    '★★ 回入口必须切到房间 —— 跳到 FOLDERS_MAIN_KEY 会让用户"点了还是以前的界面"',
+  )
+  assert.doesNotMatch(
+    code, /selectPanel\(FOLDERS_MAIN_KEY as unknown as MainPanelId\)/,
+    '★★ 旧目标必须**不再**出现在回入口里（否则两个 key 都在跳，谁赢取决于行的顺序）',
+  )
+  /** ★ 账本也要记对：记成 folder-open 会让"从房间出去了"与"从文件夹出去了"同形。 */
+  assert.match(code, /noteSelectPanelCall\('return-entry', ROOM_MAIN_KEY\)/)
+  assert.notEqual(ROOM_MAIN_KEY, FOLDERS_MAIN_KEY, '★ 两个 key 必须是不同的 id（否则"跳房间"= "跳文件夹"）')
+})
+
+test('★★★ 臂 12（反向半边）：「回到工作区」在**房间页里也必须隐藏**', async () => {
+  const { ROOM_MAIN_KEY } = await import('../lib/client/folders-probe.js')
+  /**
+   * ★★ 两个 main key 是**同一个入口的两层**（文件夹 = 有哪些工作区；房间 = 里面的人在干什么）。
+   *   在任何一层里显示"回到工作区"都是噪音 —— 而且点了没反应，
+   *   那与"这个入口坏了"同形。
+   */
+  assert.equal(returnEntryState(ROOM_MAIN_KEY), 'hidden', '★★ 房间页里不该再显示"回到工作区"')
+  assert.equal(returnEntryState(FOLDERS_MAIN_KEY), 'hidden', '★ 文件夹页里同样隐藏')
+  assert.equal(returnEntryState('conversation'), 'show', '★ 会话里显示（这是它的主用途）')
+  assert.equal(returnEntryState(null), 'show', '★ null = 正在会话里')
+})
+
+test('★★ 臂 13（反向半边）：**启动期**的默认面板**仍然是文件夹页**（用户的第二条裁定）', () => {
+  const source = readFileSync(INDEX, 'utf8')
+  const code = source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/^\s*\/\/.*$/gmu, '')
+  const selectionBlock = /noteProbeSelection\(FOLDERS_MAIN_KEY\)([\s\S]*?)noteProbeSelectionAccepted\(\)/u.exec(code)?.[1] ?? ''
+  assert.notEqual(selectionBlock, '', '★ 必须找得到启动期的选择块')
+  /**
+   * ★★ 这是**反向半边**：用户明确说「其实**不能**设置成默认入口，因为更多的工作
+   *   可能都是在目前这个界面完成的」⇒ 谁把启动期改到房间，本条立刻红。
+   *   而"改回入口"与"修一个 bug"在 diff 上很像 —— 所以它必须由判据拦住。
+   */
+  assert.match(
+    selectionBlock, /FOLDERS_MAIN_KEY/,
+    '★★ 启动期默认面板必须仍是文件夹页 —— 房间只是"等待期间可以去看"的聚合页',
+  )
+  assert.doesNotMatch(
+    selectionBlock, /ROOM_MAIN_KEY/,
+    '★★ 启动期不许切到房间（用户原话：不能设成默认入口）',
+  )
+})

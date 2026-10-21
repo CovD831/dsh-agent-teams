@@ -41,7 +41,7 @@
 
 import { useSyncExternalStore } from 'react'
 import type { MainPanelId, UsePanelInfo } from '@deepseek-ai/dsh-client-ui-layout/client'
-import { FOLDERS_MAIN_KEY } from './folders-probe.tsx'
+import { FOLDERS_MAIN_KEY, ROOM_MAIN_KEY } from './folders-probe.tsx'
 import css from './folders-panel.module.css'
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +110,14 @@ export function resetSelectPanelLog(): void {
  */
 export function returnEntryState(activePanelId: string | null | undefined): 'show' | 'hidden' | 'unknown' {
   if (activePanelId === undefined) return 'unknown'
-  return activePanelId === FOLDERS_MAIN_KEY ? 'hidden' : 'show'
+  /**
+   * ★★ 两个 main key 都算"已经聚合页里"：文件夹页与房间页是**同一个入口的两层**
+   *   （用户原话：「那个聚合页面……只是在一个等待期间可以去看」）。
+   *   ⇒ 在**任何一层**里都不该再显示"回到工作区" —— 点了没反应，与"这个入口坏了"同形。
+   *   ★ 而它们的**内容不同**（文件夹 = 有哪些工作区；房间 = 里面的人在干什么），
+   *     所以判据要认两个 id，不能只认一个。
+   */
+  return activePanelId === FOLDERS_MAIN_KEY || activePanelId === ROOM_MAIN_KEY ? 'hidden' : 'show'
 }
 
 /**
@@ -179,8 +186,24 @@ export function FoldersReturnEntry({ usePanelInfo, selectPanel }: FoldersReturnE
          *     而"试过并失败"与"没试过"必须不同形。
          */
         onClick={() => {
-          noteSelectPanelCall('return-entry', FOLDERS_MAIN_KEY)
-          selectPanel(FOLDERS_MAIN_KEY as unknown as MainPanelId)
+          /**
+           * ── ★★★ 2026-10-22：这个入口跳的是**房间**，不是文件夹页（需求 §27）────────
+           *
+           * ★ 用户实测报告：「我现在点击回到工作区，它还是以前的界面」——
+           *   因为这里跳的是 `FOLDERS_MAIN_KEY`（文件夹页），而房间是**另一个 key**。
+           *
+           * ★★ 而用户同时裁定了**不许**把房间设成默认入口：
+           *   「其实**不能**设置成默认入口，因为更多的工作可能都是在目前这个界面完成的。
+           *     而我们做的那个聚合页面，它只是**在一个等待期间可以去看**」
+           *   ⇒ 所以改的是**这个入口的目标**，不是启动期的默认面板。
+           *     ```
+           * 启动期 selectPanel（首次打开）  ⇒ 仍然是文件夹页（不动它，且 gate-main-key-probe 11 条臂钉着）
+           * 点「回到工作区」               ⇒ 房间（本条）
+           * 房间页的"回会话"出口           ⇒ selectPanel(null)（已实现）
+           *     ```
+           */
+          noteSelectPanelCall('return-entry', ROOM_MAIN_KEY)
+          selectPanel(ROOM_MAIN_KEY as unknown as MainPanelId)
         }}
         title="回到工作区列表（文件夹大页面）"
       >

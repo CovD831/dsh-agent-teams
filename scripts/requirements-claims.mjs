@@ -742,14 +742,15 @@ export const CLAIMS = Object.freeze([
       + '色弱看不出、截图也说不清。',
   },
   {
-    id: 'R27.3', section: 27, status: 'gap',
-    claim: '房间页是**默认入口**（还是与文件夹页并存，由用户选）',
-    check: { kind: 'manual' },
-    note: '⚠️ **待用户裁定**：`main` 一次只显示一个 key。'
-      + '当前实现是**两个 key 并存**（`agent-teams/folders` + `agent-teams/room`），'
-      + '房间**没有**被设为默认。'
-      + '★ 为什么不当场替换：`gate-folders-panel` 的 11 条臂钉在 `FoldersPanel` 上，'
-      + '直接换会让它们失去落点（"失去落点"与"那条判据不适用"同形）。',
+    id: 'R27.3', section: 27, status: 'met',
+    claim: '房间**不是**默认入口，但**是**「回到工作区」的目标（两件事分开）',
+    check: { kind: 'file', path: 'scripts/gate-folders-navigation.test.mjs' },
+    note: '★ 用户裁定（§27.5 逐字）：「**不能**设置成默认入口，因为更多的工作可能都是在'
+      + '目前这个界面完成的……它只是在一个等待期间可以去看」。'
+      + '★★ 而同一句话的后半是**缺陷报告**：「我现在点击回到工作区，它还是以前的界面」——'
+      + '根因是回入口跳的仍是 `FOLDERS_MAIN_KEY`，而房间是另一个 key。'
+      + '判据：臂 11（切的是房间）/ 臂 12（房间页也隐藏回入口）/ 臂 13（**反向半边**：'
+      + '启动期默认面板不许改成房间）。',
   },
   {
     id: 'R27.4', section: 27, status: 'gap',
