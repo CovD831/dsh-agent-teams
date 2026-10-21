@@ -2158,3 +2158,97 @@ function sourceFilesTouchedBy(repo: string, commit: string): number | undefined 
     .filter((path) => !path.startsWith('lib/') && !path.endsWith('git-artifact-stamp.json'))
     .length
 }
+
+/**
+ * ── ★★★ 回收一棵隔离树（2026-10-21，裁决 ①）─────────────────────────────────────
+ *
+ * ── 它补的是什么（MEASURED：5.0G / 6 棵，而 5 棵已无用）─────────────────────────
+ *
+ * `ls .agent-teams/worktrees/ | wc -l` ⇒ **6** · `du -sh` ⇒ **5.0G**
+ * 而其中 **5 棵是干净的**（产物已交付或从未产生）。
+ *
+ * ★ 隔离的价值**已被一次真实事故证明**（`docs/WORKTREE-BASE-DEFECT.md` 记的 t39：
+ *   靠它找回了 12 个文件未提交的改动）⇒ **不该去掉它**。
+ *   而它的代价（磁盘）是**可控的** —— 只要"用完了就收"。
+ *
+ * ── ★★ 安全边界：**判据先说话，删除后执行** ──────────────────────────────────
+ *
+ * 本函数**自己不做判断** —— 它接受一个已经裁过的 `reclaimable`：
+ *   · `judgeWorktreeReclaimable` 说 `reclaimable` ⇒ 才允许删
+ *   · 说 `keep` / `undecidable` ⇒ **本函数直接返回 `skipped`**，一个字节都不动
+ *
+ * ★ 为什么把判断留在外面：那是**同一个判据**（`judgeWorktreeReclaimable`）
+ *   `pnpm reclaim:worktrees` 也在用 —— 两份会分叉，而分叉之后
+ *   "回收时算已吸收、终态时说没合流"会成为一个新的、更难查的不一致。
+ *
+ * ★★ 三态，且 `skipped` 与 `removed` **不同形**：
+ *   `removed`  —— 真的删了
+ *   `skipped`  —— 判据说不能删（`reason` 说清是 `keep` 还是 `undecidable`）
+ *   `failed`   —— git 命令失败（**不是**"删了"）
+ */
+export type WorktreeReclaimOutcome =
+  | { readonly status: 'removed' }
+  | { readonly status: 'skipped'; readonly reason: string }
+  | { readonly status: 'failed'; readonly reason: string }
+
+/**
+ * 删掉一棵**已经被判为可回收**的隔离树。
+ *
+ * ★ `git worktree remove --force` 而不是 `rm -rf`：
+ *   前者会让 git 的元数据（`.git/worktrees/<name>`）一起清掉；
+ *   后者只删目录，留下一条**指向不存在的树的记录** —— 而 `git worktree list`
+ *   会继续把它列出来（本仓记账过的那种"读数指向一个不存在的东西"）。
+ */
+export function removeReclaimableWorktree(options: {
+  readonly repo: string
+  readonly worktree: string
+}): WorktreeReclaimOutcome {
+  const removed = spawnSync('git', ['worktree', 'remove', '--force', options.worktree], {
+    cwd: options.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  if (removed.status === 0) return { status: 'removed' }
+  /**
+   * ★ 失败**不抛** —— 它是收尾，不是裁决（与 `reclaim:worktrees` 的
+   *   "清理失败不改结论"同一条纪律）。而它**必须如实报** `failed` + 成因。
+   */
+  const message = (removed.stderr ?? '').trim() || `git worktree remove exited ${String(removed.status)}`
+  return { status: 'failed', reason: message }
+}
+
+/**
+ * 一条任务落到终态之后，**试一次**回收它自己的树。
+ *
+ * ★★ 它**只在判据说 `reclaimable` 时**才删（见 `removeReclaimableWorktree` 的边界）。
+ *
+ * ★ 为什么挂在**终态那一跳**、而不是靠人跑 `pnpm reclaim:worktrees`：
+ *   后者需要有人记得 —— 而本仓记账过"靠人记得的规则会被证伪"。
+ *   ⇒ 挂在终态上是**结构性的**：每一条任务收口时就顺手清掉自己的树。
+ *
+ * ★★ 而它**不影响**那条任务的结果：任何失败都只是 `failed` 读数，
+ *   不许让"清不掉临时目录"去改写"这条任务做成了没有"。
+ */
+export function reclaimTaskWorktreeAfterTerminal(options: {
+  readonly repo: string
+  readonly teamId: string
+  readonly taskId: string
+  readonly root?: string
+  /** ★ 显式的主干引用（不给 ⇒ `resolveTrunkRef` 的声明式来源）。 */
+  readonly mainRef?: string
+}): WorktreeReclaimOutcome {
+  const path = join(options.root ?? join(options.repo, '.agent-teams', 'worktrees'), worktreeDirName(options.teamId, options.taskId))
+  /**
+   * ★ 树不在 ⇒ 没有可回收的东西。
+   *   ★★ 但**不是** `removed` —— "它本来就没有树"与"我把它删了"不同形。
+   */
+  if (!existsSync(path)) return { status: 'skipped', reason: 'this task has no worktree on disk' }
+  const verdict = judgeWorktreeReclaimable({ repo: options.repo, worktree: path, ...options.mainRef === undefined ? {} : { mainRef: options.mainRef } })
+  if (verdict.status !== 'reclaimable') {
+    return {
+      status: 'skipped',
+      reason: verdict.status === 'keep'
+        ? `the reclaim judge says keep (${verdict.reason}): ${verdict.detail}`
+        : `the reclaim judge could not decide: ${verdict.why}`,
+    }
+  }
+  return removeReclaimableWorktree({ repo: options.repo, worktree: path })
+}
