@@ -260,6 +260,57 @@ test('⑭ ★ 被【拒绝】的判据，它的产出不得被当成结果使用
   )
 })
 
+test('⑭b ★★★ 被拒判据的证据**不得**进 outputs —— 它与"产出"共用同一条通道（2026-10-21）', async () => {
+  /**
+   * ── 为什么要把 ⑭ 再钉一次（而不是重复）─────────────────────────────────────────
+   *
+   * 2026-10-21 施工单序 6 曾建议「注册表在 `blocked`/`unmeasured` 支也收证据」。
+   * ★★ 那条建议**撞上 ⑭** 而被撤回 —— 而撤回的理由值得单独一条臂钉住，
+   *   因为它是一个**设计决定**，不是一个实现细节：
+   *
+   *   `blockedWith(blockers, evidence)`（`runtime/liveness.ts`）把证据叠在裁决上，
+   *   而它在**合并层**进不了 `outputs`。⇒ 那是**对的**：
+   *     一条刚说"不可信"的判据，它的结果不该被当成结果使用。
+   *
+   * ★★★ 本臂钉的是**这条边界的两半**，缺一不可：
+   *   ① `blocked` 支的额外字段**不进** `outputs`（⑭ 已有的那一半）
+   *   ② 而它**仍然**跟着裁决离开判据 —— `verdict.blockers` 之外那些字段
+   *      **在 `evaluate` 的返回值上读不到**，调用方要拿它只能直呼 `gate()`
+   *   ⇒ ② 是新增的那一半：它把"证据去哪了"这件事说清楚，
+   *     免得下一个人以为"叠上去 = 留痕"（那句话曾被写进 `liveness.ts` 的注释里）。
+   */
+  const r = createGateRegistry()
+  r.register({
+    id: 'evidenced', point: 'runtime', description: 'd',
+    gate: () => ({ ok: false, blockers: ['stalled'], waits: [{ who: 'm1' }] }),
+  })
+  const v = await r.evaluate('runtime', {})
+  assert.equal(v.ok, false)
+  assert.deepEqual(
+    v.outputs, {},
+    '★★ 被拒判据的额外字段**不进** `outputs` —— 它与"产出"共用同一条通道，'
+    + '而那条通道的准入是"只有被采纳的判据才产出"',
+  )
+  assert.equal(
+    v.outputs['evidenced'], undefined,
+    '★★ 逐条指名：那一条判据在 `outputs` 里**没有**自己的键',
+  )
+  /**
+   * ★ 反向半边：**通过**时同一批字段**必须**进 `outputs` ——
+   *   否则上一条可以靠"恒不收"通过，而那会把 ⑬ 也一起废掉。
+   */
+  const r2 = createGateRegistry()
+  r2.register({
+    id: 'evidenced', point: 'runtime', description: 'd',
+    gate: () => ({ ok: true, waits: [{ who: 'm1' }] }),
+  })
+  const v2 = await r2.evaluate('runtime', {})
+  assert.deepEqual(
+    v2.outputs['evidenced'], { waits: [{ who: 'm1' }] },
+    '★ 通过时同一批字段**必须**进 `outputs` —— 否则本条测不出"在分辨"',
+  )
+})
+
 test('⑮ 没有产出的判据 ⇒ outputs 为空对象（不是 undefined）', async () => {
   const r = withGate('delivery', ok())
   const v = await r.evaluate('delivery', {})
