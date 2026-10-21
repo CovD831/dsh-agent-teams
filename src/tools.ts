@@ -2211,7 +2211,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
              *     只删这一格，上面那层仍会拦（但判据层对下一个人又是静默的）。
              */
             requireExplicitKind: true,
-          })
+          }, undefined, workspace)
           if (!validation.ok) throw new Error(validation.error ?? 'edited task violates the quality contract')
           /**
            * ── ★★★ 2026-10-20：`add_task` 路线**终于跑契约判据门**（需求 §13 的核心诉求）────

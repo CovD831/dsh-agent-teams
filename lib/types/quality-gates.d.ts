@@ -820,7 +820,30 @@ export declare function checkTaskPremises(input: {
     acceptance?: readonly string[];
     inScope?: readonly string[];
     verify?: readonly string[];
-}, root?: string): PremiseFailure[];
+}, root?: string, 
+/**
+ * ── ★★★ 2026-10-21：**第二棵可看的树** ────────────────────────────────────────────
+ *
+ * ── 为什么需要它（MEASURED：两个夹具要的是**不同的**树）──────────────────────
+ *
+ *   `scripts/lifecycle-verify.mjs`  在**临时 workspace** 里写 `scripts/parser.test.mjs`
+ *     ⇒ 那条 `verify` 目标只在**临时树**里存在
+ *   `scripts/gate-assignment-parity.test.mjs`  植入的三条违规（`contradiction`/`emit`/`touch`）
+ *     **依赖插件仓库自己的真实文件**（`src/types.ts` …）
+ *     ⇒ 它们只在**插件树**里成立
+ *
+ * ★★ 我先只传 `workspace` ⇒ 那个夹具的 premises 检查**抢先**拒绝（多出 2 条红）；
+ *   再撤回不传 ⇒ 这个夹具的目标又"不存在"（红回来）。
+ *   ⇒ **两个都对，而只给一棵树时它们互斥。**
+ *
+ * ── 正确的读法：前提核对问的是"**这件事在这棵树上能不能做**" ─────────────────
+ *
+ *   一棵文件在**任一棵**可看的树上存在 ⇒ 那条前提就**没被证伪**。
+ *   ★ 这是**保守的**方向：它只会**减少**误拒，不会让一条真的"结构上不可能"通过
+ *     —— 后者由 (ii) 的 `structurallyImpossiblePath` 判，那条与 root 无关（它看目录结构）。
+ *   ★★ 而"两棵树都没有"仍然报 —— 那才是要拦的那种。
+ */
+extraRoot?: string): PremiseFailure[];
 export declare function validateCreateTask(team: TeamState, input: CreateTaskInput, 
 /**
  * ── ★★★ 2026-10-21：`root` —— 前提核对该看**哪棵树** ─────────────────────────────
@@ -857,7 +880,12 @@ export declare function validateCreateTask(team: TeamState, input: CreateTaskInp
  *
  * ★ 缺席 ⇒ 退回 `localPluginRoot()`（**既有行为逐字节不变**，存量调用方不用改）。
  */
-root?: string): ValidateCreateTaskResult;
+root?: string, 
+/**
+ * ★ 第二棵可看的树（见 `checkTaskPremises` 的 `extraRoot`）。
+ *   ★★ 与 `root` **并列而不是替换**：两棵都看，任一存在即算前提成立。
+ */
+workspaceRoot?: string): ValidateCreateTaskResult;
 /**
  * ── ★★★ 「这次交付有没有新增失败」—— 三态，而三态必须不同形（t19）──────────────
  *

@@ -587,7 +587,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             coverageOf: input.coverageOf,
             resume: input.resume,
             resumeReason: input.resumeReason,
-          })
+          }, undefined, workspace)
           /**
            * ── ★★★ t87 · 汇合点 C：**契约类拒绝**（规格 §1 的表）─────────────────────
            *
