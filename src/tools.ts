@@ -111,6 +111,7 @@ import { register as register_status } from './tools/status.ts'
 import { register as register_delivery } from './tools/delivery.ts'
 import { register as register_resume } from './tools/resume.ts'
 import { register as register_delete } from './tools/delete.ts'
+import { register as register_halt } from './tools/halt.ts'
 import { register as register_restart } from './tools/restart.ts'
 /**
  * ★ t7（N6）：把「计划审查」做成一次**显式**工具调用。
@@ -124,7 +125,15 @@ import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, Stag
    * ── ★★★ 2026-10-20：`add_task` 路线跑契约判据门所需的四个符号（需求 §13）──────
    * ★ 与 `create_task` 用**同一个**实现、**同一套**注入 —— 不新造第二条路径。
    */
-  rejectOnContractGates, runVerifyCommand, loadVerifyCommandRules } from './tools/shared/entities.ts'
+  rejectOnContractGates, runVerifyCommand, loadVerifyCommandRules,
+  /**
+   * ── ★★★ 2026-10-21：汇合点 B 的**输入面**补齐（需求 §11 的 R11.4）────────────
+   * ★ 这两个符号此前只有另两个调用点在用 ⇒ 修好的两条路一条新信号都没产出过，
+   *   而唯一还在出货的那条（`edit_plan`）**两格都没有**。
+   * ★ `gateIdFromMessage` 而不是新写一个正则：全仓对「拒绝原文里的判据 id」
+   *   只有一处口径（`src/tools/shared/entities.ts:4328`），第二份必然分叉。
+   */
+  gateIdFromMessage, loadCollectionIndexFor } from './tools/shared/entities.ts'
 // ── ★ t39：对外接口不变 ─────────────────────────────────────────────────────
 // 这两个类型此前【声明在 tools.ts 里】，外部（src/index.ts）从这里 import。
 // 拆分之后它们的家在 tools/shared/entities.ts —— 而【对外接口不许变】，
@@ -2377,14 +2386,48 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
        * ★ 采一次 —— 而**不改这次拒绝的任何行为**：下面原样 rethrow。
        * ★ `where` 用 `edit_plan`（那是这条路径对外的名字）。
        */
+      /**
+       * ── ★★★ 2026-10-21：这一处调用点的**输入面补齐**（需求 §11 · R11.4）────────────
+       *
+       * MEASURED（本次审计）：三个采集调用点里只有两处接了 `source` / `loadIndex`，
+       * 而**唯一还在产出新信号的那条路正是没接的这条**：
+       *
+       * ```
+       * 修复之后落盘的 5 条信号全部来自 edit_plan：
+       *   e-0045..e-0049  ["dedupe:unmeasured","cooldown:unmeasured",
+       *                    "attributable:unmeasured","immunity:ok"]
+       * ```
+       *
+       * ⇒ 那是本仓记账最贵的形态：**两条修好的路一封新信都没有，修好的读数只在一个
+       *   从不发生的分支上成立。** 本次把三格同时接上（缺一格都会让一条判据继续 `unmeasured`）：
+       *
+       * ```
+       * component   ⇒ attributable 才有东西可落（缺 ⇒ unmeasured「说不出它是什么」）
+       * source      ⇒ cooldown 的来源键       （缺 ⇒ unmeasured「这条信号没有来源」）
+       * loadIndex   ⇒ dedupe / cooldown 的窗口（缺 ⇒ unmeasured「没有索引」）
+       * gateId      ⇒ 分流的 `hard` 靶        （缺 ⇒ 只能给描述性 target，收益无法归属）
+       * ```
+       *
+       * ★ 时序**一字未变**：仍然是 `void observe(...)` + 原样 rethrow；
+       *   `loadIndex` 是惰性的，读盘发生在**不被 await 的那一段**里。
+       */
       void observe({
         stateRoot,
         where: 'edit_plan',
         message,
         kind: ['unwired'],
+        /**
+         * ★ `component` 取 `'plan'`：这条路的对外名字是 `edit_plan`，而它拒的是**计划**层面的
+         *   变更（契约写错 / 未终结任务的 assignee 这类）。★ 与 `create_task` 取 `'contract'`
+         *   同一条口径：**按拒绝面归桶，不按调用者归桶**。
+         */
+        component: 'plan',
+        ...gateIdFromMessage(message) === undefined ? {} : { gateId: gateIdFromMessage(message) },
         now: Date.now(),
         evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
           registry.evaluate('collection' as never, context) as never,
+        source: 'edit_plan',
+        loadIndex: async () => await loadCollectionIndexFor(stateRoot),
         warn: (note: string) => ctx.logger.warn(note),
       })
       throw reason
@@ -2615,6 +2658,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   register_delivery(ctx, clock, config)
   register_resume(ctx, scheduler, config)
   register_delete(ctx, config)
+  register_halt(ctx, config)
   register_restart(ctx, config)
   register_review_plan(ctx, config)
   // Live-member hydration validates saved filters against registered tools.

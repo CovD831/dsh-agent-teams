@@ -669,7 +669,7 @@
           "type": "string"
         },
         "inScope": {
-          "description": "Workspace-relative POSIX paths this task may change.",
+          "description": "Workspace-relative POSIX paths this task may change. ★ List EVERY place the work lands, not just the file you plan to edit: callers you must update, tests you must add or fix, and any build artifact (lib/) that must be regenerated. A scope that names only one of several landing points makes the work impossible to complete — the member will correctly refuse rather than fake it, and the refusal looks identical to a failed attempt.",
           "items": {
             "type": "string"
           },
@@ -1113,7 +1113,7 @@
                 "type": "string"
               },
               "inScope": {
-                "description": "Workspace-relative POSIX paths this task may change. Required for implementation/repair.",
+                "description": "Workspace-relative POSIX paths this task may change. Required for implementation/repair. ★ List EVERY place the work lands, not just the file you plan to edit: callers you must update, tests you must add or fix, and any build artifact (lib/) that must be regenerated. A scope that names only one landing point of several makes the work impossible to complete.",
                 "items": {
                   "type": "string"
                 },
@@ -1226,6 +1226,50 @@
           "dependencies",
           "roster",
           "graph"
+        ],
+        "type": "object"
+      }
+    },
+    "execute": "[function:execute/2]"
+  },
+  "agent_teams_halt": {
+    "kind": null,
+    "description": "Stop a team without destroying it: every unfinished task is cancelled (not removed), members go idle, and the team stays where it is so `agent_teams_resume` can bring it back. Use this when work should pause; use `agent_teams_delete` only when the team is finished or explicitly abandoned, because delete archives it and cannot be undone.",
+    "parameters": {
+      "properties": {
+        "reason": {
+          "description": "Why the team is being stopped. Recorded in the team event log, so a later reader can tell this apart from a crash.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "output": {
+      "render": "[function:render/2]",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled_tasks": {
+            "type": "number"
+          },
+          "resumable": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "team_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_name",
+          "cancelled_tasks",
+          "status",
+          "resumable"
         ],
         "type": "object"
       }

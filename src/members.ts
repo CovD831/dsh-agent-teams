@@ -134,7 +134,64 @@ export async function validateMemberLlmSelections(
 }
 
 const MEMBER_LABEL_PREFIX = 'agent-teams:'
-const FALLBACK_FAILURE_CODES = new Set(['QUOTA', 'RATE_LIMIT', 'AUTH', 'MISSING_CREDENTIAL', 'NO_ADAPTER'])
+/**
+ * ── ★★★ 哪些失败值得**换一条路由重试**（2026-10-22 修正）──────────────────────────
+ *
+ * ── 修正的是什么：一份**从未在真实故障上被核对过**的清单 ──────────────────────────
+ *
+ * MEASURED（2026-10-22 对 harness 源码逐条核）：
+ *
+ * ```
+ * harness 的真实 code 常量（@deepseek-ai/dsh-llm/lib/types/error.d.ts）：
+ *   QUOTA / ACCOUNT_QUOTA / CONTEXT_WINDOW_EXCEEDED / EMPTY_RESPONSE / INVALID_CREDENTIAL
+ * pi-ai 适配器的分类器（dsh-llm-pi-ai/lib/index.js 的 classifyPiAiError）：
+ *   AUTH · QUOTA · RATE_LIMIT · INVALID_REQUEST · SERVER · TIMEOUT · TRANSPORT · PI_AI_ERROR
+ * ```
+ *
+ * ★★ 而下面这份清单里有两个 code **在全仓一次都不会被产出**：
+ * `MISSING_CREDENTIAL` 与 `NO_ADAPTER` 是 harness **文档里的举例**（`error.d.ts` 的注释），
+ * 不是适配器会产出的值 ⇒ 它们让两条"看起来被覆盖"的分支永远走不到。
+ * ★ 而真正会产出的 `INVALID_CREDENTIAL` **不在清单里** —— 那是"凭证格式错"，
+ *   换路由**修不好**它，所以**刻意不加**（见下）。
+ *
+ * ── ★★★ 而 `INVALID_REQUEST` 这一条是一次**真实整队停摆**的直接成因 ─────────────────
+ *
+ * ```
+ * 用户实测的报错（docs/REQUIREMENTS.md §21 逐字）：
+ *   wb API error (400): {"code":"upstream_content_policy_blocked", ...}
+ * classifyPiAiError 对它的判定：/400/ 命中 ⇒ **INVALID_REQUEST**
+ * 而旧清单里有 INVALID_REQUEST 吗：**没有**
+ * ⇒ 4 个成员全部路由到同一个 wb 账号，账号被限制 ⇒ 每一次成员回合都失败 ⇒ 整队停摆
+ * ```
+ *
+ * ⇒ **加 `INVALID_REQUEST`**。理由不是"400 都该换路由"，而是：
+ *   ```
+ * 一次 400 有两大类成因（判定它们只需要看**当前这一条请求**，不需要重试就能分开）
+ *   ① 请求本身构造错了（schema 错 / 参数越界）  ⇒ 换路由**同样**会错 ⇒ 换路由是噪声
+ *   ② **这条路由拒绝服务**（账号被限 / 内容策略 / 供应商侧黑名单）⇒ 换路由**能救**
+ * ```
+ *   ★★ 而本机制**不区分**这两类 —— 它只做一件事：**换一次**，且**只换一次**
+ *   （`alreadySwitched` 在 `selectFallbackRoute` 里把它钉死）。
+ *   ⇒ 最坏的代价是"请求本身有错的成员多打一次另一条路由"，而**收益**是
+ *     "供应商侧拒绝服务时整队能继续"。★ 这个方向的取舍与 fallback 机制本身的
+ *     设计意图一致：**它是一张一次性安全网，不是一条重试策略。**
+ *
+ * ★ 而 `CONTEXT_WINDOW_EXCEEDED` **仍然不加**：换路由时上下文**一字不变**，
+ *   那条 arm 的实测（`scripts/fallback-tdd.mjs`）就是为了钉住这一点。
+ */
+const FALLBACK_FAILURE_CODES = new Set([
+  /** 配额耗尽 —— 换一个账号/供应商能继续。 */
+  'QUOTA', 'ACCOUNT_QUOTA',
+  /** 限流 —— 换路由绕开。 */
+  'RATE_LIMIT',
+  /** 鉴权失败（401/403）—— 换一个 provider 的凭证可能有效。 */
+  'AUTH',
+  /**
+   * ★★ 400 那一族。见上面整段 —— 这条是本类里**唯一**为真实事故加的，
+   * 而它的代价与收益都算清了（一次性、最多多打一次）。
+   */
+  'INVALID_REQUEST',
+])
 
 export function isFallbackFailureCode(code: string): boolean {
   return FALLBACK_FAILURE_CODES.has(code)

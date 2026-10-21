@@ -123,7 +123,12 @@ tasks/maxcut/secret_utility.py  ← ★ 真正裁决，被进化对象【看不�
 **判据**:用户批准 + AutoLibra 的 redundancy/coverage · **现状**:✅ · **证据**:`src/gates/collection/`
 
 ```
-INSERTION_POINTS 七个 · 共 21 条判据 · 3 个生产调用点
+> ★ 2026-10-21 更正：旧读数写「21 条判据」，实测 **22** —— 漏的是 `completion.r5`
+> （它的 id 以**数字**结尾，而旧数法用的正则是 `[a-z-]+\.[a-z-]+`）。
+> ★ 这条更正现在有判据守着（`scripts/requirements-claims.mjs` 的 R5.1 / 探针 `gate-count-is-22`）：
+> 判据增删改了而这张表没跟 ⇒ 对齐命令当场红。
+
+INSERTION_POINTS 七个 · 共 22 条判据 · 3 个生产调用点
   （entities.ts:4136 · create-task.ts:616 · tools.ts:2124）
 
 四条采集判据:dedupe · cooldown · attributable · immunity
@@ -311,7 +316,20 @@ N1 的台账与 N3 的审查链判定 ⇒ **先有数据与审查，再有深挖
 ★ 这正是本仓 `AGENTS.md`「需求捕获」纪律要挡的那一格：**需求活在计划文档里，
 于是计划一改口径、需求就跟着漂**。
 
-**现状**:⬜ 未实现（设计已在计划文档里改了四版，仍未实施）
+**现状**:⚠️ **部分**（★ 2026-10-21 更正：原写「⬜ 未实现」是**过期读数**）
+
+> ★★ **这是一条追记，不是改写历史。** 下面「证据（改前实测）」那一整段**原样保留** ——
+>   它记录的是 2026-10-20 04:10 那一刻的盘面。而 `7309ed1`（同日 07:51）把 (i) 与 (ii)
+>   都实现了，**§12 写成两小时后**。⇒ 一个读数过期之后，它比没有那个读数更坏：
+>   它会让下一个人不再去查这一格。这正是本文件 §23 存在的理由。
+
+**当前三件事的实际状态**（可复跑，见 `scripts/requirements-claims.mjs` 的 R12.1–R12.3）：
+
+```
+(i)   ✅ 已实现  `planReviewRounds` 在 edit_plan 的唯一锁内 +1（口径：per 调用；per operation 会打爆上限）
+(ii)  ✅ 已实现  approve 读 `rounds >= PLAN_REVIEW_MAX_ROUNDS` 并拒绝；describePlanLoop 五态可读
+(iii) ❌ **未实现**  halt / discard 仍然只在 Web 路由 —— 17 个工具零命中
+```
 
 ★★ 用户问的是**终止性**（这个循环会不会自己停），不是**准入性**（这一次能不能放行）。
 这两件事的差别是可复跑的：准入性是一次函数求值；终止性要三样东西 ——
@@ -830,3 +848,241 @@ node -e "…遍历 .agent-teams 下所有 team.json…"
 
 ★ 三条共同的判据（值得复用）：**一条机制如果"在真实语料里一次都走不到"，
   或者"判据的分母小到怎么算都能过"，那它做出来只会增加维护面，不会增加读数。**
+
+---
+
+## 23. ★★★ 需求台账必须有一条**本仓自己的**机械对齐判据
+
+> 「**我希望在整个插件的开发过程中，能不断对齐这份文档，看还差什么。
+>  除了你在代码层面查看以外，在需求层面也要看这份文档，看跟我的需求还差什么。**」
+> —— 用户原话（源文档 §12.1；而本仓此前**从未**对它做过任何机械检查）
+
+**判据**:用户原话 + 2026-10-21 的可复跑读数（下）。★ 而**这一条推翻了一个旧判断**：
+
+```
+旧判断：本文件第 5 行写「它是**一份可对齐的清单** —— 供 workbench-align 双向比对」
+        ⇒ 读起来像"对齐机制已经有了"
+实测：  find . -name "requirements-contract*" -not -path "./node_modules/*"   ⇒ 空
+        find . -name "workbench-align*"       -not -path "./node_modules/*"   ⇒ 空
+        grep -rn "REQUIREMENTS.md" scripts/ | grep -c claims                   ⇒ 0
+        node ~/Desktop/自动化开发插件/bin/workbench-align.mjs --repo .
+        ⇒ ✖ 26 claim(s) marked MET whose evidence is GONE（26 条全指向另一个仓的文件）
+推翻理由：那个工具住在另一个仓，它的 37 条 claim **硬编码那个仓的路径** ⇒
+          它对本仓只能回答"你的 26 个文件不存在"，而它回答不了本仓的任何一条需求。
+```
+
+★★ **而它已经漂了**（这三处都是本轮实测，不是推测）：
+
+| 漂在哪 | 台账写的 | 实测 |
+|---|---|---|
+| §12 现状 | 「⬜ 未实现」 | (i)(ii) 已实现，见 §12 的追记 |
+| §5 判据数 | 「共 21 条判据」 | **22** 条（`completion.r5` 被漏数 —— 它的 id 带数字） |
+| README | 「14 coordination tools」 | **17** 个 → **18** 个（`agent_teams_*`，2026-10-22 加了 halt） |
+
+**⇒ 需求:**
+```
+① 台账必须有一条**本仓自己的**机械对齐命令（不是"借另一个仓的工具"）
+② 它必须**双向**：需求有证据缺失（gone）· 台账有节无人认领（unclaimed）· claim 指向被删的节
+③ 它必须**诚实分级**：mechanical 与 manual 分列，绝不合并成一个"全绿"
+④ ★★ 而 `gap` 与 `met` 必须**对称** —— 一份只在缺口存在时才通过的清单会**永远绿**，
+   于是"缺口被补上了"这件事**看不见**（见 `claim-stale` 那一态）
+```
+
+**现状**:✅ 已实现（2026-10-21）
+
+```bash
+node scripts/requirements-align.mjs                     # 人读
+node scripts/requirements-align.mjs --json              # 机器读
+node scripts/requirements-align.mjs --sections          # 每节被哪条 claim 认领
+node --test scripts/gate-requirements-align.test.mjs    # 12 臂（含 5 条反向半边）
+```
+
+★ 读数：**38 条 claim · 30 条机械核对 · 2 条只能靠读 · 0 条证据消失 · 0 个未认领节**。
+
+**证据**:`scripts/requirements-claims.mjs`（claims + 探针）· `scripts/requirements-align.mjs`（命令）·
+`scripts/gate-requirements-align.test.mjs`（12 臂）。
+
+★★ 三条纪律：
+
+1. **`manual` 不许并进 `verified`。** "每条断言都要能在反向变红"是**跨整个程序的行为属性**，
+   用 grep 去"验证"它就是**把谎话打扮成检查**。一个声称"全部已验证"的报告会被忽略。
+2. **`gone` 与 `claim-stale` 的补救动作相反**（去补实现 vs 去改文档），所以是两态、两个断言。
+3. **探针不翻转方向。** 方向属于 claim 的 `status`，不属于探针 —— 本条实现时**踩过一次**：
+   §19 的探针写成"缺口还在就返回 true"，于是 `status: 'gap'` 被读成 `claim-stale`，
+   而**方向写反的探针与真的修好了在读数上完全同形**（臂 4 / 臂 9 现在钉住这一格）。
+
+---
+
+## 24. ★★★ 重启那一环**如实保持"人来做"** —— 在有人拍板之前不许实现
+
+> 「有没有办法不用重启就让我改的插件代码生效？」—— 用户问题（`docs/RESEARCH-RESTART-FREE.md`）
+> 而一旦把它回答成"能"，就会踩上 `docs/DEFECT-HMR-DURING-MEMBER-TURN.md` 记的那条：
+> **一次 `pnpm build` = 一次插件重载 = 打断所有正在跑的成员回合。**
+
+**判据**:本仓三层实测（`src/hmr-trace.ts` 文件头 + `docs/RESEARCH-RESTART-FREE.md` §2）：
+
+```
+① HMR 看到文件变化      ✅  .agent-teams/hmr-reloads.jsonl 有 50 条记录
+② 模块被重新求值        ✅
+③ apply() 被重新执行    ❌  宿主持有的工具闭包仍是旧的
+   ⇒ 「改了代码就生效」这句话是假的 —— 而三层在外部读数上**同形**
+```
+
+**⇒ 需求（这条是边界，不是能力）:**
+```
+★ `agent_teams_restart` 的 description 必须继续**逐字**声明它换不了代码，
+  并交出 `code_on_disk_in_effect` 的三态读数（yes / no / unmeasured）。
+★ 谁把那句话改成"reload 后即生效"，就必须同时拿出③成立的新读数 —— 否则那是 t11 记过的
+  同一句假承诺（措辞承诺了一件实现做不到的事）。
+★ 自迭代的最后一跳**只能是人**：这不是"还没做完"，是**当前配置下的正确形态**
+  （循环跑在 host 进程内，加载不到它自己刚写的代码 ⇒ 自迭代结构上不闭合）。
+```
+
+**现状**:✅ 已实现（"如实声明"那一半早就有了；本条把它**变成受判据保护的边界**）
+`node scripts/requirements-align.mjs` ⇒ `R24.1` 探针 `restart-still-honest` 绿。
+
+**证据**:`src/tools/restart.ts:113`（description 逐字）· `scripts/requirements-claims.mjs` 的
+`restart-still-honest` 探针 · `docs/DEFECT-HMR-DURING-MEMBER-TURN.md`。
+
+★★ 而**重载打断成员回合这件事已经修好了** —— 这条必须写清，否则下一个人会重做一遍：
+`ad5be83`（2026-10-20 04:10）加了 `infrastructureFailureOf`：紧跟在本进程一次重载之后的
+`inactive context` 失败**不落 `failed`**，任务保持打开、成员回 idle、队长收到一条明说是
+基础设施故障的消息。实测 **17/17 绿**（`node scripts/member-failure-tdd.mjs`），
+含三条对照臂（窗口外 / 别的 pid / 别的报错 都不豁免）。
+
+★ 而**仍缺的一格**：`FAILURE_KINDS` 里没有 `infrastructure` 这一类 ⇒ 那条路径**不写**
+`failureKind`（任务根本没落 `failed`），于是"被重载打断过"这件事在**任务的终态历史**里
+读不到（只在收件箱消息与 `hmr-reloads.jsonl` 里）。本轮**刻意不改**数据模型：
+加枚举值是语义变更，而它现在的收益（给一条已豁免的路径多一个标签）与风险
+（`types.ts` 镜像 + 客户端三处 + 夹具逐字比对）不成比例。
+
+---
+
+---
+
+## 25. ★★ 三处「算出来了但没落地」的接线修补（2026-10-21）—— 附改前/改后读数
+
+**判据**:用户"都去做"批准了本轮的三个修补 + §23 对齐判据 + §24 边界。本条记录**改前/改后**两组可复跑读数，
+符合本文件 §7 硬门槛②（改前读数必须在改产品**之前**采到 —— 本轮三条的改前读数都写在下面，
+且每条都有一条**先红后绿**的夹具作证）。
+
+### 25.1 `edit_plan` 采集点的输入面（R11.4）
+
+```
+改前：dedupe:unmeasured  cooldown:unmeasured  attributable:unmeasured  immunity:ok
+改后：dedupe:ok          cooldown:blocked     attributable:ok          immunity:ok
+```
+★ 复跑方式见 `scripts/gate-observe-call-sites.test.mjs`（5 臂，按调用点逐块核）。
+★★ 而**这不是"§5 说的 21 条判据又变了"** —— 变的是**输入面**，不是判据本身：
+   `attributable` 从 unmeasured 变 ok 是因为 `component: 'plan'` 补上了；
+   `cooldown` 从 unmeasured 变 **blocked** 是因为它**第一次真的有窗口可比**。
+
+★★ **而 blocked 那个读数要读对**：cooldown 窗口是 5 分钟，同一来源 5 分钟内再来一条就拒。
+   它现在**真的会拦**了 —— 在此之前它 44/44 全 `unmeasured`（等于这条判据不存在）。
+   这是"补上输入面"的预期后果，**不是**新引入的严格性。
+
+### 25.2 提案的写方（R2.2 前半）
+
+```
+改前：ls .agent-teams/evolution/  ⇒ index.json  signals.jsonl（从来没有过 proposals.jsonl）
+改后：每次采集 ⇒ 分流 ⇒ 追加一行到 proposals.jsonl（并发 20 次 id 不撞车，臂 3 钉住）
+```
+★ 而 `R2.3`（提案**真的变成**一条 `create_task`）**仍然是 gap**，本轮**刻意**不做：
+   一旦派发，"提案 → 任务"就成了无人值守的动作，而那要先有"谁的提案该被自动派发"这条判据 ——
+   那是产品决策，不是实现细节。
+
+### 25.3 重载归因：★ **本轮不修，因为已经修好了**（如实记账）
+
+```
+我上一轮的报告里有一条错：说"重载失败仍被记成 failed_context"。
+实测 `node scripts/member-failure-tdd.mjs` ⇒ 17/17 绿，含：
+  ✔ ★ N4 豁免臂：紧跟在一次重载之后的 inactive context 不落 failed，任务仍打开
+  ✔ ★★ N4 接线臂：真实接线（失败后立刻重派）下，重载打断的任务绝不停在 failed
+  ✔ 三条对照臂（窗口外 / 别的 pid / 别的报错 都不豁免）
+```
+⇒ `ad5be83`（2026-10-20 04:10）已实现。★ 本轮**没有**加 `infrastructure` 枚举值：
+   那条路径**根本不落 `failed`**，加枚举只是给一条已豁免的路径贴标签，而代价是
+   `types.ts` 镜像 + 客户端三处 + 夹具逐字比对 —— 收益与风险不成比例。
+   ★★ 这条更正本身是 §23 的直接产物：**写下来之前先复跑，而不是先相信上一轮的报告。**
+
+---
+
+---
+
+## 26. ★★★ 2026-10-22 的六个落地（1 / 5 / 6 / 7 / 8 / 9 / 10 / 11）—— 附读数
+
+**判据**:用户 2026-10-22「做 1,5，ui 还需要讨论，B 都做」的逐字裁定。
+
+### 26.1 ① 模型侧的终止动作（R12.3）
+
+```
+改前：17 个工具，grep halt/discard src/tool-names.ts ⇒ 零命中
+      ⇒ 模型只能 delete（不可逆），不能"先停一下"
+改后：18 个工具，agent_teams_halt（captain-only）
+      而且它与 delete **语义分界**：halt = 任务 cancel（不是 remove）+ 成员 idle
+      + 团队仍在 + resume 能拉回；delete = 归档、不可逆
+```
+★ 判据：`scripts/gate-halt-tool.test.mjs`（6 臂，**2 条反向半边**：非队长拒绝且零副作用 / 重复 halt 不重复 cancel）。
+
+### 26.2 ⑤ 供应商拒绝服务时的 fallback（§21 那次整队停摆的根因）
+
+```
+改前：FALLBACK_FAILURE_CODES = QUOTA · RATE_LIMIT · AUTH · MISSING_CREDENTIAL · NO_ADAPTER
+      ★ 而 MISSING_CREDENTIAL / NO_ADAPTER 在 harness 里**一次都不会被产出**
+        （它们是 `dsh-llm/lib/types/error.d.ts` 注释里的举例）
+      ★ 而那次真实报错 `wb API error (400): {...upstream_content_policy_blocked...}`
+        经 `classifyPiAiError` 判成 **INVALID_REQUEST** ⇒ 不在清单里 ⇒ 不换路由 ⇒ 整队停摆
+改后：QUOTA · ACCOUNT_QUOTA · RATE_LIMIT · AUTH · **INVALID_REQUEST**
+```
+★★ **这条推翻了本轮审计我给的建议**：我原本建议"加 `upstream_content_policy_blocked`"，
+  而那个字符串**不是** harness 的 `failure.code`（它是供应商响应体里的 content）。
+  ⇒ 正确落点是 400 那一族。判据：`scripts/fallback-tdd.mjs` 新增的**真实事故臂**
+  （把那次报错原文喂进分类器，再问"该不该换路由"）。
+★ 仍**不加** `CONTEXT_WINDOW_EXCEEDED`（换路由时上下文一字不变）。
+
+### 26.3 ⑥ 收益读数有了生产出口（R6.2）
+
+```
+改前：grep -rn "from ['"].*evaluator/" src/ | grep -v '^src/evaluator/' ⇒ 空
+改后：`snapshot` 的 `effectReadout` —— 评估器的第一个生产消费者
+```
+★ 落点在**装配层**（§1 规则 A + §3：evolution 与 evaluator 互不 import，只有 snapshot 同时看得见两边）。
+★ 判据：`scripts/gate-effect-readout.test.mjs`（6 臂，含反向半边"没靶不进分母"）。
+★★ 而真实语料那一格**此刻仍无数据**（本仓零 stored proposal）—— 臂 3b 把那个读数如实报出来，不报成通过。
+
+### 26.4 ⑦ `lib/client.js` 字节可复现（R19.1）
+
+```
+改前（同 commit、两棵树、同一份 src）：
+  主树     md5 f8567dd035e6d5b9c8e97f67a9056c1c
+  worktree md5 5690c8bbbf65583d5a21d9860bced66a
+改后：
+  主树     md5 505c631b444b76c290c7f92a2257dc31
+  worktree md5 7262cea96312c60da6b0b4a342e99c3a
+  ⇒ 归一化根路径后**逐字节相同**（只剩 esbuild `//#region` 的 module-id 注释带绝对路径）
+```
+★★ **推翻了 §19 的旧判断**：「这不是缺陷，是 worktree 的固有属性」。错了一半 ——
+  成因是**我们给一个会哈希路径的工具传了绝对路径**，worktree 只是让它显形。
+★ 判据：`scripts/gate-client-reproducible.test.mjs`（4 臂，含反向半边：绝对路径**确实**改变类名）。
+
+### 26.5 ⑧ `inScope` 的说明改成"要求作者列出落点"（§20 的处置）
+
+★ 不加新判据（§20 逐字判定"判据层做不到、不许猜"），而是把**那个可判定的问句**
+  放进 `create_task` 与 `edit_plan` **两条路线的同一格说明**里（逐字同源）。
+★★ 提示词是**必要条件而不是充分条件**：真正的防线仍是 `dispatch.changed-paths`。
+
+### 26.6 ⑨⑩⑪ pin 清单 / 文档工具数 / 待决归档
+
+```
+⑨ pin 35 → 34：退 1 条（gate-input-wiring 臂 4，已由接线修复转绿）
+   ★★ 另三条**主树上绿而刻意不退**：它们是**环境依赖**（需要 .agent-teams 语料 / node_modules 缓存），
+      转绿不构成"缺陷已修"的证据。退它们会让下一次 worktree 里那次真实红被当成"已知"吞掉。
+⑩ 文档工具数 14 → 18（README / README_ZH / progressive-loading / usage），
+   并加探针 `doc-tool-counts-match`：★ 它在第一次运行时**抓到我漏改的两处 README**
+⑪ docs/DECISIONS-PENDING.md 归档：它自称"需要你判的 3 条"，实测 6 条全部闭掉。
+```
+★ 探针 `doc-tool-counts-match` 的落点在第 10 条：**一个写着过期数字的文档比没有那个数字更坏**。
+
+---
+
+*本文件是【需求清单】，不是计划。未裁定的提案在 `docs/DECISIONS-PENDING.md`。*

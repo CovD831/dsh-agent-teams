@@ -34,6 +34,11 @@
 
 import { appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+/**
+ * ★ 2026-10-21：提案的写方（本模块 → `proposals.ts` 单向）。
+ * ★ 方向与 `evolution → gates` 那条铁律一致：本模块**不**反向 import 任何业务模块。
+ */
+import { recordProposalForSignal } from './proposals.ts'
 
 /**
  * ── 一条信号（规格 §2 的形状，**去掉**快照那两块）──────────────────────────────────
@@ -686,6 +691,38 @@ export async function observe(input: ObserveInput): Promise<string | undefined> 
       collected: collectedFieldOf(decision),
     })
     if (written === undefined) input.warn(`agent-teams: could not append an evolution signal at "${input.where}"`)
+    /**
+     * ── ★★★ 2026-10-21：信号落盘之后，**顺手**把它分流并落盘（R2.2 的前半）────────
+     *
+     * MEASURED（本次审计）：整条流水线此前只在**读的时候现算** ——
+     * `readProposalPipeline` 每次点开面板都把同一批信号重算成提案，然后**丢掉**。
+     * 于是"这一批产出了 2 份提案"与"盘上从来没有过一份提案"两句都真，而它们在面板上同形。
+     *
+     * ── ★★ 这里为什么可以 `await`，而上面那句 `void observe(...)` 不行 ──────────────
+     *
+     *   ```
+     * 调用方 → void observe(...)          ⇒ 不等待的这一层**已经**把时序保住了
+     * 本函数内部 → await 写提案            ⇒ 等的是**这一层之内**的事，对调用方不可观测
+     * ```
+     *   ★ 也就是说：**"拒绝立刻返回"这条纪律由调用点的 `void` 保证，不需要本函数再牺牲一次**。
+     *   而 `await` 换来的是"返回值返回时盘上已经真的有那一行" —— 于是夹具与人都能**当场**核对。
+     *   ★★ 第一版写的是 `void ... .then(...)`：夹具臂 1 立刻红了（`proposals.jsonl` 还没出现就断言了），
+     *   而那个红**不是夹具太苛刻** —— 它暴露了"`observe` 返回了，而它的副作用还没发生"。
+     *   一个 `undefined` 之后才落地的副作用，在任何调用方看来都等于"没发生"。
+     *
+     * ★ 仍然**绝不抛**：`recordProposalForSignal` 自己 catch 一切（见其文件头纪律 ①）。
+     */
+    if (written !== undefined) {
+      await recordProposalForSignal(stateRoot, {
+        id: written,
+        message: input.message,
+        where: input.where,
+        ...input.gateId === undefined ? {} : { gateId: input.gateId },
+        ...input.tool === undefined ? {} : { tool: input.tool },
+        kind: input.signalKind ?? 'rejection',
+        at: input.now,
+      })
+    }
     return written
   } catch (reason) {
     /**

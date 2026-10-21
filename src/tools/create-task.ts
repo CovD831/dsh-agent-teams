@@ -254,7 +254,37 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
         },
         round: { type: 'number', description: '1-based review / requirements / repair round.' },
         objective: { type: 'string', description: 'Required non-empty objective for quality kinds.' },
-        inScope: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative POSIX paths this task may change.' },
+        /**
+         * ── ★★★ 2026-10-22：这一格的说明改成**要求作者列出落点**（需求 §20 的处置）──
+         *
+         * ── 它补的是什么（MEASURED，t5 那次失败）────────────────────────────────────
+         *
+         * `t5` 的契约写对了 `src/` 那三个文件，而它要做的三件事**在结构上做不到**：
+         * ```
+         * claim 时的快照必须挂在三个 claim 点（src/tools/claim.ts / src/scheduler.ts /
+         *   src/tools/reassign.ts）—— 三个全在 inScope 之外
+         * 而臂的落点在 scripts/gate-*.test.mjs（119 个）—— 也在 inScope 之外
+         * ```
+         * ⇒ 成员正确地选择 `failed`（"宁可失败，也不造一个恒 unmeasured 的空壳"），
+         *   而 `failed` 区分不出"契约不可满足"与"做砸了"。
+         *
+         * ★★ 而 §20 逐字判定：**"每个落点都在 scope 里吗"这件事判据层做不到**
+         *   （从 `objective` / `acceptance` 推路径 = 猜，而判据不许猜）。
+         *   可行形态是"让**作者**在写 scope 时被问一句可判定的话"，而这句话的落点就是**这里**。
+         *   ★ 提示词不是判据（它不会红），所以它是**必要条件而不是充分条件**：
+         *     真正的防线仍是 `dispatch.changed-paths`（成员一碰越界就红）。
+         *   ⇒ 这一格负责把"少报"在**建的那一刻**变成一件需要主动跳过的事。
+         */
+        inScope: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Workspace-relative POSIX paths this task may change. ★ List EVERY place the work lands, '
+            + 'not just the file you plan to edit: callers you must update, tests you must add or fix, '
+            + 'and any build artifact (lib/) that must be regenerated. A scope that names only one of '
+            + 'several landing points makes the work impossible to complete — the member will correctly '
+            + 'refuse rather than fake it, and the refusal looks identical to a failed attempt.',
+        },
         outOfScope: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative POSIX paths this task must not change.' },
         acceptance: { type: 'array', items: { type: 'string' }, description: 'Acceptance criteria. Required for quality kinds.' },
         verify: { type: 'array', items: { type: 'string' }, description: 'Verification commands. Required for implementation/repair.' },

@@ -1,6 +1,6 @@
 # AgentTeams 固定协议与业务工具
 
-AgentTeams 保留原有 14 个业务工具，删除 `agent_teams_open`。精简的核心规则从首次请求起固定在 system 中，创建、批准、继续、暂停或归档团队都不切换这段提示词和工具定义。无需加载工具，也没有额外的激活调用。
+AgentTeams 保留原有 18 个业务工具，删除 `agent_teams_open`。精简的核心规则从首次请求起固定在 system 中，创建、批准、继续、暂停或归档团队都不切换这段提示词和工具定义。无需加载工具，也没有额外的激活调用。
 
 这项修改针对两个问题：
 
@@ -9,7 +9,7 @@ AgentTeams 保留原有 14 个业务工具，删除 `agent_teams_open`。精简�
 
 | 会话身份 | 固定团队工具 | 固定 system 内容 |
 |---|---|---|
-| 普通会话、队长、冷恢复的队长 | 原有 14 个业务工具 | 触发边界、审批、协作、attempt、质量门禁、暂停/恢复、收尾规则及已配置模板目录 |
+| 普通会话、队长、冷恢复的队长 | 原有 18 个业务工具 | 触发边界、审批、协作、attempt、质量门禁、暂停/恢复、收尾规则及已配置模板目录 |
 | 成员 | claim、update、send_message、status | 成员规则和原有 persona |
 
 普通编程/研究工具照常保留。成员身份来自持久化成员 ID、退休成员索引或插件正在执行的可信成员创建登记，不凭可自由填写的 label 判断。工具限制同时适用于原生 schema 和 PTC SDK，不能解除用户或 preset 的限制。
@@ -32,7 +32,7 @@ Web 的 Approve & Run 提交批准并启动调度后，通过 `captain.steer` �
 
 ## 验证标准与证据
 
-`pnpm verify:capabilities` 使用真实 scoped registry、prompt assembly 和 WorkerThreadCodeRuntime，覆盖固定规则、14 工具直接业务调用、重复创建保留原团队、用户 restriction、取消/失败、可信成员身份、暂停、冷恢复、HMR、PTC/both SDK 和实际结果裁剪。
+`pnpm verify:capabilities` 使用真实 scoped registry、prompt assembly 和 WorkerThreadCodeRuntime，覆盖固定规则、18 工具直接业务调用、重复创建保留原团队、用户 restriction、取消/失败、可信成员身份、暂停、冷恢复、HMR、PTC/both SDK 和实际结果裁剪。
 
 `scripts/harness-runtime-verify.mjs` 将打包产物安装到隔离 profile，通过发布版 CLI 和真实 Loader 启动。只有外部 LLM 是确定性 fixture；工具、会话、持久化、调度和成员创建均走生产实现。
 

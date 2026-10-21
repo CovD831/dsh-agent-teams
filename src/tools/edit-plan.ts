@@ -177,7 +177,21 @@ export function register(ctx: Context, scheduler: any, updatePlanBatch: any, con
                * ★ 形状照抄 `src/tools/create.ts` 的同一组（那一处已是"整组放行"的先例）。
                */
               objective: { type: 'string', description: 'Required non-empty objective for quality kinds.' },
-              inScope: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative POSIX paths this task may change. Required for implementation/repair.' },
+              /**
+               * ★★ 与 `create_task` 的同一格**逐字同源**（需求 §20 的处置）：
+               *   要求作者列出**每一个落点**，而不只是"打算改的那个文件"。
+               *   ★ 两条路线必须给同一个问句 —— 否则作者换一条路线写契约就会
+               *     拿到一句更弱的提示，而"更弱的提示"不会红，只会让那条路产出更差的契约。
+               */
+              inScope: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                  'Workspace-relative POSIX paths this task may change. Required for implementation/repair. '
+                  + '★ List EVERY place the work lands, not just the file you plan to edit: callers you must '
+                  + 'update, tests you must add or fix, and any build artifact (lib/) that must be regenerated. '
+                  + 'A scope that names only one landing point of several makes the work impossible to complete.',
+              },
               acceptance: { type: 'array', items: { type: 'string' }, description: 'Acceptance criteria. Required for quality kinds.' },
               verify: { type: 'array', items: { type: 'string' }, description: 'Verification commands. Required for implementation/repair.' },
               role: { type: 'string', description: 'Optional member role.' },

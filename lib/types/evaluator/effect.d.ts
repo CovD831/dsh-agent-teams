@@ -59,3 +59,31 @@ export declare function effectBucketKeyOf(effect: {
  * @param evaluatedAt  评估那一刻（after 窗口的右端点）。
  */
 export declare function effectReadingOf(subject: EvaluatedSubject, count: WindowCounter, evaluatedAt: number, options?: EffectOptions): EffectReading | undefined;
+export interface EffectSubject {
+    readonly id: string;
+    readonly at: number;
+    /** ★ 与 `evaluator/types.ts` 的 `EvaluatedSubject['effect']` **同形**，但本层不依赖那个类型。 */
+    readonly effect?: {
+        readonly component: string;
+        readonly kind: readonly string[];
+    };
+}
+export interface EffectReadout {
+    /** ★ 分母：**有靶**的提案有多少条（没有靶的不进来，见函数头）。 */
+    readonly considered: number;
+    readonly improved: number;
+    readonly unchanged: number;
+    /** ★ 判不了（无基线 / 窗口太短）—— **不并进任何一侧**。 */
+    readonly unmeasured: number;
+    /** ★ 逐条读数（`verdict` 与 `reasons` 都在里面，不压缩成一个数）。 */
+    readonly rows: readonly {
+        readonly id: string;
+        readonly bucketKey: string;
+        readonly verdict: 'improved' | 'unchanged' | 'unmeasured';
+        readonly before: number;
+        readonly after: number;
+        readonly delta?: number;
+        readonly reasons: readonly string[];
+    }[];
+}
+export declare function effectReadoutOf(subjects: readonly EffectSubject[], count: WindowCounter, evaluatedAt: number, options?: EffectOptions): EffectReadout;

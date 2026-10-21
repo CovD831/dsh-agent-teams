@@ -23,6 +23,24 @@ import type { SignalsHealthRead } from './evolution/read.ts';
  */
 import { type ProposalPipelineReadout } from './evolution/index.ts';
 /**
+ * ── ★★★ 2026-10-22：评估器的**第一个生产消费者**（R6.2）──────────────────────────────
+ *
+ * 背景（MEASURED 2026-10-22）：`src/evaluator/` 三文件在 `src/` 里**零外部消费者** ——
+ * 收益判据写对了、也测过，而**没有任何生产路径读过它**。
+ *
+ * ★★ 它为什么接在**这里**而不是 evolution 里（需求 §1 规则 A / §3）：
+ * ```
+ * evolution → 只许被 import，不许反向 import 别人
+ * evaluator → 独立模块，剥注释后零 import 于 evolution / gates
+ * ⇒ 两边都不能 import 对方
+ * ⇒ 而"收益"这件事**同时需要两边的产物**：提案的 `effect` 靶（evolution）+ 信号窗口计数（evolution）
+ * ⇒ 唯一的正确落点是**同时看得见两边的装配层**（本文件）
+ * ```
+ * ★ 而 `evaluator` 侧因此**不认识** `Proposal` / `EvolutionSignal` —— 它只收
+ *   `{ id, at, effect }` 这个最小结构（见 `effectReadoutOf` 的注释）。
+ */
+import { type EffectReadout } from './evaluator/effect.ts';
+/**
  * Visual task state for the activity panel.
  *
  * ── ★★ M4 收敛（t65）：本类型**不再在这里声明** ────────────────────────────────
@@ -309,6 +327,24 @@ export interface TeamActivitySnapshot {
      * ★ 与 `proposalPipeline: undefined`（signals 文件缺席，正常态）**不同形**。
      */
     readonly proposalPipelineUnmeasurable?: string;
+    /**
+     * ── ★★★ 2026-10-22：**收益读数**（R6.2 的生产出口）──────────────────────────────────
+     *
+     * 回答那个**只有一个判据回答得了**的问题：**这条提案生效之后，它指向的那个桶降了吗？**
+     *
+     * ★★ 与 `proposalPipeline` 的**分工**（两者不许互相顶替）：
+     * ```
+     * proposalPipeline  ⇒ "产出了几份提案"（分流层的产出量）
+     * effectReadout     ⇒ "产出的那些**有没有用**"（评估器的收益读数）
+     * ```
+     *   一个"产出 20 份提案、一份都没生效"的队，在只看前者时**看起来最健康** ——
+     *   而那正是要防的形态（§6 硬门槛②：证明收益）。
+     *
+     * ★★ 三态且**不并**（`improved` / `unchanged` / `unmeasured`）：
+     *   无基线（`before.count === 0`）**绝不**读成"没效" —— 那是把"没测到"并进"不合格"。
+     * ★ 缺席（`undefined`）= 没有一条提案带 `effect` 靶 ⇒ **这一问没被问过**（不是判不了）。
+     */
+    readonly effectReadout?: EffectReadout;
     /**
      * ★★ t100：因为超过 {@link MAILBOX_PROJECTION_LIMIT} 而**没有**进 `captainInbox` 的条数。
      *
