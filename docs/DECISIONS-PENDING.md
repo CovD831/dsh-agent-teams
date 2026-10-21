@@ -121,7 +121,7 @@ ls .agent-teams/worktrees/ | wc -l
 ★ "冷父链（父会话不驻留）⇒ unmeasured" —— 不许静默当成"不是队长"
 ```
 
-### ② `docs/REQUIREMENTS.md` 要不要建 —— 队长建议:**建**
+### ② ~~`docs/REQUIREMENTS.md` 要不要建~~ —— ✅ **已建**（44.8 KB · 21 条需求）
 
 ```
 ★ 全局指令要求:有该文件时，新需求/设计原则/被推翻的旧判断应提案追加
@@ -132,7 +132,7 @@ ls .agent-teams/worktrees/ | wc -l
 
 ★ **建了之后可以跑 `workbench-align`**（实现与需求双向对齐:需求未实现 + 实现了但无需求认领）。
 
-### ③ 本会话**反复出现的形态**要不要落成一条规则 —— 队长建议:**要**
+### ③ ~~本会话**反复出现的形态**要不要落成一条规则~~ —— ✅ **已落成**（`REQUIREMENTS.md` §4）
 
 **本会话 8 次同族事故:**
 ```
@@ -185,12 +185,33 @@ ls .agent-teams/worktrees/ | wc -l
 **建议：(甲) 与步骤 3 一起推迟。** **(乙)** 若要单独先做，唯一可行形态是
 "审的成员永久只读"（付代价：那个成员以后不能再写），需你确认这个代价可接受。
 
-### ⑥ `scripts/lifecycle-verify.mjs` / `quality-gates-tdd.mjs` 撞上的 `dispatch.plan-reviewed`
+### ⑥ ~~`scripts/lifecycle-verify.mjs` 撞上的 `dispatch.plan-reviewed`~~ —— ✅ **已裁定并落地（甲）**
 
-**这是真判据开火**（`frictions/` 里 40 条该判据记录），夹具没跟上。
-两个修法：**(甲) 给夹具补 `reviewed` 戳（建议）**；**(乙) 挪 `PLAN_REVIEWED_GATE_ONLINE_AT`**
-（`src/gates/dispatch/plan-reviewed.ts:175`，它是唯一真值）⇒ 会让判据对一批新任务不适用。
-★ 补戳的**反向半边**必须做：把戳拿掉 ⇒ 脚本必须重新红在同一条上。
+**2026-10-21 处置**：走**甲**（给夹具补戳），**没有**挪 `PLAN_REVIEWED_GATE_ONLINE_AT`。
+
+★ 而做的时候发现：**它不是一个问题，是五个** —— 每修一个，下一个才浮出来
+⇒ 这条验证此前**从未真正跑到过底**。逐条：
+
+| # | 阻塞 | 处置 |
+|---|---|---|
+| ① | `rm(…, {recursive, force})` 抛 `ENOTEMPTY`（**前面每条 check 都 PASS**）| 重试 + **清理失败不改结论**（只 warn）|
+| ② | `create_task` 缺 `reviewed` 戳 | 在 `call()` 里统一补（21 处调用点测的都是**别的事**）|
+| ③ | `approve` 撞计划审查上限（4/3，**夹具累积**）| 批准前用 `resume` 显式归零 |
+| ④ | 假 ctx 缺 `logger.info` | 补上（此前走不到那里）|
+| ⑤ | `plan.shape` 必填（乙方案）| `batchPlan` 补 `shape: 'flat'` |
+
+★★ ③ 值得单说：它**今天才可用** —— 此前 `resume` 对 `halted !== true` 的队答
+`already_running` 且**一格不动**，算出的归零**只活在返回值里**（提交 `1eaaee1` 才修）。
+⇒ **这条夹具此前被一个真缺陷挡着，而那个缺陷是今天修的。**
+
+★★★ 而修 ② 时我顺手给 `validateCreateTask` 加了 `root` 并传 `workspace`，
+全量立刻多出 2 条红（`gate-assignment-parity` 的臂 5）；撤回后 `lifecycle-verify` 又红回来。
+⇒ **两个夹具要的是不同的树，而只给一棵时互斥。**
+正确修法是**两棵都看**（`checkTaskPremises(input, root, extraRoot)`）——
+一个文件在任一棵树上存在 ⇒ 前提就没被证伪。提交 `86ebb3c`。
+
+**读数**：`lifecycle-verify` 132 PASS / EXIT 0；`assignment-parity` 7/7；
+`pnpm test:gates` 1771 / 1705 / 27 —— **NOT in pin = 0**。
 
 ### ⑦ admission 的"无待确认问题"读什么
 
