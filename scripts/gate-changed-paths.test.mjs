@@ -761,3 +761,78 @@ test('★ t41 臂 9（对照臂）：没有 worktree 目录时，并集【等于
     '★ 没有成员 worktree 时，并集必须与原有的工作区面【逐字相同】—— 改动不许动到既有口径',
   )
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 22（★★★ 2026-10-21）：`verifiedChangedPaths` 必须有消费者（施工单序 5）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 22：判据**亲眼核对过**的路径要落进 `changedPaths`（此前零消费者）', () => {
+  /**
+   * ── 它补的是什么（MEASURED，`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-5）────────
+   *
+   * `dispatch.changed-paths` 在**通过时**交出 `verifiedChangedPaths` ——
+   * 那是"判据层**亲眼核对过**的真实改动集合"（会话面 ∪ 工作区面），
+   * 比成员自报的 `changedPaths` 可信。
+   * ★★ 而它**零消费者**：产出写进 `outputs`，然后**没有任何代码读它**。
+   *
+   * ── ★ 本臂钉的是**判据本体**（产出在场），而接线在 `create_task` 里 ──────────────
+   *
+   * ★ 为什么分成两条来钉：
+   *   · 判据产出（本臂）：`gate()` 通过时必须交出 `verifiedChangedPaths`
+   *   · 接线（下面那条源码面断言）：`create_task` 必须真的读它
+   *   ★★ 两者缺一：只测产出 ⇒ "算出来了但没人读"（这正是本缺陷）；
+   *     只测接线 ⇒ "读了但产出不在"。
+   */
+  const ctx = {
+    task: { id: 't1', kind: 'implementation', inScope: ['src/a.ts'], outOfScope: [] },
+    update: { changedPaths: ['src/a.ts'] },
+    /** ★ 判据层**亲眼看到**的写入（会话面）。 */
+    observedChangedPaths: ['src/a.ts'],
+    /** ★ 第二观察面（工作区）。这里给一个**成员没报**的路径，验并集。 */
+    gitChangedPaths: ['src/a.ts', 'src/b.ts'],
+  }
+  const verdict = gate(ctx)
+  assert.equal(verdict.ok, true, `★ 前提：这一份必须通过，实测 ${JSON.stringify(verdict).slice(0, 160)}`)
+  const verified = verdict.verifiedChangedPaths
+  assert.ok(Array.isArray(verified), '★★ 通过时必须交出 verifiedChangedPaths（否则下游无从消费）')
+  assert.deepEqual(
+    [...verified].sort(), ['src/a.ts', 'src/b.ts'],
+    '★★ 必须是**两个观察面的并集** —— 只交会话面会漏掉"在别处写的、而判据核对过的"路径',
+  )
+})
+
+test('★★★ 臂 22b：`create_task` 真的**读**了 `verifiedChangedPaths`（接线面）', async () => {
+  /**
+   * ★ 这一条读**源码面**，因为它钉的是一个**调用点契约**：
+   *   判据产出全绿的时候，`create_task` 照样可以不读它 ——
+   *   而那正是 (a)-5 这个缺陷本身（"算出来了、没人读"）。
+   *
+   * ★★ 为什么用源码面而不是造一整套夹具：要造出"成员一个字没报、
+   *   而判据确实观察到改动"的真实路径，需要一个能真的产生 `tool/result`
+   *   写入事件的会话 —— 那是另一层夹具的事。而本条问的是**接线在不在**。
+   *   ★ 与 `gate-critical-symbols` 那条"不许写成读源码"的纪律**不冲突**：
+   *     那一条防的是"能力被删了而 grep 还命中"；本条钉的是
+   *     "这个字段有没有被转述到 `changedPaths` 上"，是一个**调用点**事实。
+   *
+   * 定向突变：删掉 `task.changedPaths = legal` 那一行 ⇒ 本条红。
+   */
+  /**
+   * ★ 用**本文件自己的路径**推仓库根，不依赖一个本文件没有的 `ROOT` 常量
+   *   （本夹具此前只 import 了 `node:test` / `assert` / 判据本体，没有 `node:path`）。
+   *   ★★ 而我第一版就是这么错的：`join is not defined` —— 臂红在一个**夹具缺陷**上，
+   *     而不是在被测的接线缺失上。那会把"夹具坏了"读成"接线坏了"。
+   */
+  const { readFileSync } = await import('node:fs')
+  const { dirname: dirOf, join: joinOf } = await import('node:path')
+  const { fileURLToPath: toPathOf } = await import('node:url')
+  const repoRoot = joinOf(dirOf(toPathOf(import.meta.url)), '..')
+  const source = readFileSync(joinOf(repoRoot, 'src', 'tools', 'create-task.ts'), 'utf8')
+  assert.match(
+    source, /verifiedChangedPaths/,
+    '★★★ create-task.ts 没有读 `verifiedChangedPaths` —— 那就是 (a)-5：判据算出来了，而没人消费',
+  )
+  assert.match(
+    source, /task\.changedPaths\s*=\s*legal/,
+    '★★ 读了却没写进 `changedPaths` —— 只读不用等于没接线',
+  )
+})

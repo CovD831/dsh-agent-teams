@@ -1026,6 +1026,36 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            */
           ;(task.gateEvaluations ??= {}).dispatch = gateEvaluationRecordOf(dispatchGates)
           /**
+           * ── ★★★ 序 5（2026-10-21）：把**判据亲眼核对过**的路径落进 `changedPaths` ────────
+           *
+           * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-5）：
+           * `dispatch.changed-paths` 在**通过时**交出 `verifiedChangedPaths`
+           * —— 那是"判据层**亲眼核对过**的真实改动集合"（会话面 ∪ 工作区面），
+           * 比成员自报的 `changedPaths` 可信。
+           * ★★ 而它**零消费者**：产出被写进 `outputs`，然后**没有任何代码读它**。
+           *
+           * ── ★ 为什么只在 `changedPaths` **缺席**时用它 ─────────────────────────────
+           *
+           * 成员自报的那一份要**保留**（它是 `dispatch.changed-paths` 判虚报的输入，
+           * 也是"他声称改了什么"的记录）。而 `verifiedChangedPaths` 是**核对过的事实**。
+           * ⇒ 两者不是替代关系，而是**成员没报时**的兜底：
+           *   一条 `implementation` 任务若成员一个字都没报改动，而判据**确实观察到了**
+           *   改动，那"记录里没有路径"与"它没改"同形 —— 而这一条把后者接住。
+           *
+           * ★★ 三态：`verifiedChangedPaths` 缺席 / 不是数组 ⇒ **一个字节都不动**
+           *   （不写空数组 —— 那会说"判据核对过、确实没有改动"，而真相是"没能核对"）。
+           */
+          const verifiedPaths = (dispatchGates.outputs?.['dispatch.changed-paths']?.verifiedChangedPaths ?? undefined) as unknown
+          if (task.changedPaths === undefined && Array.isArray(verifiedPaths) && verifiedPaths.length > 0) {
+            const legal = verifiedPaths.filter((path): path is string => typeof path === 'string' && path.trim() !== '')
+            /**
+             * ★★ 过滤后**空了**就不写 —— 否则会落一个空数组，
+             *   而空数组会说"判据核对过、确实没有改动"，真相是"核对出来的都不是合法路径"。
+             *   ⇒ 那正是本仓最贵的那条合流（"没测到"并进"测了是零"）。
+             */
+            if (legal.length > 0) task.changedPaths = legal
+          }
+          /**
            * ★★ t81：第二次落盘 —— 只为把上一行那句裁决持久化。
            *   ★ 位置在这里是**必须的**（dispatch 求值在锁内、且在第一次 writeTeam 之后）；
            *     而"第二次写"本身是安全的：`fresh` 是同一个活对象，
