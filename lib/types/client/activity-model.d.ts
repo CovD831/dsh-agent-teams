@@ -93,7 +93,35 @@ export declare function taskModelLabel(task: {
 }[]): string;
 /** Short model id for tight DAG/chip surfaces (`openai/gpt-5.6-sol` → `gpt-5.6-sol`). */
 export declare function compactModelLabel(route: string): string;
-/** A live team the current captain still owns and has not halted. */
+/**
+ * ── ★★★ 客户端认队长的**唯一**入口（2026-10-21，裁决 ②）────────────────────────────
+ *
+ * A live team the current captain still owns and has not halted.
+ *
+ * ── ★★★ 一条**必须写在代码里**的边界：客户端只做**精确匹配**，认不出 fork ────────────
+ *
+ * 服务端已经收口成 `sessionLeadsTeam`（`src/lineage.ts`，19 处调用）——
+ * 它沿 `parentSession` 走 fork 链，于是"队长在自己的 fork 里继续"仍认得出。
+ *
+ * ★★ 而**客户端拿不到那条链**：`liveRefsOf(ctx)` 需要 `ctx.agents`，
+ *   而客户端只有 team 记录与成员子代理的 `parentSession`（后者是**成员**的，
+ *   不是队长会话的）。⇒ (甲)「客户端也走 fork 链」在这里**结构上做不到**。
+ *
+ * ⇒ 所以本函数**如实**只做精确匹配，并把这件事**写在这里**，
+ *   而不是让它静默地漏认 —— 静默漏认的后果是：
+ *     · 面板把"队长 fork 之后"的队显示成"不属于任何人"
+ *     · 而**没有任何读数**能发现这件事
+ *
+ * ★ 这是裁决 ② 的 **(乙)**：不造一个"看起来支持 fork"的假象，
+ *   而是让这一格**显式地**说它判不了 fork。
+ *   ★★ 若哪天真要在客户端支持 fork，正确做法是**服务端把解析结果投影过来**
+ *     （一份已有的读数），而不是让客户端自己再算一遍链 ——
+ *     那会是本仓最贵的**第二份实现**。
+ *
+ * @param teams - 客户端手上那份 team 记录（**没有** fork 链）。
+ * @param sessionId - 当前会话 id。
+ * @returns 精确匹配到的队；fork 之后的情形 ⇒ `undefined`（**判不了**，不是"不属于"）。
+ */
 export declare function liveCaptainTeam<T extends {
     readonly captainSessionId: string;
     readonly halted?: boolean;

@@ -633,6 +633,12 @@ export function startActivityPolling(
       discoveredLiveKeys = new Set(discoverySessionId === undefined || discoverySessionId === ''
         ? []
         : liveTeams
+          /**
+           * ★★ 精确匹配 —— 与 `liveCaptainTeam` **同一口径**（裁决 ②，2026-10-21）。
+           *   客户端拿不到 fork 链（`liveRefsOf(ctx)` 需要 `ctx.agents`）
+           *   ⇒ fork 之后的队长在这里认不出，而那是**已知且显式**的边界，
+           *     不是静默漏认。详见 `activity-model.ts` 的 `liveCaptainTeam`。
+           */
           .filter((team) => team.captainSessionId === discoverySessionId)
           .map((team) => team.teamId))
       // A discovery session found its first team: upgrade from the low-frequency
@@ -644,6 +650,7 @@ export function startActivityPolling(
       const discoveredTeamArchived = [...previousDiscoveredKeys]
         .some((teamId) => !discoveredLiveKeys.has(teamId))
       const missing = monitorTargets.filter((target) => !liveTeams.some((team) =>
+        /** ★ 同上：精确匹配，fork 之后认不出（裁决 ② 的已知边界）。 */
         team.captainSessionId === target.sessionId && team.teamId === target.teamId,
       ))
       const needsDiscoveryArchive = discoverySessionId !== undefined
