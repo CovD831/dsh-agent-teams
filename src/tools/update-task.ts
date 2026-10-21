@@ -121,7 +121,7 @@ import { digestWorkspacePaths, snapshotReviewedArtifacts } from '../artifacts.ts
 import { testFileBaselineOf, shouldSnapshotTestFiles } from '../quality-gates.ts'
 import { gitChangedPaths, observeWorkspaces, observedChangedPaths } from '../harness-compat.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
-import { appendTaskEvidence, judgeSelfReview, repairCompletionVerdict, taskKindOf, traceEvidenceConsumer } from '../quality-gates.ts'
+import { appendTaskEvidence, compareVerifyProbe, judgeSelfReview, repairCompletionVerdict, taskKindOf, traceEvidenceConsumer } from '../quality-gates.ts'
 import { TERMINAL_TASK_STATUSES, VERDICT_KINDS, appendExecution } from '../types.ts'
 /**
  * ★ `needsWorktreeFor`：判"这条任务**应当**有隔离树吗" —— 用来把
@@ -1680,6 +1680,43 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            */
           clearStall(task)
           const producedReruns = (completionGates.outputs['completion.verify-rerun']?.reruns ?? []) as CommandResult[]
+          /**
+           * ── ★★★ 序 4（2026-10-21）：同一条命令，**建契约时 vs 完成时**结论一样吗 ──────
+           *
+           * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-4）：同一条 verify 命令被跑两次
+           *   —— `contract.verify-command`（建契约）与 `completion.verify-rerun`（完成）。
+           *   盘上 **44 条**任务都同时带这两份读数，而**没有任何一处代码把它们放在一起看**。
+           *
+           * ★★ 最要紧的那种变化是 `failed → passed`：那说明**这条命令当初就判不出真假**，
+           *   而 `contract.verify-command` 存在的全部理由就是拦掉这种契约
+           *   （它自己的措辞逐字：「must be able to go green when the work was done
+           *   and red when it was not」）。⇒ 若建契约时它是 `failed` 而契约仍被接受，
+           *   那就是那条判据**在该说话的时候没说**。
+           *
+           * ★ 但本格**只报告、不拒绝**（施工单序 4 的建议）：两次不一致**可以**是正常进展
+           *   （"修好了一个坏测试"就是 failed → passed）。硬拒会把那种任务全拦下。
+           *   ★★ 而它**必须留痕** —— 一个静默的"不一致"与"没比过"同形。
+           */
+          try {
+            const probeAtContract = (task.gateEvaluations?.contract?.outputs?.['contract.verify-command']?.verifyProbe ?? undefined) as
+              | { command?: unknown; exitCode?: unknown; status?: unknown }[]
+              | undefined
+            const probeReading = compareVerifyProbe(probeAtContract, producedReruns as { command?: unknown; exitCode?: unknown; status?: unknown }[] | undefined)
+            if (probeReading.status === 'disagree') {
+              ctx.logger.warn(
+                `agent-teams: ${task.id} the verify command(s) judge differently now than when the contract was created `
+                + `(recorded, not rejected): ${probeReading.changed.map((c) => `${c.command} ${c.atContract}→${c.atCompletion}`).join('; ')}`
+                + (probeReading.changed.some((c) => c.atContract === 'failed' && c.atCompletion === 'passed')
+                  ? ' ★ a command that failed at contract time now passes — that command could not tell done from not-done when it was accepted'
+                  : ''),
+              )
+            } else if (probeReading.status === 'unmeasured') {
+              ctx.logger.warn(`agent-teams: ${task.id} the verify probe could not be compared (recorded, not rejected): ${probeReading.why}`)
+            }
+          } catch (reason: unknown) {
+            /** ★ 它是**记录**，不是裁决 —— 读失败不许掀翻这次更新。 */
+            ctx.logger.warn(`agent-teams: could not compare the verify probe for ${task.id} (recorded, not thrown): ${String(reason)}`)
+          }
           const mergedCommandsRun = producedReruns.length > 0
             ? mergeRerunIntoCommandsRun(commandsRun ?? task.commandsRun, producedReruns)
             : commandsRun

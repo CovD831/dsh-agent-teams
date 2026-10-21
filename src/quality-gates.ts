@@ -418,6 +418,123 @@ export interface TestFileBaselineReading {
  * @param current - 现在这些路径的字节（`digestWorkspacePaths` 的产出）。
  *   **缺席**（`undefined`）⇒ 没能读回 ⇒ `unmeasured`，绝不读成"没被改"。
  */
+/**
+ * ── ★★★ 同一条 verify 命令，**建契约时**与**完成时**跑出的结论一样吗（2026-10-21，施工单序 4）
+ *
+ * ── 它补的是什么（MEASURED，`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-4）──────────
+ *
+ * 同一条命令被跑了**两次**：
+ *
+ *   `contract.verify-command`  建契约那一刻跑一次 ⇒ 落进 `gateEvaluations.contract.outputs.verifyProbe`
+ *   `completion.verify-rerun`  成员汇报完成时再跑一次 ⇒ 落进 `outputs.reruns`
+ *
+ * 实测：盘上 **44 条**任务都**同时**带着这两份读数（`verifyProbe` 44/44）。
+ * ★★ 而**没有任何一处代码把它们放在一起看** —— 于是"同一命令两次结论不一致"
+ *   这件事，今天**一个字都读不出来**。
+ *
+ * ── 它为什么值得读 ──────────────────────────────────────────────────────────
+ *
+ * 两次之间隔着成员的全部工作。结论变了**不一定是坏事**（那正是 verify 在测的东西），
+ * 但有两种变化是**信号**：
+ *   · 建契约时 `passed`、完成时 `failed` ⇒ 成员把东西弄坏了（**正常的失败**，不是信号）
+ *   · 建契约时 `failed`、完成时 `passed` ⇒ ★ 那条命令当初就判不出真假，
+ *     而它现在"过了"—— 这恰好是 `contract.verify-command` 存在的理由
+ *     （"A verify command must be able to go green when the work was done
+ *       and red when it was not"）。
+ *     ★★ 若建契约时它就是 `failed`，那契约本身有问题；而它却**一路通过了**。
+ *
+ * ── ★ 三态，且 `unmeasured` 不并进 `agree` ────────────────────────────────────
+ *
+ *   `agree`      —— 两份都在，且同一命令的结论**逐条一致**
+ *   `disagree`   —— 有命令的结论不一致（`changed` 里逐条给）
+ *   `unmeasured` —— **缺一份**（老任务没有 `verifyProbe` / 这一轮没重跑）
+ *     ★★ 这与 `agree` **不同形**："我没法比"与"比过、一样"是两件事。
+ *
+ * ★ 它**只报告，不拒绝**（施工单序 4 的建议是 `warn`）：
+ *   两次不一致**可以**是正常的工作进展，硬拒会让每一个"修好了一个坏测试"的任务被拦。
+ *   而它必须**留痕** —— 否则这条读数不存在。
+ */
+export type VerifyProbeAgreement = 'agree' | 'disagree' | 'unmeasured'
+
+export interface VerifyProbeComparison {
+  readonly status: VerifyProbeAgreement
+  /** `disagree` 时：同一命令的两次结论不同的那些（逐条给）。 */
+  readonly changed: readonly {
+    readonly command: string
+    readonly atContract: 'passed' | 'failed' | 'unknown'
+    readonly atCompletion: 'passed' | 'failed' | 'unknown'
+  }[]
+  /** `unmeasured` 时的成因（人话）。 */
+  readonly why?: string
+  /** 参与比对的命令数（0 ⇒ 两条都没跑，见 `unmeasured`）。 */
+  readonly compared: number
+}
+
+/** 把一份 probe/rerun 归一成 `命令 → 结论`。 */
+function verdictsByCommand(
+  runs: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+): Map<string, 'passed' | 'failed' | 'unknown'> | undefined {
+  if (!Array.isArray(runs)) return undefined
+  const out = new Map<string, 'passed' | 'failed' | 'unknown'>()
+  for (const run of runs) {
+    const command = typeof run?.command === 'string' ? run.command.trim() : ''
+    if (command === '') continue
+    /** ★ 优先读 `exitCode`（机械），读不到才退 `status`（自报）。 */
+    const verdict: 'passed' | 'failed' | 'unknown' = typeof run?.exitCode === 'number'
+      ? (run.exitCode === 0 ? 'passed' : 'failed')
+      : run?.status === 'passed' || run?.status === 'failed' ? run.status : 'unknown'
+    out.set(command, verdict)
+  }
+  return out
+}
+
+/**
+ * 比一份**建契约时**的 `verifyProbe` 与一份**完成时**的 `reruns`。
+ *
+ * ★ 纯函数：两份都由调用方给（与 `artifactBindingOf` / `testFileBaselineOf` 同一条纪律）。
+ */
+export function compareVerifyProbe(
+  atContract: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+  atCompletion: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+): VerifyProbeComparison {
+  const before = verdictsByCommand(atContract)
+  const after = verdictsByCommand(atCompletion)
+  /**
+   * ★ **任缺一份** ⇒ `unmeasured`。★ 不说"没变" —— 那是"没比过"。
+   *   ★★ 而两者都缺席时 `compared: 0`，与"比了但都没异议"不同形。
+   */
+  if (before === undefined || after === undefined) {
+    return {
+      status: 'unmeasured',
+      changed: [],
+      compared: 0,
+      why: before === undefined
+        ? 'this task carries no verify probe from when its contract was created, so there is nothing to compare the completion re-run against'
+        : 'the completion re-run produced no per-command results, so there is nothing to compare the contract probe against',
+    }
+  }
+  /** ★ 只比**两份都有的命令** —— 只在一边出现的命令是另一件事（契约被改过 / 命令没重跑）。 */
+  const changed: VerifyProbeComparison['changed'][number][] = []
+  let compared = 0
+  for (const [command, atContractVerdict] of before) {
+    const atCompletionVerdict = after.get(command)
+    if (atCompletionVerdict === undefined) continue
+    compared += 1
+    if (atContractVerdict !== atCompletionVerdict) {
+      changed.push({ command, atContract: atContractVerdict, atCompletion: atCompletionVerdict })
+    }
+  }
+  if (compared === 0) {
+    return {
+      status: 'unmeasured',
+      changed: [],
+      compared: 0,
+      why: 'the contract probe and the completion re-run share no command, so nothing could be compared (the contract may have been rewritten)',
+    }
+  }
+  return { status: changed.length === 0 ? 'agree' : 'disagree', changed, compared }
+}
+
 export function testFileBaselineOf(
   baseline: readonly { readonly path: string; readonly digest: string }[] | undefined,
   current: ReadonlyMap<string, string> | undefined,
