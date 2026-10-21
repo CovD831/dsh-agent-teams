@@ -300,6 +300,8 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             team_shape: { type: 'string', required: true },
             shape_execution: { type: 'string', required: true },
             shape_violations: { type: 'array', required: true, items: { type: 'string' } },
+            /** ★ 这一份数字是谁算的（判据 / status 重算）—— `OUTPUTS-CONSUMER-AUDIT` (a)-1。 */
+            shape_source: { type: 'string', required: true },
             /**
              * ── ★★★ 2026-10-20：**哪些产物还没进主干**（`deliverableCommit` 的第二个问句）──
              *
@@ -1345,7 +1347,45 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
          *   每次多两遍 `ctx.agents.list()` 直接变成延迟。更糟的是三次读数可能落在
          *   **不同的时刻**，于是"声明说在跑、违规名单却来自另一次读"这种矛盾自证不出来。
          */
-        const shapeExecution = shapeExecutionFor(ctx, team)
+        /**
+         * ── ★★★ 序 1（2026-10-21）：**先读判据的产出，读不到才重算** ──────────────────
+         *
+         * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-1）：这一格此前是
+         * **两份真相** —— `runtime.shape-execution` 判据自己算一遍并写进 `outputs`，
+         * 而这里**又算了一遍**。两者独立取证 ⇒ 它们可以不一致，而"不一致"这件事
+         * 没有任何读数（读的人只看到一个数，不知道另一个存在）。
+         *
+         * ── ★ 为什么优先读判据、而不是优先重算 ────────────────────────────────────
+         *
+         * 判据是**判据**：它的结论带三态、带 `reason`、且**已经过了注册表的三态校验**。
+         * 重算那一份没有这些保证，而且它与判据可能落在**不同的时刻**。
+         *
+         * ── ★★ 为什么保留重算作为回落（而不是删掉它）──────────────────────────────
+         *
+         * 那条判据的闸门是 `team.shape === 'dispatch'` **且事件在它的白名单里**。
+         * 不满足时它**根本不跑** ⇒ `outputs` 里没有那个键。
+         * ⇒ 而 `status` 仍然要回答"这个队的形态执行得怎么样"（那是它的职责）。
+         * 两个来源**分工明确**：
+         *   · 判据跑过 ⇒ 读它的（**同一份真相**）
+         *   · 判据没跑 ⇒ 自己算（**并如实标注 `source`**，让读的人知道这一份是哪来的）
+         *
+         * ★★★ 而 `source` 这一格是本条的要害：如果没有它，
+         *   "判据算的"与"status 自己算的"在返回值上**同形** ——
+         *   而那正是本条要消灭的形态（两份真相，读的人不知道自己在看哪一份）。
+         */
+        const gateShapeOutputs = (runtimeRecord as { outputs?: Record<string, { shape_violations?: unknown; shape_violation_count?: unknown }> } | undefined)?.outputs?.['runtime.shape-execution']
+        const fromGate = gateShapeOutputs !== undefined && Array.isArray(gateShapeOutputs.shape_violations)
+        /**
+         * ★ 判据的 `outputs` 只带**违规名单**（不带 `rows`）——
+         *   所以这里不伪造一个 `ShapeExecutionReadout`，而是把两份读数**并排放**：
+         *   判据在时用判据的名单，不在时用重算的完整读数。
+         */
+        const computedShape = shapeExecutionFor(ctx, team)
+        const shapeViolations = fromGate
+          ? (gateShapeOutputs?.shape_violations as readonly string[])
+          : (computedShape.status === 'measured' ? computedShape.violations : [])
+        const shapeStatus = fromGate ? 'measured' : computedShape.status
+        const shapeSource: 'judgment-gate' | 'status-recomputed' = fromGate ? 'judgment-gate' : 'status-recomputed'
         /**
          * ★★★ N5 / t8：计划环的读数。**紧挨着 `describeQualityLoop`** —— 两个环同形并列，
          *   而它们读**不同的状态位**（`escalated` vs `planReviewEscalated`），
@@ -1375,9 +1415,15 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * 而 `shape_violations` **恒在场**（空数组 = 读了、确实没有违规）——
            *   字段缺席会让"没违规"与"这一格不存在"同形。
            */
-          team_shape: describeTeamShape(team.shape, shapeExecution),
-          shape_execution: shapeExecution.status,
-          shape_violations: shapeExecution.status === 'measured' ? [...shapeExecution.violations] : [],
+          team_shape: describeTeamShape(team.shape, computedShape),
+          shape_execution: shapeStatus,
+          shape_violations: [...shapeViolations],
+          /**
+           * ★ 这一份是谁算的（见上面那段）—— **两份真相必须不同形**。
+           *   `judgment-gate` ⇒ 判据算的（带三态保证）；
+           *   `status-recomputed` ⇒ 判据没跑、`status` 自己算的。
+           */
+          shape_source: shapeSource,
           /**
            * ── ★★★ 「哪些产物还没进主干」────────────────────────────────────────────
            *

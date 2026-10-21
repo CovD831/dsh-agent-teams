@@ -365,3 +365,69 @@ test('★★★ 臂 8（真实路径臂）：`agent_teams_status` 真的交出 `
   assert.equal(out.shape_execution, 'unmeasured', '★★ "读不到派工"必须是 unmeasured —— 绝不许落成"零违规"')
   assert.deepEqual(out.shape_violations, [], '★ 而违规名单仍是空数组（**它恒在场**，字段缺席会让"没违规"与"这一格不存在"同形）')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 9（★★★ 2026-10-21）：`status` 必须**读判据的产出**，不许自己再算一遍
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 9：`status` 在判据跑过时**读它的产出**（`shape_source` 区分两份真相）', async () => {
+  /**
+   * ── 它补的是什么（MEASURED，`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-1）────────
+   *
+   * 这一格此前是**两份真相**：判据自己算一遍并写进 `outputs`，
+   * 而 `status` **又算了一遍**。两者独立取证 ⇒ 它们可以不一致，
+   * 而"不一致"这件事**没有任何读数**。
+   *
+   * ★★★ 所以新增 `shape_source` 这一格：`judgment-gate`（判据算的）与
+   *   `status-recomputed`（判据没跑、status 自己算的）**必须不同形** ——
+   *   否则读的人不知道自己在看哪一份。
+   *
+   * 定向突变：把 `fromGate` 恒写成 `false` ⇒ 本条在"判据跑过"那一支上红。
+   */
+  const { registerAgentTeamsTools } = await import('../lib/tools.js')
+  const { createTeamDir } = await import('../lib/state.js')
+  const { mkdtempSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const call = async (layout) => {
+    const ws = mkdtempSync(join(tmpdir(), 'shape-source-'))
+    await createTeamDir(join(ws, '.agent-teams'), { id: 'team', name: 'T', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 1, ...layout })
+    const tools = new Map()
+    const ctx = {
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      tools: { register(t) { tools.set(t.name, t) } },
+      subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'm', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'm' },
+      agents: { list: () => [], get() { return undefined } }, on() { return () => {} }, effect(s) { return s() }, inject() { return () => {} },
+    }
+    registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
+    return tools.get('agent_teams_status').execute({}, {
+      agent: { id: 'captain-session', status: 'idle', session: { header: { cwd: ws }, events: [] }, steer() {} },
+      signal: new AbortController().signal,
+    })
+  }
+
+  /** ① 非 dispatch 队 ⇒ 判据不适用 ⇒ `status-recomputed`（回落是有理由的）。 */
+  const plain = await call({ members: [], tasks: [] })
+  assert.equal(plain.shape_source, 'status-recomputed', '★ 判据没跑 ⇒ 回落，并**标明**这一份是重算的')
+
+  /**
+   * ② dispatch 队、成员**会话读不出来** ⇒ 判据答 `unmeasured`（它的 `outputs`
+   *   不带 `shape_violations`）⇒ `status` **仍然**回落成 `status-recomputed`。
+   *   ★ 这一条同时钉住"判据的 `unmeasured` 与 `measured` 不同形"：
+   *     前者没有名单，后者有（哪怕是空数组）。
+   */
+  const unreadable = await call({
+    shape: 'dispatch',
+    members: [{ id: 'm-fake', name: 'w', role: 'w', provider: 'p', model: 'm', reasoningEffort: 'default', joinedAt: 1, status: 'idle' }],
+    tasks: [{ id: 't1', subject: 'done', status: 'completed', dependencies: [], createdAt: 1, updatedAt: 2, assignee: 'w', kind: 'work' }],
+  })
+  assert.equal(unreadable.shape_source, 'status-recomputed', '★ 判据 unmeasured（无名单）⇒ 回落')
+  assert.equal(unreadable.shape_execution, 'unmeasured', '★ 而**状态本身**仍如实报 unmeasured（不是"没违规"）')
+
+  /** ★★ 两种来源必须不同形 —— 这是本条的存在理由。 */
+  assert.notEqual(
+    plain.shape_source, 'judgment-gate',
+    '★★ `status-recomputed` 与 `judgment-gate` 必须可区分（否则两份真相又合流了）',
+  )
+})

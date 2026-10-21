@@ -2354,6 +2354,9 @@
           "shape_execution": {
             "type": "string"
           },
+          "shape_source": {
+            "type": "string"
+          },
           "shape_violations": {
             "items": {
               "type": "string"
@@ -2434,6 +2437,7 @@
           "team_shape",
           "shape_execution",
           "shape_violations",
+          "shape_source",
           "deliverable_landing"
         ],
         "type": "object"
