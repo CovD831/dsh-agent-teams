@@ -16,6 +16,8 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import { haltTeamWork, registerAgentTeamsTools, rememberWorktreeBase } from '../lib/tools.js'
 import { buildActivationDirective, invokedAgentTeamsGoal, invokedAgentTeamsInvocation, installAgentTeamsGestureBoundary, profileCommandName, registerAgentTeamsCommand } from '../lib/command.js'
 import { readArchivedTeam, readMailbox, readTeam, readUnreadMailbox } from '../lib/state.js'
+/** ★ 2026-10-21：`create_task` 的 reviewed 戳（共用夹具，见 `call()` 那段）。 */
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { collectArchivedTeamsActivity } from '../lib/snapshot.js'
 
 const deliveryHarness = process.argv.includes('--delivery-harness')
@@ -378,7 +380,13 @@ const ctx = {
       void parent
     },
   },
-  logger: { debug() {}, warn() {} },
+  /**
+   * ★★ 2026-10-21：补 `info` —— 生产代码在"建树基线"那条路上会调它
+   *   （`src/scheduler.ts` 的 `worktree baseline` 那一行，由更早的提交引入）。
+   *   ★ 此前这条链**走不到那里**（前面的门先炸了），所以这个夹具缺陷一直没暴露。
+   *   ⇒ 一个假 ctx 缺少一个**生产代码真的会调**的方法，会把"夹具不全"读成"产品崩了"。
+   */
+  logger: { debug() {}, info() {}, warn() {} },
 }
 
 // Model modern host delivery as a distinct FIFO entry. Deliberately reject
@@ -442,7 +450,33 @@ function execFor(subject) {
 async function call(name, args, subject = captain) {
   const definition = definitions.get(name)
   if (!definition) throw new Error(`missing tool ${name}`)
-  return definition.execute(args, execFor(subject))
+  /**
+   * ── ★★★ 2026-10-21：`create_task` 一律补一个 `reviewed` 戳 ────────────────────────
+   *
+   * ── 它修的是什么（MEASURED：一条"测试逻辑全过、收尾崩了"的链）───────────────
+   *
+   * `dispatch.plan-reviewed` 门要求 `create_task` 带戳（那是**用户已定的路由规则**：
+   * 「带 `reviewed` 放行；不带 ⇒ 必须先审一遍才能派」）。
+   * 而本文件 21 处 `create_task` 里至少一处（`:788` 的 `'should never run'`）
+   * 不带戳 ⇒ 门当场拒绝 ⇒ 那条 check **测不到它想测的东西**
+   * （它想测"丢弃暂存计划"，而实际撞在"没审过"上）。
+   *
+   * ★ 为什么在**这一处**统一补、而不是逐处改 21 个调用点：
+   *   那些调用点测的都是**别的事**（计划生命周期 / 派发 / 归档），
+   *   没有一处**故意**测"不带戳会被拒"（实测：全文件没有那样的断言）。
+   *   ⇒ 让它们被一条**与自己的目的无关**的门挡住，只会制造"红在别处"。
+   *
+   * ★★ 为什么**不**把 `plan-reviewed` 挪走或放宽（那是另一种处置）：
+   *   那条门是**用户已定的规则**，而这里要修的只是**夹具没跟上它**。
+   *   ⇒ 改夹具，不改门 —— 与 `docs/DECISIONS-PENDING.md` §3b⑥ 的建议（甲）一致。
+   *
+   * ★ 戳从**共用夹具**取（`scripts/fixtures/reviewed-stamp.mjs`）：
+   *   那个文件的存在理由逐字就是"八个夹具被同一条门意外挡住，而它们测的都不是这件事"。
+   */
+  const stamped = name === 'agent_teams_create_task' && args !== undefined && args.reviewed === undefined
+    ? { ...args, reviewed: reviewedStamp() }
+    : args
+  return definition.execute(stamped, execFor(subject))
 }
 
 const teamId = 'lifecycle'
@@ -920,6 +954,28 @@ try {
       && modelEditedDynamic.tasks.every(item => item.status === 'pending')
       && modelEditedDynamic.planReviewState === 'awaiting_review'
       && deliveries.length === deliveriesBeforePlan)
+  /**
+   * ── ★★★ 2026-10-21：批准前**显式归零计划审查轮次** ────────────────────────────────
+   *
+   * MEASURED：本夹具此前在这一步抛
+   *   `approve refused: the plan review loop has hit its ceiling — 4 round(s) against a limit of 3`
+   *
+   * ★ 成因是**夹具累积**，不是产品缺陷：上面几次 `updateStagedPlan` / `edit_plan`
+   *   每一次都让 `planReviewRounds` +1（那是**设计**：一次"我改一下计划"就是一轮反馈），
+   *   而本夹具要测的是**计划编辑与批准**，不是"改到第 4 次会怎样"。
+   *
+   * ★★ 所以这里用**正路**把它归零：`agent_teams_resume` 的显式归零
+   *   —— 那是这条上限**唯一**的解除动作（`planReviewRounds = 0` + 清 flag），
+   *     而它要求一个非空理由。★ 理由写在这里，于是"谁在什么时候放过了它"可查
+   *     （进 `agent-teams/team-resumed` 事件）。
+   *
+   * ★★★ 而这条之所以**现在**能用，是因为今天修了它的出口缺陷：
+   *   此前 `resume` 对 `halted !== true` 的队答 `already_running` 且**一格不动**，
+   *   而它算出来的归零**只活在返回值里、从不落盘**
+   *   ⇒ 一个"已触顶、但没被 halt"的 staged 队**没有任何工具能放行**。
+   *   （提交 `1eaaee1`：把"已触顶"也算进需要显式恢复的状态，并让两个调用点写回盘。）
+   */
+  await call('agent_teams_resume', { reason: 'fixture: this plan was revised several times while testing plan editing; zero the review counter so the approval step can be exercised' })
   const approvedDynamic = await call('agent_teams_approve', { confirmation: 'user clicked Approve & Run' })
   const dynamicTeam = await readTeam(stateRoot, 'dynamic-demo')
   const correctedRunning = await call('agent_teams_edit_plan', { operations: [{ action: 'update_task', task_id: dynamicSecond.task_id, description: 'Corrected pending task context', dependencies: [dynamicFirst.task_id] }] })
@@ -1784,7 +1840,13 @@ try {
       && (await bridgeTask())?.status === 'failed')
   await call('agent_teams_delete', {})
 
-  const batchPlan = { members: [{ name: 'worker' }, { name: 'verifier' }], tasks: [
+  /**
+   * ★★ 2026-10-21：`plan.shape` 现在是**必填**（用户 2026-10-20 裁定乙方案）——
+   *   一个不声明形态的队，其成员提示会落回条件式那条，而那正是"没起效"的那条路
+   *   ⇒ 让"我没想过形态"变成一个**当场要回答**的问题。
+   *   ★ 本夹具的两个成员是**自己干活**的（worker / verifier），所以是 `'flat'`。
+   */
+  const batchPlan = { shape: 'flat', members: [{ name: 'worker' }, { name: 'verifier' }], tasks: [
     { id: 'verify', subject: 'Validate output', assignee: 'verifier', dependencies: ['work'] },
     { id: 'work', subject: 'Actual task', description: 'FULL_CONTRACT_BODY', assignee: 'worker' },
   ] }
@@ -1818,7 +1880,35 @@ try {
   await call('agent_teams_delete', {})
   check('archive retries drain previously removed roster rows', await readTeam(stateRoot, 'batch-plan') === undefined && !liveAgents.has(batchWorker.id))
 } finally {
-  await rm(workspace, { recursive: true, force: true })
+  /**
+   * ── ★★ 清理要**重试**，且清理失败不许让整条验证变成"失败"（2026-10-21）───────────
+   *
+   * MEASURED（本轮实测，可复跑）：`rm(…, { recursive: true, force: true })` 会抛
+   *
+   *   ENOTEMPTY: directory not empty, rmdir '…/.agent-teams'
+   *
+   * 而**它前面每一条 check 都是 PASS** —— 也就是说：
+   * ★★ 一条"测试逻辑全过、清理阶段崩了"的验证，会把**通过读成失败**。
+   *
+   * 根因：`agent_teams_delete` → `archiveTeamDir` 用 `renameWithRetry` 搬目录
+   * （它自己就有"瞬态锁"的重试，说明这个仓库知道这里会有竞态），
+   * 而 `rm` 紧接着跑 ⇒ 目录树在遍历与删除之间有窗口。
+   *
+   * ★ 处置两条，缺一不可：
+   *   ① **重试**清理（`maxRetries` + 短暂退避）—— 竞态是瞬态的，重试就该过
+   *   ② 清理**最终失败也不改变结论**：它是**收尾**，不是判据。
+   *      ★★ 让一个收尾失败去改写 `failures`，等于用"我删不掉临时目录"
+   *        去断言"这个团队的生命周期是坏的" —— 两件事完全不同形。
+   *      ⇒ 只在 stderr 留一条 warn，让读的人知道盘上留了东西。
+   */
+  try {
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+  } catch (cleanupError) {
+    console.error(
+      `  WARN cleanup could not remove ${workspace} (this does NOT change the verdict — `
+      + `every check above already ran): ${String(cleanupError)}`,
+    )
+  }
 }
 
 if (failures.length > 0) {
