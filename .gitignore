@@ -5,3 +5,10 @@ node_modules/
 
 # pnpm 本地 store（构建缓存，不进版本控制）
 .pnpm-store/
+
+# ── ★ 2026-10-22：Agent Reach（本机互联网能力）────────────────────────────────
+#   装在工作区内是因为**沙箱只允许写工作区**（写 ~ 会被拒），而它又不该进版本控制。
+#   ★★ 用户已裁定「留在工作区 + 加 .gitignore」（而不是挪到 ~/.agent-reach-venv）。
+#   用：./.agent-reach-venv/bin/agent-reach doctor
+.agent-reach-venv/
+.agent-reach-npm/

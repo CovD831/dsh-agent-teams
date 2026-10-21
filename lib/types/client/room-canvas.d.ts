@@ -40,12 +40,24 @@ export declare const ROOM_PALETTE: {
     readonly wallBack: "#3a3348";
     readonly wallSide: "#2e2838";
     readonly wallBase: "#1e1a26";
-    readonly deskTop: "#564a63";
-    readonly deskLeft: "#362e40";
-    readonly deskRight: "#41374d";
+    /**
+     * ── ★★★ 三明度，一个光源（外部规范 `rules/71-isometric` rule 5）────────────────────
+     *
+     * 规范逐字：「Light from the upper left: **top lightest, left face middle, right face
+     *   darkest.** Never flip it per object.」
+     *
+     * ★★ MEASURED（本条修之前）：桌子写的是 `deskLeft: '#362e40'`（更暗）、
+     *   `deskRight: '#41374d'`（更亮）⇒ **左右反了**。单看一个物件不像错，
+     *   **整间房光向不一致**才看得出来 —— 那正是规范说 "never flip it per object" 的原因。
+     * ★ 而这条错误此前**没有任何判据会红**（房间能画出来、16 条臂全绿）。
+     *   现在由 `scripts/gate-room-lighting.test.mjs` 臂 1 钉住：`top > left > right`。
+     */
+    readonly deskTop: "#5b4f69";
+    readonly deskLeft: "#41384d";
+    readonly deskRight: "#2e2838";
     readonly chairTop: "#b93a44";
-    readonly chairLeft: "#7f1f2a";
-    readonly chairRight: "#962533";
+    readonly chairLeft: "#8f2530";
+    readonly chairRight: "#6b1922";
     readonly monitorFrame: "#0b0b10";
     /** ★ 屏幕亮着时的代码色（"在干活"最一眼可见的信号）。 */
     readonly screenCode: "#0f3b36";

@@ -753,6 +753,15 @@ export const CLAIMS = Object.freeze([
       + '启动期默认面板不许改成房间）。',
   },
   {
+    id: 'R27.5', section: 27, status: 'met',
+    claim: '画风符合**像素等距的三条外部纪律**（三明度一个光源 / 接地阴影 / `x+y` 排序）',
+    check: { kind: 'file', path: 'scripts/gate-room-lighting.test.mjs' },
+    note: '★ 这三条来自 `pixeli.pebbly.space/knowledge/rules/71-isometric`（经 Agent Reach 搜到）。'
+      + '★★ 而它们此前**一条都不在判据里** —— 房子能画出来、16 条臂全绿，'
+      + '而"桌子左右面明度反了"没有任何东西会红。'
+      + '★ 这是"外部材料补上我们自己看不见的格子"的一个具体例子。',
+  },
+  {
     id: 'R27.4', section: 27, status: 'gap',
     claim: '画面从**正投影**升级到**等距房间**（经营类/像素游戏的房间观感）',
     check: { kind: 'manual' },
