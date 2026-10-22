@@ -1,6 +1,12 @@
 {
   "schema": 1,
+<<<<<<< Updated upstream
   "source": "5a103a8b51eb841ca045fef3a64cdd94ef08e96d64991992037c678a29f5efb2",
   "output": "34caa2de1e4dc2fee4119577d76397443c7aec0be1967e65ef000d3acbe62ac7",
   "commit": "088dc8cdb0bb23628c87e55016ff7914e16e254d"
+=======
+  "source": "4d45f810c59ca03dc5654144631b1f77825eb4ea3fe0bca997d39ff24a6e9689",
+  "output": "bb0d7c90f79812e77960f5a880ee07e641528953f66b534dc7323af619e1ccc9",
+  "commit": "05578f1a85deea31fd9d7e0087c3895e574a36c6"
+>>>>>>> Stashed changes
 }
