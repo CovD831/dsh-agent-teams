@@ -12,3 +12,9 @@ node_modules/
 #   用：./.agent-reach-venv/bin/agent-reach doctor
 .agent-reach-venv/
 .agent-reach-npm/
+
+# ── ★★★ 2026-10-22：登录态隔离目录（**含凭据**）──────────────────────────────────
+#   Agent Reach 用 HOME 定位配置 ⇒ 把 HOME 指到工作区内，凭据才写不进 ~。
+#   ★ 里面是 X 的 auth_token/ct0 与 B 站 SESSDATA —— **绝不许进仓**。
+#   ★★ 这条是后补的：先建目录、后想到 gitignore，中间 `git status` 已经把它报成 untracked。
+.agent-reach-home/

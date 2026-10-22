@@ -33,7 +33,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const { roomPlanOf, doingOf, SEATS_PER_ROW, MIN_ROWS } = await import(join(ROOT, 'lib', 'client', 'room-plan.js'))
+const { roomPlanOf, doingOf, SEATS_PER_ROW, SEAT_ROW_STRIDE, MIN_ROWS } = await import(join(ROOT, 'lib', 'client', 'room-plan.js'))
 
 /** 一个成员的最小形状（只给 `roomPlanOf` 读到的那些格）。 */
 const member = (name, patch = {}) => ({
@@ -181,7 +181,17 @@ test('★★ 臂 7（真实语料）：把本工作区的真实团队投影成�
    * ★★ 写 `<= MIN_ROWS + expected` 而不是 `<= expected`：房间是"最小纵深 + 团队区"，
    *   两者**相加**（见 `roomPlanOf` 的注释 —— 压平过一次，那是假绿）。
    */
-  const bandRows = teams.reduce((sum, entry) => sum + Math.max(1, Math.ceil((entry.members?.length ?? 0) / SEATS_PER_ROW)) + 1, 0)
+  /**
+   * ★★ 每个团队吃掉的排数必须按 **`SEAT_ROW_STRIDE`** 算（2026-10-22 第四轮）。
+   *   MEASURED：改成"一行 3 人 + 每排占 3 行"之后，这里仍按"每排占 1 行"算 ⇒
+   *   报 `行数 42 超过上界 30`。**而产品是对的、判据是错的** ——
+   *   排距放大 3 倍是刻意的（见 `SEAT_ROW_STRIDE` 的注释：不放大就挡死）。
+   *   ⇒ 修判据，不修产品；★ 但要把"为什么放大"写在这里，否则下一轮会把它改回去。
+   */
+  const bandRows = teams.reduce((sum, entry) => {
+    const seatsInRow = Math.max(1, Math.ceil((entry.members?.length ?? 0) / SEATS_PER_ROW))
+    return sum + ((seatsInRow - 1) * SEAT_ROW_STRIDE + 1) + 1
+  }, 0)
   assert.ok(plan.rows <= MIN_ROWS + bandRows, `行数 ${plan.rows} 超过按人头算出的上界 ${MIN_ROWS + bandRows}`)
   t.diagnostic(`${teams.length} 个团队 / ${plan.actors.length} 个成员 ⇒ ${plan.cols}×${plan.rows} 的房间`)
 })

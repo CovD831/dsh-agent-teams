@@ -71,15 +71,96 @@ npm install --prefix .agent-reach-npm --cache .agent-reach-npm/.cache mcporter
 .agent-reach-npm/node_modules/.bin/mcporter config add exa https://mcp.exa.ai/mcp --scope project
 ```
 
-**当前状态（`doctor` 实测）**：**4/16 渠道可用**
+**当前状态（`doctor` 实测，2026-10-22 第二轮配完登录态之后）**：**5/16 渠道可用 + 1 条已配好登录态**
 ```
 ✅ 任意网页（Jina Reader）        ✅ RSS/Atom
 ✅ V2EX                          ✅ 全网语义搜索（装 mcporter 之后）
+✅ B站（bili-cli，★ 复用 Edge 登录态，已实测搜到结果）
+[~] X/Twitter（twitter-cli，★ 复用 Edge 登录态，已实测搜到结果；
+    doctor 只报 warn —— 它**拒绝**执行 `twitter status`，因为上游验证失败时会
+    自动回读浏览器 cookie。★ 这一格是 doctor 的诚实，不是渠道没通）
 [!] GitHub（gh 已装，未做实时认证检查）
 [!] YouTube（yt-dlp 已装，缺 --js-runtimes node 配置）
-[!] B站（搜索 API 通；完整功能需 bili-cli）
-[X] 其余 9 个可选渠道（Twitter / Reddit / Facebook / Instagram /
-    小红书 / 小宇宙 / 雪球 / LinkedIn / Boss直聘）—— 都要登录态
+[X] 其余 8 个可选渠道（Reddit / Facebook / Instagram / 小红书 /
+    小宇宙 / 雪球 / LinkedIn / Boss直聘）—— 都要各自的登录态
+```
+
+---
+
+## 3b. ★★★ 两条渠道配了登录态 —— 以及它们**各自踩的坑**（2026-10-22 第二轮）
+
+用户原话：
+> 「你可以配置推特（其实现在就是 X），包括 B 站你也可以去配置。其实**你可以复用我 Edge 浏览器的登录状态**」
+
+### ★★ 先说那个把两者连起来的机制：隔离的 `HOME`
+
+Agent Reach 用 `HOME` 定位配置目录（`agent_reach/utils/paths.py` 逐字：`explicit_home` 优先）。
+而沙箱只允许写工作区 ⇒ **把 `HOME` 指进工作区**，凭据才写得下、也才收得住：
+
+```
+.agent-reach-home/            ← 含凭据，**已 gitignore**
+  .agent-reach/config.yaml            X 的 twitter_auth_token / twitter_ct0；B 站的 sessdata / csrf
+  .bilibili-cli/credential.json       bili-cli 的凭据
+  .twitter-cli/transaction_cache.json ★ X 的那个坑的修法（见下）
+```
+
+★★★ **一条顺序错误，如实记下**：我先 `mkdir` 了这个目录、把凭据写进去，**之后**才想到 gitignore。
+中间那一段 `git status --short` 已经把它报成 `?? .agent-reach-home/` —— 一次 `git add -A`
+就会把登录态提交进仓库。现在 `scripts/gate-agent-reach-channels.test.mjs` 臂 3 钉住它。
+
+### 坑 ①（X）：`HTTP 404`，而真因不是没登录
+
+```
+症状   twitter search "…"  ⇒ HTTP 404（不是 401、不是 429）
+真因   `x-client-transaction` 初始化失败：它去 x.com 首页找 `ondemand.s.<hash>a.js`
+       的指纹，而**未登录的首页是登录墙、里面没有那段** ⇒ 请求缺 `x-client-transaction-id`
+修法   带 cookie 取 `https://x.com/home`，把 home_html + ondemand 写进
+       `~/.twitter-cli/transaction_cache.json`（twitter-cli 自己会读它，TTL 1 小时）
+```
+
+★ **一条走了的弯路**：我先怀疑是 queryId 过期，改了 `graphql.py` 里的常量 —— **改了没用**，已回退。
+  ⇒ 这正是"症状同形"的代价：`404` 同时能由"queryId 过期"和"缺 transaction id"产生，
+    而我只看了前者。
+
+### 坑 ②（B 站）：`No cookies found`，而 Edge 明明登录着
+
+```
+症状   agent-reach configure --from-browser edge --platform bilibili ⇒ "No cookies found"
+真因   Edge **开着**时 Cookies 库被锁/未落盘；而 browser_cookie3 直接读活库会
+       `Unable to get key for cookie decryption`
+修法   先 `cp` 一份到临时目录再解，解出来写进 bili-cli 的 credential.json
+```
+
+★ 实测：解出来的 `SESSDATA` 一写进去，`bili status` 立刻报 `authenticated: true`（用户名可见）。
+
+### 用法（两条都进了包装器 —— 凭据只经**子进程环境**，不进 argv）
+
+```bash
+node scripts/agent-reach.mjs x search "pixel art office agents" -t photos -n 8
+node scripts/agent-reach.mjs bili search "像素风 等距 房间 场景" --type video
+```
+
+★★ 为什么必须进包装器：这条链上有**三个隐含前提**（`HOME` 指向哪、`twitter`/`bili`
+在不在 `PATH`、两个凭据从哪来）。任何一个缺了，症状都是**同一条** `404` / `未登录` ——
+⇒ 让包装器自己负责，别让下一个人再猜一遍。
+
+### ★★ `doctor` 为什么仍把 X 报成 `[!]` —— 那是它的**诚实**，不是没配好
+
+```
+上游 agent_reach/channels/twitter.py 逐字：
+  「Doctor cannot disable that fallback, so executing it would violate
+    the Cookie-Editor-only policy.」
+⇒ 它**拒绝**执行 `twitter status`，因为上游在验证失败时会**自动回读浏览器 cookie**。
+⇒ 于是它只能报 "凭据已配置，但未实时验证"。
+```
+
+★ 判据 `scripts/gate-agent-reach-channels.test.mjs` 臂 2 钉住的是**相反**的一件事：
+  wrapper 的 `doctor` 必须是**只读**的（修之前它偷偷跑 `install --env=auto` ——
+  一条叫 doctor 的命令在改机器状态）。体检 ≠ 治疗。
+
+★★ 而"X 到底通没通"的**唯一**可信读数是**真跑一次搜索**：
+```bash
+node scripts/agent-reach.mjs x search "pixel art" -t latest -n 3   # 有结果 = 通
 ```
 
 ---

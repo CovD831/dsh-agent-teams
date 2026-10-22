@@ -50,15 +50,60 @@ export const ROOM_PALETTE = {
    * ★ 而这条错误此前**没有任何判据会红**（房间能画出来、16 条臂全绿）。
    *   现在由 `scripts/gate-room-lighting.test.mjs` 臂 1 钉住：`top > left > right`。
    */
-  deskTop: '#5b4f69', deskLeft: '#41384d', deskRight: '#2e2838',
+  /**
+   * ── ★★★ 桌面的明度是**按对比度算出来的**，不是挑出来的（2026-10-22 第四轮）──────────
+   *
+   * MEASURED（`python3` 量参照图 + 量我们自己的调色板）：
+   * ```
+   * 参照物 agent-cockpit：桌面 #726c6e 亮度 0.154  vs 地板 0.013 ⇒ **3.3 : 1**
+   * 我们（修之前）：      桌面 #5b4f69 亮度 0.088  vs 地板 0.017 ⇒ **2.1 : 1**
+   *                                     vs 墙   0.037 ⇒ **1.6 : 1**  ← ★ 这一格最糟
+   * ```
+   * ★★ 而 1.6:1 就是"糊成一团"的**可测定义**：桌子与墙之间几乎分不出来。
+   *   ⇒ 用户说"跟我想的画面不一样"时，这不是审美分歧，是一个能量出来的差距。
+   *
+   * 修法：把桌面提到 `vs 地板 ≥ 3:1`，**同时保持** `top > left > right`（一个光源）。
+   * ```
+   * top   #8a7a9e  亮度 0.218  vs 地板 4.00:1  vs 墙 3.07:1
+   * left  #61556f  亮度 0.102  vs 地板 2.26:1
+   * right #423b4c  亮度 0.048  vs 地板 1.46:1
+   * ```
+   * ★ 判据：`gate-room-furniture-contrast` —— 桌面 vs 地板 ≥ 3:1，且三面顺序不变。
+   */
+  deskTop: '#8a7a9e', deskLeft: '#61556f', deskRight: '#423b4c',
   chairTop: '#b93a44', chairLeft: '#8f2530', chairRight: '#6b1922',
-  monitorFrame: '#0b0b10',
+  /**
+   * ── ★★ 显示器机身：**不是黑的**（2026-10-22 第四轮实测）───────────────────────────
+   *
+   * MEASURED（参照物 agent-cockpit 的显示器区域）：机身是 `#58565b`（亮度 0.095），
+   * 而**屏幕才是黑的**。我们此前把机身写成 `#0b0b10`（亮度 0.0035）
+   * ⇒ 显示器成了一块**黑洞**，把刚提亮的桌面又遮回去。
+   * ★ 而"机身比屏幕亮"是物理事实（塑料外壳反光，屏幕发光但画面暗）。
+   */
+  monitorFrame: '#58565b', monitorSide: '#3f3d42', monitorTop: '#6a686e',
   /** ★ 屏幕亮着时的代码色（"在干活"最一眼可见的信号）。 */
   screenCode: '#0f3b36', screenIdle: '#15151c',
   codeGlyph: '#4fe0c0',
   neon: '#ff3cbe', neonCool: '#3cdcff',
   ghost: 'rgba(190,200,220,0.35)',
   unknownStripe: '#6b6478',
+  /**
+   * ── ★★★ 描边：每件家具外面一圈深色（参照物的**最关键**一条画法）────────────────────
+   *
+   * MEASURED（2026-10-22 第四轮，把参照物放大到 4× 后逐像素看）：
+   * `agent-cockpit` 的桌子是一块浅灰 `#8d8f9e`，而它**外面有一圈 `#2e2a27`**；
+   * 显示器更明显（黑框 + 浅色屏幕）。`pixtuoid` 的木桌同样有一圈深棕。
+   *
+   * ★★ 为什么它比"配色好不好看"重要：没有描边时，我们的
+   *   ```
+   *   桌子 #5b4f69（亮度 0.088）· 墙 #3a3348（0.037）· 地板 #26212f（0.017）
+   *   ```
+   *   三者**只有明度差、没有边界** ⇒ 深色主题下整间房是一团灰紫，
+   *   眼睛分不出"哪是桌子、哪是墙"。而描边**先立住轮廓**，明度再去分面。
+   * ★ 它与 `gate-room-lighting` 互补：那条管"三个面的明度顺序"，
+   *   这条管"物件与背景之间有没有边界"。
+   */
+  outline: '#0f0c14',
 } as const
 
 /** 一个团队用哪种地板色（★ 固定顺序取色，跨轮询稳定）。 */
@@ -143,9 +188,25 @@ function drawSprite(
   }
 }
 
+/**
+ * ── ★★★ 头顶名牌的状态色（五态，两两不同色）────────────────────────────────────────
+ *
+ * ★ 与 `DOING_LABEL` 同一条纪律：**五态不许合流**。`unknown` 用的是**条纹灰**而不是
+ *   某个"看起来像闲着"的颜色 —— "读不到"与"闲着"在画面上也必须不同形。
+ * ★★ 参照物 pixtuoid 的做法（`#thinking` / `#working` / `#idle-a` / `#waiting`）
+ *   证明这一格是**该有的**，不是我们加戏。
+ */
+const TAG_COLOR: Readonly<Record<RoomActorDoing, string>> = {
+  working: '#4fe0c0',
+  idle: '#7d8794',
+  'not-spawned': '#4a6fa5',
+  away: '#3a3348',
+  unknown: '#6b6478',
+}
+
 /** 一个可以被夹具核对的"画了什么"的物件记录。 */
 export interface DrawnItem {
-  readonly kind: 'floor' | 'wall' | 'desk' | 'monitor' | 'chair' | 'sprite' | 'ghost' | 'neon' | 'sign'
+  readonly kind: 'floor' | 'wall' | 'desk' | 'monitor' | 'chair' | 'sprite' | 'ghost' | 'neon' | 'sign' | 'tag'
   readonly u: number
   readonly v: number
   readonly teamId?: string
@@ -242,7 +303,7 @@ export function drawRoom(
     box(ctx, ox, oy, u + 0.1, v - 0.7, 1.6, 0.6, 5, ROOM_PALETTE.deskTop, ROOM_PALETTE.deskLeft, ROOM_PALETTE.deskRight)
     drawn.push({ kind: 'desk', u, v, actorKey: actor.key, teamId: actor.teamId })
     /** 显示器：桌子上的薄盒子 + **屏幕面**（亮/暗就是"在不在干活"）。 */
-    box(ctx, ox, oy, u + 0.42, v - 0.62, 0.95, 0.12, 8, '#16161c', ROOM_PALETTE.monitorFrame, '#101016', 5)
+    box(ctx, ox, oy, u + 0.42, v - 0.62, 0.95, 0.12, 8, ROOM_PALETTE.monitorTop, ROOM_PALETTE.monitorFrame, ROOM_PALETTE.monitorSide, 5)
     const screen = toScreen(u + 0.5, v - 0.5, 6)
     quad(ctx, ox, oy, [
       { x: screen.x - 5, y: screen.y },
@@ -297,6 +358,42 @@ export function drawRoom(
     } else {
       drawSprite(ctx, ox, oy, u, v, actor.doing)
       drawn.push({ kind: 'sprite', u, v, actorKey: actor.key, doing: actor.doing })
+    }
+    /**
+     * ── ★★★ 头顶名牌：**一小块底 + 状态色**（参照物 pixtuoid / agent-cockpit 都有）────
+     *
+     * MEASURED（2026-10-22 第四轮，看参照物的图）：`pixtuoid` 每个小人头上有一块
+     * `#thinking` / `#working` / `#idle-a` 的牌子，`agent-cockpit` 有状态点。
+     * ★★ 而我们的名字只在 canvas **外面**的 `<ul>` 里 ⇒ **看画面时不知道谁是谁**，
+     *   于是"房间"退化成一个装饰图，信息仍要去读列表。
+     *
+     * ★ 本机没有视觉模型 ⇒ 文字**不画在 canvas 上**（画不了字形判据），
+     *   只画**牌子的底与状态色**，把 `kind: 'tag'` 记进 `drawn[]`。
+     *   名字仍由 `room-panel.tsx` 在放大后用页面分辨率画（参照物也是这么做的）。
+     */
+    {
+      /**
+       * ★★ 锚点必须与 `drawSprite` 的 `top` 对齐，否则名牌会**浮在半空**。
+       *   MEASURED（第五版预览图）：写成 `toScreen(…, 24)` ⇒ 牌子比头顶高 8px，
+       *   看起来像"三个色块飘在房间上方"。
+       *   而 `drawSprite` 用的是 `center.y - 16`（精灵高 24、坐姿上沿留 8 行空白）
+       *   ⇒ 这里必须用**同一个数**，并且再往上让出牌子自己的高度。
+       */
+      const head = { x: toScreen(u + 0.5, v + 0.5, 0).x, y: toScreen(u + 0.5, v + 0.5, 0).y - 16 - 5 }
+      const tagColor = TAG_COLOR[actor.doing]
+      quad(ctx, ox, oy, [
+        { x: head.x - 6, y: head.y - 3 },
+        { x: head.x + 6, y: head.y - 3 },
+        { x: head.x + 6, y: head.y },
+        { x: head.x - 6, y: head.y },
+      ], ROOM_PALETTE.outline)
+      quad(ctx, ox, oy, [
+        { x: head.x - 5, y: head.y - 2.5 },
+        { x: head.x + 5, y: head.y - 2.5 },
+        { x: head.x + 5, y: head.y - 0.5 },
+        { x: head.x - 5, y: head.y - 0.5 },
+      ], tagColor)
+      drawn.push({ kind: 'tag', u, v, actorKey: actor.key, doing: actor.doing })
     }
   }
 

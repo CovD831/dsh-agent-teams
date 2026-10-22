@@ -52,13 +52,43 @@ export declare const ROOM_PALETTE: {
      * ★ 而这条错误此前**没有任何判据会红**（房间能画出来、16 条臂全绿）。
      *   现在由 `scripts/gate-room-lighting.test.mjs` 臂 1 钉住：`top > left > right`。
      */
-    readonly deskTop: "#5b4f69";
-    readonly deskLeft: "#41384d";
-    readonly deskRight: "#2e2838";
+    /**
+     * ── ★★★ 桌面的明度是**按对比度算出来的**，不是挑出来的（2026-10-22 第四轮）──────────
+     *
+     * MEASURED（`python3` 量参照图 + 量我们自己的调色板）：
+     * ```
+     * 参照物 agent-cockpit：桌面 #726c6e 亮度 0.154  vs 地板 0.013 ⇒ **3.3 : 1**
+     * 我们（修之前）：      桌面 #5b4f69 亮度 0.088  vs 地板 0.017 ⇒ **2.1 : 1**
+     *                                     vs 墙   0.037 ⇒ **1.6 : 1**  ← ★ 这一格最糟
+     * ```
+     * ★★ 而 1.6:1 就是"糊成一团"的**可测定义**：桌子与墙之间几乎分不出来。
+     *   ⇒ 用户说"跟我想的画面不一样"时，这不是审美分歧，是一个能量出来的差距。
+     *
+     * 修法：把桌面提到 `vs 地板 ≥ 3:1`，**同时保持** `top > left > right`（一个光源）。
+     * ```
+     * top   #8a7a9e  亮度 0.218  vs 地板 4.00:1  vs 墙 3.07:1
+     * left  #61556f  亮度 0.102  vs 地板 2.26:1
+     * right #423b4c  亮度 0.048  vs 地板 1.46:1
+     * ```
+     * ★ 判据：`gate-room-furniture-contrast` —— 桌面 vs 地板 ≥ 3:1，且三面顺序不变。
+     */
+    readonly deskTop: "#8a7a9e";
+    readonly deskLeft: "#61556f";
+    readonly deskRight: "#423b4c";
     readonly chairTop: "#b93a44";
     readonly chairLeft: "#8f2530";
     readonly chairRight: "#6b1922";
-    readonly monitorFrame: "#0b0b10";
+    /**
+     * ── ★★ 显示器机身：**不是黑的**（2026-10-22 第四轮实测）───────────────────────────
+     *
+     * MEASURED（参照物 agent-cockpit 的显示器区域）：机身是 `#58565b`（亮度 0.095），
+     * 而**屏幕才是黑的**。我们此前把机身写成 `#0b0b10`（亮度 0.0035）
+     * ⇒ 显示器成了一块**黑洞**，把刚提亮的桌面又遮回去。
+     * ★ 而"机身比屏幕亮"是物理事实（塑料外壳反光，屏幕发光但画面暗）。
+     */
+    readonly monitorFrame: "#58565b";
+    readonly monitorSide: "#3f3d42";
+    readonly monitorTop: "#6a686e";
     /** ★ 屏幕亮着时的代码色（"在干活"最一眼可见的信号）。 */
     readonly screenCode: "#0f3b36";
     readonly screenIdle: "#15151c";
@@ -67,10 +97,27 @@ export declare const ROOM_PALETTE: {
     readonly neonCool: "#3cdcff";
     readonly ghost: "rgba(190,200,220,0.35)";
     readonly unknownStripe: "#6b6478";
+    /**
+     * ── ★★★ 描边：每件家具外面一圈深色（参照物的**最关键**一条画法）────────────────────
+     *
+     * MEASURED（2026-10-22 第四轮，把参照物放大到 4× 后逐像素看）：
+     * `agent-cockpit` 的桌子是一块浅灰 `#8d8f9e`，而它**外面有一圈 `#2e2a27`**；
+     * 显示器更明显（黑框 + 浅色屏幕）。`pixtuoid` 的木桌同样有一圈深棕。
+     *
+     * ★★ 为什么它比"配色好不好看"重要：没有描边时，我们的
+     *   ```
+     *   桌子 #5b4f69（亮度 0.088）· 墙 #3a3348（0.037）· 地板 #26212f（0.017）
+     *   ```
+     *   三者**只有明度差、没有边界** ⇒ 深色主题下整间房是一团灰紫，
+     *   眼睛分不出"哪是桌子、哪是墙"。而描边**先立住轮廓**，明度再去分面。
+     * ★ 它与 `gate-room-lighting` 互补：那条管"三个面的明度顺序"，
+     *   这条管"物件与背景之间有没有边界"。
+     */
+    readonly outline: "#0f0c14";
 };
 /** 一个可以被夹具核对的"画了什么"的物件记录。 */
 export interface DrawnItem {
-    readonly kind: 'floor' | 'wall' | 'desk' | 'monitor' | 'chair' | 'sprite' | 'ghost' | 'neon' | 'sign';
+    readonly kind: 'floor' | 'wall' | 'desk' | 'monitor' | 'chair' | 'sprite' | 'ghost' | 'neon' | 'sign' | 'tag';
     readonly u: number;
     readonly v: number;
     readonly teamId?: string;
