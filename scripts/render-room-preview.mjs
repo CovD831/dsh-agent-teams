@@ -28,7 +28,15 @@
  *
  * ── 用法 ──────────────────────────────────────────────────────────────────────
  *
- *   node scripts/render-room-preview.mjs [输出路径] [--zoom=4]
+ *   node scripts/render-room-preview.mjs [输出路径] [--view=world|room] [--room=<工作区>] [--scale=2]
+ *
+ * ★★ 两个尺度各一张图（用户原话里的两个"可以"，需求 §28.5）：
+ * ```
+ * --view=world   缩小到看到**所有房间**（默认，输出 docs/room-preview.png）
+ * --view=room    放大到**只有一间房**（输出 docs/room-preview-room.png）
+ * ```
+ * ★ 而**取景一律调产品代码里的 `focusWorld` / `focusRoom`** —— 这里自己算缩放，
+ *   就会得到一张"看着装得下"而界面装不下的图，而那正是 §28.4 修掉的那类漂移。
  *
  * @module dsh-agent-teams/scripts/render-room-preview
  */
@@ -41,6 +49,11 @@ import { fileURLToPath } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const { drawRoom } = await import(join(ROOT, 'lib', 'client', 'room-canvas.js'))
 const { roomPlanOf } = await import(join(ROOT, 'lib', 'client', 'room-plan.js'))
+/**
+ * ★★★ 摄像机也**从产品代码里取** —— 不是这里另算一遍。
+ * 若预览图自己算"怎么摆放房间/缩到多少"，那它又会漂（本轮刚修过同类问题）。
+ */
+const { layOutRooms, focusRoom, focusWorld } = await import(join(ROOT, 'lib', 'client', 'room-camera.js'))
 
 /**
  * ── 记录型 2D context ────────────────────────────────────────────────────────
@@ -172,54 +185,154 @@ function encodePng(pixels, width, height) {
  * ★ 刻意让五态各出现至少一次 —— 否则"预览图"看不出 `unknown` 与 `idle` 的区别，
  *   而那正是 §27.4 要求"两两不同形"的那一格。
  */
-const TEAMS = [
-  {
-    teamId: 'alpha', name: 'alpha', workspace: 'demo',
-    members: [
-      { name: 'architect', role: 'captain', liveness: 'working' },
-      { name: 'researcher', role: 'member', liveness: 'working' },
-      { name: 'builder', role: 'member', liveness: 'idle' },
-      { name: 'qa', role: 'member', liveness: 'never-spawned' },
-      { name: 'reviewer', role: 'member', liveness: 'not-live' },
-      { name: 'scribe', role: 'member', liveness: 'could-not-measure' },
-    ],
-  },
-  {
-    teamId: 'beta', name: 'beta', workspace: 'demo',
-    members: [
-      { name: 'worker-1', role: 'member', liveness: 'working' },
-      { name: 'worker-2', role: 'member', liveness: 'idle' },
-      { name: 'worker-3', role: 'member', liveness: 'working' },
-    ],
-  },
-]
+const CORPUS = {
+  /** 一个工作区：两个团队，五态齐全。 */
+  '/demo/alpha': [
+    {
+      teamId: 'alpha', name: 'alpha', workspace: '/demo/alpha',
+      members: [
+        { name: 'architect', role: 'captain', liveness: 'working' },
+        { name: 'researcher', role: 'member', liveness: 'working' },
+        { name: 'builder', role: 'member', liveness: 'idle' },
+        { name: 'qa', role: 'member', liveness: 'never-spawned' },
+        { name: 'reviewer', role: 'member', liveness: 'not-live' },
+        { name: 'scribe', role: 'member', liveness: 'could-not-measure' },
+      ],
+    },
+    {
+      teamId: 'beta', name: 'beta', workspace: '/demo/alpha',
+      members: [
+        { name: 'worker-1', role: 'member', liveness: 'working' },
+        { name: 'worker-2', role: 'member', liveness: 'idle' },
+        { name: 'worker-3', role: 'member', liveness: 'working' },
+      ],
+    },
+  ],
+  /** 第二个工作区：一个四人队。 */
+  '/demo/beta': [
+    {
+      teamId: 'gamma', name: 'gamma', workspace: '/demo/beta',
+      members: [
+        { name: 'lead', role: 'captain', liveness: 'working' },
+        { name: 'dev', role: 'member', liveness: 'working' },
+        { name: 'test', role: 'member', liveness: 'idle' },
+        { name: 'docs', role: 'member', liveness: 'working' },
+      ],
+    },
+  ],
+  /** 第三个工作区：一个三人队（★ 三个房间才看得出"一条街"）。 */
+  '/demo/gamma': [
+    {
+      teamId: 'delta', name: 'delta', workspace: '/demo/gamma',
+      members: [
+        { name: 'one', role: 'captain', liveness: 'working' },
+        { name: 'two', role: 'member', liveness: 'idle' },
+        { name: 'three', role: 'member', liveness: 'could-not-measure' },
+      ],
+    },
+  ],
+}
 
 const args = process.argv.slice(2)
-const zoomArg = args.find((entry) => entry.startsWith('--zoom='))
-const ZOOM = zoomArg === undefined ? 4 : Math.max(1, Number.parseInt(zoomArg.slice(7), 10))
-const out = args.find((entry) => !entry.startsWith('--')) ?? join(ROOT, 'docs', 'room-preview.png')
+const scaleArg = args.find((entry) => entry.startsWith('--scale=') || entry.startsWith('--zoom='))
+const viewArg = args.find((entry) => entry.startsWith('--view='))
+const roomArg = args.find((entry) => entry.startsWith('--room='))
+/**
+ * ★ 输出图再放大多少倍（**整数**）。★ 它只放大**已经算好**的画面，不参与摄像机取景 ——
+ *   若让它参与取景，那就会得到"看起来能装下"而实际装不下的假读数。
+ */
+const SCALE = scaleArg === undefined ? 2 : Math.max(1, Number.parseInt(scaleArg.slice(scaleArg.indexOf('=') + 1), 10))
+/**
+ * ★★ 用户原话里的**两个尺度**，各是一个取值（这是 §28.5 的判据形状）：
+ * ```
+ * world  缩小到看到**所有房间**（默认）
+ * room   放大到**只有一间房**
+ * ```
+ */
+const VIEW = viewArg?.slice('--view='.length) ?? 'world'
+const VIEWPORT = { width: 900, height: 600 }
+const out = args.find((entry) => !entry.startsWith('--'))
+  ?? join(ROOT, 'docs', VIEW === 'room' ? 'room-preview-room.png' : 'room-preview.png')
 
-const plan = roomPlanOf(TEAMS)
-const recorder = new Recorder()
-const frame = drawRoom(recorder, plan, { mainBusy: true, now: 0 })
+/**
+ * ★★ 语料按**工作区**分组 —— 与 `RoomPanel` 同一条投影（一个工作区 = 一间房）。
+ *   若这里改成"一个团队一间房"，预览图会与真实界面不是同一件事（§28.4 那条纪律）。
+ */
+const plans = Object.entries(CORPUS).map(([workspace, teams]) => ({ workspace, plan: roomPlanOf(teams) }))
+const { rooms, world } = layOutRooms(plans)
 
-const small = rasterize(recorder.ops, frame.width, frame.height)
-/** ★ 整数倍放大、最近邻 —— 与 `room-panel.tsx` 的 `ZOOM` 同一个道理。 */
-const width = frame.width * ZOOM
-const height = frame.height * ZOOM
+/** 把一间房按 1:1 画进像素缓冲。★ 调的是**真实的** `drawRoom()`。 */
+function paintRoom(plan) {
+  const recorder = new Recorder()
+  const frame = drawRoom(recorder, plan, { mainBusy: true, now: 0 })
+  return { ops: recorder.ops.length, frame, pixels: rasterize(recorder.ops, frame.width, frame.height) }
+}
+
+/**
+ * ★ 世界缓冲：所有房间按 `origin` 贴进**同一张**画布（1:1，先不缩放）。
+ *   这正是 `room-panel.tsx` 里"每间房各画一张离屏画布、再整块贴"的同一步。
+ */
+const worldPixels = new Uint8Array(world.width * world.height * 3)
+for (let i = 0; i < world.width * world.height; i += 1) {
+  worldPixels[i * 3] = 0x0b
+  worldPixels[i * 3 + 1] = 0x0a
+  worldPixels[i * 3 + 2] = 0x10
+}
+const painted = rooms.map((room) => ({ room, ...paintRoom(room.plan) }))
+for (const { room, frame, pixels } of painted) {
+  for (let y = 0; y < frame.height; y += 1) {
+    for (let x = 0; x < frame.width; x += 1) {
+      const src = (y * frame.width + x) * 3
+      const dst = ((room.origin.y + y) * world.width + (room.origin.x + x)) * 3
+      worldPixels[dst] = pixels[src]
+      worldPixels[dst + 1] = pixels[src + 1]
+      worldPixels[dst + 2] = pixels[src + 2]
+    }
+  }
+}
+
+/** ★ 摄像机：两个尺度用**产品代码里的同一个函数族**，不在这里另算。 */
+const focused = VIEW === 'room'
+  ? (rooms.find((room) => room.workspace === roomArg?.slice('--room='.length)) ?? rooms[0])
+  : undefined
+const camera = focused === undefined ? focusWorld(world, VIEWPORT) : focusRoom(focused, VIEWPORT)
+
+/**
+ * ★★ 取景：对每个屏幕像素按摄像机反算世界坐标，**最近邻**取样。
+ *   这正是 `room-panel.tsx` 里 `drawImage(..., imageSmoothingEnabled = false)` 做的事 ——
+ *   所以预览图里"每个源像素占几个屏幕像素"与真实界面一致。
+ */
+const width = VIEWPORT.width * SCALE
+const height = VIEWPORT.height * SCALE
 const big = new Uint8Array(width * height * 3)
-for (let y = 0; y < height; y += 1) {
-  for (let x = 0; x < width; x += 1) {
-    const src = ((Math.floor(y / ZOOM)) * frame.width + Math.floor(x / ZOOM)) * 3
-    const dst = (y * width + x) * 3
-    big[dst] = small[src]; big[dst + 1] = small[src + 1]; big[dst + 2] = small[src + 2]
+for (let sy = 0; sy < VIEWPORT.height; sy += 1) {
+  for (let sx = 0; sx < VIEWPORT.width; sx += 1) {
+    const wx = Math.floor(sx / camera.zoom + camera.x)
+    const wy = Math.floor(sy / camera.zoom + camera.y)
+    const inside = wx >= 0 && wy >= 0 && wx < world.width && wy < world.height
+    for (let dy = 0; dy < SCALE; dy += 1) {
+      for (let dx = 0; dx < SCALE; dx += 1) {
+        const dst = (((sy * SCALE) + dy) * width + (sx * SCALE + dx)) * 3
+        if (!inside) {
+          big[dst] = 0x0b; big[dst + 1] = 0x0a; big[dst + 2] = 0x10
+          continue
+        }
+        const src = (wy * world.width + wx) * 3
+        big[dst] = worldPixels[src]
+        big[dst + 1] = worldPixels[src + 1]
+        big[dst + 2] = worldPixels[src + 2]
+      }
+    }
   }
 }
 
 writeFileSync(out, encodePng(big, width, height))
 process.stdout.write(
   `room-preview: ${out}\n`
-  + `  来自 drawRoom() 的 ${recorder.ops.length} 个绘制指令（★ 不是另画一遍）\n`
-  + `  房间 ${plan.cols}×${plan.rows} · ${plan.actors.length} 人 · ${plan.teams.length} 个团队\n`
-  + `  画布 ${width}×${height}（1:1 是 ${frame.width}×${frame.height}，放大 ${ZOOM}×）\n`,
+  + `  视图 ${focused === undefined ? '所有房间（缩小）' : `一间房（${focused.workspace}，放大）`}`
+  + ` · 摄像机 zoom=${camera.zoom}（x=${camera.x}, y=${camera.y}）\n`
+  + `  来自 drawRoom() 的 ${painted.reduce((sum, entry) => sum + entry.ops, 0)} 个绘制指令（★ 不是另画一遍）\n`
+  + `  ${rooms.length} 间房 · 世界 ${world.width}×${world.height}`
+  + ` · 画布 ${width}×${height}（视口 ${VIEWPORT.width}×${VIEWPORT.height} ×${SCALE}）\n`
+  + `  房间：${rooms.map((room) => `${room.workspace} ${room.frame.width}×${room.frame.height}@${room.origin.x}`).join(' · ')}\n`,
 )

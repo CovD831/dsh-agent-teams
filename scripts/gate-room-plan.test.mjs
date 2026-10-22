@@ -230,10 +230,23 @@ test('★★ 臂 9：渲染层的 `data-*` 全部**从 plan 派生**（渲染层
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
   /** ★ 它必须调 `roomPlanOf`（不许自己算座位）。 */
   assert.match(code, /roomPlanOf\(/, '★ 渲染层必须用纯函数算出来的房间，不许自己排座位')
-  /** ★ 每个 `data-*` 都从 plan/actor 读，不出现"渲染层自己再算一遍状态"的第二种写法。 */
-  for (const key of ['data-room-cols', 'data-room-rows', 'data-room-actors', 'data-room-teams', 'data-room-state']) {
+  /**
+   * ★★ 读数集合**按"一条街"改写**（§28.5）：房间从"一间"变成"每工作区一间"，
+   *   于是 `data-room-cols` / `data-room-rows`（**单数**）不再是可表达的读数 ——
+   *   世界里有 N 间房，只报一个列数会让判据读不到其余 N-1 间。
+   *
+   * ★★★ 而这不是"为了让判据变绿而改判据"：新增的 `data-room-geometry` 是**更严**的那一版 ——
+   *   它要求**每一间**房的列×排都报出来（`工作区:列x排`），而不是只报一间。
+   *   旧臂钉的是"有几何读数"，新臂钉的是"**每间房**都有几何读数"。
+   */
+  for (const key of ['data-room-geometry', 'data-room-actors', 'data-room-teams', 'data-room-state']) {
     assert.ok(code.includes(key), `★ 缺读数 ${key}`)
   }
+  /** ★★ 而 `data-room-geometry` 必须由 `room.plan` 拼出来，不许另算（不许调 `sceneSize` 之类）。 */
+  const geometryLine = code.split('\n').find((line) => line.includes('data-room-geometry')) ?? ''
+  assert.ok(geometryLine.includes('room.plan.cols'), '★★ `data-room-geometry` 必须逐间从 `room.plan.cols` 取')
+  assert.ok(geometryLine.includes('room.plan.rows'), '★★ `data-room-geometry` 必须逐间从 `room.plan.rows` 取')
+  assert.ok(!/sceneSize\s*\(/.test(code), '★★ 渲染层自己算场景尺寸 ⇒ 与 drawRoom 的 sceneSize 变成两份真相')
   for (const key of ['data-actor-doing', 'data-actor-seat', 'data-actor-task', 'data-actor-team']) {
     assert.ok(code.includes(key), `★★ 缺成员级读数 ${key} —— 而"谁在干活"正是 §27 要表达的东西`)
   }
