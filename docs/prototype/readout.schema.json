@@ -1,0 +1,162 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://maple.dev/schemas/readout.schema.json",
+  "title": "ControlPlaneReadout",
+  "description": "控制面读数契约（原料版）：前端三栏（左关卡/中事件/右产物审查）与待你决策收件箱所需的全部原料数据。所有 evidenceRef / evidenceId 必须双向闭合。本 schema 只承载原料，UI 文案/按钮/三态徽标由前端据字段推导。",
+  "type": "object",
+  "required": ["generatedAt", "decisions", "tasks"],
+  "additionalProperties": false,
+  "properties": {
+    "generatedAt": {
+      "type": "integer",
+      "description": "readout 生成时间（epoch 毫秒）。用于计算 waitingSince / blockedSince 的相对时长。"
+    },
+    "decisions": {
+      "type": "array",
+      "description": "待你决策收件箱。",
+      "items": { "$ref": "#/definitions/decision" }
+    },
+    "tasks": {
+      "type": "array",
+      "description": "任务列表（首页 drill-in 后展开的三栏数据载体）。",
+      "items": { "$ref": "#/definitions/task" }
+    }
+  },
+  "definitions": {
+    "decision": {
+      "type": "object",
+      "required": ["decisionId", "kind", "oneLine", "waitingSince", "blockedBy", "evidenceRef"],
+      "additionalProperties": false,
+      "properties": {
+        "decisionId": { "type": "string", "description": "决策唯一 id（与后端契约一致）。" },
+        "kind": { "type": "string", "enum": ["approve", "adjudicate", "notice"] },
+        "oneLine": { "type": "string", "description": "一句话决策诉求。" },
+        "waitingSince": { "type": "integer", "description": "开始等待人类介入的时间（epoch 毫秒）。" },
+        "blockedBy": {
+          "type": "object",
+          "required": ["agent", "attempts", "missingDimension"],
+          "additionalProperties": false,
+          "properties": {
+            "agent": { "type": "string", "description": "卡住该决策的 agent / 角色。" },
+            "attempts": { "type": "integer", "description": "已尝试次数。" },
+            "missingDimension": { "$ref": "#/definitions/missingDimension" }
+          }
+        },
+        "evidenceRef": { "type": "string", "description": "指向某条事件的 evidenceId，用于跨栏追溯。" }
+      }
+    },
+    "missingDimension": {
+      "type": "object",
+      "required": ["code"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["worktree-idle-policy", "severity-threshold", "ownership"],
+          "description": "缺失维度枚举。新增维度须人工加枚举，不允许自由文本进 code —— 否则「同一维度上报 ≥N 次」这类自改进度量永远数不出来。"
+        },
+        "note": { "type": "string", "description": "可选自由文本，补充说明该缺失维度。" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": ["taskId", "title", "status", "gates", "events", "acceptance", "artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "taskId": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string", "description": "任务整体状态，例如 review-blocked。" },
+        "gates": { "type": "array", "items": { "$ref": "#/definitions/gate" } },
+        "events": { "type": "array", "items": { "$ref": "#/definitions/event" } },
+        "acceptance": { "type": "array", "items": { "$ref": "#/definitions/acceptance" } },
+        "artifacts": { "$ref": "#/definitions/artifacts" }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["point", "verdict", "summary", "checks"],
+      "additionalProperties": false,
+      "properties": {
+        "point": { "type": "string", "description": "关卡名，例如 立项/计划/实现/审查/交付。" },
+        "verdict": { "type": "string", "enum": ["ok", "blocked", "unmeasured", "skipped"] },
+        "summary": { "type": "string", "description": "关卡一句话结论。" },
+        "checks": { "type": "array", "items": { "$ref": "#/definitions/check" } }
+      }
+    },
+    "check": {
+      "type": "object",
+      "required": ["checkId", "label", "hasSoft", "hasHard", "verdict", "evidenceRef", "blockedSince", "owner"],
+      "additionalProperties": false,
+      "properties": {
+        "checkId": { "type": "string" },
+        "label": { "type": "string", "description": "检查项标签。" },
+        "hasSoft": { "type": "boolean", "description": "是否有软判定配对。与 hasHard 共同推导前端三态徽标。" },
+        "hasHard": { "type": "boolean", "description": "是否有硬判定配对。" },
+        "verdict": { "type": "string", "description": "检查项结论，例如 pass/fail/pending/unmeasured。" },
+        "evidenceRef": { "type": "string", "description": "指向某条事件的 evidenceId。" },
+        "blockedSince": { "type": "integer", "description": "被阻塞起始时间（epoch 毫秒），未阻塞为 0。" },
+        "owner": { "type": "string", "description": "负责该检查项的 agent / 角色。" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["evidenceId", "at", "type", "status", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "evidenceId": { "type": "string", "description": "事件唯一追溯 id，格式 type#id（与后端契约一致）。" },
+        "at": { "type": "integer", "description": "事件发生时间（epoch 毫秒）。" },
+        "type": { "type": "string", "description": "事件类型，例如 gate.evaluated / verify.rerun / proposal.created。" },
+        "status": { "type": "string", "description": "事件状态，例如 PASS / FAIL / BLOCKED / PENDING / OK。" },
+        "payload": { "type": "object", "description": "事件原始载荷，任意结构（原料）。" }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "required": ["item", "ok", "evidenceRef", "gate"],
+      "additionalProperties": false,
+      "properties": {
+        "item": { "type": "string", "description": "验收项描述。" },
+        "ok": { "type": "boolean", "description": "true=达成, false=未达成, 缺失维度时传 false。" },
+        "evidenceRef": { "type": "string", "description": "指向支撑该验收项的事件 evidenceId。" },
+        "gate": { "type": "string", "description": "所属关卡名。" }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["files", "hunks"],
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "涉及的文件名清单（原料），供右栏文件树展示。"
+        },
+        "hunks": {
+          "type": "array",
+          "description": "结构化 diff（替代旧的单字符串 diff）。",
+          "items": {
+            "type": "object",
+            "required": ["file", "oldStart", "lines"],
+            "additionalProperties": false,
+            "properties": {
+              "file": { "type": "string", "description": "本 hunk 所属文件。" },
+              "oldStart": { "type": "integer", "description": "原文件起始行号。" },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["type", "text"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": { "type": "string", "enum": ["add", "del", "ctx"] },
+                    "text": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

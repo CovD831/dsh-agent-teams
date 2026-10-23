@@ -1,0 +1,119 @@
+{
+  "generatedAt": 1792838580000,
+  "decisions": [
+    {
+      "decisionId": "dec-1",
+      "kind": "approve",
+      "oneLine": "批准「审查关新增独立审查者」",
+      "waitingSince": 1792838400000,
+      "blockedBy": { "agent": "human-rev", "attempts": 1, "missingDimension": { "code": "ownership", "note": "reviewer 指派" } },
+      "evidenceRef": "proposal.created#g-1c04"
+    },
+    {
+      "decisionId": "dec-2",
+      "kind": "adjudicate",
+      "oneLine": "决定是否豁免 verify 重跑失败",
+      "waitingSince": 1792837560000,
+      "blockedBy": { "agent": "impl-agent", "attempts": 2, "missingDimension": { "code": "severity-threshold", "note": "verify 退出码归因" } },
+      "evidenceRef": "verify.rerun#g-8b71"
+    },
+    {
+      "decisionId": "dec-3",
+      "kind": "notice",
+      "oneLine": "处理提案 g-1c04（指派独立审查者）",
+      "waitingSince": 1792795380000,
+      "blockedBy": { "agent": "owner", "attempts": 0, "missingDimension": { "code": "worktree-idle-policy", "note": "提案卡在空闲 worktree，无人认领" } },
+      "evidenceRef": "proposal.created#g-1c04"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "contract-rewrite",
+      "title": "MAPLE 契约重构",
+      "status": "review-blocked",
+      "gates": [
+        {
+          "point": "立项",
+          "verdict": "ok",
+          "summary": "已通过",
+          "checks": [
+            { "checkId": "c-init", "label": "立项评审", "hasSoft": true, "hasHard": true, "verdict": "pass", "evidenceRef": "task.scoped#t-0001", "blockedSince": 0, "owner": "maple-orch" }
+          ]
+        },
+        {
+          "point": "计划",
+          "verdict": "ok",
+          "summary": "已通过",
+          "checks": [
+            { "checkId": "c-plan", "label": "计划评审", "hasSoft": true, "hasHard": true, "verdict": "pass", "evidenceRef": "plan.approved#p-0002", "blockedSince": 0, "owner": "maple-orch" }
+          ]
+        },
+        {
+          "point": "实现",
+          "verdict": "ok",
+          "summary": "已通过",
+          "checks": [
+            { "checkId": "c-impl", "label": "实现完成", "hasSoft": true, "hasHard": true, "verdict": "pass", "evidenceRef": "impl.done#i-0003", "blockedSince": 0, "owner": "impl-agent" }
+          ]
+        },
+        {
+          "point": "审查",
+          "verdict": "blocked",
+          "summary": "verify 未过",
+          "checks": [
+            { "checkId": "c-paths", "label": "changed-paths 越界", "hasSoft": false, "hasHard": true, "verdict": "fail", "evidenceRef": "gate.evaluated#g-3f2a", "blockedSince": 1792837560000, "owner": "gate-keeper" },
+            { "checkId": "c-verify", "label": "verify 命令重跑", "hasSoft": true, "hasHard": true, "verdict": "fail", "evidenceRef": "verify.rerun#g-8b71", "blockedSince": 1792837560000, "owner": "maple-orch" },
+            { "checkId": "c-rev", "label": "独立审查者", "hasSoft": true, "hasHard": false, "verdict": "pending", "evidenceRef": "proposal.created#g-1c04", "blockedSince": 0, "owner": "human-rev" }
+          ]
+        },
+        {
+          "point": "交付",
+          "verdict": "unmeasured",
+          "summary": "未开始",
+          "checks": [
+            { "checkId": "c-deli", "label": "交付门禁触发", "hasSoft": true, "hasHard": true, "verdict": "unmeasured", "evidenceRef": "gate.evaluated#g-77b2", "blockedSince": 0, "owner": "gate-keeper" },
+            { "checkId": "c-zero", "label": "交付零误报", "hasSoft": true, "hasHard": true, "verdict": "pass", "evidenceRef": "gate.evaluated#g-1b88", "blockedSince": 0, "owner": "gate-keeper" }
+          ]
+        }
+      ],
+      "events": [
+        { "evidenceId": "task.scoped#t-0001", "at": 1792837201000, "type": "task.scoped", "status": "PASS", "payload": { "event": "task.scoped", "task": "contract-rewrite", "scope": "rewrite review gate contract", "author": "maple-orch", "ts": "2026-10-23T10:20:01Z" } },
+        { "evidenceId": "plan.approved#p-0002", "at": 1792837360000, "type": "plan.approved", "status": "PASS", "payload": { "event": "plan.approved", "plan": "contract-rewrite-plan", "status": "APPROVED", "author": "maple-orch", "ts": "2026-10-23T10:22:40Z" } },
+        { "evidenceId": "impl.done#i-0003", "at": 1792837765000, "type": "impl.done", "status": "PASS", "payload": { "event": "impl.done", "task": "contract-rewrite", "files": 7, "author": "impl-agent", "ts": "2026-10-23T10:28:55Z" } },
+        { "evidenceId": "gate.evaluated#g-3f2a", "at": 1792838523000, "type": "gate.evaluated", "status": "BLOCKED", "payload": { "event": "gate.evaluated", "gate": "review", "status": "BLOCKED", "checks": { "changed-paths": "FAIL", "verify-rerun": "FAIL", "independent-reviewer": "PENDING" }, "blocked_by": ["changed-paths", "verify-rerun"], "evidence": "gate.evaluated#g-3f2a", "ts": "2026-10-23T10:42:03Z" } },
+        { "evidenceId": "verify.rerun#g-8b71", "at": 1792838164000, "type": "verify.rerun", "status": "FAIL", "payload": { "event": "verify.rerun", "command": "pnpm verify --gate review", "exit_code": 1, "output": "3 paths exceed max_changed_paths=4 (got 7)", "evidence": "verify.rerun#g-8b71", "ts": "2026-10-23T10:35:44Z" } },
+        { "evidenceId": "proposal.created#g-1c04", "at": 1792838240000, "type": "proposal.created", "status": "PENDING", "payload": { "event": "proposal.created", "proposal": "assign-independent-reviewer", "status": "PENDING", "reason": "independent-reviewer check needs a human sign-off", "evidence": "proposal.created#g-1c04", "ts": "2026-10-23T10:37:20Z" } },
+        { "evidenceId": "gate.evaluated#g-1b88", "at": 1792837900000, "type": "gate.evaluated", "status": "PASS", "payload": { "event": "gate.evaluated", "gate": "delivery", "status": "PASS", "checks": { "delivery-zero-false-positive": "PASS" }, "evidence": "gate.evaluated#g-1b88", "ts": "2026-10-23T10:33:10Z" } },
+        { "evidenceId": "gate.evaluated#g-77b2", "at": 1792837523000, "type": "gate.evaluated", "status": "UNMEASURED", "payload": { "event": "gate.evaluated", "gate": "delivery", "status": "UNMEASURED", "note": "delivery gate not yet triggered", "evidence": "gate.evaluated#g-77b2", "ts": "2026-10-23T10:25:13Z" } }
+      ],
+      "acceptance": [
+        { "item": "新增检查项拦下越界路径", "ok": true, "evidenceRef": "gate.evaluated#g-3f2a", "gate": "审查" },
+        { "item": "verify 命令在 CI 重跑通过", "ok": false, "evidenceRef": "verify.rerun#g-8b71", "gate": "审查" },
+        { "item": "独立审查者已签署", "ok": false, "evidenceRef": "proposal.created#g-1c04", "gate": "审查" },
+        { "item": "交付门禁零误报", "ok": true, "evidenceRef": "gate.evaluated#g-1b88", "gate": "交付" }
+      ],
+      "artifacts": {
+        "files": ["contracts/maple.gate.json", "src/gates/review.ts", "docs/handoff.md"],
+        "hunks": [
+          {
+            "file": "contracts/maple.gate.json",
+            "oldStart": 12,
+            "lines": [
+              { "type": "ctx", "text": "  \"gate\": \"review\"," },
+              { "type": "ctx", "text": "  \"required_checks\": [\"changed-paths\", \"verify\"]," },
+              { "type": "del", "text": "    \"required_checks\": [\"changed-paths\", \"verify\"]," },
+              { "type": "add", "text": "    \"required_checks\": [\"changed-paths\", \"verify\", \"independent-reviewer\"]," },
+              { "type": "ctx", "text": "    \"independent_reviewer\": true," },
+              { "type": "del", "text": "    \"max_changed_paths\": 8," },
+              { "type": "add", "text": "    \"max_changed_paths\": 4," },
+              { "type": "ctx", "text": "    \"verify_command\": \"pnpm verify\"," },
+              { "type": "ctx", "text": "    \"ci_required\": false" },
+              { "type": "del", "text": "    \"reviewers\": []," },
+              { "type": "add", "text": "    \"reviewers\": [\"human-rev\"]," }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
