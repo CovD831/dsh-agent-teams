@@ -2424,8 +2424,31 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         component: 'plan',
         ...gateIdFromMessage(message) === undefined ? {} : { gateId: gateIdFromMessage(message) },
         now: Date.now(),
-        evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
-          registry.evaluate('collection' as never, context) as never,
+        evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) => {
+          /**
+           * ── ★ 输入面核对（`collection` 位）—— 旁路，不改裁决 ──────────────────────
+           *
+           * MEASURED（2026-10-23）：`gate-input-wiring` 臂 10 报
+           * `evaluate.collection = 3 / audit.collection = 0` —— 四条采集判据
+           * （dedupe / cooldown / attributable / immunity）**都声明了 `requires`**
+           * （`candidate` / `index`），而生产路径上**从来没有核对过**这些声明。
+           *
+           * ★ 为什么结论挂在返回对象上、而不是先拦：
+           *   与其它位置同一条纪律 —— **先软后硬**。一个自己还没被验证过的核对
+           *   当场否决采集，会把"核对报缺"变成"采集中断"。
+           *   所以这里只把结论**附加**出去（`collectionDecisionOf` 只读
+           *   `ok` / `unmeasured` / `ran`，不检查形状，故附加是安全的）。
+           *
+           * ★ 结论会被谁读到：`observe` 把它当 `collection` 用；任何读该对象的
+           *   地方都能拿到 `inputSurface`。缺格时它不是 `undefined`，而是
+           *   `{ checked, incomplete, skipped, missing }` 的四格读数。
+           */
+          const collectionInputSurface = inputSurfaceOf('collection', context)
+          const evaluation = await registry.evaluate('collection' as never, context)
+          return (collectionInputSurface === undefined
+            ? evaluation
+            : { ...evaluation, inputSurface: collectionInputSurface }) as never
+        },
         source: 'edit_plan',
         loadIndex: async () => await loadCollectionIndexFor(stateRoot),
         warn: (note: string) => ctx.logger.warn(note),

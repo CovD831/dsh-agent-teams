@@ -8,7 +8,7 @@ import { appendTeamEvent, captainSessionOf } from '../events.ts'
 import { snapshotReviewedArtifacts } from '../artifacts.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
-import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, loadCollectionIndexFor, makeTask, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
+import { captainOpenTask, diagnosticFields, evaluateRuntimeGates, gateIdFromMessage, inputSurfaceOf, loadCollectionIndexFor, makeTask, memberOpenTask, recordFriction, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireMember, requireTask, runVerifyCommand, scopeViolations, stateRootOf, stopTeamMemberActivations, throwWithSurface, teamLockKey, withInputSurfaceOnError, workspaceOf, loadVerifyCommandRules, } from './shared/entities.ts'
 import { CAPTAIN_KEY, beginTaskAttempt, discardMailboxMessages, gateEvaluationRecordOf, invalidateTaskAttempt, normalizeBlankOptionalTaskFields, readTeam, readUnreadMailbox, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, unsatisfiedDependencies, validateCreateTask, withTeamLock, writeTeam } from '../state.ts'
 import { TERMINAL_TASK_STATUSES, TaskKind, TeamTask } from '../types.ts'
 import { registry } from '../gates/index.ts'
@@ -203,13 +203,15 @@ export function describeModelBindingForCreate(input: {
   rebinding: boolean
 }): { model: string; reasoningEffort?: string } | undefined {
   if (input.rebinding) return undefined
-  const model = input.model?.trim()
-  if (model === undefined || model === '') return undefined
-  const reasoningEffort = input.reasoningEffort?.trim()
-  return {
-    model,
-    ...reasoningEffort === undefined || reasoningEffort === '' ? {} : { reasoningEffort },
-  }
+  /**
+   * ★ 读懂「一个记录上的 model / reasoningEffort ⇒ 一份绑定」这条规则**只有一处**：
+   *   {@link modelBindingOf}。★ 它此前在本函数里被**逐字重写了一遍**（同一个 trim、
+   *   同一个空串判、同一个可选键展开）—— 而那正是本仓记账最久的「同一个规则的第二份实现」：
+   *   两处都写，改一处不改另一处时，其中一份变成死代码而没人知道。
+   * ★ `rebinding` 那一格是**本调用点自己的知识**（"这次是改绑定、不是新建"），
+   *   所以它留在这里；`modelBindingOf` 只管"记录上那两格怎么读成一份绑定"。
+   */
+  return modelBindingOf(input)
 }
 
 /**
@@ -643,8 +645,15 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               component: 'contract',
               tool: 'agent_teams_create_task',
               now: Date.now(),
-              evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
-                registry.evaluate('collection' as never, context) as never,
+              evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) => {
+                /**
+                 * ★ 输入面核对（旁路，不改裁决）：四条采集判据都声明了 `requires`，
+                 *   而生产路径此前从未核过。结论附加在返回对象上，不参与拒绝（先软后硬）。
+                 */
+                const surface = inputSurfaceOf('collection', context)
+                const evaluation = await registry.evaluate('collection' as never, context)
+                return (surface === undefined ? evaluation : { ...evaluation, inputSurface: surface }) as never
+              },
               /**
                * ── ★★★ N1.2：`source` 与 `index` 同时接上（之前两格都没有）──────────────
                *

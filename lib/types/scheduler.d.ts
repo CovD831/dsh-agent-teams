@@ -236,6 +236,24 @@ export interface DispatchTicket {
     readonly profileSeedId?: string;
     readonly dependencyOutputs: readonly DependencyOutput[];
     /**
+     * ── ★★★ 直接依赖的**终态全貌**（一句话；全 completed 时是空串）──────────────────
+     *
+     * 与 {@link dependencyOutputs} **并存而不是替换**，理由是 `src/state.ts:336` 逐字写的：
+     * `unsatisfiedDependencies`（闸门）与 `dependencyStatuses`（证据）「两者**必须**都能
+     * 被读到……合成一个"能开工 + 一个布尔"会让第二件事消失」。
+     *
+     * ★ 两者的**问题不同**，所以两份都要在票里：
+     *   · `dependencyOutputs` —— 上游**交出了什么**（传递闭包里的终态任务 + 它们的 output）；
+     *     它按【任务】铺开，下游据此接着干。
+     *   · 本格 —— 我这条任务的**每一条直接依赖**落在哪一态、算不算了结；
+     *     它按【我声明的 dependencies 原序】铺开，下游据此知道"我欠不欠前置条件"。
+     *   ⇒ 只印其中一份，都会让另一件事在派发文本里消失。
+     *
+     * ★ 空串语义：**全 completed 时为空**（见 `describeDependencyOutcomes`）——
+     *   一个每次派发都出现的"上游都做完了"是噪音，而噪音会教人忽略真正要看的那一行。
+     */
+    readonly dependencyOutcomes: string;
+    /**
      * ── ★★★ 直接上游的产物读数（t5）：建树基线的输入 ──────────────────────────────
      *
      * ★ 在**票里**算，而不是在建树那一刻再读一次队状态：两者之间隔着 `await`

@@ -3927,8 +3927,16 @@ function normalizeRescueInput(input: { rescue?: { state?: unknown } } | Friction
   }
   /** 台账记录形状 ⇒ 解包 `record.rescue`，且**保留它的全部字段**。 */
   const nested = (input as { rescue?: FrictionRescue }).rescue
-  if (nested === undefined || typeof nested.state !== 'string') return undefined
-  return RESCUE_STATES.includes(nested.state) ? nested : undefined
+  if (nested === undefined) return undefined
+  /**
+   * ★ 「这个 `state` 是不是认识的那三态之一」这条判定**只有一处**：{@link rescueStateOf}。
+   *   ★ 它此前在本函数里被**重写了一遍**（`RESCUE_STATES.includes(nested.state)`），
+   *     而那是同一规则的**第三份**写法（另两份：`rescueStateOf` 自己、
+   *     `scripts/frictions-html.mjs` 的本地副本）。⇒ 加第四态时必定漏一处。
+   * ★ 语义逐字不变：`rescueStateOf` 就是 `RESCUE_STATES.find(known => known === state)`，
+   *   `typeof state !== 'string'` / 不认识的取值 ⇒ 同样 `undefined`。
+   */
+  return rescueStateOf(input as { rescue?: { state?: unknown } }) === undefined ? undefined : nested
 }
 
 export function classifyRescue(record: { rescue?: { state?: unknown } } | FrictionRescue | undefined): RescueClass {
@@ -5143,8 +5151,15 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
           }
         : {},
       now: Date.now(),
-      evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) =>
-        registry.evaluate('collection' as never, context) as never,
+      evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) => {
+        /**
+         * ★ 输入面核对（旁路，不改裁决）：四条采集判据都声明了 `requires`，
+         *   而生产路径此前从未核过。结论附加在返回对象上，不参与拒绝（先软后硬）。
+         */
+        const surface = inputSurfaceOf('collection', context)
+        const evaluation = await registry.evaluate('collection' as never, context)
+        return (surface === undefined ? evaluation : { ...evaluation, inputSurface: surface }) as never
+      },
       /**
        * ── ★★★ N1.2：把 `source` 与 `index` 真的接上（这一行之前两者都没有）────────────
        *

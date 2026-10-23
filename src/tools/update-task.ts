@@ -157,6 +157,7 @@ import { existsSync, readFileSync } from 'node:fs'
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
+import { appendGateTallies } from '../evolution/gate-tally.ts'
 import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, noteStall, clearStall, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
@@ -1478,6 +1479,45 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           const completionContext = completionWiring.context
           const completionInputSurface = completionWiring.inputSurface as { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
           const completionGates = completionWiring.gates
+          /**
+           * ── ★ 门禁裁决的使用读数：飞轮的第一份**真实**原料 ────────────────────────
+           *
+           * MEASURED（2026-10-23）：在本次接线之前，`UsageTally` / `tallyAdopt` /
+           * `tallyRecall` 在 `confidence.ts` **之外零引用** ⇒ 飞轮的四个裁决
+           * （promote / observe / archive / unmeasured）从来没有真实数据喂进去过。
+           * 本条把「这一轮完工门逐条得到了什么裁决」记成账，让 `confidenceOf` 第一次有输入。
+           *
+           * ── 为什么用 `void` ────────────────────────────────────────────────────
+           *
+           * 与上面 `void observe(...)` 同一条纪律：**记账是旁路**。
+           * `appendGateTallies` 自己 catch 一切、绝不抛（见其文件头）；
+           * 这里再 `void` 掉，是为了连"等它落盘"都不占完工路径的时序。
+           *
+           * ── 为什么**只接这一处** ───────────────────────────────────────────────
+           *
+           * `recalled` 是 confidence 的**分母**。若同一次求值在 dispatch / completion /
+           * delivery 各记一次，同一个裁决会被数 N 遍 ⇒ 曝光度虚高 ⇒ confidence 被
+           * 系统性压低 ⇒ 真正有效的判据反而进不了 promote。
+           * ⇒ 一个裁决只记**一次**，记在它真正生效的那一刻。
+           *
+           * ── `by` 为什么是 `caller.id` ─────────────────────────────────────────
+           *
+           * 它是这次完工的触发者。`contributors` 存的是**名单**而不是计数，
+           * 因为「≥2 contributors」要回答的是"是不是两个不同的人"——
+           * 而一个 `contributors: 3` 的计数回答不了"这 3 次是不是同一个人做的"。
+           *
+           * ── 时钟 ──────────────────────────────────────────────────────────────
+           *
+           * 用注入的 `clock()`（`config.now?.() ?? Date.now()`），不直接 `Date.now()`：
+           * 夹具要靠它复现 `firstSeenAt` 与「≥14 天」那条年龄条件。
+           */
+          void appendGateTallies({
+            stateRoot,
+            point: 'completion',
+            ran: completionGates.ran,
+            at: clock(),
+            by: caller.id,
+          })
           /** ★ `wantsCompleted` 在段内算出、而段外还要用 ⇒ 由模块交出来。 */
           const wantsCompleted = completionWiring.wantsCompleted
           /**

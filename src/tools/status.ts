@@ -6,7 +6,7 @@
 
 import { registry } from '../gates/index.ts'
 import { mailboxContent, readCurrentMailbox } from '../mailbox.ts'
-import { TERMINAL_TASK_STATUSES } from '../types.ts'
+import { TERMINAL_TASK_STATUSES, summariseExecutions } from '../types.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { ModuleFreshness, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, inputSurfaceSchema, clearRestartRequest, moduleFreshness, moduleFreshnessMessage, readPlanReview, restartQueueFrom, restartQueueMessage, observeMemberActivity, observeMemberConvergence, requireCaptain, requireFreshParticipant, requireParticipantTeam, stateRootOf, teamLockKey, throwWithSurface, workspaceOf } from './shared/entities.ts'
@@ -1001,6 +1001,33 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           kind: taskKindOf(task),
           ...task.round === undefined ? {} : { round: task.round },
           ...task.verdict === undefined ? {} : { verdict: task.verdict },
+          /**
+           * ── ★★★ t19：**这条任务跑过几次、收敛了没有** ──────────────────────────────
+           *
+           * `src/types.ts:807` 逐字写明这个读数的用途：「借自 `@linxin666/dsh-web-all` 的
+           * task-board：那边渲染的是 `task.executions.length` 作为「跑了几次」」。
+           * ★ 而 `summariseExecutions`（`src/types.ts:1422`）把 `executions[]` 折成
+           *   `{ rounds, failures, outcome }` —— 那个函数**此前一个 src/ 消费者都没有**，
+           *   于是「它在第二轮修好了」与「它失败两次」在读数上仍然同形。
+           *
+           * ★ 为什么这里读它、而不是把 `executions[]` 原样塞出去：
+           *   `executions[]` 是**逐次**记录（含每次的 `by` / `at`），而本工具回答的是
+           *   「这条任务现在什么状况」。读的人要的是**收敛结论**，不是原始事件流
+           *   （原始流在 `team.json` 里，需要的人自己去看）。
+           *
+           * ★ 缺席语义：`executions` 从不写成空数组（见 `appendExecution`）⇒
+           *   `rounds === 0` 就是「**从未跑到终态**」，与「跑过但记录丢了」不同形。
+           *   这与上面 `round` / `verdict` 的展开式同一条纪律：不伪造一格出来。
+           *
+           * ★ 为什么这里**展开**成匿名对象、而不是直接塞
+           *   `summariseExecutions(task)` 的返回值：工具的 `output` 走 `JsonValue`
+           *   索引签名，而 `ExecutionHistorySummary` 是 **interface** —— interface 不带
+           *   隐式索引签名，直接塞会被 tsc 拒（本任务实测：TS2322）。
+           *   ⇒ 展开后是一个**匿名对象类型**（带隐式索引签名）；**字段与取值一字不改**。
+           */
+          ...task.executions === undefined
+            ? {}
+            : { execution: { ...summariseExecutions(task) } },
           /**
            * ── ★★★ t12：`failure_kind` —— 把已经算好的细分**送到读者手里**────────────
            *

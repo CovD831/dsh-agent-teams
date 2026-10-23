@@ -51,6 +51,25 @@ export interface SignalsHealthRead {
      *   在读行的那一层计数才不会把"没这格"错算成 0。
      */
     readonly refused?: Readonly<Record<string, number>>;
+    /**
+     * ── ★★★ t93：**撞过车的 id** —— "曾经撞过"必须读得出来 ────────────────────────────
+     *
+     * `docs/SIGNAL-ID-COLLISION.md:222` 逐字：「那五组撞车**仍在文件里**（审计数据）。
+     * ★ 读取端要靠 `duplicateSignalIds` **主动问**；**不问就仍会读到错的那条**」。
+     *
+     * ★ 本模块就是那个「读取端」：它已经把整份 `text` 读进来了，而 `duplicateSignalIds`
+     *   正是拿 `text` 判的 ⇒ 这一问在这里是**零额外 I/O** 的（补一行读取，不新造链路）。
+     *
+     * ★ 为什么它必须与 `skippedMalformed` 分开计数：坏行是"这一行不能用"，
+     *   撞车是"这两行都用得了、但按 id 索引会取到错的那条" —— 补救动作不同
+     *   （前者去查写入端，后者去查**读的人按 id 信了谁**）。
+     * ★ `status === 'unmeasured'` 时缺席（没有文件就没有行，也就没有 id 可撞）。
+     * ★ **只有真的撞了才在场**：空数组会与"没撞过"不同形，而这里两者同一件事。
+     */
+    readonly duplicateIds?: readonly {
+        readonly id: string;
+        readonly lines: readonly number[];
+    }[];
 }
 /**
  * 读 `signals.jsonl` 并投影成 `HealthRecord[]`。
