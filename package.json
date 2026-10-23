@@ -94,8 +94,11 @@
     "verify:skill": "node scripts/sync-skill.mjs --check",
     "verify:fast": "node scripts/verify-fast.mjs",
     "verify:fast:self-test": "node scripts/verify-fast.mjs --self-test",
-    "verify": "node scripts/verify.mjs && node scripts/fallback-tdd.mjs && node scripts/member-failure-tdd.mjs && pnpm verify:quality-gates && node scripts/lifecycle-verify.mjs && node scripts/stress-verify.mjs && node --test scripts/issue-159.test.mjs && pnpm verify:corrupt-state && pnpm verify:web-routes && pnpm verify:release && pnpm verify:readme && pnpm verify:skill && pnpm verify:harness-contract && pnpm verify:http-body && pnpm verify:compatibility && pnpm verify:capabilities && pnpm verify:member-spawn-recovery && pnpm test:git-install && pnpm verify:source-runner && pnpm verify:requirements && pnpm verify:gates && pnpm verify:git-artifact && pnpm verify:frictions",
+    "verify": "node scripts/verify.mjs && node scripts/fallback-tdd.mjs && node scripts/member-failure-tdd.mjs && pnpm verify:quality-gates && node scripts/lifecycle-verify.mjs && node scripts/stress-verify.mjs && node --test scripts/issue-159.test.mjs && pnpm verify:corrupt-state && pnpm verify:web-routes && pnpm verify:release && pnpm verify:readme && pnpm verify:skill && pnpm verify:harness-contract && pnpm verify:http-body && pnpm verify:compatibility && pnpm verify:capabilities && pnpm verify:member-spawn-recovery && pnpm test:git-install && pnpm verify:source-runner && pnpm verify:requirements && pnpm verify:gates && pnpm verify:git-artifact && pnpm verify:frictions && pnpm verify:readouts && pnpm verify:readouts:isolation",
     "prepublishOnly": "pnpm build && pnpm verify",
+    "verify:gate-tally": "node --experimental-strip-types scripts/gate-tally.test.mts",
+    "verify:readouts": "node --test scripts/readout-container.test.mjs",
+    "verify:readouts:isolation": "node scripts/arm-isolation-check.mjs scripts/readout-container.test.mjs",
     "verify:frictions": "node scripts/frictions-html.mjs && node --test scripts/frictions-html.test.mjs",
     "verify:requirements": "node scripts/requirements-align.mjs && node --test scripts/gate-requirements-align.test.mjs scripts/gate-observe-call-sites.test.mjs scripts/gate-proposal-writer.test.mjs scripts/gate-halt-tool.test.mjs scripts/gate-effect-readout.test.mjs scripts/gate-client-reproducible.test.mjs scripts/gate-room-plan.test.mjs scripts/gate-room-sprite.test.mjs scripts/gate-room-lighting.test.mjs scripts/gate-agent-reach-channels.test.mjs scripts/gate-room-drawing.test.mjs scripts/gate-room-camera.test.mjs",
     "verify:quality-gates": "node scripts/quality-gates-tdd.mjs && node --test scripts/quality-gates-repair-scope.test.mjs scripts/quality-gates-amend.test.mjs",
@@ -117,7 +120,9 @@
     "fixtures:tools": "node scripts/tool-definitions.mjs --write",
     "verify:fixtures": "node scripts/tool-definitions.mjs --check",
     "reclaim:worktrees": "node scripts/worktree-reclaim.mjs",
-    "reclaim:worktrees:apply": "node scripts/worktree-reclaim.mjs --apply"
+    "reclaim:worktrees:apply": "node scripts/worktree-reclaim.mjs --apply",
+    "test-tree:init": "node scripts/test-tree.mjs init",
+    "test-tree:status": "node scripts/test-tree.mjs status"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

@@ -18,3 +18,9 @@ node_modules/
 #   ★ 里面是 X 的 auth_token/ct0 与 B 站 SESSDATA —— **绝不许进仓**。
 #   ★★ 这条是后补的：先建目录、后想到 gitignore，中间 `git status` 已经把它报成 untracked。
 .agent-reach-home/
+
+# ── ★ 2026-10-22：运行档案（工具产生，不进版本控制）────────────────────────────
+#   契约证据团的每次运行落在 .workbuddy/team-runs/：
+#   MANIFEST.json / DEVIATIONS.md / INDEX.tsv
+#   ★ 它们是「可复核的过程记录」，不是产品产物；进仓会让 diff 被噪音淹没。
+.workbuddy/
