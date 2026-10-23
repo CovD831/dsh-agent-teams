@@ -178,6 +178,18 @@ export interface ActivityTeam {
   readonly captainInboxState: 'absent' | 'empty' | 'present'
   /** ★ 形状不对、读不出来的条目数 —— **不静默丢**（丢一条与"没有它"同形）。 */
   readonly captainInboxUnreadable: number
+  /**
+   * ── ★ 各线读数（证据链 / 软硬配对 / 后端能力位 / 流程模板）────────────────────
+   *
+   * ★★ 用 `Record<string, unknown>` 而**不是逐字段声明**：四条工作线各自往一个 key 里塞，
+   *   逐字段声明会让它们同时改这一个接口 ⇒ 五方撞一处（实测合并成功率 1/4）。
+   *   各线在自己的组件里做结构化读（先例：`MemberRow.tsx:663` 的
+   *   `(team as { gateCatalog?: unknown })`）。
+   *
+   * ★ 缺席 ⇒ 一条线都没接上（服务端那个容器空转）。**不是**"接了但都是空"。
+   *   这条区分与 `captainInboxState` 的三态同源：读不到与确实没有必须不同形。
+   */
+  readonly readouts?: Readonly<Record<string, unknown>>
 }
 
 /**

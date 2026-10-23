@@ -22,6 +22,29 @@ import { TERMINAL_TASK_STATUSES, type GateEvaluationRecord, type MemberStatus, t
 import type { FailureKind, VisualTaskState } from './state.ts'
 import { registry, INSERTION_POINTS } from './gates/index.ts'
 /**
+ * ── ★★★ 读数槽位容器（2026-10-23）：四条并行线的**唯一**汇合点 ────────────────
+ *
+ * 证据链 / 软硬配对 / 后端能力位 / 模板库四条线都要把读数暴露给 UI，而出口只有
+ * 本文件那个 `return { … }`。四条线各自往那里加一行就是四次对**同一行**的编辑。
+ * ⇒ 读数经 `readouts.ts` 的**预置槽位**挂载：四条线各改自己那一行，
+ *   本文件只认这一个入口，加第五条线**不用改本文件**。
+ *
+ * ★ `readouts.ts` 是**零 import 叶子**（不 import 任何模块，含 src 内的），
+ *   所以它不会把任何加载顺序 / 循环引用变成四条线共同的故障面。
+ */
+import { collectReadouts, type ReadoutContext } from './readouts.ts'
+/**
+ * ── ★ 副作用 import：四条线的读数装配清单 ────────────────────────────────────────
+ *
+ * `contributeReadout` 是**模块顶层副作用**：某个模块被 import 一次，它才登记一次。
+ * ⇒ 不 import 这个清单 ⇒ **没有人登记任何槽位** ⇒ `collectReadouts()` 恒返回 `{}`
+ *   ⇒ `readouts` 整格缺席 ⇒ 面板看起来"那条线没做"。
+ *
+ * MEASURED（2026-10-23）：本行加上之前，`contributeReadout` 的外部调用点 = 0。
+ * 见 `src/readouts/index.ts` 文件头（四条线各占一行，不要重排）。
+ */
+import './readouts/index.ts'
+/**
  * ── ★★★ t101：采集健康读数（health.ts 的**第一个生产消费者**）────────────────────────
  *
  * 背景（`EVOLUTION-WIRING-GAP.md` §1）：`collectionHealthOf` 能算但从**没有任何生产路径
@@ -403,6 +426,21 @@ export interface TeamActivitySnapshot {
    * 所以不依赖任何任务的状态 —— 于是"可插拔"才成立。
    */
   readonly gateCatalog: readonly TeamActivityGateCatalog[]
+  /**
+   * ── ★★★ 四条并行线的读数（`src/readouts.ts` 的预置槽位，2026-10-23）─────────────
+   *
+   * ★ 槽位名与三态语义全由 `readouts.ts` 决定，本格只做**转发**（不解释内容）；
+   *   每个槽位的内部形状是那条线自己的契约（`docs/prototype/readout.schema.json`）。
+   *
+   * 三种状态必须不同形：
+   *
+   * · 这一格**根本不出现**      ⇒ 一个槽位都没被认领（四条线**还没接** —— 正常态）
+   * · `{ unmeasured: '…' }`     ⇒ 有线认领，但**这一次没测成**（异常态，不是"没有问题"）
+   * · 其余形状                  ⇒ 该线自己的读数
+   *
+   * ★ 把"没接"读成"没测成"、或把"没测成"读成"通过"，正是本仓记账最久的那条漏洞。
+   */
+  readonly readouts?: Readonly<Record<string, unknown>>
 }
 
 /** Snapshot projection switches for live and archived teams. */
@@ -438,6 +476,53 @@ export function gateCatalogForUi(): TeamActivityGateCatalog[] {
       })),
     }
   })
+}
+
+/**
+ * ── ★★★ 快照交给读数 provider 的 context（**导出是为了可直测**，2026-10-24）──────────
+ *
+ * ── 为什么要提成纯函数并导出 ──────────────────────────────────────────────────
+ *
+ * 这三格的构造规则以前**只存在于 `assembleTeamSnapshot` 的函数体里**，于是它只能通过
+ * 「某个 provider 收到什么」被**间接**观察到。而 provider 是四条线各自写的 ——
+ * 一条**不读** `stateRoot` 的 provider（只报静态能力位那种）会让"传错了"在读数上
+ * 完全看不出来 ⇒ 那条不变量**无守卫**（实测：夹具里把 `stateRoot` 改成 `''`，
+ * 若四条线都不读它，9 条臂全绿）。
+ *
+ * ⇒ 提成纯函数之后，夹具可以直接断言**它自己的输出**，与任何 provider 的行为无关。
+ *   这钉住的是"**这个函数不篡改任何一格**"。
+ *
+ * ── ★★★ 它钉不住的：**调用点**（这条别漏读）──────────────────────────────────────
+ *
+ * MEASURED（2026-10-24）：把本函数的**调用参数**改成 `readoutContextOf(state.id, '', …)`
+ * （即真的把空串传下去），夹具的 `readoutContextOf` 臂**照样绿** —— 因为它断言的是
+ * `readoutContextOf('/a/b') === '/a/b'`，看不见"谁在用它、用什么参数调它"。
+ *
+ * ⇒ 所以本函数把 M8 的守卫**从"取决于 provider 写法"收窄到"函数契约 + 调用点两半"**：
+ *   · 函数契约 —— 已由夹具无条件钉住；
+ *   · 调用点   —— 由"快照真的把 context 交给了 provider 且值原样进 `readouts`"那条臂
+ *     钉住，而它需要主实例上还有空槽位（四线全落后不适用，夹具会打印"无守卫"）。
+ *   ★ 要无条件钉住调用点，需要**在调用点上可观察**（注入 / 回显）—— **未做**。
+ *     在那之前，别把这条函数的存在读成"调用点也被守住了"。
+ *
+ * ── ★★ 三条"不许兜底"（每一格都原样，越"聪明"越错）────────────────────────────
+ *
+ *   · `stateRoot` **不许**兜底成 `'.'` / `process.cwd()` / `stateRoot || '/'`：
+ *     空串是一个**真实的传错形态**（形参没接上就成了 `''`）。若在这里兜底成 `'.'`，
+ *     那个缺陷就永远看不见了 —— 而 provider 会去读一个"看起来合法"的错目录。
+ *   · `historic` **不许**折算成 `historic ?? false` 之外的东西：它必须是
+ *     `options.historic === true` 的结果，而不是"真值判断"（`options.historic`
+ *     的非法值不该被悄悄圆成 `true`）。
+ *   · `teamId` 原样过（它是 durable 目录名，不做 trim / normalize ——
+ *     归一化会让"读错了队"与"读到了空"同形）。
+ *
+ * @param teamId - 团队 id（`state.id`，durable 目录名）。
+ * @param stateRoot - 该团队所在 workspace 的 durable 根（`assembleTeamSnapshot` 的形参）。
+ * @param historic - 这是不是**归档团队**的投影（`options.historic === true`）。
+ * @returns 交给 `collectReadouts` 的那一份（三格原样）。
+ */
+export function readoutContextOf(teamId: string, stateRoot: string, historic: boolean): ReadoutContext {
+  return { teamId, stateRoot, historic }
 }
 
 /** The current task of a member: its first unfinished owned task. */
@@ -859,6 +944,23 @@ export async function assembleTeamSnapshot(
     }
   }
 
+  /**
+   * ── ★★★ 读数槽位（2026-10-23）：四条并行线经 `readouts.ts` 挂上来的那一格 ──────────
+   *
+   * ★ 只给**只有这一层拿得到**的三样：`state.id` / `stateRoot` / `options.historic`。
+   *   · `stateRoot` 在**本函数作用域里有**（形参），所以给；provider 靠
+   *     `stateRoot + teamId` 自己读盘 —— 那才是"读数=现读"，而不是读一份
+   *     组装那一刻的旧副本。
+   *   · 归档支（`historic`）必须如实传：那些团队的会话按定义已经停了，
+   *     "活着"类读数在那一支**不该去探**（探了会报一整排"没在跑"，
+   *     而那是关于"它是历史"的已知事实，不是一次观测）。
+   * ★ **不**传的几格及理由写在 `readouts.ts` 的 `ReadoutContext` 上（workspace 是
+   *   显示名；`state`/`tasks` 与 `ctx` 要 import，会破坏零依赖叶子）。
+   * ★ `collectReadouts` 永不抛出（它自己逐槽位 try/catch），所以这里不需要守卫 ——
+   *   一条读数的故障不许把整份快照带走。
+   */
+  const readoutField = await collectReadouts(readoutContextOf(state.id, stateRoot, options.historic === true))
+
   return {
     workspace,
     teamId: state.id,
@@ -1045,6 +1147,19 @@ export async function assembleTeamSnapshot(
     ...proposalPipelineUnmeasurable === undefined ? {} : { proposalPipelineUnmeasurable },
     /** ★ 2026-10-22：收益读数（缺席 = 没有一条提案带结构化靶 ⇒ 这一问没被问过）。 */
     ...effectReadout === undefined ? {} : { effectReadout },
+    /**
+     * ── ★★★ 读数槽位（2026-10-23）───────────────────────────────────────────────
+     *
+     * ★ 与任务卡的字面写法差一处（见交付说明「偏差点」）：卡上写 `...readoutField`，
+     *   而 `collectReadouts` 返回的是 `{ evidence: …, pairing: … }` —— 直接展开会把
+     *   四个槽位摊在**快照顶层**，而接口那格叫 `readouts`、验收读的是
+     *   `snapshot.readouts.evidence`。⇒ 这里包一层，并对空表做"整格缺席"。
+     *
+     * 展开后：**没登记的槽位不出现**（键都没有）；登记了但没测成的槽位值是
+     * `{ unmeasured: '…' }`。★ 于是"四条线一条都没接"时这一行展开成空的，
+     * `readouts` 那格**缺席** —— 与"接了但没测成"（在场且带 `unmeasured`）不同形。
+     */
+    ...Object.keys(readoutField).length === 0 ? {} : { readouts: readoutField },
   }
 }
 
