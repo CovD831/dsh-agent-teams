@@ -42,19 +42,22 @@
 import { contributeReadout } from '../readouts.ts'
 
 // ── 线 A：证据链 ─────────────────────────────────────────────────────────────
-// 落点 src/evidence.ts（尚未落地）。产出 evidenceId ↔ producedCheckIds 的双向引用。
-// import { provideEvidenceReadout } from '../evidence.ts'
-// contributeReadout('evidence', provideEvidenceReadout)
+// 落点 src/evidence.ts。产出两条 durable 证据流（executions / supplementalEvidence）
+// 的**投影**（只读不存），每条带 `task.id + attemptId + at` 派生的稳定 evidenceId。
+import { provideEvidenceReadout } from '../evidence.ts'
+contributeReadout('evidence', provideEvidenceReadout)
 
 // ── 线 B：软硬配对 ───────────────────────────────────────────────────────────
-// 落点 src/gates/pairing.ts（尚未落地）。产出"已注册判据 ↔ 其 soft 说明"的双向校验结果。
-// import { providePairingReadout } from '../gates/pairing.ts'
-// contributeReadout('pairing', providePairingReadout)
+// 落点 src/gates/pairing.ts。产出"已注册判据 ↔ 其 soft 说明"的双向校验结果
+// （`{ [gateId]: { hasSoft, hasHard } }`）。侧表不闭合 ⇒ 该槽位落 unmeasured 并列出 id。
+import { providePairingReadout } from '../gates/pairing.ts'
+contributeReadout('pairing', providePairingReadout)
 
 // ── 线 C：后端能力位 ─────────────────────────────────────────────────────────
-// 落点 src/backends.ts（尚未落地）。产出当前后端声明了哪几个能力位。
-// import { provideBackendsReadout } from '../backends.ts'
-// contributeReadout('backends', provideBackendsReadout)
+// 落点 src/backends.ts。产出本队**用过**的后端（读 `<stateRoot>/<teamId>/team.json`
+// 的 `members[].provider`）与每个后端**声明**的能力位（`source: 'declared'`）。
+import { provideBackendsReadout } from '../backends.ts'
+contributeReadout('backends', provideBackendsReadout)
 
 // ── 线 D：流程模板 ───────────────────────────────────────────────────────────
 // 落点 src/templates/index.ts（尚未落地）。产出已加载的流程模板清单与生效版本。
