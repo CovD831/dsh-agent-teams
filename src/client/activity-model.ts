@@ -2031,3 +2031,246 @@ export function wrapByColumns(text: string, maxColumns: number, maxLines = Numbe
   if (current !== '') lines.push(current)
   return lines.slice(0, maxLines === Number.POSITIVE_INFINITY ? undefined : maxLines)
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ 读数槽位读端（readout-panel，2026-10-24）：把 `readouts` 那一格读成五态 ──
+ *
+ * 三条读数线（evidence / pairing / backends）已经把数据写进 `team.readouts`，
+ * 但此前**没有任何 UI 读它**（`grep -rn "readouts" src/client/` 仅 `activity-monitor.ts`
+ * 一处声明）。本函数是那一半读端：纯函数、不碰 `ActivityTeam` 的字段
+ * （只通过结构类型读 `readouts`），把每个槽位收敛成**不同形**的读端状态。
+ *
+ * ★ 五态必须不同形（整个产品最在意的一条）：
+ *   · 整个 `readouts` 缺席 / 不是对象        ⇒ 三格全 `not-wired`
+ *   · 键缺席（容器在，但那格没有这个键）    ⇒ 那一格 `not-wired`
+ *     （**不是** measured 空数组，也**不是** unmeasured）
+ *   · 值是 `{ unmeasured: '...' }`           ⇒ `unmeasured`，reason 原样带出
+ *     （**不许**截断成"测不了"三个字）
+ *   · 值本身测到了、但**嵌了一层** `{ unmeasured }` ⇒ `partial`，`unknown` 只放路径
+ *     （如 `backends.capability.<id>.unmeasured`：后端读到了，但能力位那块没测成）
+ *     ★ 这是今晚一直在防的假阳性：它若被吞成 `measured`，界面会显示"1 项"而那块其实是未知。
+ *     ★ `partial` 的 `unknown` **只放路径**（`capability.claude`），原因不许拍平成 measured 的附注。
+ *   · 全测到了                            ⇒ `measured`
+ *
+ * ★ 槽位专属分流（evidence / pairing 各有一层）：
+ *   · evidence.reverified：`'yes'|'no'|'unknown'`，**无记录 = unknown**（不是 no）
+ *     ⇒ unknown 必须显式「自述·未复核」，不许单独以"measured / N 项"出现
+ *     （审计实测补证据可一次 update_task 伪造，全仓无判据读它）。
+ *   · pairing.discrimination：`'none'` ⇒ `no-discrimination`（"22 项，本读数无判别力" + why 原样），
+ *     **不许**渲染成绿色"22 项成对"；`'full'` ⇒ 才可按条显示；无该键（旧形状）⇒ 不猜，
+ *     走 measured 并加注「缺 discrimination 标记（旧形状）」，不许静默当 full。
+ *
+ * ★ 为什么逐层收窄而不写 `as any`：容器把四线各自的结构塞进 `unknown`，任何一处
+ *   `as any` 都会把"形状不对"静默吞掉 —— 而那正是"读不到"与"确实没有"同形这条老漏洞的来源。
+ * @module dsh-agent-teams/client/activity/readout-summary
+ */
+
+export type ReadoutSlot =
+  | { readonly kind: 'not-wired' }
+  | { readonly kind: 'unmeasured'; readonly reason: string }
+  | { readonly kind: 'measured'; readonly summary: string; readonly detail: readonly string[] }
+  | { readonly kind: 'partial'; readonly summary: string; readonly unknown: readonly string[] }
+  | { readonly kind: 'no-discrimination'; readonly summary: string; readonly why: string }
+
+export interface ReadoutSummary {
+  readonly evidence: ReadoutSlot
+  readonly pairing: ReadoutSlot
+  readonly backends: ReadoutSlot
+}
+
+const NOT_WIRED: ReadoutSlot = { kind: 'not-wired' }
+
+function isPlainRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * 收值里"嵌了 `{ unmeasured: '…' }`"的所有位置（≤2 层，足够覆盖
+ * `capability.<id>.unmeasured` 这种形状）。只收**路径**（如 `capability.claude`），
+ * 不把原因拍平进来——原因会被读成"补充说明"，而不是"这块没测成"。
+ *
+ * @returns 相对槽位值的点分隔路径数组，如 `['capability.claude']`。
+ */
+function nestedUnmeasuredPaths(value: unknown, depthLeft: number, base: readonly string[]): string[] {
+  if (depthLeft <= 0 || !isPlainRecord(value)) return []
+  const out: string[] = []
+  for (const [key, child] of Object.entries(value)) {
+    if (!isPlainRecord(child)) continue
+    if (typeof child.unmeasured === 'string') {
+      out.push([...base, key].join('.'))
+    } else {
+      out.push(...nestedUnmeasuredPaths(child, depthLeft - 1, [...base, key]))
+    }
+  }
+  return out
+}
+
+/**
+ * 把"一个槽位的原始值"收敛成读端状态（五态之一）。
+ *
+ * @param value - `readouts[key]` 的原始值；键缺席时调用方传 `undefined`。
+ * @param slot - 槽位名，用于 evidence 的 `reverified` / pairing 的 `discrimination` 专属分流。
+ */
+function slotOf(value: unknown, slot: 'evidence' | 'pairing' | 'backends'): ReadoutSlot {
+  // 键缺席 ⇒ not-wired（不是 measured 空、也不是 unmeasured）
+  if (value === undefined) return NOT_WIRED
+
+  if (isPlainRecord(value)) {
+    // 顶层 `{ unmeasured: '...' }` ⇒ unmeasured，reason 原样带出（不许截断成"测不了"）
+    if (typeof value.unmeasured === 'string') {
+      return { kind: 'unmeasured', reason: value.unmeasured }
+    }
+
+    // ── pairing 专属：discrimination ───────────────────────────────────────────
+    if (slot === 'pairing') {
+      const disc = value.discrimination
+      if (disc === 'none') {
+        // 恒真式：不许渲染成绿色"N 项成对"，明确说"无判别力" + why 原样带出
+        const n = entriesCount(value.entries)
+        const why = typeof value.why === 'string' ? value.why : ''
+        return { kind: 'no-discrimination', summary: `${n} 项，本读数无判别力`, why }
+      }
+      if (disc === undefined) {
+        // 旧形状（未换 discrimination 标记）：不猜，走 measured 并加注；不许静默当 full
+        const m = measuredOf(value)
+        return { kind: 'measured', summary: m.summary, detail: [...m.detail, '缺 discrimination 标记（旧形状）'] }
+      }
+      // disc === 'full' ⇒ 按条显示，落到下面的 measured / partial
+    }
+
+    // ── evidence 专属：reverified ─────────────────────────────────────────────
+    if (slot === 'evidence') {
+      const rev = value.reverified
+      const revState = rev === 'yes' || rev === 'no' ? rev : 'unknown' // 无记录 = unknown（不是 no）
+      if (revState === 'unknown') {
+        // 判据（写进注释，防止下次又把计数吞掉）：
+        //   "0 条" 是【查过了没有】⇒ measured
+        //   "没接线" 是【没查】      ⇒ not-wired
+        //   "N 条但没复核" ⇒ unmeasured，且必须带 N
+        //   三者不许同形，且谁也不许把对方的数字吃掉。
+        const n = entriesCount(value.entries) // 复用已有的 entriesCount
+        if (n === 0) {
+          // "查过了，确实没有" —— 这是一次真实测量，不是"没测"
+          return { kind: 'measured', summary: '0 条证据（已读两条流，确无）', detail: ['evidence 流为空'] }
+        }
+        return { kind: 'unmeasured', reason: `自述·未复核：${n} 条；补证据可被一次 update_task 调用伪造，全仓无判据读它` }
+      }
+      // 'yes' | 'no' ⇒ 落到下面的 measured / partial
+    }
+
+    // ── 嵌套 unmeasured 探测（≤2 层，覆盖 capability.<id>.unmeasured）──────────
+    // 顶层已在上面判过；这里只收更深一层，它们是会被 measured 吞掉的假阳性。
+    const unknownPaths = nestedUnmeasuredPaths(value, 2, [])
+    if (unknownPaths.length > 0) {
+      // summary 仍给规模；unknown 只放路径，不许把原因拍平成 measured 的附注
+      return { kind: 'partial', summary: summarizeMeasured(value), unknown: unknownPaths }
+    }
+
+    // 其余 ⇒ measured
+    return measuredOf(value)
+  }
+
+  // 数组 / 原始值 ⇒ measured
+  return measuredOf(value)
+}
+
+/** 把"全测到了"的值收敛成 measured（summary + detail）。 */
+type MeasuredSlot = { readonly kind: 'measured'; readonly summary: string; readonly detail: readonly string[] }
+function measuredOf(value: unknown): MeasuredSlot {
+  return { kind: 'measured', summary: summarizeMeasured(value), detail: buildDetail(value) }
+}
+
+/** 从 pairing 的 `entries` 字段取规模（数组看 length、记录看键数、数字直接用）。 */
+function entriesCount(entries: unknown): number | string {
+  if (Array.isArray(entries)) return entries.length
+  if (isPlainRecord(entries)) return Object.keys(entries).length
+  if (typeof entries === 'number') return entries
+  return '?'
+}
+
+/**
+ * 槽位徽标文案：五态各一字；evidence 的 unmeasured 显式写成「自述·未复核」
+ * （审计实测补证据可一次 update_task 伪造，全仓无判据读它）。
+ * 这是 UI 渲染路径的纯函数化，便于测试断言徽标文案。
+ */
+export function readoutBadgeLabel(kind: ReadoutSlot['kind'], name: string): string {
+  if (kind === 'not-wired') return '未接线'
+  if (kind === 'unmeasured') return name === 'evidence' ? '自述·未复核' : '未测成'
+  if (kind === 'measured') return '已测'
+  if (kind === 'partial') return '部分未测'
+  return '无判别力'
+}
+
+/** 单行摘要：空表必须明说为 0，非空则给出规模。 */
+function summarizeMeasured(value: unknown): string {
+  if (Array.isArray(value)) return `${value.length} 项`
+  if (!isPlainRecord(value)) return String(value)
+  const entries = Object.entries(value)
+  if (entries.length === 0) return '0 项'
+  // 空表启发式：每个条目都是空集合（空数组 / 空对象）→ 视为空
+  if (entries.every(([, v]) => isEmptyCollection(v))) return '0 项'
+  // 优先报数组字段的规模（后端 providers、证据流等主集合都是数组）
+  const arrays = entries.filter(([, v]) => Array.isArray(v))
+  if (arrays.length > 0) {
+    return arrays.map(([k, v]) => `${k}: ${(v as readonly unknown[]).length} 项`).join('，')
+  }
+  return `${entries.length} 项`
+}
+
+/** 一个值是否为"空集合"（空数组或空对象）—— 用于空表启发式。 */
+function isEmptyCollection(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length === 0
+  if (isPlainRecord(value)) return Object.keys(value).length === 0
+  return false
+}
+
+/** 细节：展示读数长什么样（键名 + 值的一行摘要），但不塞整个 JSON，超 6 条写 `…+N`。 */
+function buildDetail(value: unknown): readonly string[] {
+  if (Array.isArray(value)) {
+    const head = value.slice(0, 6)
+    const lines = head.map((item, index) => `#${index}: ${oneLine(item)}`)
+    if (value.length > head.length) lines.push(`…+${value.length - head.length}`)
+    return lines
+  }
+  if (isPlainRecord(value)) {
+    const entries = Object.entries(value)
+    const head = entries.slice(0, 6)
+    const lines = head.map(([key, val]) => `${key}: ${oneLine(val)}`)
+    if (entries.length > head.length) lines.push(`…+${entries.length - head.length}`)
+    return lines
+  }
+  return [oneLine(value)]
+}
+
+/** 值的单行摘要（不递归展开对象/数组，避免把整个 JSON 塞进 detail）。 */
+function oneLine(value: unknown): string {
+  if (value === null) return 'null'
+  if (value === undefined) return 'undefined'
+  if (typeof value === 'string') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[…${value.length}]`
+  if (isPlainRecord(value)) return `{${Object.keys(value).length} 键}`
+  return String(value)
+}
+
+/**
+ * ── ★★ 读数读端主入口 ─────────────────────────────────────────────────────────
+ *
+ * 接受 `{ readouts?: … }` 的结构类型（即 `ActivityTeam`），**只读**那一格。
+ * 不修改、不新增 `ActivityTeam` 的字段。
+ *
+ * @returns 三个已接线槽位（evidence / pairing / backends）各自的四态读端。
+ */
+export function readoutSummaryOf(team: {
+  readonly readouts?: Readonly<Record<string, unknown>>
+}): Readonly<ReadoutSummary> {
+  const readouts = team.readouts
+  if (readouts === undefined || !isPlainRecord(readouts)) {
+    // 整个容器缺席 ⇒ 三格全 not-wired（与"接了但空"不同形）
+    return { evidence: NOT_WIRED, pairing: NOT_WIRED, backends: NOT_WIRED }
+  }
+  return {
+    evidence: slotOf(readouts.evidence, 'evidence'),
+    pairing: slotOf(readouts.pairing, 'pairing'),
+    backends: slotOf(readouts.backends, 'backends'),
+  }
+}
