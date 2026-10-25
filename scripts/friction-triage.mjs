@@ -217,12 +217,112 @@ export function proposalForJudgement(candidate, triage) {
  *     而 captain 只能逐条去读 —— 那正好抵消了本工具的全部价值。
  *   ⇒ 如实报 `unknown`，并**让那个数字可见**（它是"台账需要回填"这条读数）。
  */
+/**
+ * ── ★★★ t60（N4）：把 `auto` 里的判据 id 读成【三态】，而不是一个数组 ──────────────
+ *
+ * ── 它答的问题 ────────────────────────────────────────────────────────────────
+ *
+ * 「这条卡点记录**被哪些判据拒过**？」—— 而在台账里有**两代**记录：
+ *
+ *     `gates[]` 在场  ⇒ 写端给了**全量**（t30 之后写的记录）
+ *     `gates[]` 缺席  ⇒ 写于那个字段之前，**只有标量 `gate`**（= 首位，其余丢失）
+ *     两者都缺席      ⇒ 这条记录**根本没记到判据**（不是"没有判据"，是"没读出来"）
+ *
+ * ── ★★ 为什么返回的是 `{ ids, from }` 而不是 `string[]`（N-a 的全部要点）───────────
+ *
+ * 契约 §5 N-a 逐字：「N4 的接口面**必须先声明它**，否则 N4 的读数**静默变空**，
+ * 而**「字段没了」与「卡点本来就没有」同形**。」
+ *
+ * ★ 若本函数 `return origin.gates ?? []`，那么：
+ *     · 「这个字段不在（我读不到全量）」  ⇒ `[]`
+ *     · 「这一轮真的没有判据」            ⇒ `[]`
+ *   两件事**合成同一个读数** ⇒ 正是 N-a 点名的那一格。
+ * ⇒ 所以 `from` **必须**在场，且三态互斥：
+ *
+ *     from: 'gates'  ⇒ 权威全量（可能长度为 1，但那是**真的只有一条**）
+ *     from: 'gate'   ⇒ ★ **回退**：只有标量。**这不是全量** —— 非首位判据丢了
+ *     from: 'none'   ⇒ 这条记录没记到判据（第三种"没有"）
+ *
+ * ── 读法（★ 顺序与优先级写死）────────────────────────────────────────────────
+ *
+ * ① **`gates[]` 优先**（契约 §5 的 C4「权威源」）：它是 t30 之后写的全量。
+ *    ★ 只接受**非空字符串数组** —— 空数组按契约**根本不会被写出**（`entities.ts:3510`
+ *      的 `gates.length === 0 ? {} : { gates }`），所以若它真的出现了，那是**写侧损坏**，
+ *      按"读不出来"处置（落 `none`），**不许**静默当成"没有判据"。
+ * ② 否则退回标量 `gate`（★ N-c：**只接受 `string`**，不接受数组 —— 见调用点的长注释）。
+ * ③ 否则 `none`。
+ *
+ * ★ 本函数**只读**，不改任何记录、不写盘。
+ */
+export function readGateIds(origin) {
+  /** ① 权威全量。★ 非空字符串数组才算数（空数组 = 写侧损坏，不当作"没有"）。 */
+  if (Array.isArray(origin?.gates)) {
+    const ids = origin.gates.filter((id) => typeof id === 'string' && id !== '')
+    if (ids.length > 0 && ids.length === origin.gates.length) return { ids, from: 'gates' }
+    /**
+     * ★ 长度对不上（含非字符串 / 空串）⇒ 按"读不出来"处置：
+     *   一个**半坏的**全量比一个**诚实的**回退更危险 —— 它会让人以为"就这些判据"。
+     */
+    return { ids: [], from: 'none' }
+  }
+  /** ② 标量回退（N-c：**只接受 `string`**；数组在这里**不是**一条路）。 */
+  if (typeof origin?.gate === 'string' && origin.gate !== '') {
+    return { ids: [origin.gate], from: 'gate' }
+  }
+  /** ③ 两种都没有 ⇒ 这条记录没记到判据。 */
+  return { ids: [], from: 'none' }
+}
+
 export function actionForFriction(record) {
   const state = record?.resolution?.state
   if (state === 'fixed') return { action: 'no-action', why: 'resolution.state = fixed（已修）' }
   if (state === 'wontfix') return { action: 'no-action', why: 'resolution.state = wontfix（已裁定不修）' }
   if (state === 'scheduled') return { action: 'no-action', why: `resolution.state = scheduled（已排进 ${String(record?.resolution?.task ?? '某个任务')}）` }
   if (state === 'open') return { action: 'candidate', why: 'resolution.state = open（真的还欠一个动作）' }
+  /**
+   * ── ★★★ C2：**已经自己解掉的**卡点不再进待办清单 ────────────────────────────────
+   *
+   * 用户原话：「卡点 = 任务停下来了」，而一个**已经解掉**的阻塞**不再让任何任务停下来**。
+   * ⇒ 它与 `fixed` 同归宿：**no-action**。
+   *
+   * ── ★★ 为什么它必须排在四个 `state` 检查【之后】─────────────────────────────────
+   *
+   * ★ 与 t91 给 `auto` 那条的规定**同一条理由**（见下面的长注释）：
+   *   契约的反向半边是「不许把有待处理的条目也一并放过 ——
+   *   若某条记录**已经有 resolution**，它仍该按那个 resolution 走。」
+   *   ⇒ 一条被标成 `resolution.state = 'open'`（还欠一个动作）的记录，
+   *     即使它的 rescue 说"已自解"，也**仍该按 `open` 走** ——
+   *     因为"这个阻塞解掉了"与"这条台账还欠一个动作"是两件事。
+   *   ★ 把顺序反过来会在那条路径上**漏掉一条真的待办**。
+   *
+   * ── ★ 而它与 `fixed` 的**理由不同**（所以 `why` 不同形）────────────────────────
+   *
+   *   `fixed`      —— 「台账说这条修好了」（人对**记录**的动作）
+   *   `solved`     —— 「**那个阻塞**被自己解掉了」（人对**卡点**的动作，台账可能还没回填）
+   * ⇒ 两个读数分开报，读的人才知道该去信哪一格。
+   */
+  if (record?.rescue?.state === 'solved') {
+    return {
+      action: 'no-action',
+      why: `rescue.state = solved（★ 那个阻塞我们**自己解掉了**：${String(record?.rescue?.solvedBy ?? '(没记是谁)')}）`
+        + ' —— 它不再让任何任务停下来，所以不是待办',
+    }
+  }
+  /**
+   * ── ★★ C2：`cannot-solve` 是**唯一**该被人看见的那一态 ──────────────────────────
+   *
+   * ★ 它**不**变成 `candidate`（那是"派一条任务去修"）：解不掉的卡点不是一条可派的工作，
+   *   它是一件**要人裁决**的事。⇒ 单独成一格，且**带出"为什么解不掉"**。
+   * ★ 而它排在 `solved` 之后、`auto` 之前：一个自动条目若已被判定"解不掉"，
+   *   那它**仍然**要人看（"自动记录的"不等于"不用管"）。
+   */
+  if (record?.rescue?.state === 'cannot-solve') {
+    return {
+      action: 'escalate',
+      why: `rescue.state = cannot-solve（★ 试过、解不掉：${String(record?.rescue?.whyCannotSolve ?? '(没记为什么)')}）`
+        + ' —— 只有这一态会把事推到人面前',
+    }
+  }
   /**
    * ── ★★★ t91：**自动记录**与"还没回填"是两件事 ─────────────────────────────────
    *
@@ -245,13 +345,59 @@ export function actionForFriction(record) {
    */
   if (record?.auto !== undefined) {
     const origin = record.auto
-    const source = typeof origin?.gate === 'string' && origin.gate !== ''
-      ? `${String(origin.point ?? '?')} 位置的 ${origin.gate}`
+    /**
+     * ── ★★★ t60（N4）：读【全部】被拒的判据，而不是只有首项 ────────────────────────
+     *
+     * ── 消费的是什么 ────────────────────────────────────────────────────────────
+     *
+     * `auto.gates[]`（`src/tools/shared/entities.ts:3508-3511`，由 `fe7f2b0` 落地）。
+     * ★ 它**已经落盘**，只是本文件此前**只读标量 `gate`** ⇒ 一条含多个判据 id 的
+     *   拒绝记录在分诊眼里**只剩第一个** —— 那正是 t30 修掉的那个缺陷在**读端**的残留：
+     *   **写端早就把全量写下来了（`gates`），读端没去拿。**
+     *
+     * ── ★★ N-c：`gate` 保持单值 —— 本文件**不许**把它当数组用 ─────────────────────
+     *
+     * ★ 实测依据（不是约定）：`noteStall` 用**标量相等** `previous.gate === gate`
+     *   （`src/types.ts:717-719`）判"同一个判据又拒了一次"。
+     *   ⇒ 若 `gate` 被写成数组，那条相等**恒为 false** ⇒ `sameGate` 恒 false
+     *     ⇒ 每次拒绝都被算成"第一次" ⇒ **卡点计数永不触发**（整个机制失效）。
+     *   ★ 所以下面那道 `typeof origin.gate === 'string'` 是**"我只接受标量"**的显式形式 ——
+     *     而**不写 `Array.isArray(origin.gate)` 的分支**：那会暗示"它可能是数组"，
+     *     而这个字段按契约**永远是标量**。
+     *
+     * ── ★★★ N-a：接口面必须先声明它，否则读数【静默变空】────────────────────────────
+     *
+     * 契约 §5 N-a 逐字：「N4 的接口面**必须先声明它**，否则 N4 的读数**静默变空**，
+     * 而**「字段没了」与「卡点本来就没有」同形**。」
+     *
+     * ⇒ 这两件事**必须不同形**，所以 `readGateIds()` 返回的**不是一个数组**，而是
+     *   **带三态的读数**（见该函数的注释）：`from: 'gates' | 'gate' | 'none'`。
+     *   ★ 只返回 `[]` 就会把「这个字段不在（N4 读不到全量）」与「这一轮真的没有判据」
+     *     合成同一个读数 —— 而那正是 N-a 点名要防的那一格。
+     */
+    const gateRead = readGateIds(origin)
+    const source = gateRead.ids.length > 0
+      ? `${String(origin.point ?? '?')} 位置的 ${gateRead.ids.join(' + ')}`
       : String(origin?.point ?? '?')
     return {
       action: 'auto-recorded',
+      /**
+       * ★★ 把**全量**交出去，且**连同它是从哪读来的**（`gates` / `gate` / `none`）。
+       *   ⇒ 下游不必再自己解析 `why` 那句话，也**读得出"是不是走的回退"**。
+       *   ★ 而它与 `gate` **不同格**：`gate` 是兼容标量（N-c），`gates` 是权威全量。
+       */
+      gates: gateRead.ids,
+      gatesFrom: gateRead.from,
       why: `自动记录的拒绝（${source}）—— 它没有 resolution.state **是设计如此**：`
-        + '记录发生在判据拒绝的那一下，那时没有人做过决定。★ 它**不要求人回填**。',
+        + '记录发生在判据拒绝的那一下，那时没有人做过决定。★ 它**不要求人回填**。'
+        /**
+         * ★ N-a 的读数落进 `why`（人读的那一格）：当全量读不到而只能吃标量回退时，
+         *   那句话**必须说出来**，否则读的人会以为"这条记录只有一个判据"。
+         */
+        + (gateRead.from === 'gate'
+          ? '★ 注意：这条记录只有标量 `gate`，没有 `gates[]`（它写在 t30 加那个字段之前）'
+            + ' ⇒ 上面那个 id 是**首位**，而这条记录**可能还拒过别的判据**。'
+          : ''),
     }
   }
   /**
@@ -1435,6 +1581,943 @@ export function tierOf(contract, { exists = defaultTierExists } = {}) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑪ ★★★ t113：分档 ⇒ 拆解（**P3 填本体**；在此之前是明写的 unmeasured）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 用户原话（这条阶段存在的理由，逐字）─────────────────────────────────────────
+ *
+ *   「一开始都是去对符合条件的任务产出契约之类的东西，然后可能有的契约根据一些
+ *     判定认为不符合原子化的条件，那就得去拆」
+ *
+ * ⇒ ★ 所以"拆解"不是一条错误路径，而是**大档的正常下一步**。
+ *
+ * ── ★★★ 而它此刻**还没有实现** —— 那是 P3 的任务，不许在这里假装有 ──────────────
+ *
+ * 本任务（P1）的边界逐字写着：「本任务**只做骨架与阶段化**，`decompose` 本体由 P3 填」。
+ *
+ * ★★ 所以这里返回 `decomposed: false` + `status: 'unmeasured'`，
+ *   而**不是**一个空数组、也不是"拆成一条 = 原样"：
+ *
+ *     返回 []                       ⇒ "拆完了，一条也不用做" —— 一个**编出来的结论**
+ *     返回 [原提案]                 ⇒ "拆完了，还是这一条" —— 于是大活**从拆解里溜进 ready**
+ *                                      （★ 那正是"派出的不应该有大活"要防的那件事）
+ *     返回 unmeasured（本实现）      ⇒ "我还没学会怎么拆" —— ★ 而它的补救动作是【填 P3】，不是裁决
+ *
+ * ── ★ 而那与主干上的"大档"**不同形**（两格、两句话、两个补救动作）───────────────
+ *
+ *     decompose 没实现（unmeasured）  ⇒ 人**什么都补不了**，要去填 P3（补**能力**）
+ *     分档判不了（unmeasurable）      ⇒ 人**补 inScope**（补**信息**）
+ *     大档                            ⇒ 人**裁决**（拍板"这么拆行不行"）
+ *
+ * ── ★★★ P3 落地：拆解器本体（**纯机械、零 token**）────────────────────────────────
+ *
+ * 上一版在这里返回 `unmeasured`（"我还没学会"）。P3 把那一条填上了，而**填法**是本任务
+ * 的实质：它**不许调用模型**，只按 `tierOf` 已有的**三条信号**切边界。
+ *
+ * ── 为什么"三条信号"就是拆法的全部依据（而不是另找一套判据）────────────────────
+ *
+ *   `tierOf` 判"大"用的正是这三条（`signals` 那一格），所以**拆解要消灭的也正是它们**：
+ *
+ *     A `multipleFiles`         ⇒ 跨 ≥2 个现有文件 ⇒ 按**文件**切（一个子活一个文件）
+ *     B `restructuresDirectory` ⇒ 要新建/重组目录 ⇒ **目录**那一条单独成子活（它是搬运）
+ *     C `movesExistingCode`     ⇒ 要搬已有代码   ⇒ 搬与被搬**分开**（否则它还是"搬"）
+ *
+ *   ★ 拆完**每条子活**该落在小档 —— 而那正是可判定的成功条件（见 `decomposeContract`
+ *     与下面那个 `verifyChildrenAreAtomic`）：**拆法自己也要能被 `tierOf` 判小。**
+ *     ⇒ 于是"拆得对不对"不是一个主观问题，而是"子活过不过得了同一条 `tierOf`"。
+ *
+ * ── ★★★ 而这条实现里最要紧的一条纪律：【拆不动时留在队列并指名哪一问】─────────────
+ *
+ *   绝不静默降级成一个大任务。所以下面每一个"我不拆"的出口都带 `blockingQuestion`
+ *   （从 `tier.blockingQuestion` 来）与 `missing`（缺什么），而**都不产出 children**
+ *   ⇒ 于是它落回主干那条 `awaitingRuling`（有人要裁决），**不会**并进 ready。
+ *
+ * ── ★ 递归上限 2 层 ────────────────────────────────────────────────────────────
+ *
+ *   `depth` 由主干传进来（`runStages` 的 `depth`）。到 `MAX_DECOMPOSE_DEPTH` 就不再往下拆
+ *   —— 而**超限不是错误**，它是一个读数：那些子活**留在队列**（`awaitingRuling`），
+ *   因为"再拆一层"这件事需要人拍板（或者说明这条活本身不该被拆）。
+ */
+export const MAX_DECOMPOSE_DEPTH = 2
+
+/**
+ * 把一条大活按 `tier.signals` **机械地**切成子提案。
+ *
+ * ★ 它是纯函数：同样的 (tier, contract, depth) 给出同样的结果，**不读盘、不调模型**。
+ *   （存在性只经由 `tier.signals` 进来 —— 那是 `tierOf` 已经读过的结论。）
+ */
+export function mechanicalDecompose({ tier, proposal, depth = 0, exists = defaultTierExists }) {
+  /** ★ 信号 B 要问"这个目录此刻存在吗" —— 与 `tierOf` 用的是**同一个** `exists`。 */
+  const existsForSignals = exists
+  const contract = proposal ?? {}
+  const inScope = Array.isArray(contract?.inScope) ? contract.inScope.map(String) : []
+  const files = tierSourceFiles(inScope)
+  const dirs = tierDirectoryEntries(inScope)
+
+  /**
+   * ── 递归上限 ────────────────────────────────────────────────────────────────
+   *
+   * ★ 到顶了 ⇒ **不产出 children**（于是主干落 `awaitingRuling` ⇒ 子活**留在队列**），
+   *   而理由要说清是"到顶"而不是"我不会"（两者的补救动作不同）。
+   */
+  if (depth >= MAX_DECOMPOSE_DEPTH) {
+    return {
+      status: 'unmeasured',
+      why: `递归到第 ${depth} 层（上限 ${MAX_DECOMPOSE_DEPTH}）⇒ 不再往下拆。`
+        + '★ 这不是"拆不了"，而是"再拆一层要人拍板" —— 子活**留在队列**，'
+        + '不许静默当成一条大活派出去。',
+      missing: [`★ 递归上限（第 ${depth} 层 / 上限 ${MAX_DECOMPOSE_DEPTH}）`],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  /**
+   * ── 切边界：按信号逐条来 ──────────────────────────────────────────────────────
+   *
+   * ★ 顺序有理由：**目录那一条最先**（它是搬运，而搬运是这三条里唯一"会移动已有代码"的）
+   *   —— 若把它并进某个文件的子活，那条子活仍然含"重组"，拆完还是大档。
+   */
+  const children = []
+  /**
+   * ── ★★★ 信号：**从 `tier.signals` 读**，而 `tier` 没给时**自己按同一条口径推** ──────
+   *
+   * ⚠️ MEASURED（P3 当场抓出来）：第一版**只读 `tier.signals`** ⇒ 一条手工构造的 tier
+   *   （`{ tier:'large', why:'…' }`，没有 `signals`）会让拆解器答"三条信号一条都不成立"
+   *   —— 而**那是错的读数**：拆解器明明能从写域自己看出信号 A。
+   *
+   *   ★ 而它的形态是本队记账过的那条：**把"上游没给这一格"读成了"这一件事实不成立"。**
+   *     （"我没拿到读数"与"读数是零"合流 —— 而两者的补救动作相反。）
+   *
+   * ⇒ 修法：`tier.signals` 在场就**以它为准**（那是分档亲眼读到的，最新鲜）；
+   *   不在场时**按 `tierOf` 的同一条口径从写域推**（同样的三个判断、同一份 `exists`）。
+   *   ★ 而推的时候必须用**同一套 helper**（`tierSourceFiles`/`tierDirectoryEntries`）
+   *     —— 各写一遍会让两处在下一次改动时对同一份写域给出不同的信号。
+   */
+  const signals = tier?.signals ?? {
+    multipleFiles: files.length >= 2,
+    restructuresDirectory: dirs.some((path) => { try { return !existsForSignals(path) } catch { return false } }),
+    movesExistingCode: REORG_VERB.test(String(contract?.objective ?? '')) && files.length >= 1,
+  }
+  const base = {
+    sourceId: contract?.sourceId,
+    kind: contract?.kind,
+    objective: contract?.objective,
+    acceptance: contract?.acceptance,
+    verify: contract?.verify,
+  }
+
+  if (signals.restructuresDirectory === true) {
+    for (const dir of dirs) {
+      children.push({
+        ...base,
+        sourceId: `${String(contract?.sourceId ?? 'proposal')}#dir:${dir}`,
+        inScope: [dir],
+        subject: `重组目录 ${dir}（只做搬运，不改行为）`,
+        objective: `把 ${dir} 这一处目录重组落地：只搬运，不改行为。`
+          + '★ 它是拆出来的一条**搬运**子活 —— 而"搬"与"改"分开，正是为了让这条能单独被审。',
+      })
+    }
+  }
+
+  if (signals.multipleFiles === true) {
+    for (const file of files) {
+      children.push({
+        ...base,
+        sourceId: `${String(contract?.sourceId ?? 'proposal')}#file:${file}`,
+        inScope: [file],
+        subject: `改 ${file}`,
+        objective: `只改 ${file} 这一个文件。`
+          + '★ 它是拆出来的一条**单文件**子活 —— 一条子活一个文件，'
+          + '于是 `tierOf` 对它判小（信号 A 不再成立）。',
+      })
+    }
+  }
+
+  /**
+   * ★ 而 C（`movesExistingCode`）**没有单独的子活** —— 它由上面两条**消掉**：
+   *   搬运落在目录那条子活里，而"改"落在单文件那几条里。
+   *   ⇒ 于是每一条子活的任务语里都不再含"拆/搬/重组"（见下面 `verifyChildrenAreAtomic`）。
+   *
+   * ★ 而若三条信号一条都不成立 ⇒ **那不是大档**（`tierOf` 不会这么判）⇒ 如实报"形不一致"，
+   *   而不是编一个空拆法出来。
+   */
+  if (children.length === 0) {
+    return {
+      status: 'unmeasured',
+      why: '这条提案被判大档，而它的三条信号**一条都不成立** ⇒ 拆解器读不懂它大在哪。'
+        + '★ 不产出子活：编一个空拆法出来会把"我不懂"伪装成"拆完了"。',
+      missing: ['★ 大档的三条信号（multipleFiles / restructuresDirectory / movesExistingCode）一条都不成立'],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  /**
+   * ★★ 拆完**自检**：每一条子活都必须**真的比原来小**。
+   *
+   * ── ★★★ 而"小"在这里的定义必须精确 —— 我第一版写错了，被自己的自检当场打红 ──────
+   *
+   *   第一版判据是"子活必须被 `tierOf` 判**小档**"。而它**必然**拒掉目录那条子活：
+   *
+   *     src/newdir/ 这条子活 ⇒ `tierOf` 仍判 large，因为**信号 B 还在**
+   *     （`restructuresDirectory` 正是"声明了一个不存在的目录条目"）
+   *
+   *   ⇒ ★ 而那不是子活的毛病：**"重组一个目录"这条活，说它自己大不大是没意义的** ——
+   *     它是**搬运**，而搬运的风险在于"搬了什么、漏了什么"，不在于面有多宽。
+   *     ⇒ 所以用 `tierOf` 的档位去判它，等于**拿一把量宽度的尺去量一件关于顺序的事**。
+   *     本队记过这条：**拿一个不是那个东西的量，去断言那个东西的性质。**
+   *
+   * ── 正确的判据：拆解要消灭的是【原提案那几条信号】，而不是"让每一条都变小档" ──
+   *
+   *   逐条对：
+   *     · 信号 A（跨 ≥2 文件）⇒ 子活**一个文件** ⇒ ★ A 消失（可核：`files.length === 1`）
+   *     · 信号 B（新建/重组目录）⇒ 子活含**恰好一个**目录条目 ⇒ ★ B 收敛到"一条搬运"
+   *       （可核：目录条目数 = 1），而那条搬运**本身**就是原子的 —— 它不再需要"拆"
+   *     · 信号 C（搬已有的东西）⇒ 拆完每条子活**只剩一种动作**（要么搬、要么改）
+   *
+   *   ★ 而"子活仍被判大档"**不是失败**，只要它大的原因是**已经收敛的那一条**
+   *     （即：它的信号集**严格小于**原来的）。⇒ 所以判据是**信号集合的真包含**，
+   *     而它同样是机械的、可核的。
+   */
+  const originalSignalCount = [signals.multipleFiles, signals.restructuresDirectory, signals.movesExistingCode]
+    .filter(Boolean).length
+
+  /**
+   * 一条子活是否**真的收敛了**：它的信号集合是原来的**真子集**。
+   *
+   * ★ 逐条说清（与上面那段一一对应）：
+   *   · A 消失 ⇒ 它只碰一个文件（`files.length <= 1`）
+   *   · B 收敛 ⇒ 它最多声明一个目录条目（`dirs.length <= 1`）—— 而那一格就是"一次搬运"
+   *   · C 消失 ⇒ 它的写域里**要么只有目录条目、要么只有文件**（不同时）
+   *     ⇒ 那正是"搬"与"改"分开的机械形式
+   */
+  const converges = (child) => {
+    const scope = Array.isArray(child?.inScope) ? child.inScope.map(String) : []
+    const childFiles = tierSourceFiles(scope)
+    const childDirs = tierDirectoryEntries(scope)
+    const childSignals = {
+      multipleFiles: childFiles.length >= 2,
+      restructuresDirectory: childDirs.length > 1,
+      movesExistingCode: childFiles.length > 0 && childDirs.length > 0,
+    }
+    const childCount = Object.values(childSignals).filter(Boolean).length
+    return childCount < originalSignalCount
+  }
+
+  const notConverged = children.filter((child) => !converges(child))
+  if (notConverged.length > 0) {
+    return {
+      status: 'unmeasured',
+      why: `拆出来的 ${notConverged.length} 条子活**没有收敛**（信号没有变少，例如 `
+        + `${String(notConverged[0]?.inScope?.[0] ?? '(无写域)')}）⇒ 这次拆解没消灭大档。`
+        + '★ 不许并进 ready：那只是把大活换了个名字。',
+      missing: ['★ 一个能让每条子活的信号集合【真包含于】原提案的拆法'],
+      blockingQuestion: tier?.blockingQuestion,
+    }
+  }
+
+  return { status: 'decomposed', children }
+}
+
+/**
+ * 缺省拆解器 —— **零 token、纯机械**。
+ *
+ * ★ 它是 `decompose` 的缺省 `decomposer`。而 `options.decomposer` 仍可覆盖它
+ *   （夹具要喂"故意坏掉"的拆解器去跑那两道非法拆法的闸门，见 `decomposeContract`）。
+ */
+function defaultDecomposer({ tier, proposal, depth }) {
+  const outcome = mechanicalDecompose({ tier, proposal, depth })
+  /**
+   * ★ 三态翻译：**只有 `decomposed` 才交出 children**。
+   *   `unmeasured` ⇒ **不给料**（`undefined`），于是 `decompose` 那一层如实落 unmeasured
+   *   ⇒ 主干落 `awaitingRuling` ⇒ 子活留在队列。
+   *   ★ 而"给了料却自称 unmeasured"那条形不一致，`decomposeContract` 会拒 —— 这里不走那条路。
+   */
+  return outcome.status === 'decomposed' ? outcome.children : undefined
+}
+
+/**
+ * 缺省拆解器**为什么**答 unmeasured —— 与 `defaultDecomposer` 读的是同一件事。
+ *
+ * ★ 为什么要单列一个：`decompose` 那一层只拿得到 children（`undefined`），拿不到原因。
+ *   而原因**必须**往上走 —— 见 `decompose` 里那段"三种情形不许合流成一句"。
+ * ★ 而它与 `defaultDecomposer` **共用 `mechanicalDecompose`** ⇒ 两者不会分叉
+ *   （若各写一遍判断，它们会在下一次改动时对同一份料给出不同的解释）。
+ */
+function defaultDecomposerReason({ tier, proposal, depth }) {
+  const outcome = mechanicalDecompose({ tier, proposal, depth })
+  return outcome.status === 'decomposed' ? undefined : outcome
+}
+
+export function decompose(tier, proposal, { depth = 0, decomposer } = {}) {
+  /**
+   * ── ★★ 而"拆解器"是**注入**的（`options.decomposer`）────────────────────────────
+   *
+   * ★ 理由与 `tierOf` 的 `options.exists` **同源**：一个不注入的本体在夹具里只能用
+   *   真实磁盘 / 真实拆解器去测 ⇒ 而 P3 之前那个本体**不存在**
+   *   ⇒ 下面两道"非法拆法"的闸门会**够不着**（而那与"守住了"同形）。
+   *
+   * ★★★ 所以这一格让夹具能喂进一个**故意坏掉**的拆解器（拆出 0 条 / 原样还回来），
+   *   从而把闸门**真的跑一遍**。★ 而缺省（没有注入）仍然是那条诚实的 unmeasured。
+   */
+  const children = typeof decomposer === 'function'
+    ? decomposer({ tier, proposal, depth })
+    : defaultDecomposer({ tier, proposal, depth })
+  /**
+   * ★★ 而"给了料"⇒ 自报就该是 `decomposed`（而不是那条"我还没学会"）——
+   *   否则下游会读到一句与料对不上的话（`decomposeContract` 那一道"形不一致"会拒掉它）。
+   *   ★ 而"没给料"⇒ 那条诚实的 `unmeasured`。
+   */
+  const decomposed = children !== undefined
+  /**
+   * ── ★★★ P3：`unmeasured` 时，**理由必须来自拆解器自己**，不是这里替它编一句 ────────
+   *
+   *   缺省拆解器（`defaultDecomposer`）在三种情形下答 unmeasured，而它们的补救动作相反：
+   *   ① 递归到顶 ② 三条信号一条都不成立 ③ 拆出来没收敛。
+   *   ⇒ 若这里统一写一句"我还没学会"，那三种就**合流**成一句 —— 而读的人会去补 P3
+   *     （那已经填好了），真正的那一条永远读不到。
+   */
+  const reason = decomposed ? undefined : defaultDecomposerReason({ tier, proposal, depth })
+  return {
+    decomposed,
+    status: decomposed ? 'decomposed' : 'unmeasured',
+    depth,
+    /** ★ 而拆解器给了料（哪怕那料是坏的）⇒ 它**必须**被下游看见（见 `decomposeContract`）。 */
+    ...decomposed ? { children } : {},
+    /**
+     * ★ 而"缺什么"要**逐项**说清（`cannot-emit` 的 `missing` 用同一套口径）——
+     *   读的人要能直接去补那一项，而不是再来问一次。
+     *   ★ 而拆解器**给了料**时这几项**不再缺**（没有"缺什么"要说）。
+     */
+    ...decomposed ? {} : {
+      /**
+       * ★★★ P3 之后这一格的含义变了（**不许留着旧措辞**）────────────────────────────
+       *
+       *   落地前：它是"**我还没学会**"（补救动作 = 填 P3）。
+       *   落地后：拆解器**在**了，而它**仍然**答 unmeasured ⇒ 那说明的是**别的**原因，
+       *           而可能的原因**至少有三种**，补救动作各不相同：
+       *
+       *     ① 递归到顶（`depth >= MAX_DECOMPOSE_DEPTH`）⇒ 再拆一层要人拍板
+       *     ② 大档的三条信号一条都不成立        ⇒ 分档与拆解器读的不是同一件事
+       *     ③ 拆出来的子活没有收敛               ⇒ 拆法不够好，要换一个
+       *
+       *   ⇒ ★ 所以 `why` 由**拆解器自己**给出（它最清楚为什么），而这里只补上
+       *     "这条活为什么该被拆"与"它卡在哪一问"那两条**下游要用来裁决**的信息。
+       *   ★ 而"留着旧措辞"的后果是实的：读的人会去填一个**已经填好的** P3，
+       *     而真正的那一条（到顶 / 信号不成立 / 没收敛）**永远读不到**。
+       */
+      missing: [
+        ...Array.isArray(reason?.missing) ? reason.missing : [],
+        `★ 而这一条大活为什么该被拆：${String(tier?.why ?? '(分档没给理由)')}`,
+        `★ 它卡在哪一问上：${String(tier?.blockingQuestion ?? '(分档没给那一问)')}`,
+      ],
+      why: String(reason?.why ?? '拆解器答 unmeasured ⇒ 如实落 unmeasured。')
+        + '★ 而它**不许**并进"可派"（那会让大活直接出了货）。',
+      blockingQuestion: reason?.blockingQuestion ?? tier?.blockingQuestion,
+    },
+  }
+}
+
+/**
+ * 把一份**已生成的契约**拆成子契约。★ 而它**不是一个空壳** —— 在拆解器落地之前，
+ * 它只做一件可核的事：把 `decompose` 的 `unmeasured` **形状**交给下游，
+ * 并**当场拒绝**任何"拆了个空的"或"原样还回来"的拆法（见下）。
+ *
+ * ★★★ 为什么这条函数现在就值得写：它把"大活不许从拆解里溜进 ready"写成**可执行的断言**，
+ *   而不是一句注释 —— 于是 P3 填本体时，一个"拆成 []"或"拆成原样"的实现**当场红**。
+ */
+export function decomposeContract(contract, tier, { depth = 0, exists, decomposer } = {}) {
+  const outcome = decompose(tier, contract, { depth, ...decomposer === undefined ? {} : { decomposer } })
+  /**
+   * ⚠️ MEASURED（本任务当场抓出来）：第一版在这里**先** `return` 掉 `unmeasured`
+   *   ⇒ 下面那两道"非法拆法"的闸门**永远走不到**（P3 之前 `decompose` 恒答 unmeasured）
+   *   ⇒ 它们是一条**够不着的断言** —— 而"够不着"与"守住了"在读数上同形。
+   *
+   * ★★ 而那条是我自己写的一条臂（T113f）打红的：它构造了一个"拆出 0 条"的拆解器，
+   *   期望这里拒掉，而实际返回的是 `decompose` 那句"我还没学会"⇒ 断言对不上。
+   *   ⇒ ★ 而那正是夹具该做的事：**它把我"以为写了、其实没跑"的闸门当场指出来。**
+   *
+   * ⇒ 修法：**先**看拆解器给没给出子活，再谈 status。
+   */
+  const children = Array.isArray(outcome.children) ? outcome.children : []
+
+  /**
+   * ── ★★★ 形状闸门**先跑**（不管拆解器自报的是什么 state）──────────────────────────
+   *
+   * ⚠️ MEASURED（本任务当场抓出来，**两次**）：
+   *
+   *   ① 第一版把 `unmeasured` 先 `return` 掉 ⇒ 闸门在 P3 之前**够不着**
+   *      （"够不着"与"守住了"在读数上同形）。
+   *   ② 第二版把闸门放进了 `if (outcome.status === 'unmeasured')` 里面 ⇒
+   *      一个**合法的**拆法（写域真的变小了）会在那里被当成"我还没学会"而放过去
+   *      —— 而反过来，一个"同形"的坏结果带着 `status: 'decomposed'` 时又走不到闸门。
+   *
+   * ★★ 根因是同一个：**闸门被 arrangement 挂在了一条分支上**，而不是挂在
+   *   "料长什么样"上。⇒ 现在它**只看料**：
+   *
+   *     料是 undefined      ⇒ 相信拆解器的自报（`unmeasured` = "我还没学会"）
+   *     料是空数组          ⇒ ★ 拒（"这条活凭空消失了"）
+   *     料里有与原来同形的   ⇒ ★ 拒（"原样传下去，下一轮还会被判大档"）
+   *     料是合法的子活       ⇒ 放行（`decomposed`）
+   *
+   * ★ 而"自报 unmeasured 却给了料"也在这里被拦（见下）—— 那是形不一致。
+   */
+  const gaveChildren = outcome.children !== undefined
+  const sameShape = children.some((child) => {
+    const scope = Array.isArray(child?.inScope) ? child.inScope.map(String) : []
+    const own = Array.isArray(contract?.inScope) ? contract.inScope.map(String) : []
+    return scope.length === own.length && scope.every((entry, index) => entry === own[index])
+  })
+
+  if (gaveChildren && (children.length === 0 || sameShape)) {
+    return {
+      ...outcome,
+      status: 'unmeasured',
+      children: undefined,
+      why: children.length === 0
+        ? '拆解给出了 **0** 条子活 ⇒ 那不是"拆完了"，是"这条活凭空消失了"。★ 不许并进 ready。'
+        : '拆解至少有一条子活与**原契约同形**（同样的写域）⇒ 那只是把这条大活原样传下去，'
+          + '下一轮它会**再一次**被判大档 ⇒ 而若让它过闸，大活就出了货。★ 不许并进 ready。',
+    }
+  }
+
+  /** ★ 而"没给料" ⇒ 相信自报：`unmeasured`（"我还没学会"，补救是填 P3）。 */
+  if (!gaveChildren) return { ...outcome, children: undefined }
+
+  /**
+   * ── ★★★ 最后一道：**自报与料对不对得上** ───────────────────────────────────────
+   *
+   * ★ 而"对得上"只有一种：自报 `decomposed` **且**给了子活 —— 那是正常的那一半。
+   *
+   * ★★ 而"自报说没学会、却给了一串**能用的**子活" ⇒ 那是**形不一致**：
+   *   下游没法知道该信哪一半。★ 不许并进 ready。
+   *
+   * ⚠️ MEASURED（t113 补强杀伤率时当场抓出来，一次**真 bug**）：这一格的判断
+   *   我第一版**写反了** ——
+   *
+   *     if (outcome.status === 'decomposed') { …拒绝… }   ← 反了
+   *
+   *   ⇒ 后果是：一个**完全正常**的拆解（自报 decomposed + 给出两条合法子活）
+   *     被判成"形不一致"而**拒绝** ⇒ 拆解**永远不会成功**。
+   *   ★★ 而它是被我**自己**那条反向半边臂（T113f 的"合法的拆法必须被放行"）
+   *     抓出来的 —— 而那一条正是为了防"上面两道闸门可能是一律拒绝"才写的。
+   *   ⇒ 所以那条臂不是形式：它当场逮住了一个会让整个 P3 无法交付的错。
+   */
+  if (outcome.status !== 'decomposed') {
+    return {
+      ...outcome,
+      status: 'unmeasured',
+      children: undefined,
+      why: `拆解器自报 \`${String(outcome.status)}\`，而它**同时**给出了一串子活 ⇒ 那个自报与料对不上。`
+        + '★ 不许并进 ready：一个连自己都没说清的拆解结果，没人能核。',
+    }
+  }
+
+  return { ...outcome, status: 'decomposed', children }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑫ ★★★ t113：**单一主干** —— 分类 → 契约 → 分档 → 拆解 → 生成即审查 → ready
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 这一节要消掉的那个缺陷（实测，本任务的由来）────────────────────────────
+ *
+ * 此前有三条**独立出口**，各自走了流水线的不同片段，且**顺序不一致**：
+ *
+ *     `--emit-task <id>`   生成 → 审查            ★ **不分档**（大活也产出契约）
+ *     `--dispatchable`     分档 → 生成 → 审查     顺序对，但只**列**不落地
+ *     `--json`             只出分类报告            走不到契约
+ *
+ * ★ 根因：`tierOf` **只**在 `dispatchable()` 内部被调用 ⇒ `emitReviewedContract`
+ *   自己不知道分档 ⇒「原子化判定」是**调用方记得去做的一步**，而不是流水线的一个阶段。
+ *
+ * ⇒ ★★ 于是同一提案走 `--emit-task` 出契约、走 `--dispatchable` 被判大档 ——
+ *   两条路对**同一件工作**给出**相反处置**（那正是本任务的行名）。
+ *
+ * ── 修法：阶段**固定且有序**，而它们是**代码的顺序**，不是一个约定 ────────────────
+ *
+ *     ① 分类             —— 提案由 `triage()` 给出（它已经有）
+ *     ② 产出契约         —— `emitTaskContract`（★ 注意：**不是** `emitReviewedContract`）
+ *     ③ ★ 分档           —— `tierOf`（**硬性阶段**：主干上的一站，不是可选步骤）
+ *                            ├ 小档         → ⑥ 生成即审查
+ *                            ├ 大档         → ④ 拆解 → ⑤ 审拆法 → 子提案【回到 ②】
+ *                            │                （递归上限 2 层；★ 在 P3 填本体之前，
+ *                            │                 ④ 如实落 unmeasured ⇒ cannot-emit）
+ *                            └ unmeasurable → cannot-emit（★ 绝不并进"可派"）
+ *     ⑥ 生成即审查       —— `adversarialReview` 五问 → 盖章 reviewed / needs-review / rejected
+ *     ⑦ 进 ready 池      —— 附完整契约 + 派工理由
+ *
+ * ── ★★★ 为什么"契约"单独是第 ② 站，而审查不是 ──────────────────────────────────
+ *
+ * ★ 一条**没有契约**的提案（缺 inScope / 缺 subject …）根本无从分档 ——
+ *   `tierOf` 的 `unmeasurable` 那一格说的就是这件事（"inScope absent" / "inScope empty"）。
+ * ⇒ 所以顺序必须是 ② 再 ③：分档要有一份写域可读。
+ *
+ * ── ★★★★ 而分档读的是【提案自己的写域】，**不是收窄之后的那一份**（t113 修正）─────
+ *
+ * MEASURED（本任务第一版就是收窄后分档，由 captain 裁定改掉）：
+ *
+ *   分档问的是「**这条活本身有多大**」——
+ *   而 `narrowScope` 是**为了产出契约**做的一次收窄，它发生在
+ *   "我们已经决定要做它"【之后】。
+ *
+ *   ⇒ 用收窄后的写域去判"它大不大"，等于**用施工图判这块地原本多大**：
+ *     判出来的是**收窄器的输出**，不是提案的面。
+ *
+ * ★★ 而它的实际后果是可量出来的（那一版实测）：
+ *     一条判决侧 `inScope: ['src/a.ts','src/b.ts']` 会被收窄成两个具体文件
+ *     （`scripts/gate-*.test.mjs` + `src/gates/index.ts`）⇒ **判成小档**
+ *     ⇒ ★ **信号 A（跨多个现有源码文件 —— t54 教出来的那一条）在判决侧永不触发**
+ *
+ *   ★ 而那正是 t54 的事故形状（跨 6 个文件、amend 三次）；
+ *     第一版会把它**结构性地**从判决侧关掉 —— 不能接受。
+ *
+ * ── ★ 而收窄本身**不是白做的**：它的读数要保留，只是不再喂给分档 ────────────────
+ *
+ * 「收窄前 vs 收窄后」的差**本身是一个有用的信号**：
+ *   收窄把一个粗面压成两个文件，说明**原始写域粗得没能指认对象**。
+ * ⇒ 它进 `narrowing` 那一格（见 `runStages` 的返回值），**不进分档的输入**。
+ *   ★ 两个读数各说各的事：`tier` 说"这条活多大"，`narrowing` 说"这次收窄干了什么"。
+ *     把它们合成一个，就会让"收窄器坏了"与"这条活很小"在读数上同形。
+ *
+ * ★★ 而 `emitReviewedContract` **不许**被绕过：⑦ 那一格拿到的契约**就是它给的**
+ *   （见 `OUTCOME_CONTRACT_SOURCE`）⇒ 于是"大活直接出契约"在结构上不可能。
+ *
+ * ── 三态（而三者不许合并）─────────────────────────────────────────────────────
+ *
+ *     `ready`          —— 小档 + 审查过了（契约带 `reviewed`）
+ *     `awaitingRuling` —— ★ 大档：一个**队列**，不是错误（每条带"它大在哪"与"卡在哪一问"）
+ *     `cannot-emit`    —— ★ 补信息（契约不全 / 分档判不了 / 拆解器还没实现）
+ *     `rejected`       —— 审了没过
+ *
+ *   ★ 而 `ready` / `awaitingRuling` / `cannot-emit` 里**没有一格并进另一格**。
+ */
+export function runPipeline(proposal, options = {}) {
+  const now = options.now ?? Date.now()
+  /**
+   * ── ★★★ 递归上限那一格的【唯一真值】必须在这里读，而不是写死 0 ──────────────────
+   *
+   * ⚠️ MEASURED（P3 当场抓出来）：第一版这里写死 `depth: 0` —— 于是子活回到入口时
+   *   **深度被清零**，`MAX_DECOMPOSE_DEPTH` **永远够不着** ⇒ 递归没有上限。
+   *
+   *   ★ 而它的形态正是本队记账最久的那条：**一条守着上限的门，而那个上限从来没被读到。**
+   *     （"有上限"与"上限生效"在读数上同形 —— 直到有人造一条真的会无限往下拆的活。）
+   *
+   * ⇒ 修法：深度由调用方经 `options.depth` 传进来，缺省 0。
+   *   ★ 而**对外**的语义不变：`runPipeline(proposal)` 仍然从第 0 层开始 ——
+   *     只有递归那条路会显式递增它。
+   */
+  const depth = Number.isInteger(options.depth) ? options.depth : 0
+  return runStages(proposal, options, { depth, now, trace: [] })
+}
+
+/**
+ * ★★ 而下面这个常数是"审查不许被跳过"的**单一真值**（见 `runStages` 里那处断言）：
+ *   ⑦ 那一格的契约**只能**来自 `emitReviewedContract`。
+ */
+export const OUTCOME_CONTRACT_SOURCE = 'emitReviewedContract'
+
+function runStages(proposal, options, { depth, now, trace }) {
+  const at = (stage) => [...trace, stage]
+
+  /**
+   * ── ② 产出契约（**未盖章的那一份**）────────────────────────────────────────────
+   *
+   * ★ 用 `emitTaskContract` 而不是 `emitReviewedContract`：证据是它点名的那条失效
+   *   ——「大档提案绝不被 `emitReviewedContract` **直接**产出契约」。
+   *   而**这一站在主干上**、且它之后**必然**是 ③ 分档 ⇒ 那条不可能成立，
+   *   而路径上的每一站都写在下面的 `trace` 里（可核，不是一个承诺）。
+   *
+   * ★ 而它是**收窄之后**的提案：**契约**写的是收窄后的写域（那是对的 ——
+   *   契约要指得出它到底改哪几个文件）。
+   *   ★★ 而**分档不读这一份** —— 见本文件头"用施工图判这块地原本多大"那一节。
+   */
+  const narrow = narrowScope(proposal, options)
+  const emitted = emitTaskContract({ ...proposal, inScope: narrow.inScope }, options)
+
+  /**
+   * ── ★★ `narrowing`：这次收窄干了什么（**读数**，不是裁决）──────────────────────
+   *
+   * ★ 它**不**参与分档（那正是本任务修正的那一格），而它不是一个可以丢掉的东西：
+   *   原始写域 ⇒ 收窄后写域 的**差**，说的是一件分档说不了的事 ——
+   *
+   *     收窄把一个大面压成两个具体文件  ⇒ ★ 原始写域**粗得没能指认对象**
+   *                                       （判决侧 claim 是人话散文，推不出路径）
+   *     收窄什么都没改（`coarse`）       ⇒ 它推不出来，如实标粗
+   *
+   * ★★ 而它必须**逐条可核**：`from` 是提案给的、`to` 是收窄器给的、`rejected` 是两者的差。
+   *   把两个读数（`tier` / `narrowing`）合成一个，会让"收窄器坏了"与"这条活很小"同形。
+   */
+  const narrowing = {
+    status: narrow.status,
+    /** ★ 提案**自己的**写域（分档读的就是它）。 */
+    from: Array.isArray(proposal?.inScope) ? [...proposal.inScope] : [],
+    /** ★ 收窄之后、写进**契约**的那一份。 */
+    to: Array.isArray(narrow.inScope) ? [...narrow.inScope] : [],
+    /** ★ 而"被收窄掉了哪些格子"要看得见（那是"原始写域粗"的证据）。 */
+    dropped: (Array.isArray(proposal?.inScope) ? proposal.inScope : [])
+      .filter((entry) => !(Array.isArray(narrow.inScope) ? narrow.inScope : []).includes(entry)),
+    why: narrow.why,
+  }
+
+  /**
+   * ── ★★★ ② · 分档的**第一半**：写域本身就读不出来 ⇒ 那**就是** `unmeasurable` ──────
+   *
+   * ★★ MEASURED（本任务当场抓出来）：`emitTaskContract` 在 `inScope` 为空时**先**报
+   *   `cannot-emit`，而 `tierOf` 的 `unmeasurable` 那一格**永远走不到** ——
+   *   于是同一条"写域判不了"的提案会有**两个不同的出处**：
+   *
+   *     走契约那一站 ⇒ `missing: ['inScope（没有写域 ⇒ …）']`，**没有** `becauseTier`
+   *     走分档那一站 ⇒ `missing: [tier.why]`，**有** `becauseTier: 'unmeasurable'`
+   *
+   *   ★ 而下游要能分辨"分档判不了"与"别的项缺了"（两者的补救动作不同：一个补写域、
+   *     一个补 subject/acceptance/…）⇒ 少了那一格，读的人**分不出**该去补什么。
+   *
+   * ⇒ 修法：在这里把"写域读不出来"**如实**标成 `becauseTier: unmeasurable` ——
+   *   而它**不是猜的**：`inScope` 缺席/为空**正是** `tierOf` 判 `unmeasurable` 的那两个条件
+   *   （见 `tierOf` 开头那两格），所以这里与那里**读的是同一件事**。
+   *
+   * ★ 而 stage 仍然是 `cannot-emit`（它确实是"出不了契约"）——**两个出口都是**。
+   */
+  if (emitted.status !== 'executable') {
+    const scopeUnreadable = !Array.isArray(narrow.inScope) || narrow.inScope.length === 0
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: emitted.missing,
+      ...scopeUnreadable ? { becauseTier: TIER.unmeasurable } : {},
+      because: '契约不完整',
+      narrowing,
+      trace: at('contract'),
+    }
+  }
+
+  const contract = emitted.contract
+
+  /**
+   * ── ★★★ ③ 分档 —— **硬性阶段** ───────────────────────────────────────────────
+   *
+   * ★★ 而它读的是 **`proposal`（提案自己的写域）**，**不是** `contract`（收窄后的那一份）——
+   *   见本文件头那一节逐字的理由（"用施工图判这块地原本多大"）。
+   *
+   * ★ 所以这里必须用 `proposal` 而不是 `{ ...contract, inScope: narrow.inScope }`：
+   *   后者读的是**收窄器的输出**，而信号 A（跨多个现有源码文件）会在判决侧永不触发。
+   *
+   * ★★ 而"分档要在契约之后"这一条**仍然成立**（顺序没变）：
+   *   ② 那一站的用途是**证明这份提案出得了契约**（subject/kind/acceptance/verify/inScope 都在），
+   *   而不是把"契约里那份写域"当成分档的输入。
+   */
+  const tier = tierOf(proposal, options)
+
+  /** ★ `unmeasurable`（`inScope` 缺席/为空）⇒ 补**信息**，不许并进"可派"。 */
+  if (tier.tier === TIER.unmeasurable) {
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: [tier.why],
+      becauseTier: TIER.unmeasurable,
+      because: '分档判不了',
+      tier,
+      narrowing,
+      narrowing,
+      trace: at('tier'),
+    }
+  }
+
+  /** ── ③ · 大档分支：④ 拆解 → ⑤ 审拆法 → 子提案【回到 ②】──────────────────────── */
+  if (tier.tier === TIER.large) {
+    /**
+     * ─── ★★★ 在 P3 落地之前，这一站的形状是【行为不变的】 ─────────────────────────
+     *
+     * 任务边界逐字写着：「在 P3 完成前，③ 判为大档时走**现有的** `awaitingRuling`
+     * （行为不变），只是位置从 `dispatchable()` 内部提到主干上。」
+     *
+     * ★ 而"提起位置"这件事**本身就是本任务**：此前分档只发生在 `dispatchable()` 内部
+     *   ⇒ `--emit-task` 走的是"生成 → 审查"而**没有这一站** ⇒ 它给一条大活出了契约。
+     *   ⇒ 现在它在**主干上**，两个出口都经过它。
+     *
+     * ★★ 而为什么是 `awaitingRuling` 而**不是** `cannot-emit`（我第一版写错了，MEASURED）：
+     *   两者都"没有契约"，而它们的**补救动作相反**，混起来会让派发停摆：
+     *
+     *     `cannot-emit`    ⇒ "我出不了契约" —— 人**补信息/补能力**，而**没有东西可裁决**
+     *     `awaitingRuling` ⇒ ★ 契约**完整且合格**，只是这个提案是**大活**
+     *                        ⇒ 人（或 P3 的拆解器）**有东西可裁决**：这么拆行不行
+     *
+     *   把大档报成 `cannot-emit` 的后果是**直接的**：`withMutatedTool` 那类臂会看到
+     *   `awaitingRuling` 空了，而 captain 读到的是一句"契约生成不出来"——
+     *   于是他会去补一条**根本不缺**的信息，而那条大活**永远等不到裁决**。
+     *   ⇒ ★ 这正是本队记账过的形态：**把一类读数伪装成另一类，而两者的补救动作相反。**
+     *
+     * ★ 所以：**大活的信息是完整的**，缺的从来不是信息。
+     */
+    const decomposed = decomposeContract(contract, tier, {
+      depth,
+      ...options.exists === undefined ? {} : { exists: options.exists },
+      /**
+       * ★★ 注入的拆解器必须**转发到这里** —— 否则 `options.decomposer` 永远到不了
+       *   `decompose`，而"夹具能喂一个故意坏掉的拆解器"这件事就成了空话：
+       *   那两道非法拆法的闸门会**够不着**（而"够不着"与"守住了"在读数上同形）。
+       */
+      ...options.decomposer === undefined ? {} : { decomposer: options.decomposer },
+    })
+    /**
+     * ── ★★ ⑤ 审拆法 ──────────────────────────────────────────────────────────────
+     *
+     * ★ 拆法**本身**要过五问（和契约一样）—— 而那正是用户说的"原子化拆解的审查（门禁）"：
+     *   他裁定的从来不是"这条活大不大"，而是"**这么拆行不行**"。
+     *
+     * ★ 而这里**复用** `adversarialReview`（同一个函数、同一套五问）——
+     *   不为拆解另写一套（那样两份会分叉，而分叉之后"审过了"在日志里同形）。
+     */
+    const decompositionReview = adversarialReview(
+      { inScope: contract.inScope, acceptance: contract.acceptance, verify: contract.verify, objective: contract.objective },
+      narrow,
+    )
+
+    /**
+     * ── ★★★ 拆解器**还没有落地**（P3）⇒ 这一站落 `awaitingRuling`【但把缺什么说清】───
+     *
+     * ★ 三件事**同时**成立，而它们都要在读数里：
+     *   ① 它在**等人裁决**（本任务的边界：行为不变，走现有的 `awaitingRuling`）
+     *   ② ★ 而那份契约**完整** ⇒ 它不是"生成不出来"（`cannotEmit` 会误导）
+     *   ③ ★★ 而"拆解器没落地"这件事**不许被藏起来** —— 它进 `decomposition` 那一格，
+     *      因为把这个工况伪装成"一条正常的大活等人裁决"，就是本队记账的
+     *      **把基础设施工况伪装成关于数据的结论**。
+     *
+     * ★★ 而 P3 一落地，`decomposed.status === 'decomposed'` ⇒ 走下面那一段递归，
+     *   这一格**自动消失**（不是靠谁记得来删它）。
+     */
+    const notYetDecomposable = decomposed.status !== 'decomposed'
+
+    /**
+     * ── ★★★ P3：拆得动 ⇒ 子提案**回到流水线入口**（递归，上限 2 层）───────────────
+     *
+     * ★ 那正是用户那句话的落点：「拆解 →（回到）一开始」。
+     *   所以每一条子活**重新走一遍** ②契约 → ③分档 → …… —— 而不是在这里就地宣布它合格。
+     *   ★ 理由与"审查不许被跳过"同源：**子活自己也要被判一次**，
+     *     否则"拆过了"就成了一个绕过分档的后门（而子活可能还是大档）。
+     *
+     * ★★ 而递归的深度是 `depth + 1`，上限由 `MAX_DECOMPOSE_DEPTH` 管
+     *   ⇒ 到顶时子活落进它自己的 `awaitingRuling`（**留在队列**，不是被丢掉）。
+     *
+     * ★★★ 而审查（⑤ 审拆法）**先过**才递归：`needs-review` / `rejected` 一律不往下走
+     *   —— 那正是"审拆法"这道门的意义。见下面 `decompositionReview.status`。
+     */
+    /**
+     * ── ★★★ 而审查（⑤ 审拆法）**先过**才递归 ──────────────────────────────────────
+     *
+     * ⚠️ MEASURED（P3 当场抓出来）：我第一版写的是 `decompositionReview?.status`，
+     *   而 `adversarialReview` 交出来的那一格叫 **`outcome`**（不是 `status`）。
+     *   ⇒ 那个 `!== 'rejected'` 因此**恒真**（`undefined !== 'rejected'`）
+     *   ⇒ **审拆法这道门被静默跳过了** —— 而它看起来完全正常（返回值里那份 review 在）。
+     *
+     *   ★★ 而它的形状正是本队记账最久的那条：**读了一个不存在的字段，而它恒真。**
+     *     （"门守住了"与"门读了 undefined"在读数上同形 —— 因为两者都不抛。）
+     *
+     * ⇒ 修法两条**同时**做：
+     *   ① 读**真的那一格**（`outcome`）；
+     *   ② ★ 而它**读不到时就【不】放行** —— 一个读不到的审查结论**不能**当成"审查过了"
+     *      （与"没能测量不得并进通过"同一条纪律）。
+     *
+     * ── ★★★ 而"哪几种 outcome 该拦下"必须分清（否则这道门会把 P3 整个卡死）─────────
+     *
+     *   修好 ① 之后，一条**正常**的拆解会拿到 `needs-review` —— 而那不是"拆法坏了"：
+     *
+     *     `needs-review` 的成因是**别的**那一问（实测：`scope` 因为 claim 是散文
+     *     ⇒ `narrowScope` 推不出具体文件 ⇒ 它如实标 `unmeasured`）。
+     *     ★ 而那是**收窄器**的既有限制（与拆解无关），且现有行为就是"如实标粗、交给人看"。
+     *
+     *   ⇒ 把它当成"拆法没过"的后果是**直接的**：**每一条大活都拆不动** ⇒ P3 整个不可用。
+     *     ★ 而那不是"严格"，是一条**永远不能为真**的门（本队记账过的那条）。
+     *
+     *   ⇒ 所以这里拦的是【**拆法自己**出了问题】那两种，而不是"别的问没测到"：
+     *     · `rejected`   ⇒ 拆法**被拒** ⇒ 拦住（那是结论，不是缺读数）
+     *     · ★ 而**拆法那几问里出现 `fail`** ⇒ 拦住（那是"这么拆不行"）
+     *     · `needs-review` 而**只有 `unmeasured`** ⇒ **放行**（缺的是别人的读数，不是拆法的问题）
+     *       ★ 而它**不静默**：`decomposition.review` 那一格如实带着这份结论
+     *         —— 于是"为什么它过了、而哪一问没测到"读得出来。
+     */
+    const reviewOutcome = decompositionReview?.outcome
+    const reviewReadable = typeof reviewOutcome === 'string'
+    /**
+     * ★ 拆法自己失败了吗：五问里有没有 `fail`。
+     *   （`adversarialReview` 交出的 `failedIds` 就是那个读数 —— 用它，不重算一遍。）
+     */
+    const reviewFailures = Array.isArray(decompositionReview?.failedIds) ? decompositionReview.failedIds : []
+    const decompositionAccepted = decomposed.status === 'decomposed'
+      && reviewReadable
+      && reviewOutcome !== 'rejected'
+      && reviewFailures.length === 0
+
+    if (decompositionAccepted) {
+      const children = Array.isArray(decomposed.children) ? decomposed.children : []
+      /**
+       * ★ 每条子活回到入口 ⇒ 而它们的结论**全部**在返回值里（不是只留第一条）。
+       *   ★ 而"回不去"（无 sourceId 等）时它仍然是子活 —— 由下一轮自己去报缺什么。
+       */
+      const runs = children.map((child, index) => ({
+        index,
+        child,
+        /**
+         * ★★★ **深度必须递增** —— `depth + 1`，不是 0。
+         *
+         *   ⚠️ MEASURED（P3 当场抓出来）：第一版漏了这一步（而 `runPipeline` 那时
+         *   还写死 `depth: 0`）⇒ 子活回到入口时深度被清零 ⇒ **递归没有上限**。
+         *   那是一条"守着上限而从未读到上限"的门 —— 见 `runPipeline` 里那段。
+         */
+        ...runPipeline(child, { ...options, depth: depth + 1 }),
+      }))
+      return {
+        stage: 'decomposed',
+        sourceId: proposal?.sourceId,
+        entry: {
+          proposal,
+          sourceId: proposal?.sourceId,
+          subject: proposal?.subject ?? contract.subject,
+          inScope: contract.inScope,
+          whyLarge: tier.why,
+          blockingQuestion: tier.blockingQuestion,
+          nextStep: tier.nextStep,
+          signals: tier.signals,
+        },
+        tier,
+        decompositionReview,
+        decomposition: {
+          status: 'decomposed',
+          decomposed: true,
+          depth,
+          /** ★ 拆了几条，以及**每一条自己走到了哪一站** —— 那才是可核的读数。 */
+          count: children.length,
+          children: runs.map((run) => ({
+            sourceId: run.child?.sourceId,
+            inScope: run.child?.inScope,
+            stage: run.stage,
+            ...run.tier === undefined ? {} : { tier: run.tier.tier },
+          })),
+        },
+        runs,
+        narrowing,
+        trace: at('tier').concat('decompose', 'recurse'),
+      }
+    }
+
+    return {
+      stage: 'awaitingRuling',
+      sourceId: proposal?.sourceId,
+      /** ★ 用户裁决时需要知道它**大在哪** —— 不许只给一个"大"字。 */
+      entry: {
+        proposal,
+        sourceId: proposal?.sourceId,
+        subject: proposal?.subject ?? contract.subject,
+        inScope: contract.inScope,
+        whyLarge: tier.why,
+        blockingQuestion: tier.blockingQuestion,
+        nextStep: tier.nextStep,
+        signals: tier.signals,
+      },
+      tier,
+      decompositionReview,
+      /**
+       * ★ 而这一格是**读数**（不是错误）：
+       *   `unmeasured` ⇒ ★ **拆不动**（递归到顶 / 信号一条都不成立 / 拆了没收效）
+       *                  ⇒ 子活**留在队列**（就是这一站），而 `missing` 指名缺什么
+       *   `illegal`    ⇒ 拆解器拆出一个**非法的**结果（空 / 与原样同形）
+       *                  ⇒ 补救是**修拆解器**，而它同样**不许**进 ready
+       *
+       * ★★★ 而 `blockingQuestion` 必须**跟着这一站一起出去** ——
+       *   那就是"留在队列**并指名哪一问**"那句验收的落点：
+       *   读的人要能直接回答"它在等哪一问被裁决"，而不是再来问一次。
+       */
+      blockingQuestion: tier?.blockingQuestion,
+      ...notYetDecomposable
+        ? {
+          decomposition: {
+            status: decomposed.status,
+            decomposed: false,
+            missing: decomposed.missing,
+            why: decomposed.why,
+            /** ★ 拆不动时**指名哪一问**（与 `entry.blockingQuestion` 同一件事，这里更醒目）。 */
+            blockingQuestion: decomposed.blockingQuestion ?? tier?.blockingQuestion,
+          },
+        }
+        : {
+          /**
+           * ★ 拆得动、而**审拆法没过** ⇒ 也留在这里，而理由要指名是**哪一问**没过。
+           *   这是 ⑤ 那道门的落点：不许"拆了就算过"。
+           */
+          decomposition: {
+            status: 'not-accepted',
+            decomposed: true,
+            blockingQuestion: decompositionReview?.missing?.[0]
+              ?? decompositionReview?.questions?.find((q) => q?.status !== 'passed')?.question,
+            why: '拆法本身没通过五问 ⇒ 子活**留在队列**，等这一问被裁决。',
+            review: decompositionReview?.status,
+          },
+        },
+      narrowing,
+      trace: at('tier').concat('decompose'),
+    }
+  }
+
+  /** ── ⑥ 生成即审查（五问）→ 盖章 reviewed / needs-review / rejected ────────────── */
+  const reviewed = emitReviewedContract(proposal, options)
+
+  if (reviewed.status === 'rejected') {
+    return {
+      stage: 'rejected',
+      sourceId: proposal?.sourceId,
+      tier,
+      emitted: reviewed,
+      narrowing,
+      narrowing,
+    trace: at('tier').concat('review'),
+    }
+  }
+  /**
+   * ★ 而"契约生不出来"在**这一站**也要如实报 —— 它此前在 ② 就回去了，
+   *   而这里再判一次是因为 ⑥ 是**最后一个**能发现它的地方（两条路都不许静默）。
+   */
+  if (reviewed.status !== 'executable') {
+    return {
+      stage: 'cannot-emit',
+      sourceId: proposal?.sourceId,
+      missing: reviewed.missing,
+      because: '契约不完整（审查那一站判出来的）',
+      tier,
+      narrowing,
+      narrowing,
+    trace: at('tier').concat('review'),
+    }
+  }
+
+  /**
+   * ── ★★★ ⑦ 进 ready 池 ────────────────────────────────────────────────────────
+   *
+   * ★★ 而这里有一条**结构性断言**（不是注释）：ready 池里那份契约**只能是**
+   *   `emitReviewedContract` 给的 ⇒ 一条绕过了审查的契约**到不了这一格**。
+   */
+  if (String(OUTCOME_CONTRACT_SOURCE) !== 'emitReviewedContract') {
+    throw new Error('the reviewed gate was renamed — re-check that ready contracts still come from it')
+  }
+  return {
+    stage: 'ready',
+    sourceId: proposal?.sourceId,
+    tier,
+    reviewStage: {
+      outcome: reviewed.review.outcome,
+      /** ★ 而 `reviewed` 那一格**只有在全 pass 时**才盖（needs-review 不盖章）。 */
+      stamped: reviewed.contract.reviewed !== undefined,
+      checks: reviewed.review.checks.map((check) => ({ id: check.id, verdict: check.verdict })),
+    },
+    emitted: reviewed,
+    method: { stages: at('tier').concat('review'), source: OUTCOME_CONTRACT_SOURCE, now: new Date(now).toISOString() },
+    narrowing,
+    trace: at('tier').concat('review'),
+  }
+}
+
 /**
  * ── ★★ `--dispatchable`：只列**现在就能建**的 ──────────────────────────────────
  *
@@ -1461,64 +2544,94 @@ export function dispatchable(report, options = {}) {
    * ⇒ ★ 判成大档的提案**不进 `ready`**，而是进这里，且每条**带上它大在哪**。
    */
   const awaitingRuling = []
-  /** ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked。 */
-  const notReadyBecause = { large: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
+  /**
+   * ★★★ P3：拆出来的那一栏 —— 每条大活拆成几条子活、而**每条子活走到了哪一站**。
+   *   它与 `awaitingRuling` **不同形**：那里是"有人要拍板"，这里是"拆解已经发生"。
+   */
+  const decomposed = []
+  /**
+   * ── ★ 而"为什么没进 `ready`"要**分栏报**，而不是一个笼统的 blocked ──────────────
+   *
+   * ★★ 而下面这个映射是**那一栏的名字 ← 主干的 stage**：
+   *   主干的 stage 是**处置**（`awaitingRuling` / `cannot-emit` / `rejected`），
+   *   而这一栏的名字是**为什么**（`large` / `contractIncomplete` / `notReviewed`）。
+   *   ★ 两者不许各自猜：映射**只有一处**。
+   *
+   * ★★★ 而 `ready` **故意不在这张表里** —— 这一栏问的就是"为什么**没**进 ready"
+   *   ⇒ 一条进了 ready 的提案**本来就没有那一栏**（给它记一栏会让分栏的合计
+   *     与 `toDispatch` 一样大，而那把"进了的"与"没进的"又合成一个数字）。
+   *   ★ 所以下面查表**只对非 ready 的 stage**做。
+   */
+  const notReadyBecause = { large: 0, decomposed: 0, notReviewed: 0, contractIncomplete: 0, scopeBlocked: 0 }
+  const COLUMN_BY_STAGE = {
+    awaitingRuling: 'large',
+    /** ★ P3：拆解那一栏 —— 而它**不是** `notReviewed`（拆解不是审查没过的意思）。 */
+    decomposed: 'decomposed',
+    rejected: 'notReviewed',
+    'cannot-emit': 'contractIncomplete',
+  }
 
   for (const proposal of report?.toDispatch ?? []) {
     /**
-     * ── ★★★ t98：准入的**第三条** —— 分档必须是小档（原子级）─────────────────────
+     * ── ★★★ t113：这条循环**不再自己走一遍阶段** —— 它调用那唯一的一条主干 ──────────
      *
-     * ★ 放在 `emitReviewedContract` **之前**：因为一条大活的正确处置不是"再审一遍"
-     *   （它审过也是大的），而是**先拆解**。⇒ 先分档能省掉一次无意义的生成+审查。
+     * ★ 本任务的全部理由：`--emit-task` 与 `--dispatchable` 各写了一遍阶段，而它们的
+     *   **顺序不一样**（前者不分档，后者分档）⇒ 同一提案在两个出口上**处置相反**。
+     *   ⇒ 现在两个出口都是 `runPipeline` 的**薄包装**，分叉在结构上不可能。
      *
-     * ★★ 而它**必须是三条都要**（契约点名的）：
-     *     ① to-dispatch（值得做 —— 走到这里就已经满足，它来自 `report.toDispatch`）
-     *     ② 审查通过（带 `reviewed` —— `emitReviewedContract` 给）
-     *     ③ 分档是小档（原子级 —— 本行给）
+     * ★★★ 而"分档"这一步的位置**在本函数之外**（在主干上）—— 那是本任务最要紧的一格：
+     *   它此前**只**在这个循环里被调用 ⇒ `emitReviewedContract` 自己不知道分档，
+     *   于是一条大活走 `--emit-task` 就会**出一份契约**。
+     *
+     * ★ 而 `notReadyBecause` 的计数**从 stage 读出来**，不在这里重算 ——
+     *   否则"哪一格进哪一栏"又会有第二处口径（而那正是本任务要消掉的那种分叉）。
      */
-    const tier = tierOf(proposal, options)
-
-    if (tier.tier === TIER.large) {
-      awaitingRuling.push({
-        proposal,
+    const outcome = runPipeline(proposal, options)
+    if (outcome.stage === 'ready') ready.push({ proposal, tier: outcome.tier, ...outcome.emitted })
+    else if (outcome.stage === 'awaitingRuling') awaitingRuling.push(outcome.entry)
+    /**
+     * ── ★★★ P3：`decomposed` 是一条**新的 stage**，而它进哪一栏要说清 ────────────────
+     *
+     * ★ 它**不进 ready**（那会把一条大活当成可派的），也**不进 awaitingRuling**
+     *   （那不是"等人裁决"：拆解**已经发生了**，等人看的是它拆出来的那几条）。
+     *
+     * ★★ 而它进 `decomposed` 那一栏，且**带着每条子活自己的去向** ——
+     *   于是"拆出来的那几条现在在哪"是一个直接读得出来的读数，
+     *   而不是要靠人去把三栏扫一遍才知道。
+     *
+     * ★★★ 而子活里那些走到 `ready` 的**也在这一栏里**（不重复进顶层 ready）——
+     *   理由：把它们同时报在顶层 ready 会让"这一轮该派几条"变成一个要数两遍的问题，
+     *   而拆解这一站的产出**本来就是一组子活**（见 `decomposition.children`）。
+     */
+    else if (outcome.stage === 'decomposed') {
+      decomposed.push({
         sourceId: proposal.sourceId,
-        subject: proposal.subject,
-        inScope: proposal.inScope,
-        /** ★ 用户裁决时需要知道它**大在哪** —— 不许只给一个"大"字。 */
-        whyLarge: tier.why,
-        /** ★ 而它**卡在哪一问上**（那一句就是用户要回答的）。 */
-        blockingQuestion: tier.blockingQuestion,
-        /** ★ 而下一步是【拆解】，不是【再生成】。 */
-        nextStep: tier.nextStep,
-        signals: tier.signals,
+        tier: outcome.tier,
+        decomposition: outcome.decomposition,
+        children: Array.isArray(outcome.decomposition?.children) ? outcome.decomposition.children : [],
       })
-      notReadyBecause.large += 1
-      continue
-    }
-    /**
-     * ★ 而 `unmeasurable`（`inScope` 缺席或为空）**不进派发池** ——
-     *   它既不是"小档"也不是"大档"，而"判不了"绝不许并进"可派"。
-     *   ★ 而它与"大档"的处置不同：大档要**裁决**，它要**补信息**。
-     */
-    if (tier.tier === TIER.unmeasurable) {
-      cannotEmit.push({ sourceId: proposal.sourceId, missing: [tier.why], becauseTier: tier.tier })
-      notReadyBecause.contractIncomplete += 1
-      continue
-    }
-
-    /**
-     * ── ★★★ t97：`--dispatchable` 走**带审查**的那条路 ─────────────────────────
-     * 用户原话：「在自动生成的时候就可以去做了…带一个『已审查』的字段」
-     * ⇒ 生成与审查是**一步**，不是两步。
-     */
-    const emitted = emitReviewedContract(proposal, options)
-    if (emitted.status === 'executable') ready.push({ proposal, tier, ...emitted })
-    else if (emitted.status === 'rejected') {
-      rejected.push({ sourceId: proposal.sourceId, because: emitted.rejectedBecause, review: emitted.review })
-      notReadyBecause.notReviewed += 1
+    } else if (outcome.stage === 'rejected') {
+      rejected.push({ sourceId: proposal.sourceId, because: outcome.emitted.rejectedBecause, review: outcome.emitted.review })
+    } else if (outcome.stage === 'cannot-emit') {
+      cannotEmit.push({
+        sourceId: proposal.sourceId,
+        missing: outcome.missing,
+        ...outcome.becauseTier === undefined ? {} : { becauseTier: outcome.becauseTier },
+      })
     } else {
-      cannotEmit.push({ sourceId: proposal.sourceId, missing: emitted.missing })
-      notReadyBecause.contractIncomplete += 1
+      /** ★ 一个认不出的 stage ⇒ **不许静默吞掉**：那会让一条提案凭空消失。 */
+      throw new Error(`runPipeline returned an unknown stage "${String(outcome.stage)}" for ${String(proposal?.sourceId)}`)
+    }
+    /**
+     * ★ 而"没进 ready 的 stage 没有对应栏" ⇒ **当场炸**，不是静默漏计。
+     *   ★★ 那正是本任务要消的那种形态：**一个读数悄悄少了一格**，
+     *     而读的人会以为"这一类是 0 条"。
+     *   ★ 而进了 ready 的那一条**本来就没有这一栏**（见上面那张表的注释）。
+     */
+    if (outcome.stage !== 'ready') {
+      const column = COLUMN_BY_STAGE[outcome.stage]
+      if (column === undefined) throw new Error(`main-trunk stage "${String(outcome.stage)}" has no column in notReadyBecause`)
+      notReadyBecause[column] += 1
     }
   }
   return {
@@ -1530,6 +2643,8 @@ export function dispatchable(report, options = {}) {
     rejected,
     ready,
     awaitingRuling,
+    /** ★★★ P3：拆解那一栏 —— 每条大活拆成了几条子活、而每条子活走到了哪一站。 */
+    decomposed,
     cannotEmit,
     /** ★ 而那一格是**读数**：被挡的有几条（它们不在这份清单里，而读的人要知道有多少）。 */
     blockedCount: (report?.blocked ?? []).length,
@@ -1584,6 +2699,24 @@ export function renderDispatchable(result) {
       lines.push(`      写域：${(entry.inScope ?? []).join(', ') || '(未声明)'}`)
     }
   }
+  /**
+   * ── ★★★ P3：拆解那一栏（而它与"等人裁决"**不同形**）────────────────────────────
+   *
+   * ★ 这里报的是**已经拆完的**：每条大活拆成了几条、而**每条子活走到了哪一站**。
+   *   ⇒ 读的人不必把三栏都扫一遍才知道"拆出来的那几条现在在哪"。
+   *   ★ 而"有人要拍板"（awaitingRuling）与"拆解已经发生"（本栏）是**两件事** ——
+   *     前者是队列（等一个回答），后者是**读数**（一项已完成的工作的产出）。
+   */
+  if ((result.decomposed ?? []).length > 0) {
+    lines.push('', `── ★ 已拆解（${result.decomposed.length}）—— 每条大活拆成的子活，及其各自去向 ──`)
+    for (const entry of result.decomposed) {
+      lines.push('', `  · [${entry.sourceId}] ⇒ ${entry.children.length} 条子活`)
+      for (const child of entry.children) {
+        const where = child.inScope?.join(', ') ?? '(未声明)'
+        lines.push(`      · ${where} ⇒ ${child.stage}${child.tier === undefined ? '' : ` (${child.tier})`}`)
+      }
+    }
+  }
   if (result.cannotEmit.length > 0) {
     lines.push('', `── ★ 契约生成不出来（${result.cannotEmit.length}）—— 缺什么写在下面 ──`)
     for (const entry of result.cannotEmit) {
@@ -1602,7 +2735,8 @@ export function renderDispatchable(result) {
   lines.push(
     '',
     `★ 分栏（为什么没进"现在就能建"）：`
-    + `大档等人裁决 ${columns.large ?? 0} · 审查没过 ${columns.notReviewed ?? 0}`
+    + `大档等人裁决 ${columns.large ?? 0} · 已拆解 ${columns.decomposed ?? 0}`
+    + ` · 审查没过 ${columns.notReviewed ?? 0}`
     + ` · 契约不全 ${columns.contractIncomplete ?? 0} · 写域被挡 ${result.blockedCount}`,
   )
   return lines.join('\n')
@@ -1651,22 +2785,89 @@ if (invokedDirectly) {
         + `  （已看过的：${[...report.toDispatch, ...report.blocked].map((e) => e.sourceId).join(', ') || '(空)'}）\n`)
       process.exitCode = 1
     } else {
-      /** ★★★ t97：`--emit-task` 也走**同一条**（生成即审查）。 */
-      const emitted = emitReviewedContract(proposal, teamState)
-      if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(emitted, null, 2)}\n`)
-      else if (emitted.status === 'executable') {
-        process.stdout.write(`${JSON.stringify(emitted.contract, null, 2)}\n`)
-        process.stdout.write(`\n★ 审查（五问）：${emitted.review.outcome}\n`)
-        for (const check of emitted.review.checks) {
+      /**
+       * ── ★★★ t113：`--emit-task` 也是 `runPipeline` 的**薄包装** ──────────────────
+       *
+       * ★ 此前它走的是 `emitReviewedContract`（生成即审查）而**不分档** ——
+       *   于是一条大活在这里会拿到一份完整的、盖了 `reviewed` 的契约，
+       *   而**同一条**走 `--dispatchable` 会被判大档等人裁决。
+       *   ⇒ **两条路对同一件工作给出相反处置**（本任务的行名）。
+       *
+       * ★★ 而现在两条出口调的是**同一个函数**：分档在主干上，
+       *   它**不可能**被这个出口绕过（`runPipeline` 里 `tierOf` 那一站就是证据）。
+       */
+      const outcome = runPipeline(proposal, teamState)
+      if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(outcome, null, 2)}\n`)
+      else if (outcome.stage === 'ready') {
+        const c = outcome.emitted.contract
+        process.stdout.write(`${JSON.stringify(c, null, 2)}\n`)
+        process.stdout.write(`\n★ 分档：${outcome.tier.tier} —— ${outcome.tier.why}\n`)
+        if (outcome.viaDecomposition === true) {
+          process.stdout.write(`\n★ 这一格是【拆出来的】子活（${outcome.children.length} 条一起进 ready）`
+            + `\n  拆法审查：${outcome.decompositionReview.outcome}\n`)
+        }
+        process.stdout.write(`\n★ 审查（五问）：${outcome.emitted.review.outcome}\n`)
+        for (const check of outcome.emitted.review.checks) {
           process.stdout.write(`  · ${check.id}=${check.verdict} —— ${check.why}\n`)
         }
-        process.stdout.write(`\n★ 写域：${emitted.scope.status}\n  ${emitted.scope.why}\n`)
-        process.stdout.write(`\n★ 派工理由：\n${emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
-      } else if (emitted.status === 'rejected') {
+        process.stdout.write(`\n★ 写域：${outcome.emitted.scope.status}\n  ${outcome.emitted.scope.why}\n`)
+        process.stdout.write(`\n★ 派工理由：\n${outcome.emitted.assignee.reasons.map((r) => `  · ${r}`).join('\n')}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      } else if (outcome.stage === 'awaitingRuling') {
+        /**
+         * ★★ 大活**不出契约** —— 这一格是本任务最要紧的读数：
+         *   它此前会出契约，而那正是"派出的不应该有大活"被违反的地方。
+         */
+        process.stdout.write('★ 这条是【大档】⇒ **不产出可派契约**，先等人裁决/拆解。\n')
+        process.stdout.write(`  它大在哪：${outcome.entry.whyLarge}\n`)
+        process.stdout.write(`  ★ 卡在哪一问：${outcome.entry.blockingQuestion}\n`)
+        process.stdout.write(`  下一步：${outcome.entry.nextStep}\n`)
+        process.stdout.write(`  写域：${(outcome.entry.inScope ?? []).join(', ') || '(未声明)'}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      } else if (outcome.stage === 'rejected') {
         process.stdout.write(`★ 审查**没过** ⇒ 不产出可派契约。没过的问：\n`)
-        for (const reason of emitted.rejectedBecause) process.stdout.write(`  · ${reason}\n`)
+        for (const reason of outcome.emitted.rejectedBecause) process.stdout.write(`  · ${reason}\n`)
+        process.stdout.write(`\n★ 分档：${outcome.tier.tier}\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
       } else {
-        process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${emitted.missing.map((m) => `  · ${m}`).join('\n')}\n`)
+        process.stdout.write(`★ 这份契约**生成不出来** —— 缺：\n${outcome.missing.map((m) => `  · ${m}`).join('\n')}\n`)
+        if (outcome.tier !== undefined) process.stdout.write(`\n★ 分档：${outcome.tier.tier} —— ${outcome.tier.why}\n`)
+        process.stdout.write(`\n★ 走过的阶段：${outcome.trace.join(' → ')}\n`)
+      }
+    }
+  } else if (argv.includes('--tier')) {
+    /**
+     * ── ★★★ t113：`--tier <id>` —— 一条**故意最小**的出口，只为回答一个问题 ──────────
+     *
+     * ★ 「同一提案走 `--emit-task` 与 `--dispatchable` 得到**相同**的分档与放行结论」
+     *   这一条判据需要一个**能同时驱动两个出口**的读数。而此前的两个出口各自
+     *   **写了一遍阶段** ⇒ 让它们相等要在一个方向上改两处 —— 那是把判据绑在写法上。
+     *
+     * ★★ ⇒ 加上这一格：它按 `{ sourceId, outcome, tier }` 的形状印出来，而
+     *   `--dispatchable --json` 的四格也用**同一份**分档对象（`entry.tier`）。
+     *   ⇒ 「两个出口给出同一份分档」可以是一条对象比对，而不是字符串比对。
+     *
+     * ★ 而它**自己不走一遍阶段**：它读 `dispatchable()` 的结论（同一份输入、同一次分档），
+     *   只是换一个**形状**印出来 —— 于是它不会成为第二种口径。
+     */
+    const wanted = argValue(argv, '--tier', undefined)
+    const stubs = dispatchable(report, teamState)
+    const stubsByOutcome = [
+      ...stubs.ready.map((entry) => ({ sourceId: entry.sourceId, outcome: 'ready', tier: entry.tier })),
+      ...stubs.awaitingRuling.map((entry) => ({ sourceId: entry.sourceId, outcome: 'awaitingRuling', tier: entry.tier })),
+      ...stubs.rejected.map((entry) => ({ sourceId: entry.sourceId, outcome: 'rejected', tier: entry.tier })),
+      ...stubs.cannotEmit.map((entry) => ({ sourceId: entry.sourceId, outcome: 'cannot-emit', tier: entry.tier })),
+    ].filter((stub) => stub.sourceId === wanted)
+    const known = [...report.toDispatch, ...report.blocked].some((entry) => entry.sourceId === wanted)
+    if (!known) {
+      process.stdout.write(`★ 找不到 "${String(wanted)}" —— 它既不在待派里，也不在被挡里。\n`)
+      process.exitCode = 1
+    } else if (argv.includes('--json')) {
+      process.stdout.write(`${JSON.stringify(stubsByOutcome, null, 2)}\n`)
+    } else if (stubsByOutcome.length === 0) {
+      process.stdout.write(`★ [${String(wanted)}] 不在 --dispatchable 的任一格里（它不在待派清单里）。\n`)
+    } else {
+      for (const stub of stubsByOutcome) {
+        process.stdout.write(`★ [${stub.sourceId}] ${stub.outcome} · 分档=${stub.tier.tier}\n  ${stub.tier.why}\n`)
       }
     }
   } else if (argv.includes('--json')) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)

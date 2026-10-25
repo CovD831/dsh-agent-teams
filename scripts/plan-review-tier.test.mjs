@@ -28,6 +28,22 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ── ★★★ t12：四个必答项的【真值】从本夹具**搬到了** `plan-review-check.mjs` ────────
+ *
+ * 它们此前是本文件里一个测试函数的**内部常量** ⇒ 没有任何外部读者能用它们
+ * 对**一份真实计划**求值 ⇒ 「captain 交计划前必须先跑计划审查」无从被检查。
+ *
+ * ★ 现在本臂**从那里取** —— 而"改回内部常量"会让这一行不再有意义、臂 6 当场红。
+ */
+import {
+  REQUIRED_PLAN_QUESTIONS,
+  READING_QUESTION_KEY,
+  checkPlanReview,
+  formatPlanReview,
+  looksLikeReading,
+} from './plan-review-check.mjs'
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -409,31 +425,23 @@ test('臂 6 ★★ 计划审查的四个必答项，而第③项必须指名一�
   /**
    * ★ 这一臂的产出是**一张表**：四个必答项 + 每一项缺了会怎样。
    *   ★ 它不是"再写一遍那四条"，而是把每一条挂到一个**已实测的后果**上。
+   *
+   * ── ★★★ t12：这四条**不再声明在这里** ────────────────────────────────────────
+   *
+   * MEASURED（t12 实测）：它们此前是本函数的**内部常量**（`const REQUIRED = [...]`）。
+   *
+   * ⇒ `grep -rn "why-now|invariant-reading" scripts/` **只命中这一个文件**
+   *   ⇒ 于是「captain 交计划前必须先跑计划审查」**没有任何东西能检查它** ——
+   *     那四条**不是一份可对真实计划求值的真值**，而是一份"只有本函数见过"的表。
+   *
+   * ★ 这与 `reviewStateOf` 没有调用方、`admission` 未接线是**同一个形状**：
+   *   **机制在，而流程没走。**
+   *
+   * ⇒ 它们现在住在 `scripts/plan-review-check.mjs` 的 `REQUIRED_PLAN_QUESTIONS`
+   *   （**可被外部 import 的真值**），而本臂**从那里取**。
+   *   ★ 定向突变：把这一行换回函数内部常量（不再 import）⇒ 本臂当场红。
    */
-  const REQUIRED = [
-    {
-      key: 'why-now',
-      question: '为什么现在做？前置条件在不在？',
-      /** ★ 实测后果：t58 第二半的前提（第一半的 commit）不在 —— 而那是**事后**才发现的。 */
-      missingCost: 't58: the second half discovered its premise (the first half\'s commit) was missing, only after it started',
-    },
-    {
-      key: 'steps',
-      question: '拆成几步？每步的边界是什么？',
-      missingCost: 't54: three amend rounds, because the boundary (inScope) kept turning out to be wrong',
-    },
-    {
-      key: 'invariant-reading',
-      question: '★ 每步做完后，【什么读数】能证明它没丢东西？',
-      /** ★ 这就是 t70 缺的那一格。 */
-      missingCost: 't70: 4 wiring groups (t69/t76/t83) were erased during the move, and nothing was counting',
-    },
-    {
-      key: 'stop-points',
-      question: '哪一步之后必须停下来给人看？',
-      missingCost: 'the half-finished state in a worktree is invisible to everyone else',
-    },
-  ]
+  const REQUIRED = REQUIRED_PLAN_QUESTIONS
 
   for (const item of REQUIRED) {
     assert.ok(item.question.length > 8, `★ 必答项 ${item.key} 的问题太短`)
@@ -454,4 +462,239 @@ test('臂 6 ★★ 计划审查的四个必答项，而第③项必须指名一�
    * ★ 而四个 key 必须互不相同（否则"四个必答项"其实少于四个）。
    */
   assert.equal(new Set(REQUIRED.map((item) => item.key)).size, 4, '★ 四个必答项必须互不相同')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 7–11（t12）：把四个必答项**真的用来对一份计划求值**──────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 臂 6 与臂 7–11 的分工 ──────────────────────────────────────────────────────
+ *
+ *   臂 6     钉**真值本身**（四个 key / 问题 / 缺了会怎样 / 第③项含"读数"）
+ *   臂 7–11  钉**求值**（对一份计划逐条报出三态、缺的说得出缺什么、
+ *            `unmeasured` 不许并进 pass、修好的计划必须过、读数进报告）
+ *
+ * ★ 而它们合起来回答的是同一件事：**「计划审查」从此是一个可被跑的东西**，
+ *   而不是一份只存在于某个测试函数里的表。
+ */
+
+/** 一份**写全了**的契约（反向臂用它 —— 缺它就无法区分"检查有效"与"检查在乱拒"）。 */
+function completePlanContract(id = 'good-1') {
+  return {
+    id,
+    objective: 'do the thing now, because its precondition (the earlier commit) landed',
+    inScope: ['scripts/a.mjs'],
+    acceptance: ['the fixture reports 5 passing arms and exit code 0'],
+    verify: ['pnpm test:gates'],
+  }
+}
+
+test('★ 臂 7（t12）：对一份真实计划逐条求值，**缺的说得出缺什么**', () => {
+  /**
+   * ★ 定向突变：让 `missing` 的 detail 变空 ⇒ 本臂红。
+   *
+   * ★ 为什么"缺什么"是硬要求：一句"这项缺"与"我不知道缺在哪"同形 ——
+   *   而补的人需要知道的正是**缺在哪一格**（`acceptance` 还是 `inScope`）。
+   */
+  const thin = {
+    id: 'thin-1',
+    objective: 'do it',
+    inScope: [],                                  // ★ 空 ⇒ 缺（判得了、判它缺）
+    /**
+     * ★★ 这一格**必须在场**：本臂要验的是「缺的说得出缺什么」，
+     *   而"整格缺席"是**另一态**（`unmeasured`，见臂 9）。
+     *   ⇒ 第一版把它整个省掉，于是整体正确地报 `unmeasured`，
+     *     而本臂却断言"整体不该说读不到" —— **那是本臂的输入造错了，不是检查错了**。
+     *   ★ 这与本队那条同源：**先看清这一格测的是哪一态，再造它的输入。**
+     */
+    acceptance: ['I checked it and it looked right'],   // ★ 在场、非空、但**没有读数** ⇒ 第③项判"缺"
+    verify: ['true'],
+  }
+  const result = checkPlanReview([thin])
+  assert.equal(result.contracts.length, 1, '★ 一条契约 ⇒ 一条读数')
+
+  const entries = Object.entries(result.contracts[0].answers)
+  assert.equal(entries.length, 4, '★ 每条契约必须报**四项**（少一项就是那一项没被问）')
+
+  for (const [key, answer] of entries) {
+    assert.ok(
+      ['present', 'missing', 'unmeasured'].includes(answer.status),
+      `★ ${key} 的裁决必须是三态之一（实际 ${answer.status}）`,
+    )
+    if (answer.status === 'missing') {
+      assert.ok(
+        typeof answer.detail === 'string' && answer.detail.length >= 24,
+        `★ ${key} 判"缺"却说不清缺什么（detail=${JSON.stringify(answer.detail)}）—— `
+        + '一句"这项缺"与"我不知道缺在哪"同形，而补的人要知道的正是**缺在哪一格**',
+      )
+      assert.match(
+        answer.detail, /`(objective|inScope|acceptance|verify)`/,
+        `★ ${key} 判"缺"，但 detail 没点名是哪一格：${JSON.stringify(answer.detail)}`,
+      )
+    }
+    if (answer.status === 'unmeasured') {
+      assert.ok(typeof answer.detail === 'string' && answer.detail.length >= 24, `★ ${key} 判"读不到"却说不清读不到什么`)
+    }
+  }
+  assert.equal(result.overall, 'missing', '★ 三格都在、可读 ⇒ 整体不该说"读不到"')
+
+  const text = formatPlanReview(result)
+  assert.match(text, /plan review: missing/, '★ 摘要必须说出总判定')
+  assert.equal((text.match(/[✔✘？]/g) ?? []).length, 4, '★ 逐条要给出四项各自的标记')
+})
+
+test('★★★ 臂 8（t12）：第③项要求一个【读数】—— 没有读数的契约判「缺」', () => {
+  /**
+   * 文档 §6 逐字：**「一个不可读的保证与没有保证同形。」**
+   * ⇒ 机械形式：第③项的证据必须含一个**可比对的量**，"我检查过了"不算。
+   * ★ 定向突变（把没读数读成有读数）⇒ 本臂红。
+   */
+  const item = REQUIRED_PLAN_QUESTIONS.find((entry) => entry.key === READING_QUESTION_KEY)
+  assert.notEqual(item, undefined, '★ 第③项必须在四个必答项里')
+  assert.match(item.question, /读数/, '★ 第③项必须要求一个【读数】，而不是一句"我检查过了"')
+  assert.equal(item.requiresReading, true, '★ 而它必须把"要求读数"写成**数据** —— 否则检查层无从机械地处理它')
+
+  assert.equal(looksLikeReading('the fixture reports 5 passing arms'), true, '★ 含数字/实测 ⇒ 是读数')
+  assert.equal(looksLikeReading('the exit code is 0 and the stamp matches'), true, '★ 退出码/比对 ⇒ 是读数')
+  assert.equal(looksLikeReading('I checked it and it looked right'), false, '★ ★ "我检查过了"**不是**读数')
+  assert.equal(looksLikeReading('everything works as expected'), false, '★ ★ "符合预期"**不是**读数')
+  assert.equal(looksLikeReading(''), false, '★ 空串不是读数')
+
+  const noReading = {
+    id: 'no-reading',
+    objective: 'do it now (precondition landed)',
+    inScope: ['scripts/a.mjs'],
+    acceptance: ['I checked it and it looked right'],
+    verify: ['true'],
+  }
+  const verdict = checkPlanReview([noReading]).contracts[0].answers[READING_QUESTION_KEY]
+  assert.equal(
+    verdict.status, 'missing',
+    '★★★ 一份"说做了、而没给出任何读数"的契约 ⇒ 第③项必须判【缺】。'
+    + '定向突变（把没读数读成有读数）⇒ 本臂红',
+  )
+  assert.match(verdict.detail, /READING|读数/, '★ 而它必须说清缺的是**读数**（不是泛泛的"没写"）')
+
+  const withReading = { ...noReading, id: 'with-reading', acceptance: ['the fixture reports 5 passing arms and exit code 0'] }
+  assert.equal(
+    checkPlanReview([withReading]).contracts[0].answers[READING_QUESTION_KEY].status, 'present',
+    '★ 反向：含一个可比对的量 ⇒ 必须判【有】—— 否则这一项永远拒，它与没装同形',
+  )
+})
+
+test('★★ 臂 9（t12）：观测模式（`unmeasured`）与「有」不同形，**绝不并进 pass**', () => {
+  /**
+   * ★ 本臂防的是本队最贵那条：「**没能测量**并进**通过**」。
+   * ★ 定向突变（把 `unmeasured` 并进 `present`）⇒ 本臂红。
+   */
+  const absent = { id: 'absent-field', objective: 'o', inScope: ['a'], verify: ['true'] }
+  const a1 = checkPlanReview([absent]).contracts[0].answers[READING_QUESTION_KEY]
+  assert.equal(
+    a1.status, 'unmeasured',
+    '★ 契约**没有**那一格 ⇒ 读不到（unmeasured），而不是"缺"（missing）—— '
+    + '两者的补救动作不同：前者要去看契约形状，后者要去补内容',
+  )
+  assert.match(a1.detail, /read nothing|no such field/, '★ 而它必须说清**读不到什么**')
+
+  const empty = { id: 'empty-field', objective: 'o', inScope: [], verify: ['true'] }
+  const a2 = checkPlanReview([empty]).contracts[0].answers['steps']
+  assert.equal(a2.status, 'missing', '★ 写了格子、而它是空的 ⇒ "缺"（判得了）')
+  assert.notEqual(a1.status, a2.status, '★ "读不到"与"缺"必须不同形')
+
+  const mixed = checkPlanReview([{ id: 'm', objective: 'o', inScope: ['a'], verify: ['true'] }])
+  assert.equal(mixed.overall, 'unmeasured', '★★ 有读不到的项 ⇒ 整体 unmeasured，绝不并进 pass')
+  assert.notEqual(mixed.overall, 'present', '★★ 读不到与通过不同形（本队最贵那条）')
+  assert.match(mixed.detail, /NOT a pass/, '★ 而摘要必须把这件事说出来')
+
+  assert.equal(checkPlanReview(undefined).overall, 'unmeasured', '★ 计划读不到 ⇒ unmeasured')
+  assert.equal(checkPlanReview([]).overall, 'unmeasured', '★ 空计划同样是"没judged"')
+  assert.match(checkPlanReview([]).detail, /empty plan and an unreadable plan/, '★ 而它必须说清两者不是同一件事')
+})
+
+test('★ 臂 10（t12，反向）：修好的计划**必须过** —— 否则无法区分"检查有效"与"检查在乱拒"', () => {
+  /**
+   * ★ 缺了本臂，前几条都可能是"一个永远拒绝的检查"在同义反复里全绿。
+   * ★ 定向突变（让检查恒判"缺"）⇒ 本臂红。
+   */
+  const result = checkPlanReview([completePlanContract('good-1'), completePlanContract('good-2')])
+  assert.equal(result.overall, 'present', '★ 两份写全了的契约 ⇒ 总判定必须是 present')
+  assert.equal(result.contracts.length, 2, '★ 两条各一条读数')
+  for (const contract of result.contracts) {
+    for (const [key, answer] of Object.entries(contract.answers)) {
+      assert.equal(answer.status, 'present', `★ ${contract.id} / ${key}：写全了的必须判"有"`)
+      assert.equal(typeof answer.because, 'string', `★ ${contract.id} / ${key}：判"有"时必须交出它读到的原文`)
+      assert.ok(answer.because.trim() !== '', `★ ${contract.id} / ${key}：原文不许是空串`)
+    }
+  }
+  assert.match(formatPlanReview(result), /plan review: present/, '★ 摘要要说"全部有"')
+})
+
+test('★ 臂 11（t12，读数臂）：对本团队当前计划跑一次，逐条给出四个必答项的结果', () => {
+  /**
+   * ── 本臂是**读数臂**（不是复述）：它把本队真实计划的结果打印出来 ────────────────
+   *
+   * ★ 而它**不**断言"总数必须是 N" —— 计划随每一轮任务增长，
+   *   把一个会变的数写死会让本夹具按设计变红（棘轮）。⇒ 它断言的是**形状**。
+   */
+  const here = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    /**
+     * ★★ 三条路径，因为**读数要从哪一个根出发是可变的**（t12 实测）：
+     *   · 在**主树**里跑 ⇒ `.agent-teams/` 就在旁边；
+     *   · 在**成员的 worktree** 里跑 ⇒ `.agent-teams/` 是 gitignored ⇒ **干净 checkout 不带它**
+     *     ⇒ 只剩主树那一份，而它经 `../../../` 可达（worktree 在 `.agent-teams/worktrees/<id>`）。
+     *   ★ 第一版只试了前两条，于是**在 worktree 里恒红** ——
+     *     而那不是"计划没有四项"，是**本臂站错了根**。
+     */
+    join(ROOT, '.agent-teams', 'unified-pipeline', 'team.json'),
+    join(here, '..', '.agent-teams', 'unified-pipeline', 'team.json'),
+    /**
+     * ★★ `ROOT/../..` 而不是 `ROOT/..`：worktree 在 `.agent-teams/worktrees/<id>`，
+     *   而主树的 `.agent-teams/` 在**再上一层**。★ 第一版写成 `ROOT/..` ⇒ 解析到
+     *   `worktrees/unified-pipeline/team.json`（不存在）⇒ 本臂在 worktree 里恒红，
+     *   而红的原因是**本臂站错了根**，不是"计划缺四项"。
+     */
+    join(ROOT, '..', '..', 'unified-pipeline', 'team.json'),
+  ]
+  const found = candidates.find((candidate) => existsSync(candidate))
+  /**
+   * ★ 读不到 ⇒ **不静默通过**：本臂要报出"我没测到"，而不是变绿。
+   *   （`t.skip` 与 `pass` 在 test runner 里不同形 —— 这正是本队那条纪律。）
+   */
+  assert.notEqual(
+    found, undefined,
+    `★ 读不到本队计划（试过 ${candidates.map((c) => c.replace(ROOT, '.')).join(' / ')}）—— `
+    + '本臂**无法成立**。★ 而"读不到就跳过"是恒真写法：它会让本臂在语料缺失时静默变绿，'
+    + '而"没测到"并进"通过"正是本队最贵那条',
+  )
+  const plan = JSON.parse(readFileSync(found, 'utf8')).tasks
+  assert.ok(Array.isArray(plan) && plan.length > 0, '★ 计划为空时"逐条报出"恒真 —— 至少要有一条契约')
+
+  const result = checkPlanReview(plan)
+  assert.equal(result.contracts.length, plan.length, '★ 每条契约一条读数（少一条就是有一条没被问）')
+
+  const counts = { present: 0, missing: 0, unmeasured: 0 }
+  for (const contract of result.contracts) {
+    const answers = Object.values(contract.answers)
+    assert.equal(answers.length, 4, `★ ${contract.id}：必须报出**四项**`)
+    for (const answer of answers) {
+      assert.ok(answer.status in counts, `★ ${contract.id}：裁决 ${answer.status} 不是三态之一`)
+      counts[answer.status] += 1
+    }
+  }
+  const expected = counts.unmeasured > 0 ? 'unmeasured' : counts.missing > 0 ? 'missing' : 'present'
+  assert.equal(result.overall, expected, '★ 总判定必须由逐条读数推出 —— 否则摘要与明细在说两件事')
+
+  console.log(`    ℹ 本团队计划读数：${plan.length} 条契约 × 4 项 = ${plan.length * 4} 个必答项`)
+  console.log(`       有 = ${counts.present} · 缺 = ${counts.missing} · 读不到 = ${counts.unmeasured} · 总判定 = ${result.overall}`)
+  const gaps = result.contracts.flatMap((contract) => Object.entries(contract.answers)
+    .filter(([, answer]) => answer.status !== 'present')
+    .map(([key, answer]) => `${contract.id} / ${key} / ${answer.status}`))
+  if (gaps.length === 0) {
+    console.log('       ★ 四项全部有 —— 而这是**当下快照**，不是不变量（计划会增长）')
+  } else {
+    console.log(`       ★ 缺/读不到的 ${gaps.length} 处（逐条指名）：`)
+    for (const gap of gaps) console.log(`          · ${gap}`)
+  }
 })

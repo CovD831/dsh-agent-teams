@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 860" font-family="-apple-system, 'PingFang SC', sans-serif">
+<style>
+  .bg{fill:#16191d}
+  .h1{fill:#e8eaed;font-size:19px;font-weight:600}
+  .h2{fill:#c8ccd1;font-size:13px;font-weight:600}
+  .t{fill:#b8bec5;font-size:11.5px}
+  .name{fill:#e8eaed;font-size:12px;font-weight:500}
+  .dim{fill:#6f7780;font-size:10.5px}
+  .note{fill:#8b939c;font-size:10.5px}
+  .ok{fill:#5fbf7f;font-size:10.5px}
+  .new{fill:#5b9dd9;font-size:10.5px}
+  .warn{fill:#e0a35c;font-size:11px}
+  .team{fill:#8b7fd9;font-size:10.5px}
+  .empty{fill:#6f7780;font-size:10.5px}
+  .card{fill:#22262b;stroke:#33383e;stroke-width:1}
+  .card-dim{fill:#1c1f23;stroke:#2b3036;stroke-width:1}
+  .card-new{fill:#1e2630;stroke:#3a5a7a;stroke-width:1}
+  .card-was{fill:#1e2a22;stroke:#3a6a4a;stroke-width:1}
+  .card-team{fill:#241f2e;stroke:#4a3f6a;stroke-width:1}
+  .card-note{fill:#1e2024;stroke:#33383e;stroke-width:1}
+</style>
+<rect width="1180" height="860" class="bg"/>
+<text x="24" y="34" class="h1">Agent Teams 重构地图</text>
+<text x="24" y="54" class="dim">12 条线 · 71 个 commit · src/ 93 文件 51056 行</text>
+<text x="24" y="92" class="h2">① 分层：三条线各管一层</text>
+<rect x="24" y="104" width="372" height="66" rx="6" class="card"/>
+<text x="38" y="128" class="name">E 结构重构</text>
+<text x="38" y="146" class="dim">拆大文件、去死代码</text>
+<text x="382" y="164" class="ok" text-anchor="end">45 个模块</text>
+<rect x="406" y="104" width="372" height="66" rx="6" class="card"/>
+<text x="420" y="128" class="name">M 模块拆分</text>
+<text x="420" y="146" class="dim">mutation / QG-A / state 各拆一次</text>
+<text x="764" y="164" class="ok" text-anchor="end">51k → 93 文件</text>
+<rect x="788" y="104" width="372" height="66" rx="6" class="card"/>
+<text x="802" y="128" class="name">N 盘局地图</text>
+<text x="802" y="146" class="dim">把"哪里有东西"画出来</text>
+<text x="1146" y="164" class="ok" text-anchor="end">PLATE-MAP.md</text>
+<text x="24" y="206" class="h2">② 判据体系：6 个插入点 × 17 条判据 —— 而【哪一段落盘】是本轮的关键</text>
+<rect x="24" y="218" width="178" height="62" rx="6" class="card-dim"/>
+<text x="36" y="242" class="name">admission</text>
+<text x="36" y="260" class="dim">3 条未注册</text>
+<text x="36" y="274" class="dim">真的 0 条</text>
+<rect x="210" y="218" width="178" height="62" rx="6" class="card-new"/>
+<text x="222" y="242" class="name">contract</text>
+<text x="222" y="260" class="dim">3 条</text>
+<text x="222" y="274" class="new">★ 乙：本轮新落盘</text>
+<rect x="396" y="218" width="178" height="62" rx="6" class="card-new"/>
+<text x="408" y="242" class="name">dispatch</text>
+<text x="408" y="260" class="dim">3 条</text>
+<text x="408" y="274" class="new">★ 乙：本轮新落盘</text>
+<rect x="582" y="218" width="178" height="62" rx="6" class="card-was"/>
+<text x="594" y="242" class="name">completion</text>
+<text x="594" y="260" class="dim">4 条</text>
+<text x="594" y="274" class="ok">S1 原有</text>
+<rect x="768" y="218" width="178" height="62" rx="6" class="card-team"/>
+<text x="780" y="242" class="name">delivery</text>
+<text x="780" y="260" class="dim">2 条</text>
+<text x="780" y="274" class="team">团队级</text>
+<rect x="954" y="218" width="178" height="62" rx="6" class="card-team"/>
+<text x="966" y="242" class="name">runtime</text>
+<text x="966" y="260" class="dim">2 条</text>
+<text x="966" y="274" class="team">事件级</text>
+<text x="24" y="302" class="warn">⇒ ★ 四类"没有裁决"的成因必须不同形：0 条(真的没判据) · 团队级(不在任务上) · 未开始 · 未落盘</text>
+<text x="24" y="344" class="h2">③ 本轮重建的三块能力</text>
+<rect x="24" y="356" width="372" height="78" rx="6" class="card"/>
+<text x="38" y="380" class="name">S1 判据落盘</text>
+<text x="38" y="398" class="dim">completion 段的裁决写进 task</text>
+<text x="38" y="418" class="new">★ 曾被我的 git add -A 静默删掉，已恢复+加判据</text>
+<rect x="406" y="356" width="372" height="78" rx="6" class="card"/>
+<text x="420" y="380" class="name">乙 按段落盘</text>
+<text x="420" y="398" class="dim">contract/dispatch 两段也落盘</text>
+<text x="420" y="418" class="new">★ 新增 gateEvaluations（按段，不覆盖）</text>
+<rect x="788" y="356" width="372" height="78" rx="6" class="card"/>
+<text x="802" y="380" class="name">UI v4 重构</text>
+<text x="802" y="398" class="dim">两行式 · 六态 · 去徽章 · 中文职责</text>
+<text x="802" y="418" class="new">★ 含 CJK 宽度表（零依赖，带对拍臂）</text>
+<text x="24" y="472" class="h2">④ 已建但【未接线】的机制（如实记账）</text>
+<text x="32" y="496" class="dim">·</text>
+<text x="44" y="496" class="t">confidence.ts 双计数</text>
+<text x="340" y="496" class="dim">算得出来，但零调用方</text>
+<text x="32" y="522" class="dim">·</text>
+<text x="44" y="522" class="t">（无）poolForRescue</text>
+<text x="340" y="522" class="dim">★ 更正：它【已接线】—— 写进卡点台账 resolution.pool</text>
+<text x="32" y="548" class="dim">·</text>
+<text x="44" y="548" class="t">admission.* 三条判据</text>
+<text x="340" y="548" class="dim">文件在，注册表从不注册</text>
+<text x="32" y="574" class="dim">·</text>
+<text x="44" y="574" class="t">deliverable-return</text>
+<text x="340" y="574" class="dim">工具可用，但没做成闸门</text>
+<text x="32" y="600" class="dim">·</text>
+<text x="44" y="600" class="t">U 线参数化</text>
+<text x="340" y="600" class="dim">5 行耦合，产品决策待定</text>
+<text x="620" y="472" class="h2">⑤ 修掉的工装缺陷（T 编号）</text>
+<text x="628" y="496" class="ok">·</text>
+<text x="640" y="496" class="t">T5  gate 死锁</text>
+<text x="880" y="496" class="dim">lib/types/X.d.ts 是文件而同名目录也在</text>
+<text x="628" y="522" class="ok">·</text>
+<text x="640" y="522" class="t">T8  成对产物漏声明</text>
+<text x="880" y="522" class="dim">tsdown 打包 ⇒ .map 跟 bundle 不跟源</text>
+<text x="628" y="548" class="ok">·</text>
+<text x="640" y="548" class="t">t74 声明两份</text>
+<text x="880" y="548" class="dim">我 c32f0a5 的 git add -A 静默删了 S1</text>
+<text x="628" y="574" class="ok">·</text>
+<text x="640" y="574" class="t">t75 关键符号判据</text>
+<text x="880" y="574" class="dim">wired ≠ still there</text>
+<text x="628" y="600" class="ok">·</text>
+<text x="640" y="600" class="t">t76 元判据</text>
+<text x="880" y="600" class="dim">判据数不许减少（基准在 git 历史）</text>
+<rect x="24" y="622" width="1132" height="96" rx="6" class="card-note"/>
+<text x="40" y="648" class="h2">⑥ 本轮反复出现的三个形态（已记账）</text>
+<text x="40" y="670" class="note">A. 「它被删了」与「它从来没做过」在报告里同形  →  t75/t76 两条判据</text>
+<text x="40" y="688" class="note">B. 「改了但没报」与「没改」同形              →  探针别名保留（t80）</text>
+<text x="40" y="706" class="note">C. 「写了但没跑」与「跑了且通过」同形          →  对拍臂必须落到跑者里（t83）</text>
+<text x="24" y="742" class="dim">⑦ 而"契约由实测推翻"发生了 6 次 —— 其中 4 次是队长的规格错，由成员查出后先报不动手</text>
+<text x="24" y="762" class="dim">    · rejectOnContractGates 通过时不返回 { gates }（我引用的那两处是卡点台账的）</text>
+<text x="24" y="780" class="dim">    · UI 四态逻辑整体在 outOfScope 文件里（我落点判断错）</text>
+<text x="24" y="798" class="dim">    · types.ts 写不出我指定的类型（它是零 import 叶子，两条臂逐字钉住）</text>
+<text x="24" y="816" class="dim">    · GateEvaluationRecord 的两份声明（我去重时对象是零份，因为 S1 已被我删）</text>
+</svg>

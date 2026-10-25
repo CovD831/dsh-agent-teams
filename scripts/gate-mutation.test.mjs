@@ -50,6 +50,13 @@ import { parseTestSummary } from '../lib/mutation.js'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
+/**
+ * ★ 递归标记的唯一出处：清洗规则搬去 `scripts/fixtures/nested-test-env.mjs`。
+ *   ★ 迁移前本文件的 `childEnv()` 删的是 `NODE_TEST*` + `NODE_OPTIONS`（见下），
+ *     转移后**集合一字未变** —— 共享件用的正是同一套判据（那一份集合是它收拢的
+ *     三个夹具里最宽的一个），所以这里的行为是等价的，不是放宽。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
 const run = promisify(execFile)
 
 /**
@@ -323,13 +330,14 @@ function expectOk(verdict) {
  *
  * ⇒ 这条同时说明为什么"未测量"必须能与真实结论分开：夹具环境造成的假 unmeasured
  *   与"套件真的够不到"在旧形态下会长得一模一样。
+ *
+ * ★ 现在这份清洗**只有一处实现**（`scripts/fixtures/nested-test-env.mjs` 的
+ *   `recursionFreeEnv`）—— 本文件此前那份就地循环是它的 7 份重复实现之一。
+ *   这里保留 `childEnv()` 这个名字，是因为它在下面被调用三处、且名字本身
+ *   说的是"给子进程的那份 env"，语义没变；变的是它不再自己定义"什么算标记"。
  */
 function childEnv() {
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('NODE_TEST') || key === 'NODE_OPTIONS') delete env[key]
-  }
-  return env
+  return recursionFreeEnv(process.env)
 }
 
 /**
@@ -368,7 +376,8 @@ function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...
          *     形态（`runVerifyCommand` 也是 shell），夹具必须一致，否则测的是一套
          *     不存在的接口。
          *
-         *   · `env` 里清掉 `NODE_TEST*` / `NODE_OPTIONS` —— MEASURED：夹具自己跑在
+         *   · `env` 里清掉递归标记（`NODE_TEST*` / `NODE_OPTIONS`，
+         *     唯一出处 `scripts/fixtures/nested-test-env.mjs`）—— MEASURED：夹具自己跑在
          *     `node --test` 里，那会通过环境把子进程变成【子报告器】，于是子进程
          *     不再打印汇总行 ⇒ 判据读不到 `pass/fail` ⇒ 一次本该测到的东西被读成
          *     "没能测量"。也就是说，夹具的环境会让被测判据产生假 unmeasured，
@@ -382,6 +391,30 @@ function context({ suite, changedFiles = ['mutation-sut.mjs'], changedLines, ...
     },
     testCommand: `node --test *`,
     killerSuites: [{ id: suitePath, files: [suitePath] }],
+    /**
+     * ── ★★★ 配额必须被【钉住】，因为本条断言的不是配额（2026-10-12）─────────────
+     *
+     * MEASURED（本轮实跑，我自己踩的）：
+     *
+     *     配额缺省 25/200（改动前）⇒ considered 26、killed 24 ⇒ score 0.923 ⇒ 臂 1 绿
+     *     配额缺省  4/40（本次下调）⇒ considered 18、killed 16 ⇒ score 0.889 ⇒ 臂 1 红
+     *
+     * ★ 而【存活体是同两条】（`and-to-or@L9` / `and-to-or@L11`，两次都在）。
+     *   ⇒ 这次变红与"套件强不强"**毫无关系** —— 变的只是分母：配额一收窄，
+     *     同一批存活体在更小的分母上占更大比重。
+     *
+     * ★ 于是暴露出一件比这个测试更值钱的事：**带抽样的杀伤率，其判据的含义
+     *   随样本量漂移**。同一份实现，26 条时 0.923（过）、18 条时 0.889（不过）
+     *   —— 那正是"判据不可复现"，而门禁的全部价值就在可复现。
+     *   这条读数已写回技能（`deepseek-harness-tuning` §10.9）。
+     *
+     * ★ 本夹具的处置：这里问的是「判据会不会区分强套件与装饰套件」，配额与这个问题
+     *   **正交**。所以把配额钉在**不会触发**的位置，让断言只关于被测的那件事 ——
+     *   否则任何一次与配额无关的缺省调整都会把它打红（本轮就是这样）。
+     *   ★ 配额本身的有界性与读数，由 `scripts/gate-mutation-cap.test.mjs` 单独测。
+     */
+    maxMutants: 1000,
+    maxPerOperator: 1000,
     ...rest,
   }
 }

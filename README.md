@@ -22,7 +22,7 @@
 
 `dsh-agent-teams` turns the current DeepSeek Harness session into a captain that can assemble durable sub-agents, split a goal into dependency-aware tasks, and coordinate work through direct messages.
 
-Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
+Ask in natural language. The plugin provides the team protocol, 18 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
 <p align="center">
   <img src="./assets/readme/workspace.png" width="100%" alt="AgentTeams native workspace with members, task dependencies, and progress">
@@ -30,7 +30,7 @@ Ask in natural language. The plugin provides the team protocol, 14 coordination 
 
 ## Releases
 
-[v0.1.23](./release-notes/v0.1.23.md) targets the published Harness `0.2.0-rc.2` packages and retains script-free Git installation. This plugin release uses npm `latest`; the recommended host is Harness `0.2.0-rc.2` (its `next` channel). See the exact [support matrix](./compatibility.json).
+[v0.1.23](./release-notes/v0.1.23.md) targets the published Harness `0.2.1-rc.2` packages and retains script-free Git installation. This plugin release uses npm `latest`; the recommended host is Harness `0.2.1-rc.2` (its `next` channel). See the exact [support matrix](./compatibility.json).
 
 ## Why AgentTeams?
 
@@ -49,12 +49,12 @@ The conversation card and activity panel use Harness's official locale service. 
 
 ## Install and choose versions
 
-**Recommended pair: DeepSeek Harness `0.2.0-rc.2` + AgentTeams `0.1.23`. The host remains an RC.**
+**Recommended pair: DeepSeek Harness `0.2.1-rc.2` + AgentTeams `0.1.23`. The host remains an RC.**
 
 | Use case | DeepSeek Harness | AgentTeams plugin |
 | --- | --- | --- |
-| **Recommended** | **`0.2.0-rc.2`** | **`0.1.23`** |
-| Previous recommended RC | `0.1.7-rc.2` | `0.1.23` |
+| **Recommended** | **`0.2.1-rc.2`** | **`0.1.23`** |
+| Previous recommended RC | `0.2.0-rc.2`, `0.1.7-rc.2` | `0.1.23` |
 | Legacy RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.23` |
 | Retaining an older RC | `0.1.2-rc.1` | `0.1.23` |
 | Developer Alpha testing | `0.1.2-alpha.5` | `0.1.23` |
@@ -70,12 +70,12 @@ In the app sidebar, open **Plugins → Add plugin** and enter the npm package sp
 
 Install it, then choose **Enable now**. If the host asks for a restart, restart the desktop app. Use the package spec above for the published build; an npm or GitHub webpage URL is not the same install source. For Git installation, use a commit containing the verified build outputs described below.
 
-The desktop app supplies its own Harness core and package manager. Upgrading the global CLI does not upgrade that core, and an ordinary standalone CLI cannot manage its desktop profile. The CLI carrier installed by the desktop app can manage that profile in `0.2.0-rc.2`. Check the embedded core against the compatibility list. Harness `0.2.0-rc.2` is now the exact published target; its RC status is unchanged. The earlier source-only `0.2.0` prediction is no longer a support declaration. See the [release migration evidence](./docs/harness-0.2.0-rc.2/README.md).
+The desktop app supplies its own Harness core and package manager. Upgrading the global CLI does not upgrade that core, and an ordinary standalone CLI cannot manage its desktop profile. The CLI carrier installed by the desktop app can manage that profile in `0.2.1-rc.2`. Check the embedded core against the compatibility list. Harness `0.2.1-rc.2` is now the exact published target; its RC status is unchanged. The earlier source-only `0.2.0` prediction is no longer a support declaration. See the [release migration evidence](./docs/harness-0.2.1-rc.2/README.md).
 
 ### CLI / Web: 1. Install DeepSeek Harness
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.2.0-rc.2
+npm install --global @deepseek-ai/dsh@0.2.1-rc.2
 dsh --version
 ```
 
@@ -122,7 +122,7 @@ Team state is stored under `<workspace>/.agent-teams/`; the Web panel reads that
 
 Member creation is zero-interaction by default: a member on the captain's current LLM route snapshots that provider, model, and reasoning effort, while a member on a requested alternative route snapshots the target model's default effort; later continuations restore the resolved snapshot. Only an explicit heterogeneous-team request (for example, “backend on provider A/model X, frontend on provider B/model Y”) supplies a member-specific `provider` + `model`; there is no per-member model or reasoning prompt.
 
-Captain sessions keep the concise core protocol and the original 14 native team tools from their first request. All business tools are directly available; no loading tool or extra activation call is needed. Configured profiles retain their bounded directory in the fixed system prompt. Creating, approving, continuing or ending a team does not rewrite the system prompt or tool schemas. Core rules remain available after history compaction or discarded code-mode tool results. Members receive four team tools, fixed member instructions, and their ordinary coding/research tools. Web approval wakes the captain with a control message; later member reports wake it again. See the [fixed protocol and benchmark contract](./docs/progressive-loading.md).
+Captain sessions keep the concise core protocol and the original 18 native team tools from their first request. All business tools are directly available; no loading tool or extra activation call is needed. Configured profiles retain their bounded directory in the fixed system prompt. Creating, approving, continuing or ending a team does not rewrite the system prompt or tool schemas. Core rules remain available after history compaction or discarded code-mode tool results. Members receive four team tools, fixed member instructions, and their ordinary coding/research tools. Web approval wakes the captain with a control message; later member reports wake it again. See the [fixed protocol and benchmark contract](./docs/progressive-loading.md).
 
 ## Slash command
 

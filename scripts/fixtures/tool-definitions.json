@@ -308,6 +308,10 @@
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "executionPrompt": {
+                    "description": "Member-specific execution prompt. It remains editable while staged.",
+                    "type": "string"
+                  },
                   "model": {
                     "type": "string"
                   },
@@ -331,12 +335,84 @@
               },
               "type": "array"
             },
+            "quality": {
+              "additionalProperties": false,
+              "description": "Quality mode: generate the standard DAG instead of writing five tasks by hand. Mutually exclusive with tasks.",
+              "properties": {
+                "analyst": {
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "implementer": {
+                  "type": "string"
+                },
+                "inScope": {
+                  "description": "REQUIRED: replaces the generator placeholder. Derive from the real workspace.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "integrator": {
+                  "type": "string"
+                },
+                "reviewer": {
+                  "type": "string"
+                },
+                "tester": {
+                  "type": "string"
+                },
+                "verify": {
+                  "description": "REQUIRED: replaces the generator placeholder. Use commands that actually exist in this repo.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "goal",
+                "implementer",
+                "reviewer",
+                "inScope",
+                "verify"
+              ],
+              "type": "object"
+            },
+            "shape": {
+              "description": "REQUIRED: \"dispatch\" = durable members spawn a one-shot worker per task (the specified form; avoids burning a member session on every task); \"flat\" = members implement their own tasks (the earlier form). This selects the framework prompt a member receives; personas are still written by the caller.",
+              "enum": [
+                "dispatch",
+                "flat"
+              ],
+              "type": "string"
+            },
             "tasks": {
               "items": {
                 "additionalProperties": false,
                 "properties": {
+                  "acceptance": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
                   "assignee": {
                     "type": "string"
+                  },
+                  "coverageOf": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "deliverables": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
                   },
                   "dependencies": {
                     "items": {
@@ -351,8 +427,62 @@
                     "description": "Local reference used by dependencies in this plan; the result maps it to a durable task id.",
                     "type": "string"
                   },
+                  "inScope": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "description": "Quality kind. Omit for ordinary work. A quality kind requires objective + acceptance (plus inScope + verify for implementation/repair/integration).",
+                    "enum": [
+                      "requirements",
+                      "implementation",
+                      "verification",
+                      "review",
+                      "repair",
+                      "integration",
+                      "work"
+                    ],
+                    "type": "string"
+                  },
+                  "model": {
+                    "description": "The model that runs THIS task. Recorded on the task record so the result keeps a single, answerable attribution.",
+                    "type": "string"
+                  },
+                  "nonGoals": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "objective": {
+                    "type": "string"
+                  },
+                  "outOfScope": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "reasoning_effort": {
+                    "type": "string"
+                  },
+                  "reviewedTaskId": {
+                    "description": "For kind=review: the seed task id (from this plan) being reviewed.",
+                    "type": "string"
+                  },
+                  "round": {
+                    "type": "number"
+                  },
                   "subject": {
                     "type": "string"
+                  },
+                  "verify": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
                   }
                 },
                 "required": [
@@ -366,7 +496,7 @@
           },
           "required": [
             "members",
-            "tasks"
+            "shape"
           ],
           "type": "object"
         },
@@ -505,6 +635,14 @@
           "description": "Member name when an owner is specified. Omission puts this task in the shared pool; roles, subjects and descriptions do not assign an owner.",
           "type": "string"
         },
+        "bindModelReasoningEffort": {
+          "description": "Optional reasoning effort for the rebind requested by bindModelTo.",
+          "type": "string"
+        },
+        "bindModelTo": {
+          "description": "Rebind the model of an EXISTING task id. Fail-closed: refused once that task has executed (attempt > 0, claimed/in_progress, or settled).",
+          "type": "string"
+        },
         "coverageOf": {
           "description": "User-constraint / goal items this task covers.",
           "items": {
@@ -531,7 +669,7 @@
           "type": "string"
         },
         "inScope": {
-          "description": "Workspace-relative POSIX paths this task may change.",
+          "description": "Workspace-relative POSIX paths this task may change. ★ List EVERY place the work lands, not just the file you plan to edit: callers you must update, tests you must add or fix, and any build artifact (lib/) that must be regenerated. A scope that names only one of several landing points makes the work impossible to complete — the member will correctly refuse rather than fake it, and the refusal looks identical to a failed attempt.",
           "items": {
             "type": "string"
           },
@@ -548,6 +686,10 @@
             "repair",
             "integration"
           ],
+          "type": "string"
+        },
+        "model": {
+          "description": "The model that runs THIS task. Recorded on the task record so the result keeps a single, answerable attribution even though one durable member executes many tasks across rounds. A review task may declare a different model from the implementation it judges.",
           "type": "string"
         },
         "nonGoals": {
@@ -568,6 +710,10 @@
           },
           "type": "array"
         },
+        "reasoning_effort": {
+          "description": "Optional reasoning effort for this task's model binding. Only meaningful together with model; \"default\" forces the target model's own default.",
+          "type": "string"
+        },
         "resume": {
           "description": "If true, clear halted in the same lock before creating the task.",
           "type": "boolean"
@@ -575,6 +721,52 @@
         "resumeReason": {
           "description": "Required non-empty reason when resume=true.",
           "type": "string"
+        },
+        "reviewed": {
+          "additionalProperties": false,
+          "description": "A review stamp: {at, by, checks[]}. Optional — its absence means \"not reviewed yet\", which is a normal state (a task the user ruled on did not go through auto-generation).",
+          "properties": {
+            "at": {
+              "description": "Epoch ms when the review was stamped.",
+              "type": "number"
+            },
+            "by": {
+              "description": "Identity that performed the review (adversarial, captain, …).",
+              "type": "string"
+            },
+            "checks": {
+              "description": "Per-question verdicts (pass / fail / unmeasured). A bare boolean would be indistinguishable from one here.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "description": "Question id (scope, prerequisite, move, acceptance, boundary, …).",
+                    "type": "string"
+                  },
+                  "verdict": {
+                    "description": "pass / fail / unmeasured. unmeasured must NOT be folded into pass.",
+                    "type": "string"
+                  },
+                  "why": {
+                    "description": "Why this verdict — the reading that produced it.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "verdict"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "at",
+            "by",
+            "checks"
+          ],
+          "type": "object"
         },
         "reviewedTaskId": {
           "description": "Existing AgentTeams implementation/repair task id. Required for kind=review; an external repository audit is kind=work.",
@@ -620,6 +812,27 @@
           "assignee": {
             "type": "string"
           },
+          "dispatch_input_surface": {
+            "additionalProperties": false,
+            "properties": {
+              "checked": {
+                "type": "number"
+              },
+              "incomplete": {
+                "type": "number"
+              },
+              "missing": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "skipped": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
           "input_surface": {
             "additionalProperties": false,
             "properties": {
@@ -643,6 +856,54 @@
           },
           "kind": {
             "type": "string"
+          },
+          "model_binding": {
+            "additionalProperties": false,
+            "properties": {
+              "enforced": {
+                "type": "boolean"
+              },
+              "member_model": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              },
+              "reasoning_effort": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "model",
+              "note"
+            ],
+            "type": "object"
+          },
+          "model_binding_refused": {
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "task_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "task_id",
+              "reason"
+            ],
+            "type": "object"
           },
           "runtime_gates": {},
           "status": {
@@ -670,7 +931,12 @@
     "kind": null,
     "description": "Captain-only delivery declaration: asks the delivery insertion point whether this team may be reported to the user as delivered, and REFUSES when it may not (uncovered goals, members that never converged, unfinished quality gates). Use it right before telling the user the work is done. agent_teams_status only REPORTS the same verdict without refusing, so reading team state never blocks.",
     "parameters": {
-      "properties": {},
+      "properties": {
+        "workspace": {
+          "description": "Optional. A registered workspace path or title to read delivery state from, instead of your own workspace. An unregistered name is REJECTED (it does not silently fall back to your own workspace). Omit to keep the previous behaviour.",
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "output": {
@@ -716,6 +982,48 @@
           },
           "team_id": {
             "type": "string"
+          },
+          "workspace_audit": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "enum": [
+                    "read-delivery"
+                  ],
+                  "type": "string"
+                },
+                "actor": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "number"
+                },
+                "callerWorkspace": {
+                  "type": "string"
+                },
+                "targetTitle": {
+                  "type": "string"
+                },
+                "targetWorkspace": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "at",
+                "actor",
+                "callerWorkspace",
+                "targetWorkspace",
+                "targetTitle",
+                "tool",
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -768,6 +1076,13 @@
           "items": {
             "additionalProperties": false,
             "properties": {
+              "acceptance": {
+                "description": "Acceptance criteria. Required for quality kinds.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "action": {
                 "enum": [
                   "update_member",
@@ -797,12 +1112,36 @@
                 "description": "Optional member-specific execution prompt.",
                 "type": "string"
               },
+              "inScope": {
+                "description": "Workspace-relative POSIX paths this task may change. Required for implementation/repair. ★ List EVERY place the work lands, not just the file you plan to edit: callers you must update, tests you must add or fix, and any build artifact (lib/) that must be regenerated. A scope that names only one landing point of several makes the work impossible to complete.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "description": "Required for add_task: the task kind must be declared explicitly — this route must not silently create a \"work\" task. A quality kind additionally requires objective + acceptance; implementation/repair also require inScope + verify.",
+                "enum": [
+                  "requirements",
+                  "implementation",
+                  "verification",
+                  "review",
+                  "repair",
+                  "integration",
+                  "work"
+                ],
+                "type": "string"
+              },
               "member_name": {
                 "description": "Member name for update_member or remove_member.",
                 "type": "string"
               },
               "model": {
                 "description": "Optional member model; defaults to the current staged route.",
+                "type": "string"
+              },
+              "objective": {
+                "description": "Required non-empty objective for quality kinds.",
                 "type": "string"
               },
               "provider": {
@@ -824,6 +1163,13 @@
               "task_id": {
                 "description": "Task id for update_task or remove_task.",
                 "type": "string"
+              },
+              "verify": {
+                "description": "Verification commands. Required for implementation/repair.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -880,6 +1226,50 @@
           "dependencies",
           "roster",
           "graph"
+        ],
+        "type": "object"
+      }
+    },
+    "execute": "[function:execute/2]"
+  },
+  "agent_teams_halt": {
+    "kind": null,
+    "description": "Stop a team without destroying it: every unfinished task is cancelled (not removed), members go idle, and the team stays where it is so `agent_teams_resume` can bring it back. Use this when work should pause; use `agent_teams_delete` only when the team is finished or explicitly abandoned, because delete archives it and cannot be undone.",
+    "parameters": {
+      "properties": {
+        "reason": {
+          "description": "Why the team is being stopped. Recorded in the team event log, so a later reader can tell this apart from a crash.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "output": {
+      "render": "[function:render/2]",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cancelled_tasks": {
+            "type": "number"
+          },
+          "resumable": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string"
+          },
+          "team_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "team_name",
+          "cancelled_tasks",
+          "status",
+          "resumable"
         ],
         "type": "object"
       }
@@ -991,7 +1381,7 @@
   },
   "agent_teams_restart": {
     "kind": null,
-    "description": "Captain-only: reload this plugin so subsequent calls run the code now on disk. Use after a gate/tool change has been built AND verified. This is an ARBITRATION, not a re-check: it does not re-run the verdict — it only asks whether a passing verdict exists and whether any task is in progress. Refuses when either precondition fails, and says which one.",
+    "description": "Captain-only: re-run this plugin's apply() so it picks up its current config. ★ This does NOT change which code the process runs: a fiber restart re-executes apply against the module already loaded in memory (no import, no cache drop), so edits built to disk stay invisible until the HOST PROCESS is restarted. The result therefore reports `code_on_disk_in_effect` — measured, not assumed: \"yes\" means the process already holds the build on disk, \"no\" names the build it actually holds, \"unmeasured\" means it could not be determined. Use after a gate/tool change has been built AND verified. This is an ARBITRATION, not a re-check: it does not re-run the verdict — it only asks whether a passing verdict exists and whether any task is in progress. Refuses when either precondition fails, and says which one.",
     "parameters": {
       "properties": {
         "verdict": {
@@ -1013,6 +1403,23 @@
         "additionalProperties": false,
         "properties": {
           "blocked_by": {
+            "type": "string"
+          },
+          "code_loaded": {
+            "type": "string"
+          },
+          "code_on_disk": {
+            "type": "string"
+          },
+          "code_on_disk_detail": {
+            "type": "string"
+          },
+          "code_on_disk_in_effect": {
+            "enum": [
+              "yes",
+              "no",
+              "unmeasured"
+            ],
             "type": "string"
           },
           "detail": {
@@ -1039,7 +1446,9 @@
         },
         "required": [
           "restarted",
-          "reason"
+          "reason",
+          "code_on_disk_in_effect",
+          "code_on_disk_detail"
         ],
         "type": "object"
       }
@@ -1080,6 +1489,230 @@
           "status",
           "team_id",
           "reason"
+        ],
+        "type": "object"
+      }
+    },
+    "execute": "[function:execute/2]"
+  },
+  "agent_teams_review_plan": {
+    "kind": null,
+    "description": "Run the adversarial plan review on a task contract and, ONLY if every question passes, return a `reviewed` stamp you can pass to create_task/amend_task. Call this before dispatch: `dispatch.plan-reviewed` rejects any task without a stamp. When the review cannot settle a question (needs-review) or rejects it, this tool returns NO stamp and lists each failing question with the remedy — a stamp whose shape is legal but whose content failed would launder \"cannot decide\" into \"reviewed\".",
+    "parameters": {
+      "properties": {
+        "by": {
+          "description": "Who performs the review (recorded in the stamp). Defaults to the caller identity (`captain` or the member name).",
+          "type": "string"
+        },
+        "contract": {
+          "additionalProperties": false,
+          "description": "The contract to review: the same fields you are about to pass to create_task (subject, objective, inScope, outOfScope, acceptance, verify, dependencies, kind).",
+          "properties": {
+            "acceptance": {
+              "description": "Acceptance criteria — each must be falsifiable by one directed mutation.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dependencies": {
+              "description": "Task ids this contract depends on.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "inScope": {
+              "description": "Workspace-relative POSIX paths this task may change.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "description": "Quality kind (implementation / repair / verification / review / requirements / integration / work).",
+              "type": "string"
+            },
+            "objective": {
+              "description": "Why this task exists — what breaks if it is not done now.",
+              "type": "string"
+            },
+            "outOfScope": {
+              "description": "Workspace-relative POSIX paths this task must not change.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "subject": {
+              "description": "Task subject.",
+              "type": "string"
+            },
+            "verify": {
+              "description": "Verification commands.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "contract"
+      ],
+      "type": "object"
+    },
+    "output": {
+      "render": "[function:render/2]",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "verdict": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "verdict",
+                "why"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "plan_detail": {
+            "type": "string"
+          },
+          "plan_overall": {
+            "type": "string"
+          },
+          "plan_per_question": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "detail": {
+                  "type": "string"
+                },
+                "key": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "status",
+                "detail"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "refusals": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "remedy": {
+                  "type": "string"
+                },
+                "verdict": {
+                  "type": "string"
+                },
+                "why": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "verdict",
+                "why",
+                "remedy"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "reviewed": {
+            "additionalProperties": false,
+            "properties": {
+              "at": {
+                "type": "number"
+              },
+              "by": {
+                "type": "string"
+              },
+              "checks": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    },
+                    "why": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "why"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "at",
+              "by",
+              "checks"
+            ],
+            "type": "object"
+          },
+          "stampable": {
+            "type": "boolean"
+          },
+          "tier": {
+            "type": "string"
+          },
+          "tier_next_step": {
+            "type": "string"
+          },
+          "tier_why": {
+            "type": "string"
+          },
+          "unmeasured": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stampable",
+          "checks",
+          "refusals",
+          "plan_overall",
+          "plan_detail",
+          "plan_per_question",
+          "tier",
+          "tier_why"
         ],
         "type": "object"
       }
@@ -1174,6 +1807,9 @@
           },
           "deliverable": {
             "type": "boolean"
+          },
+          "deliverable_landing": {
+            "type": "string"
           },
           "delivery": {
             "additionalProperties": false,
@@ -1288,6 +1924,148 @@
           "escalated": {
             "type": "boolean"
           },
+          "gate_view": {
+            "additionalProperties": false,
+            "properties": {
+              "abnormal": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "type": "number"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "observed": {
+                      "type": "boolean"
+                    },
+                    "produced": {
+                      "type": "boolean"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "observed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "active": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "count": {
+                      "type": "number"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "observed": {
+                      "type": "boolean"
+                    },
+                    "produced": {
+                      "type": "boolean"
+                    },
+                    "verdict": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "verdict",
+                    "observed"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "points": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "blocked": {
+                      "type": "number"
+                    },
+                    "evaluated": {
+                      "type": "number"
+                    },
+                    "ok": {
+                      "type": "number"
+                    },
+                    "point": {
+                      "type": "string"
+                    },
+                    "registered": {
+                      "type": "number"
+                    },
+                    "skipped": {
+                      "type": "number"
+                    },
+                    "unmeasured": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "point",
+                    "registered",
+                    "evaluated",
+                    "ok",
+                    "blocked",
+                    "unmeasured",
+                    "skipped"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "truncated": {
+                "additionalProperties": false,
+                "properties": {
+                  "abnormal": {
+                    "type": "number"
+                  },
+                  "active": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "active",
+                  "abnormal"
+                ],
+                "type": "object"
+              },
+              "unchecked": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evaluated": {
+                      "type": "number"
+                    },
+                    "point": {
+                      "type": "string"
+                    },
+                    "registered": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "point",
+                    "registered",
+                    "evaluated"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
           "halted": {
             "type": "boolean"
           },
@@ -1322,13 +2100,252 @@
           "members": {
             "items": {
               "additionalProperties": true,
-              "properties": {},
+              "properties": {
+                "liveness": {
+                  "type": "string"
+                },
+                "liveness_readout": {
+                  "type": "string"
+                },
+                "liveness_reason": {
+                  "type": "string"
+                },
+                "stranded": {
+                  "type": "boolean"
+                },
+                "stranded_tasks": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
               "type": "object"
             },
             "type": "array"
           },
           "phase": {
             "type": "string"
+          },
+          "plan_loop": {
+            "additionalProperties": false,
+            "properties": {
+              "canEnd": {
+                "type": "boolean"
+              },
+              "maxRounds": {
+                "type": "number"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "rounds": {
+                "type": "number"
+              },
+              "roundsSource": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "surfaces": {
+                "additionalProperties": false,
+                "properties": {
+                  "notApplicable": {
+                    "type": "number"
+                  },
+                  "notApplicableIds": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "readable": {
+                    "type": "number"
+                  },
+                  "total": {
+                    "type": "number"
+                  },
+                  "unreadable": {
+                    "type": "number"
+                  },
+                  "unreadableIds": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "total",
+                  "readable",
+                  "unreadable",
+                  "unreadableIds",
+                  "notApplicable",
+                  "notApplicableIds"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "state",
+              "rounds",
+              "maxRounds",
+              "reason",
+              "canEnd",
+              "roundsSource"
+            ],
+            "type": "object"
+          },
+          "plan_review": {
+            "additionalProperties": false,
+            "properties": {
+              "readout": {
+                "additionalProperties": false,
+                "properties": {
+                  "applicable_overall": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "gaps": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail": {
+                          "type": "string"
+                        },
+                        "id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "key",
+                        "status",
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "not_applicable": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "key": {
+                          "type": "string"
+                        },
+                        "why": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "key",
+                        "why"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "overall": {
+                    "type": "string"
+                  },
+                  "questions": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "key": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "number"
+                        },
+                        "not_applicable": {
+                          "type": "number"
+                        },
+                        "present": {
+                          "type": "number"
+                        },
+                        "question": {
+                          "type": "string"
+                        },
+                        "unmeasured": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "key",
+                        "question",
+                        "present",
+                        "missing",
+                        "unmeasured",
+                        "not_applicable"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "tiers": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "large": {
+                        "type": "number"
+                      },
+                      "small": {
+                        "type": "number"
+                      },
+                      "unmeasurable": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "small",
+                      "large",
+                      "unmeasurable"
+                    ],
+                    "type": "object"
+                  },
+                  "tiers_why": {
+                    "type": "string"
+                  },
+                  "total": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "total",
+                  "overall",
+                  "detail",
+                  "applicable_overall",
+                  "questions",
+                  "gaps",
+                  "not_applicable"
+                ],
+                "type": "object"
+              },
+              "state": {
+                "type": "string"
+              },
+              "why": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
           },
           "profile": {
             "additionalProperties": true,
@@ -1378,10 +2395,71 @@
             "type": "object"
           },
           "runtime_gates": {},
+          "shape_execution": {
+            "type": "string"
+          },
+          "shape_source": {
+            "type": "string"
+          },
+          "shape_violations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "stranded_work": {
+            "additionalProperties": false,
+            "properties": {
+              "checked": {
+                "type": "number"
+              },
+              "message": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "worktrees": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "dirty": {
+                      "type": "number"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "name",
+                    "dirty"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "status",
+              "message"
+            ],
+            "type": "object"
+          },
           "tasks": {
             "items": {
               "additionalProperties": true,
-              "properties": {},
+              "properties": {
+                "failure_kind": {
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             "type": "array"
@@ -1392,10 +2470,20 @@
           "team_name": {
             "type": "string"
           },
+          "team_shape": {
+            "type": "string"
+          },
           "viewer": {
             "type": "string"
           }
         },
+        "required": [
+          "team_shape",
+          "shape_execution",
+          "shape_violations",
+          "shape_source",
+          "deliverable_landing"
+        ],
         "type": "object"
       }
     },
@@ -1457,6 +2545,12 @@
               },
               "exitCode": {
                 "type": "number"
+              },
+              "failures": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "status": {
                 "enum": [
@@ -1566,27 +2660,6 @@
             "type": "string"
           },
           "completion_input_surface": {
-            "additionalProperties": false,
-            "properties": {
-              "checked": {
-                "type": "number"
-              },
-              "incomplete": {
-                "type": "number"
-              },
-              "missing": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "skipped": {
-                "type": "number"
-              }
-            },
-            "type": "object"
-          },
-          "dispatch_input_surface": {
             "additionalProperties": false,
             "properties": {
               "checked": {

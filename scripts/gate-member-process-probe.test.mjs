@@ -25,6 +25,17 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ★ 递归标记的唯一出处（见 `scripts/fixtures/nested-test-env.mjs`）。
+ *
+ * 本文件迁移前有 **4 处**各自手写 `delete cleanEnv.NODE_TEST_CONTEXT`。
+ * ★ 那些 `delete` 的**意图**原样保留：这里要的就是"剥干净的那一半"。
+ *   而另一半（`NODE_TEST_CONTEXT: 'child-v8'`）是**机制臂**，必须**显式**带上去 ——
+ *   那是被测机制本身，不是疏漏，共享件不该、也没有替谁做这件事。
+ * ⇒ 分工：干净的半边走 `recursionFreeEnv()`，嵌套的半边显式覆盖。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PROBE = join(ROOT, 'scripts', 'verify-nested-runtime.mjs')
 
@@ -73,8 +84,7 @@ test('★ 臂 1（机制臂）：NODE_TEST_CONTEXT 在场 ⇒ 内层 node --test
   const { dir, file } = innerFixture()
   try {
     /** 对照：**没有**那一格 ⇒ 内层正常跑（否则下面的"跳过"没有参照）。 */
-    const cleanEnv = { ...process.env }
-    delete cleanEnv.NODE_TEST_CONTEXT
+    const cleanEnv = recursionFreeEnv(process.env)
     const clean = runInner(file, dir, cleanEnv)
 
     const nestedEnv = { ...process.env, NODE_TEST_CONTEXT: 'child-v8' }
@@ -122,8 +132,7 @@ test('★ 臂 2（★ 探针三态臂）：探针对 NODE_TEST_CONTEXT 的有无
    */
   const run = (env) => JSON.parse(execFileSync('node', [PROBE], { env, encoding: 'utf8' }))
 
-  const cleanEnv = { ...process.env }
-  delete cleanEnv.NODE_TEST_CONTEXT
+  const cleanEnv = recursionFreeEnv(process.env)
   const clean = run(cleanEnv)
   const nested = run({ ...process.env, NODE_TEST_CONTEXT: 'child-v8' })
 
@@ -150,8 +159,7 @@ test('★ 臂 2（★ 探针三态臂）：探针对 NODE_TEST_CONTEXT 的有无
 // ─────────────────────────────────────────────────────────────────────────────
 
 test('★★ 臂 3（★★ 射程臂）：观测到的与观测不到的必须分开，且 execArgv 的不对称要说清', () => {
-  const cleanEnv = { ...process.env }
-  delete cleanEnv.NODE_TEST_CONTEXT
+  const cleanEnv = recursionFreeEnv(process.env)
   const report = JSON.parse(execFileSync('node', [PROBE], { env: cleanEnv, encoding: 'utf8' }))
 
   /**
@@ -212,8 +220,7 @@ test('★ 臂 4（对照臂）：探针自带机制自证，且它**独立于本
    */
   const read = (env) => JSON.parse(execFileSync('node', [PROBE], { env, encoding: 'utf8' })).mechanism
 
-  const cleanEnv = { ...process.env }
-  delete cleanEnv.NODE_TEST_CONTEXT
+  const cleanEnv = recursionFreeEnv(process.env)
   const fromClean = read(cleanEnv)
   const fromNested = read({ ...process.env, NODE_TEST_CONTEXT: 'child-v8' })
 

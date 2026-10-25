@@ -42,6 +42,27 @@ export interface TeamProfileConfig {
     protocol?: string;
     executionPrompt?: string;
     fallback?: TeamModelFallbackConfig;
+    /**
+     * ── ★★★ t15：这个花名册的**默认模型** —— 配一次，凡是这份 profile 建的队都照它起步 ──
+     *
+     * ★ 它补的是**粒度**上的一个缺口，而不是机制上的：`TeamProfileMemberConfig` 早就有
+     *   `provider`/`model`/`reasoning_effort`，而且逐成员那条路**本来就是通的**
+     *   （本任务实测：`members:[{name:'architect',model:'claude-opus'}]` 一路走到
+     *   member 记录上是 `model: 'claude-opus'`）。
+     *   但**没有**一个"这一队人默认都用某个模型"的落点 ⇒ 一支 8 人的花名册要把同一个
+     *   模型名抄 8 遍，而**抄第 8 遍时漏一个**的表现是"那一个成员悄悄跑在队长的路由上"。
+     *
+     * ★★ 优先级（**从宽到窄**，而窄的一定赢）：
+     *     成员显式声明 > 这份 profile 的默认 > 插件级 `memberModel` > 队长当前路由
+     *   ⇒ 前两级是"配置说了算"，后两级是**今天的既有行为**（一行没动）。
+     *
+     * ★ 三态：给了 ⇒ 该 profile 里**没有自己声明 model 的**成员拿它当默认；
+     *   不给 ⇒ **这一格不参与**，那些成员照旧走插件级/队长路由 ——
+     *   "没配默认"绝不能被实现成"默认是一个空路由"。
+     */
+    model?: string;
+    /** 与 `model` 成对的默认推理档位。★ 只在成员自己没声明时生效。 */
+    reasoning_effort?: string;
     members: TeamProfileMemberConfig[];
     /**
      * `captain` means the profile supplies people and guardrails only; the
@@ -70,6 +91,55 @@ export interface NormalizedProfileTask {
     assignee?: string;
     dependencies: string[];
     sourceIndex: number;
+    /**
+     * ── ★ 契约字段：`kind` 决定一条任务走不走质量门，其余是质量门要求的入参 ──────────
+     *
+     * 与 `TaskDraft`（`tools/shared/entities.ts`）逐键同名，因为本结构**直接喂** `makeTask`。
+     * 不给默认值：`undefined` ⇒ `makeTask` 不写这一格 ⇒ 与"改造前建的种子任务"同形
+     * （见 `entities.ts:5524` 那段「`kind` **不传**」的注释 —— 本改造不推翻它，
+     *  只是让**想传的时候**传得进去）。
+     *
+     * ★ `reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+     *   **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+     *   而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。
+     */
+    kind?: import('./types.ts').TaskKind;
+    objective?: string;
+    acceptance?: string[];
+    verify?: string[];
+    inScope?: string[];
+    outOfScope?: string[];
+    deliverables?: string[];
+    nonGoals?: string[];
+    coverageOf?: string[];
+    round?: number;
+    model?: string;
+    reasoningEffort?: string;
+    /**
+     * ── ★★★ 审查任务要审的是哪条（**推翻**了本结构此前"这一格不该在这里"的裁定）──────
+     *
+     * OLD（此前写在 `:142-145`，逐字）：
+     *   「`reviewedTaskId` / `sourceTaskId` **不在**这里：它们是审查/修复轮的
+     *     **系统生成物**（`planQualityFollowUp` 写、`update_task` 写），不是建队种子该手工填的。
+     *     而种子 id 与运行期 id 不同轴，让队长在种子图里手填 linkage 只会造出悬空引用。」
+     *
+     * ★ 为什么推翻：
+     *   ① **"系统生成物"这个前提是错的。** `defaultQualityDeliveryGraph()`
+     *      （`quality-gates.ts:2520`）本身就在**建队之前**生成一张含 review 的完整 DAG，
+     *      而 `validateCreateTask`（`:1052`）要求 review 必须带 `reviewedTaskId`。
+     *      ⇒ 那个函数产出的图**自己过不了自己的校验**（实测原文：
+     *      `profile task "review-round-1" is not a valid review task — review tasks require reviewedTaskId`）。
+     *      只要这一格不存在，"生成一个标准质量图"这条路就永远走不通。
+     *   ② **"不同轴"这个理由站不住。** 建队时本来就把种子 id 映射成 `tN`
+     *      （`entities.ts:5497 seedToActual`），而 `dependencies` 一直在用这套映射。
+     *      让 `reviewedTaskId` 走**同一套**映射，它就在同一个轴上 —— 反例见
+     *      `entities.ts:5562` 那段：不换名会写出一个永远指不中的引用。
+     *   ③ 悬空引用现在也**不会静默**：`validateCreateTask` 会逐字拒
+     *      `reviewed task "xxx" does not exist`。
+     *
+     * ★ 语义：填的是**种子 id**（模板 id），不是 `tN`。
+     */
+    reviewedTaskId?: string;
 }
 /** A fully validated, topologically ordered team profile. */
 export interface NormalizedTeamProfile {
@@ -122,3 +192,32 @@ export declare function parseProfileInvocation(rawInput: string): AgentTeamsInvo
 export declare function resolveTeamProfile(profiles: Record<string, TeamProfileConfig>, profileName: string, maxMembers: number): NormalizedTeamProfile;
 /** Public lookup used by activation text and status rendering. */
 export declare function resolveProfileTaskPlanning(config: TeamProfileConfig | undefined): 'captain' | 'seed';
+/**
+ * ── ★★★ t15：把 profile 的默认路由**并进**一个成员 —— 而"显式的一定赢" ────────────
+ *
+ * 优先级（从宽到窄，窄的赢）：
+ *
+ *     成员显式声明  >  这份 profile 的默认  >  插件级 `memberModel`  >  队长当前路由
+ *     └────────── 本函数管这一段 ──────────┘   └──── 今天已有的行为，一行不动 ────
+ *
+ * ★★ 它只**填空白**，绝不覆盖：一个成员自己写了 `model` ⇒ 那两格**原样返回**。
+ *   这一点是整个任务里最容易写错的一处 —— 写成"默认总是覆盖"的表现是
+ *   **显式的逐成员选择被静默丢掉**，而那种错误在读数上与"默认生效了"同形
+ *   （两边都得到一个不是用户要的模型）。
+ *
+ * ★ 而"没配默认"与"配了默认"必须**不同形**：`defaultModel === undefined` 时
+ *   返回的成员**一个键都不加**，于是它照旧走插件级/队长那条链 ——
+ *   绝不能把它变成 `model: undefined` 或空串（那会是一个**空路由**，
+ *   而"没配"的本意是"照旧"）。
+ *
+ * ★ 档位**独立**判断：成员自己写了 `reasoning_effort` 就留着它，哪怕它的模型
+ *   来自 profile 默认 —— 因为档位是"在这个模型上花多少算力"的**独立**选择。
+ *
+ * @param member - 已归一化的成员（`provider` 与 `model` 的配对已经校验过）。
+ * @param defaults - 这份 profile 的默认（两格各自可选）。
+ * @returns 该成员最终的路由片段；没有任何一格被填 ⇒ 原样返回。
+ */
+export declare function applyProfileModelDefaults(member: NormalizedProfileMember, defaults: {
+    model?: string;
+    reasoningEffort?: string;
+}): NormalizedProfileMember;

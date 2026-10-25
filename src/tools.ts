@@ -56,9 +56,20 @@ import {
   sanitizeReviewObjective,
   normalizeBlankOptionalTaskFields,
   taskKindOf,
+  /** ★ 2026-10-20：`add_task` 落盘契约段裁决用（与 `create_task` 同一个投影）。 */
+  gateEvaluationRecordOf,
 } from './state.ts'
 import { appendTaskEvidence, repairCompletionVerdict } from './quality-gates.ts'
+/**
+ * ── ★★★ N5 / t8：计划审查环（`describePlanLoop` 的家属）─────────────────────────
+ * ★ 直接从这里取而**不经 `state.ts` 中转**：`src/state.ts` 不在本任务的写域里，
+ *   而工具/装配层直取 `quality-gates.ts` 是本仓既有形态
+ *   （`src/tools/create.ts:15`、`src/tools/edit-plan.ts:24`、`src/tools/update-task.ts:123` 都这样）。
+ */
+import { PLAN_REVIEW_MAX_ROUNDS } from './quality-gates.ts'
 import { gateModuleViews, registry } from './gates/index.ts'
+/** ★ t87：采集层（汇合点 B 的调用方；形状的唯一实现在那边）。 */
+import { observe } from './evolution/collect.ts'
 import { auditRequires } from './gates/requires.ts'
 import type { GatePoint } from './gates/index.ts'
 import { gitChangedPaths, observedChangedPaths, sessionOwnEvents } from './harness-compat.ts'
@@ -70,11 +81,17 @@ import {
   installMemberSelectionRuntime,
   installMemberDelegationGuard,
   memberActivity,
+  /** ★ 2026-10-20（t4）：会话预算 —— 读 + 判 + 两个可注入的常量。 */
+  memberSessionBudget,
+  judgeSessionBudget,
+  contextWindowOf,
+  sessionBudgetThresholdOf,
   resolveMemberLlmSelection,
   spawnMember,
   steerCaptainReport,
   validateMemberLlmSelections,
   type MemberRuntimeConfig,
+  type MemberSelectionRuntime,
 } from './members.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
 import { collectCompletedDependencyOutputs, formatDependencyOutputs, installTeamScheduler } from './scheduler.ts'
@@ -94,8 +111,29 @@ import { register as register_status } from './tools/status.ts'
 import { register as register_delivery } from './tools/delivery.ts'
 import { register as register_resume } from './tools/resume.ts'
 import { register as register_delete } from './tools/delete.ts'
+import { register as register_halt } from './tools/halt.ts'
 import { register as register_restart } from './tools/restart.ts'
-import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf } from './tools/shared/entities.ts'
+/**
+ * ★ t7（N6）：把「计划审查」做成一次**显式**工具调用。
+ *
+ * ★ 工具体之间不互相调用（各自只向 `ctx.tools` 注册），所以它排在哪一行
+ *   都不影响语义；放在末尾是为了让 diff 只多两行。
+ */
+import { register as register_review_plan } from './tools/review-plan.ts'
+import { AgentTeamsRuntime, INPUT_SURFACE_PROPERTY, RUNTIME_GATE_LOG_LIMIT, StagedPlanMutation, ToolsConfig, WaitRecord, WaitWindow, arbitrateRestart, auditGateRequires, diagnosticFields, evaluateRuntimeGates, forgetWaitWindow, inputSurfaceOf, judgeRuntimeGates, makeTask, moduleFreshness, moduleFreshnessMessage, observeMemberActivity, observeMemberConvergence, observedSpoke, pluginRoot, putWaitRecord, putWaitWindow, requireFreshCaptainTeam, requireMember, requireTask, runtimeGateLog, stateRootOf, stopTeamMemberActivations, taskWorktreeBase, teamLockKey, teamWaitObservations, throwWithSurface, trimmedOptional, waitRecords, waitWindowKey, waitWindows, workspaceOf, worktreeBaseOf,
+  /**
+   * ── ★★★ 2026-10-20：`add_task` 路线跑契约判据门所需的四个符号（需求 §13）──────
+   * ★ 与 `create_task` 用**同一个**实现、**同一套**注入 —— 不新造第二条路径。
+   */
+  rejectOnContractGates, runVerifyCommand, loadVerifyCommandRules,
+  /**
+   * ── ★★★ 2026-10-21：汇合点 B 的**输入面**补齐（需求 §11 的 R11.4）────────────
+   * ★ 这两个符号此前只有另两个调用点在用 ⇒ 修好的两条路一条新信号都没产出过，
+   *   而唯一还在出货的那条（`edit_plan`）**两格都没有**。
+   * ★ `gateIdFromMessage` 而不是新写一个正则：全仓对「拒绝原文里的判据 id」
+   *   只有一处口径（`src/tools/shared/entities.ts:4328`），第二份必然分叉。
+   */
+  gateIdFromMessage, loadCollectionIndexFor } from './tools/shared/entities.ts'
 // ── ★ t39：对外接口不变 ─────────────────────────────────────────────────────
 // 这两个类型此前【声明在 tools.ts 里】，外部（src/index.ts）从这里 import。
 // 拆分之后它们的家在 tools/shared/entities.ts —— 而【对外接口不许变】，
@@ -129,6 +167,18 @@ export {
   moduleFreshnessFrom,
   stampCommitOf,
   currentHead,
+  /**
+   * ★ `isAncestorOf` 与上面几个同一理由导出：它决定 `commitBehind` 那一格，
+   *   而"构建时的提交是不是 HEAD 的祖先"必须能被夹具【精确驱动】——
+   *   ★ 否则它的三态（是 / 不是 / 判不了）只能靠 live 读数去碰。
+   */
+  isAncestorOf,
+  /**
+   * ★★★ 同样导出：它是 `commitBehind` 那第三个维度 —— 「这两个提交之间，
+   *   构建的输入变了吗」。而它的三态（变了 / 没变 / 问不出来）必须能被夹具
+   *   逐格钉住，否则"每提交一次一条假红"这个形态只能靠 live 读数去碰。
+   */
+  buildInputsChangedBetween,
   readStamp,
   moduleFreshnessMessage,
   restartArbitrationMessage,
@@ -252,14 +302,26 @@ export function rememberWorktreeBase(taskId: string, base: string): void {
  * ★ 为什么要落盘：内存 Map 在进程重启后清空，而"改动发生【之前】的版本是什么"
  *   在改动发生之后就**再也推不出来**了（HEAD 已经含了改动）⇒ 那个事实只能记下来。
  *
- * ★ 为什么要查 workspace 下**所有**团队：`onWorktree` 的回调只拿到 `taskId`，
- *   而任务属于某个团队。团队目录在 `stateDir` 之下 ⇒ 逐个看。
+ * ★ 为什么还要查 workspace 下**所有**团队：`onWorktree` 的回调只拿到 `taskId`，
+ *   而任务属于某个团队。`stateRoot` 是 stateDir 的绝对路径（**调用方交进来的**，
+ *   不是这里推出来的）⇒ 逐个团队目录看。
  *   ★ 代价说清楚：任务数少（一个团队几十条），而这一步发生在**派发时刻**
  *     （不是每次调用），所以这个扫法是可接受的。
+ *
+ * ★★ `stateRoot` 是**参数而不是模块级变量**（2026-10-10 改）：团队住在
+ *   `join(workspace, stateDir)`，而 workspace 每个会话各不相同 ⇒ 进程级单值
+ *   **表达不了它**。两版猜法（`process.cwd()` / `pluginRoot()`）的实测后果见
+ *   本文件里那段 `STATE_DIR_FOR_BASE_PERSIST` 的墓志铭。
+ *
+ * ★ `stateRoot` **必填、不判空**（2026-10-10，队长指出后删）：它由调度器交出，
+ *   编译期就不可能缺席 ⇒ 这里**没有** `if (root === undefined) return`。
+ *   ★ 为什么删：那句会**声明**一种类型系统已经排除的状态 ⇒ 读代码的人以为
+ *     "这里可能拿不到 stateRoot"，而那个印象恰好是**前两版翻车的形态**
+ *     （"猜不到就静默返回"读起来像正常路径）。★ 真正的缺席只有一种，见下：
+ *     团队目录**还不存在**（第一个团队尚未落盘）⇒ 那是 readdir 的 ENOENT，不是 undefined。
  */
-async function persistTaskBaseRevision(taskId: string, base: string): Promise<void> {
-  const root = STATE_DIR_FOR_BASE_PERSIST
-  if (root === undefined) return
+async function persistTaskBaseRevision(taskId: string, base: string, stateRoot: string): Promise<void> {
+  const root = stateRoot
   const { readdir } = await import('node:fs/promises')
   let teamIds: string[]
   try {
@@ -295,14 +357,32 @@ async function persistTaskBaseRevision(taskId: string, base: string): Promise<vo
 }
 
 /**
- * ★ `persistTaskBaseRevision` 需要知道 `stateDir` 的**绝对路径**，而 `onWorktree`
- *   的回调签名里没有它 ⇒ 在 `registerAgentTeamsTools` 装配时记一个模块级引用。
+ * ── ★★★ 这里曾经有一个模块级变量 `STATE_DIR_FOR_BASE_PERSIST`（2026-10-10 已删）────
  *
- * ★ 为什么用模块级变量而不是改 `SchedulerConfig` 的签名：改签名要动
- *   `src/scheduler.ts`（本任务 **outOfScope**）。⇒ 代价如实说明：进程内只会有
- *   一个已装配的插件实例（本插件的既有约定），而这个变量只被 `onWorktree` 读。
+ * 它的用途：`persistTaskBaseRevision` 要把 `base` 落进 `team.json`，就需要知道
+ * **团队住在哪**，而当时的 `onWorktree` 回调签名里只有 `(taskId, base)`
+ * ⇒ 于是"在装配时把 stateDir 记成一个进程级单值"。
+ *
+ * ★★ 删掉它的理由不是"变量不好"，而是【它没有正确答案可放】：
+ *   团队住在 `join(workspace, stateDir)`，而 `workspace = agent.session.header.cwd`
+ *   —— 那是一个**每个会话各不相同**的值。一个进程级单值**表达不了它**：
+ *
+ *     · 第一版放 `process.cwd()`      ⇒ 那是**宿主进程**的工作目录。实测宿主 cwd 是
+ *       profile 目录，而团队在用户的仓库里 ⇒ `readdir` 不抛错、候选集为空
+ *       ⇒ 零错误、零日志、零迹象（本缺陷藏得最深的一态）；
+ *     · 第二版放 `pluginRoot()`       ⇒ 那是**插件自己的**目录，与 workspace
+ *       **无关**；两者相等**当且仅当插件恰好装在 workspace 里**。本机正是这个巧合
+ *       （`profiles/desktop/node_modules/@nanmicoder/dsh-agent-teams --link-->`
+ *       本仓库），所以它**看起来**有效 —— 而换部署（插件在 profile、团队在用户
+ *       仓库）就退回缺陷。实测：那种部署下 worktree 建出、任务 claimed、warnings
+ *       为空，而 `team.json` 的 `baseRevision === undefined`。
+ *
+ * ⇒ 真正的修法不是"换个更聪明的锚点"，而是**把这份知识从猜改成传**：
+ *   `SchedulerConfig.onWorktree` 现在带第三个参数 `stateRoot`，由调度器交出它
+ *   已经算好的那个（`stateRootOf(workspace, config)`）⇒ 调用方不再需要任何模块级状态。
+ * ★ 于是这个变量被**删除而不是保留**：留着它就是留着"第二个锚点"，
+ *   而两个锚点在"哪个对"这件事上必然分叉 —— 那正是上面那两版实现的形态。
  */
-let STATE_DIR_FOR_BASE_PERSIST: string | undefined
 
 /** 取该任务的基准；没有就返回 undefined（**不是** HEAD，也不是空串）。 */
 
@@ -454,9 +534,37 @@ function validateStagedGraph(team: TeamState, requireRunnable: boolean): void {
   if (requireRunnable && team.tasks.length === 0) throw new Error('add at least one task before approving the plan')
   const memberNames = new Set(members.map((member) => member.name))
   const taskIds = new Set(team.tasks.map((task) => task.id))
+  /**
+   * ── ★★★ t10：**已终结的任务不参与"当前图合法不合法"的判定** ────────────────────
+   *
+   * MEASURED（`docs/DEFECT-EDITPLAN-HISTORIC-ASSIGNEE.md`）：本函数此前对**所有**
+   * 任务都跑下面那条 assignee 校验，于是一个**已完成**任务的历史 assignee 能挡住
+   * 整个 `edit_plan`。现场：队长给六个成员改中文角色时被一条 `t15` 挡住
+   * （`task "t15" assignee "reviewer" is not an active member`），
+   * 而那件事**与任务图毫无关系**。
+   *
+   * ── 为什么"历史任务当历史"是对的，而不是放宽 ──────────────────────────────────
+   *
+   * 这条校验要回答的是「**这份计划现在能不能跑**」—— 它问的是**当前图**。
+   * 一条 `completed` 任务的 assignee 是**历史事实**：那个成员当时在队里，
+   * 现在被移除了，而**那条任务已经做完了**。拿历史事实去否当前图，
+   * 是把"曾经合法"读成"现在不合法"。
+   *
+   * ★★ 而**未终结**的任务仍然全额校验 —— 那才是"现在能不能跑"的答案所在。
+   *   反向半边：把一条 `pending` 任务的 assignee 改成已移除成员，**必须仍然被拒**。
+   *
+   * ── 三条**不**跟着放宽的（它们与任务状态无关）──────────────────────────────────
+   *
+   *   · `subject` 非空 —— 一条没有标题的任务，无论什么状态都读不出它是什么；
+   *   · 依赖自指 / 未知依赖 id —— 图的结构问题：历史任务留着一条指向不存在任务的边
+   *     同样是坏图；
+   *   · 下面的 DFS 环检测 —— 环就是环，与哪条任务先完成无关。
+   * ⇒ ★ 只放宽 assignee 那一条，且只对终态任务放宽。**这是收窄，不是打开。**
+   */
   for (const task of team.tasks) {
     if (task.subject.trim() === '') throw new Error(`task "${task.id}" must have a subject`)
-    if (task.assignee !== undefined && task.assignee !== CAPTAIN_KEY && !memberNames.has(task.assignee)) {
+    const terminal = TERMINAL_TASK_STATUSES.includes(task.status)
+    if (!terminal && task.assignee !== undefined && task.assignee !== CAPTAIN_KEY && !memberNames.has(task.assignee)) {
       throw new Error(`task "${task.id}" assignee "${task.assignee}" is not an active member`)
     }
     for (const dependency of task.dependencies) {
@@ -651,11 +759,20 @@ export function stagedPlanFeedbackContext(teamName: string): string {
 /** 读盘上当前的 stamp 的 `output` 摘要；拿不到 ⇒ `undefined`（**不是**空串）。 */
 
 /**
- * 插件根目录 —— 与 `STATE_DIR_FOR_BASE_PERSIST` 同一种做法（`__dirname` 的上两级）。
+ * 插件根目录 —— `pluginRoot()`（`tools/shared/entities.ts`）返回的**项目根**，
+ * 也就是 `lib/` 的父目录。
+ *
+ * ★ 与 `buildGate` / `sessionDirsOf` 同族：这里要的是**插件自己**的根，
+ *   不是用户的工作区根 —— 两者是**不同的东西**，而它们恰好在"插件装在
+ *   workspace 里"时相等（本机正是这个巧合）。
+ *   （★ 说清曾经的错误：曾经把这一族结论**顺手推广**到了 `onWorktree` 的落盘锚点上
+ *    —— 那一处要的是 workspace，不是插件根 ⇒ `pluginRoot()` 在那里是错的。
+ *    两版实测见本文件里那段 `STATE_DIR_FOR_BASE_PERSIST` 的墓志铭。）
  *
  * ★ 为什么不用 `process.cwd()`：插件的产物位置与**用户的工作目录**无关，
  *   而 stamp 在插件的 `lib/` 里。用 cwd 会在"用户在别处起会话"时读错地方，
  *   而那会**静默**把 `unknown` 变成常态（于是这条读数永远不报）。
+ *   ★ 同一个理由是上面那个缺陷的成因：cwd 读错地方时，失败**不是抛错而是静默**。
  */
 
 /** 加载时记下的 output 摘要（**进程级、只在模块求值时写一次** —— 这正是被检测的对象）。 */
@@ -1450,7 +1567,11 @@ function sessionSpokeWithContent(session: unknown): boolean {
  * 落一条卡点记录。
  *
  * ★ 路径：`<stateRoot>/frictions/<id>.json` —— 与既有 12 条**同一个目录、同一种形状**。
- *   `stateRoot` 的锚点与 `onWorktree` 的落盘共用 `STATE_DIR_FOR_BASE_PERSIST`。
+ *   `stateRoot` 的锚点与 `onWorktree` 的落盘**不是**同一个来源：这里用的是
+ *   `stateRootOf(workspaceOf(captain), config)`（会话给的 workspace），
+ *   而落盘那一处用的是调度器交出来的 `stateRoot`。★ 两者都由 workspace 推出，
+ *   但**别把它们说成"同一个变量"** —— 曾经正因为这样说过，才把 `pluginRoot()`
+ *   这种"插件根"锚点误当成了 workspace 锚点。
  *
  * ★ 这一层只做 I/O，**不改任何裁决** —— 与 `inputSurfaceOf` 同一条纪律（旁路数据）。
  */
@@ -1685,15 +1806,53 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
    */
   const clock = (): number => config.now?.() ?? Date.now()
   /**
-   * ★ t18：`onWorktree` 的回调只拿得到 `taskId`，而把父版本**落盘**需要知道
-   *   团队目录在哪。`stateDir` 是配置项（相对 workspace），而 workspace 在派发
-   *   那一刻由调度器持有 —— 回调签名里没有它（改签名要动 `src/scheduler.ts`，
-   *   那是本任务的 **outOfScope**）。
-   *   ⇒ 在装配时记下 `stateDir` 的**绝对路径**，供 `onWorktree` 使用。
-   *   ★ 代价如实说明：进程内只有一个已装配的插件实例（本插件的既有约定），
-   *     而这个变量只被 `onWorktree` 读、只被这里写。
+   * ── ★★★ 这里【不再】有 `STATE_DIR_FOR_BASE_PERSIST`（2026-10-10 删除）──────────────
+   *
+   * 它此前是"团队住在哪"的落盘锚点：`persistTaskBaseRevision` 要把 `base` 写进
+   * `team.json` 就需要它，而旧回调签名 `(taskId, base)` 里没有它 ⇒ 只能记一个
+   * **进程级单值**。★ 而它**没有正确答案可放**：
+   *
+   *   团队住在 `join(workspace, stateDir)`，`workspace = agent.session.header.cwd`
+   *   —— 那是**每个会话各不相同**的值，一个进程级单值表达不了它。于是它被猜了两次：
+   *
+   *   MEASURED（第一版，`process.cwd()`；captain 实测 + 本任务复核。这正是
+   *   `[completion.backtest]` 报 "no parent revision was recorded … the record was
+   *   lost rather than never created" 的成因，而该门对 completed 与 failed
+   *   **两个方向都拦**）：
+   *
+   *     宿主 DSH 进程（web / plugin-manager）的 cwd 是 **profile 目录**
+   *     （实测 `/Users/abab/.dsh/profiles/desktop`），**不是**用户的工作区。
+   *     ⇒ `join(process.cwd(), '.agent-teams')` 算出的 root 是
+   *       `/Users/abab/.dsh/profiles/desktop/.agent-teams`。
+   *     ★★ 而它失败的形态**不是**"那个目录不存在"（这个区别很重要，两种形态读数不同）：
+   *       · 那个目录**确实存在**（`installHmrTrace` 的旧 cwd 缺陷留下的痕迹，
+   *         里面只有一个 `hmr-reloads.jsonl`，**没有任何团队目录**）；
+   *       · 于是 `readdir(root)` **根本不抛错** ⇒ 那个 `catch` 的静默 `return` **不是主因**；
+   *       · 真正发生的是 `teamIds = []`（实测逐字：`subdirectories (teamIds) = []`）
+   *         ⇒ 循环体执行 **0 次** ⇒ 不写、不抛、不打日志 —— **零错误、零日志、零迹象**。
+   *     ⇒ 这是"锚点算错"的**最隐蔽形态**：目录存在、readdir 成功、循环跑完，
+   *       只是扫了一个**空的候选集**。
+   *
+   *   MEASURED（第二版，`pluginRoot()`；★★★ 这一版是**错的，已回退**）：
+   *     当时把它归纳成"锚点必须不随 cwd 变"，于是换成了插件自己的根。
+   *     ★ 而那是**另一棵树**：`pluginRoot()` 返回**插件自己的目录**，与 workspace
+   *       **无关**；两者相等**当且仅当插件恰好装在 workspace 里**。
+   *       本机正是这个巧合（`profiles/desktop/node_modules/@nanmicoder/dsh-agent-teams`
+   *       `--link-->` 本仓库）⇒ 它**看起来**有效。
+   *     ★ 实测（情形 2：插件目录 ≠ workspace）：worktree 建出、任务 claimed、
+   *       warnings 为空，而 `team.json` 里 **`baseRevision = undefined`**
+   *       ⇒ 缺陷原样存在，只是换了个部署才显形。
+   *     ⇒ ★★ 教训：这里的性质不是"算错了层数"，而是**这一格上根本没有可用的锚点**；
+   *       "换一个更聪明的锚点"这个方向本身就是错的 —— 正确方向是**把知识传进来**。
+   *
+   * ⇒★★ 修法：`SchedulerConfig.onWorktree` 增加第三个参数 `stateRoot`
+   *   （`src/scheduler.ts`），由调度器交出**它已经算好的那一个**
+   *   （`kickMember` 里的 `stateRootOf(workspace, config)`）——
+   *   也就是 web 路由与判据读的**同一个**解析结果。
+   *   ⇒ 于是"团队住在哪"只有**一个**来源，模块级变量与它携带的那份猜测**一并删除**。
+   *   ★ 留着那个变量就是留着"第二个锚点"，而两个锚点在"哪个对"这件事上必然分叉
+   *     —— 那正是上面两版实现的形态。
    */
-  STATE_DIR_FOR_BASE_PERSIST = join(process.cwd(), config.stateDir ?? '.agent-teams')
   const scheduler = installTeamScheduler(ctx, {
     stateDir: config.stateDir,
     executionPrompt: config.executionPrompt,
@@ -1730,10 +1889,15 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
      * ★ `void` + catch：这是**旁路数据的持久化**，失败不该让派发本身失败
      *   （派发已经发生了）。而失败也**不静默**：日志里留下一条，读得到。
      *   ⇒ 内存那一份仍然生效，所以最坏情况退回 t18 之前的行为，不会更坏。
+     *
+     * ★★★ 第三个参数 `stateRoot`（2026-10-10 修）：它就是团队所在的那棵树
+     *   （`stateRootOf(workspace, config)`，由调度器交出）。★ 这里**直接用它** ——
+     *   不再有任何模块级变量，也不再从 `process.cwd()` / `pluginRoot()` 猜。
+     *   两版猜法的实测后果见上面 `STATE_DIR_FOR_BASE_PERSIST` 的墓志铭。
      */
-    onWorktree: (taskId, base) => {
+    onWorktree: (taskId, base, stateRoot) => {
       rememberWorktreeBase(taskId, base)
-      void persistTaskBaseRevision(taskId, base).catch((error: unknown) => {
+      void persistTaskBaseRevision(taskId, base, stateRoot).catch((error: unknown) => {
         ctx.logger.warn(`agent-teams: could not persist the base revision for task "${taskId}": ${String(error)}`)
       })
     },
@@ -1767,9 +1931,6 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       void evaluateRuntimeGates(ctx, 'member-dispatched', event, clock)
     },
   })
-  const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
-    scheduler.kickMember(workspace, teamId, memberName)
-  ))
 
   async function dispatchMember(captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string): Promise<boolean> {
     const root = stateRootOf(workspaceOf(captain), config)
@@ -1797,11 +1958,56 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         const member = team.members.find(item => item.name === memberName && item.status !== 'removed')
         if (member === undefined || member.stopping === true || team.tasks.some(task => task.reassigning === true && task.assignee === memberName)) return false
         if (attemptId !== undefined && !team.tasks.some(task => task.attemptId === attemptId && task.assignee === memberName && (task.status === 'claimed' || task.status === 'in_progress'))) return false
-        if (member.id !== '') return deliverToMember(ctx, captain, member.id, text, signal, mode)
+        /**
+         * ── ★★★ 会话预算：**已经满了就不往里投**（2026-10-20，补 t4）─────────────────
+         *
+         * ── 它拦的是什么（MEASURED：插件推荐的动作必然失败）──────────────────────
+         *
+         * 下一行 `deliverToMember(…, member.id, …)` 把任务投进**这个成员已有的会话**，
+         * 而那个会话**永不重建**（`src/tools.ts:2023` 逐字：「已生成会话的成员
+         * **永远不会再跑** `spawnMember`」）。
+         * ⇒ ★ 一个已经烧穿上下文的成员被重派时，新任务进的是**同一个已死的会话**。
+         *   而本仓缺陷文档还推荐「reassign it or retry when ready」——
+         *   **插件推荐的动作必然失败**。
+         *
+         * ── ★ 三态各自不同形 ────────────────────────────────────────────────────
+         *
+         *   `ok`      ⇒ 照常投递
+         *   `full`    ⇒ **拒绝**，并指名是哪个成员、依据哪个读数
+         *   `unknown` ⇒ **照常投递，但留痕**（先软后硬：本仓那条纪律是"新机制先别误伤"）
+         *     ★★ 而它**必须留痕** —— 一个静默放行的 unknown 与 ok 同形，
+         *       那正是"重派必然撞死"能一直发生的原因。
+         *
+         * ★ 窗口大小从 `AGENT_TEAMS_CONTEXT_WINDOW` 读；**没配就不报比例**（不猜一个数）。
+         */
+        if (member.id !== '') {
+          const budget = judgeSessionBudget(
+            await memberSessionBudget(member.id, workspaceOf(captain)),
+            contextWindowOf(),
+            sessionBudgetThresholdOf(),
+          )
+          if (budget.verdict === 'full') {
+            /**
+             * ★ 拒绝语必须**可行动**：说清是谁、依据什么、以及**该做什么**。
+             *   ★★ 而"该做什么"这一格是本条最要紧的 —— 因为本插件今天
+             *     **没有**"给成员换一个干净会话"的能力（那是另一条改动）。
+             *     ⇒ 所以只能如实说"重派也没用"，而不是让人去撞一次墙。
+             */
+            throw new Error(
+              `member "${member.name}" cannot take more work: ${budget.why}. `
+              + '★ Reassigning will NOT help — a member\'s session is never recreated, so the new task would land in this same session. '
+              + 'Spawn a replacement member, or hand this task to one whose session still has room.',
+            )
+          }
+          if (budget.verdict === 'unknown') {
+            ctx.logger.warn(`agent-teams: session budget for "${member.name}" could not be judged (recorded, not rejected): ${budget.why}`)
+          }
+          return deliverToMember(ctx, captain, member.id, text, signal, mode)
+        }
         const selection = await resolveMemberLlmSelection(ctx, captain, {
           provider: member.provider, model: member.model, reasoningEffort: member.reasoningEffort, fallback: member.fallback,
         }, signal)
-        await spawnMember(ctx, memberRuntime(config), memberSelections, selection, captain, team, member, config.stateDir, signal, text)
+        await spawnMember(ctx, memberRuntime(config), deferredSelections, selection, captain, team, member, config.stateDir, signal, text)
         orphan = { ...member }
         delete member.spawnError
         await writeTeam(root, team)
@@ -1831,13 +2037,79 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       const staged = fresh.phase === 'staged'
       if (!staged && !allowPendingEdits) requireStagedTeam(fresh)
       if (fresh.halted === true) throw new Error('team is halted; resume before editing tasks')
-      if (!staged && mutations.some(mutation => mutation.action !== 'update_task')) {
-        throw new Error('a running team only permits update_task edits to pending, never-started tasks; roster and removal edits require a staged plan')
+      /**
+       * ── ★★★ t16：运行中的团队允许 `update_member`，但【只对还没起来的成员】────────
+       *
+       * 此前这一格是**一刀切**：`mutation.action !== 'update_task'` ⇒ 拒。
+       * ⇒ 于是"给一个【还没起来】的成员换模型"也被当成"改已启动的花名册"一并拒掉 ——
+       *   而这两件事要防的东西完全不同：
+       *
+       *     改已启动成员的模型 ⇒ 它的路由在创建那一刻就冻进描述符了（t14 实测），
+       *                          改它既改不动、又会让人以为改动了 ⇒ **必须拒**
+       *     改还没起来成员的模型 ⇒ 它还没有描述符 ⇒ 这正是 t14 那条边界允许的情形
+       *
+       * ★ 而"哪个成员算已启动"这条规则**不在这里重写**：下面循环的
+       *   `member.id !== ''`（"was already spawned"）就是那一条，它本来就在。
+       *   ⇒ 这里只做一件窄的事：把一刀切收成"先放行 update_member，由那一格去判"。
+       *   ★ 不在这里抄一份 `member.id` 判断 —— 抄一份就是同一条规则的两个副本，
+       *     而副本会分叉（本队记账里最贵的那类缺陷）。
+       *
+       * ★ 其余动作（add_task / remove_task / remove_member）对运行中的团队仍然拒：
+       *   那些是拓扑改动，与"换一个还没起来的成员的模型"不是一件事。
+       */
+      if (!staged && mutations.some(mutation => mutation.action !== 'update_task' && mutation.action !== 'update_member')) {
+        throw new Error('a running team only permits update_task edits to pending, never-started tasks, and update_member model edits for members that have not been spawned yet; other roster and removal edits require a staged plan')
       }
       for (const mutation of mutations) {
         if (mutation.action === 'update_member') {
           const member = requireMember(fresh, mutation.memberName)
-          if (member.id !== '') throw new Error(`staged member "${member.name}" was already spawned`)
+          /**
+           * ★ t16：这一格现在对运行中的团队也会走到，所以错误信息必须说清
+           *   【为什么】不能改 —— 而不只是"它已经起来了"。
+           *   · 运行中的团队 ⇒ 它的路由在创建时冻进描述符了（t14 实测：不传播）
+           *   · 暂存团队     ⇒ 它已经起来了，暂存期只该改还没起来的那些
+           *   ★ "不能改"与"改了也不会生效"必须分开说 —— 后者才是这里真正的理由，
+           *     而前者会让人以为再点一次就行。
+           */
+          /**
+           * ── ★★★ t84：闸门**按字段**收紧 —— 只拒【真的冻住】的字段 ────────────────────
+           *
+           * 原来这一格是 `if (member.id !== '') throw` —— **整条 update_member 一起拒**。
+           * ★ 而它的理由（下面逐字）**只对一部分字段成立**：
+           *
+           * | 字段 | 进哪里 | 对已生成成员改它，生效吗 |
+           * |---|---|---|
+           * | `provider` · `model` · `reasoningEffort` | 冻进 **session descriptor**（t14 实测：不传播） | ❌ **不生效** ⇒ ★ **该拒** |
+           * | `role` · `executionPrompt` | `team.json` **数据**（`snapshot.ts:368` 每轮重读） | ✅ **面板立刻生效** |
+           *
+           * ★★ 而 `role` / `executionPrompt` **另有一半是冻的**（**既存事实**，不是本次引入）：
+           *   它们同时也进**成员的 persona**（`members.ts:534-536` 的 `memberPersona`），
+           *   而那**只在一处被调用** —— `members.ts:634`，位于 `spawnMember` 内部。
+           *   而调度路径逐字是 `if (member.id !== '') return deliverToMember(...)`
+           *   ⇒ **已生成会话的成员永远不会再跑 `spawnMember`** ⇒ persona 不再重建。
+           *   ⇒ ★ 所以放行之后：**面板刷新即生效；成员自我认知仍是生成时那句。**
+           *     今天这两件事都被同一条闸门挡住，所以没人看得见这个区别。
+           *
+           * ── ★★ 判据为什么是"**变了没有**"而不是 `!== undefined` ────────────────────────
+           * MEASURED（t84 实查）：`StagedPlanMutation` 的 `provider` / `model` 是
+           *   **必填**（`provider: string; model: string`），而 `edit-plan.ts` 用
+           *   **成员当前值兜底**（`operation.model?.trim() || member.model || ''`）。
+           *   ⇒ 一次"只改 role"的编辑，到达这里时 `mutation.model` **是成员现有值、恒非 undefined**
+           *   ⇒ ★ 若写成 `mutation.model !== undefined`，**闸门会把 role 编辑照样拒掉**，
+           *     即"修了但没修好"，而那种失败在报告里与"改对了"同形。
+           *   ⇒ 所以逐字段比较**值是否变化**（`trim` 后）—— 没变 ⇒ 不是在改那个字段 ⇒ 不拒。
+           *
+           * ★ 与 `resolveMemberLlmSelection` 下面的调用**不冲突**：值没变时它解析出的
+           *   就是同一个路由 ⇒ 写回去是幂等的（不是"放宽"，是"同一个值"）。
+           */
+          const changedLlmRoute = member.id !== '' && (
+            (mutation.provider?.trim() ?? member.provider ?? '') !== (member.provider ?? '')
+            || (mutation.model?.trim() ?? member.model ?? '') !== (member.model ?? '')
+            || (trimmedOptional(mutation.reasoningEffort) ?? '') !== (member.reasoningEffort ?? '')
+          )
+          if (changedLlmRoute) throw new Error(!staged
+            ? `member "${member.name}" has already been spawned, so its model is frozen into its session descriptor; changing it now would be recorded without being applied - spawn a replacement member instead`
+            : `staged member "${member.name}" was already spawned`)
           const selection = await resolveMemberLlmSelection(ctx, captain, {
             provider: mutation.provider,
             model: mutation.model,
@@ -1865,20 +2137,149 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         } else if (mutation.action === 'add_task') {
           const subject = mutation.subject.trim()
           if (subject === '') throw new Error('task subject must not be empty')
-          fresh.taskSeq += 1
-          const now = Date.now()
-          fresh.tasks.push({
-            id: `t${fresh.taskSeq}`,
+          /**
+           * ★ t117：构造走**唯一的** `makeTask`（`tools/shared/entities.ts`）。
+           *
+           * ── ★★★ t9：`kind: 'work'` 的硬编码**已被删掉** ─────────────────────────────
+           *
+           * ★★ 那处硬编码曾被写成"与改造前逐字一致 —— 本步是纯重构，不改行为"，
+           *   而它同时是一处**结构性限制**：`StagedPlanMutation` 的 `add_task`
+           *   当时没有 `kind` 格，所以经 `edit_plan` 加进来的任务**永远不是 quality kind**，
+           *   也就永远不需要质量契约 —— 而"这活根本没被人看过"这件事在数据上**不可见**。
+           *   t9 把那一格开出来了（`entities.ts:255`），于是这里**不再需要**猜一个值。
+           *
+           * ── 为什么"删掉硬编码、让它缺席"也不够（MEASURED，t9）──────────────────────
+           *
+           *   拿真表在完工位置（`registry.evaluate('completion', …)`）上跑四行，
+           *   读数**逐字相同**：
+           *
+           *       work / verification / review / undefined
+           *         ⇒ ok=false blockers=0 unmeasured=undefined evaluated=0 skipped=4
+           *
+           *   ★ 也就是说一个"没人声明过类型"的任务与一个"明写了 work"的任务，
+           *     **在裁决面上一格都分不开**。⇒ 缺席不是第三态，缺席是**零信息量**。
+           *   而 `src/gates/requires.ts:611-621` 逐字写着它**故意不探字符串**：
+           *   「`task.kind` 这一类**故意不探字符串** …… ⇒ 这一类如实**推不出来**（少报），
+           *     而不是猜一个」。⇒ 本路径**不可能**靠"落一个缺席的键"来表达"没人声明"。
+           *
+           * ── 于是判据是【拒绝】，不是"补 work"也不是"落标记"───────────────────────
+           *
+           *   `mutation.kind` 缺席 ⇒ 指名拒绝。这是**双层拒的第二层**：
+           *     第一层在 `src/tools/edit-plan.ts` 的 mapper（工具入口，措辞同源）；
+           *     这一层在这里，防的是**绕过那个 mapper 的调用方**（HTTP 计划路由在
+           *     `src/index.ts` 的 `updateStagedPlan` 调用点、以及内部直接构造 mutation 的地方）。
+           *   ⇒ 两层防的是**不同的事**，删一层不删另一层等于只关了一扇门。
+           */
+          if (mutation.kind === undefined) {
+            throw new Error(
+              'add_task requires an explicit kind: the plan route must not silently create a "work" task. '
+              + 'Declare the kind ("work" for ordinary work, or a quality kind such as "implementation"). '
+              + '★ An undeclared kind and a kind of "work" are indistinguishable at the adjudication surface, '
+              + 'so "nobody declared this" cannot be recovered after the fact — it has to be refused here.',
+            )
+          }
+          const draft = {
             subject,
             description: trimmedOptional(mutation.description),
-            status: 'pending',
             assignee: trimmedOptional(mutation.assignee),
             dependencies: [...new Set(mutation.dependencies.map((item) => item.trim()).filter(Boolean))],
-            attempt: 0,
-            kind: 'work',
-            createdAt: now,
-            updatedAt: now,
-          })
+            kind: mutation.kind,
+            objective: trimmedOptional(mutation.objective),
+            inScope: mutation.inScope ?? undefined,
+            acceptance: mutation.acceptance ?? undefined,
+            verify: mutation.verify ?? undefined,
+          }
+          /**
+           * ── ★★★ t9 验收第 3 条：走 `create_task` 的**同一条**校验 ──────────────────
+           *
+           * ★★ 而"同一条"是**逐格列举**传进去（照抄 `create-task.ts:531` 的形状），
+           *   不是 `draft as never` —— 后者会让"我传漏了一格"在类型上无声，而
+           *   "判据写对了但输入面没接上"在断言层面与"没判据"同形（本队记账过）。
+           *   ★ `validateCreateTask` 本来就在本文件的 import 里（`:48`），
+           *     这证明这条校验**本来就是"计划路线也该用"的**，只是此前没接上。
+           *
+           * ★ 位置在 `makeTask` **之前**、在 `taskSeq` 自增之前 —— 与 `create_task` 同序：
+           *   一条不合格的任务**一个字节都不该被构造出来**，也不该占掉一个 id。
+           */
+          const validation = validateCreateTask(fresh, {
+            subject,
+            description: draft.description,
+            dependencies: draft.dependencies,
+            assignee: draft.assignee,
+            kind: draft.kind,
+            objective: draft.objective,
+            inScope: draft.inScope,
+            acceptance: draft.acceptance,
+            verify: draft.verify,
+            /**
+             * ★★ 这一格**就是**双层拒的第二层（见 `CreateTaskInput.requireExplicitKind`）。
+             *   上面那道 `mutation.kind === undefined` 拦的是"这次调用没带 kind"；
+             *   这一格交给判据层的是"**这条路**要求显式声明"这件事本身 ——
+             *   ⇒ 于是判据层不再是"谁都能靠一个静默缺省过关"的状态。
+             *   ★ 两层缺一不可：只删上面那层，判据层仍会拦（因为它收到了这个声明）；
+             *     只删这一格，上面那层仍会拦（但判据层对下一个人又是静默的）。
+             */
+            requireExplicitKind: true,
+          }, undefined, workspace)
+          if (!validation.ok) throw new Error(validation.error ?? 'edited task violates the quality contract')
+          /**
+           * ── ★★★ 2026-10-20：`add_task` 路线**终于跑契约判据门**（需求 §13 的核心诉求）────
+           *
+           * ── 它补的是什么（MEASURED，就在本轮）──────────────────────────────────────
+           *
+           * 需求 §13 逐字记过：「`edit_plan` 的 `add_task` 路径**完全不跑任何契约门**」，
+   *     并给了一句预言：「**任何碰 `src/` 的任务必然产出 `lib/` 改动**，这不是偶然，
+   *     是结构性的。代价每次都是"一个成员的完整实现 + 一次契约修订 + 一次重来"。」
+           *
+           * ★★ 而本轮**真的又栽了同一件事，而且更贵**：
+           *   · 我用 `edit_plan` 建的 4 条 implementation 契约**全部**只声明了 `src/`、
+           *     没配对 `lib/` ⇒ `git-artifacts --check` 在每一条交付后变红
+           *   · 而 `t5` 更狠：它的 inScope 把**三个 claim 点**（`claim.ts:98` /
+           *     `scheduler.ts:891` / `reassign.ts:117`）与**臂的落点**（`scripts/`）
+           *     全留在外面 ⇒ 那条契约**在结构上不可满足** ⇒ 成员只能正确地选择 `failed`，
+           *     交付零代码。那是一次**完整的实现 + 一次失败记账**，只为了一个本可以在
+           *     建契约那一刻就报出来的缺格。
+           *
+           * ── 为什么此前没接：一层**类型上的**障碍，不是设计取舍 ─────────────────────
+           *
+           * `rejectOnContractGates` 是 **async**（它可能注入 `execVerifyCommand` 跑命令），
+           * 而这里以前是同步 push。⇒ 现在把它 `await` 在 push **之前**：
+           *   ★ 位置与 `validateCreateTask` 同序 —— 一条不合格的任务
+           *     **一个字节都不该被构造出来**，也不该占掉一个 id。
+           *
+           * ★★ 与上面那道 `validateCreateTask` 的分工（两层防的是不同的事）：
+           *   `validateCreateTask`  —— **契约合法吗**（kind 要哪些格、格式对不对）
+           *   契约判据门            —— **这份契约可判吗 / 可诚实完成吗**
+           *     （`contract.build-artifact-scope` 的 blocker 逐字点名
+           *      「declares no build artifact under "lib/" … **can never be completed honestly**」）
+           *   ⇒ 两层缺一不可，就像上面 kind 那两层一样。
+           *
+           * ── 与 `create_task` 用**同一个**实现、**同一套**注入 ──────────────────────
+           *
+           * ★ 不新造第二条"跑契约门"的路径（两条路径会在超时/退出码语义上慢慢分叉，
+           *   而那种分叉在日志里同形 —— 本仓记账过）。
+           */
+          const pendingTask = makeTask({ id: `t${fresh.taskSeq + 1}`, ...draft })
+          const contractGateSurface = await rejectOnContractGates(
+            ctx,
+            { team: fresh, task: pendingTask, creating: true },
+            'edit_plan.add_task',
+            stateRoot,
+            {
+              execVerifyCommand: (command: string): Promise<number> => runVerifyCommand(workspace, command),
+              loadRules: () => loadVerifyCommandRules(workspace),
+            },
+          )
+          /**
+           * ★ 与 `create_task` 同一落点：把契约段的裁决落盘到这条任务。
+           *   ★★ 只在**真的求值过**时才写 —— 一个恒在场的空记录会让
+           *     「这一步没被检查」与「检查了且没事」同形。
+           */
+          if (contractGateSurface !== undefined) {
+            ;(pendingTask.gateEvaluations ??= {}).contract = gateEvaluationRecordOf(contractGateSurface.gates)
+          }
+          fresh.taskSeq += 1
+          fresh.tasks.push(pendingTask)
         } else if (mutation.action === 'remove_task') {
           const task = requireTask(fresh, mutation.taskId)
           const dependent = fresh.tasks.find((candidate) => candidate.dependencies.includes(task.id))
@@ -1904,16 +2305,161 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           const validation = validateCreateTask({ ...fresh, tasks: fresh.tasks.filter(item => item.id !== task.id) }, task)
           if (!validation.ok) throw new Error(validation.error ?? 'edited task violates the quality contract')
         }
-      } else fresh.planReviewState = 'awaiting_review'
+      } else {
+        /**
+         * ── ★★★ N5 / t8：轮次计数（改的是**计划**，所以计在这里）────────────────────
+         *
+         * ★★ 口径：**+1 per `edit_plan` 调用，不是 per operation。**
+         *   用户/队长的一次"我改一下计划"在语义上是**一轮反馈**，哪怕它同时改了 5 条任务。
+         *   按 operation 计数 ⇒ 一次批量修 5 处就吃掉 5/3 轮 ⇒ 上限会在**第一次真实修订**
+         *   就打爆，而那会让这个上限从第一天起就是噪音。
+         *   ★ 这条口径必须留在代码里：下一个人会"顺手改成 per operation"，而那时
+         *     没有任何测试会红（两种写法在单 operation 的臂上同形）。
+         *
+         * ★★ 落点是这里而不是工具层（N5.12 漏洞 3）：计数与"打回 awaiting_review"
+         *   必须在**同一个 `withTeamLock` 内、同一个 `writeTeam` 上**。
+         *   写在别处会让两者落在不同的事务边界上 —— 一次在锁内失败的编辑
+         *   可能已经计了数却没打回，或反之。
+         *
+         * ★ 清 `planReviewEscalated`：这是这个位**唯一的清除点**（N5.14）。
+         *   ★★ 而"只清 flag 不归零"不算解除 —— `describePlanLoop` 会立刻从
+         *      `rounds >= maxRounds` 重新算出 escalated（审查者实测的死码）。
+         *      ⇒ 所以 `rounds` 在这里**继续涨**，解除只能走 `resume` 的显式归零。
+         */
+        fresh.planReviewState = 'awaiting_review'
+        const rounds = (typeof fresh.planReviewRounds === 'number' && Number.isFinite(fresh.planReviewRounds)
+          ? Math.max(0, Math.floor(fresh.planReviewRounds))
+          : 0) + 1
+        fresh.planReviewRounds = rounds
+        /**
+         * ★ 只在**达到**上限时置位。
+         *
+         * ★★ 这里**不**清 `planReviewEscalated` —— 那是审查者实测出来的死码（N5.17 B4）：
+         *   "下一次 edit_plan 打回 awaiting_review 时清 flag" 在这份数据上**毫无作用**，
+         *   因为 `describePlanLoop` 会立刻从 `rounds >= maxRounds` 重新算出 escalated。
+         *   ⇒ 解除**只能**是显式归零（`rounds = 0` ＋清 flag），而那是 `resume`
+         *     或人点名时的动作，不是一次普通编辑的副产品。
+         *   ★ 写一段"看起来在解除"的死码比不写更坏：它会让下一个人以为出口存在。
+         */
+        if (rounds >= PLAN_REVIEW_MAX_ROUNDS) fresh.planReviewEscalated = true
+      }
       signal?.throwIfAborted()
       await writeTeam(stateRoot, fresh)
       return fresh
     })
   }
 
+  /**
+   * ── ★★★ t87 · 汇合点 B：**闸门拒绝**（非判据）也进台账 ──────────────────────────
+   *
+   * ★★★ 为什么这一半最有价值（t87 开工实测）：
+   *   本会话 **7 次契约被推翻，其中 5 次是【闸门拒绝】**（inScope 形状错、越界那类）
+   *   —— 而它们**一条都没进台账**：
+   *   ```
+   *   384 条里最新是 2026-10-14；★ 10-16（本会话）有 0 条
+   *   ```
+   *   ⇒ 判据拒绝有记录（汇合点 A），**闸门拒绝没有** —— 而后者才是本会话里真正发生的那类。
+   *
+   * ── ★ 为什么包在 `updatePlanBatch` 上，而不是逐个改那 8 处 `throw` ──────────────
+   *   逐个改 ⇒ 8 份"先采集再抛"的逻辑 ⇒ **它们会分叉**（本仓记账最贵的那类缺陷）。
+   *   ⇒ 在**唯一入口**上包一层 try/catch：**它一条 throw 都不改**（行为零变化），
+   *     只在异常**向上穿出**时补一条旁路采集。
+   *   ★ 而 `updatePlanBatch` 是 `edit_plan` 的唯一入口（`register_edit_plan(ctx, …, updatePlanBatch, …)`）
+   *     ⇒ 那些闸门拒绝**全部**从这里出去。
+   *
+   * ── ★★ 时序（反向半边 C 的同一条纪律）────────────────────────────────────────────
+   *   `catch` 里**先记台账再抛**会让拒绝等一次写盘 ⇒ ★ **改变可观测的时序**。
+   *   ⇒ 用 `void observe(...)`（旁路：不 await、不抛），**然后原样 rethrow**。
+   *   ★ 而 `observe` 自己也不抛 ⇒ 即使采集坏了，这次拒绝的行为**仍然原样**。
+   */
+  const updatePlanBatchTraced = async (
+    captain: Agent, teamId: string, mutations: readonly StagedPlanMutation[], signal?: AbortSignal,
+    allowPendingEdits = false,
+  ): Promise<TeamState> => {
+    try {
+      return await updatePlanBatch(captain, teamId, mutations, signal, allowPendingEdits)
+    } catch (reason) {
+      const workspace = workspaceOf(captain)
+      const stateRoot = stateRootOf(workspace, config)
+      const message = reason instanceof Error ? reason.message : String(reason)
+      /**
+       * ★ 采一次 —— 而**不改这次拒绝的任何行为**：下面原样 rethrow。
+       * ★ `where` 用 `edit_plan`（那是这条路径对外的名字）。
+       */
+      /**
+       * ── ★★★ 2026-10-21：这一处调用点的**输入面补齐**（需求 §11 · R11.4）────────────
+       *
+       * MEASURED（本次审计）：三个采集调用点里只有两处接了 `source` / `loadIndex`，
+       * 而**唯一还在产出新信号的那条路正是没接的这条**：
+       *
+       * ```
+       * 修复之后落盘的 5 条信号全部来自 edit_plan：
+       *   e-0045..e-0049  ["dedupe:unmeasured","cooldown:unmeasured",
+       *                    "attributable:unmeasured","immunity:ok"]
+       * ```
+       *
+       * ⇒ 那是本仓记账最贵的形态：**两条修好的路一封新信都没有，修好的读数只在一个
+       *   从不发生的分支上成立。** 本次把三格同时接上（缺一格都会让一条判据继续 `unmeasured`）：
+       *
+       * ```
+       * component   ⇒ attributable 才有东西可落（缺 ⇒ unmeasured「说不出它是什么」）
+       * source      ⇒ cooldown 的来源键       （缺 ⇒ unmeasured「这条信号没有来源」）
+       * loadIndex   ⇒ dedupe / cooldown 的窗口（缺 ⇒ unmeasured「没有索引」）
+       * gateId      ⇒ 分流的 `hard` 靶        （缺 ⇒ 只能给描述性 target，收益无法归属）
+       * ```
+       *
+       * ★ 时序**一字未变**：仍然是 `void observe(...)` + 原样 rethrow；
+       *   `loadIndex` 是惰性的，读盘发生在**不被 await 的那一段**里。
+       */
+      void observe({
+        stateRoot,
+        where: 'edit_plan',
+        message,
+        kind: ['unwired'],
+        /**
+         * ★ `component` 取 `'plan'`：这条路的对外名字是 `edit_plan`，而它拒的是**计划**层面的
+         *   变更（契约写错 / 未终结任务的 assignee 这类）。★ 与 `create_task` 取 `'contract'`
+         *   同一条口径：**按拒绝面归桶，不按调用者归桶**。
+         */
+        component: 'plan',
+        ...gateIdFromMessage(message) === undefined ? {} : { gateId: gateIdFromMessage(message) },
+        now: Date.now(),
+        evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) => {
+          /**
+           * ── ★ 输入面核对（`collection` 位）—— 旁路，不改裁决 ──────────────────────
+           *
+           * MEASURED（2026-10-23）：`gate-input-wiring` 臂 10 报
+           * `evaluate.collection = 3 / audit.collection = 0` —— 四条采集判据
+           * （dedupe / cooldown / attributable / immunity）**都声明了 `requires`**
+           * （`candidate` / `index`），而生产路径上**从来没有核对过**这些声明。
+           *
+           * ★ 为什么结论挂在返回对象上、而不是先拦：
+           *   与其它位置同一条纪律 —— **先软后硬**。一个自己还没被验证过的核对
+           *   当场否决采集，会把"核对报缺"变成"采集中断"。
+           *   所以这里只把结论**附加**出去（`collectionDecisionOf` 只读
+           *   `ok` / `unmeasured` / `ran`，不检查形状，故附加是安全的）。
+           *
+           * ★ 结论会被谁读到：`observe` 把它当 `collection` 用；任何读该对象的
+           *   地方都能拿到 `inputSurface`。缺格时它不是 `undefined`，而是
+           *   `{ checked, incomplete, skipped, missing }` 的四格读数。
+           */
+          const collectionInputSurface = inputSurfaceOf('collection', context)
+          const evaluation = await registry.evaluate('collection' as never, context)
+          return (collectionInputSurface === undefined
+            ? evaluation
+            : { ...evaluation, inputSurface: collectionInputSurface }) as never
+        },
+        source: 'edit_plan',
+        loadIndex: async () => await loadCollectionIndexFor(stateRoot),
+        warn: (note: string) => ctx.logger.warn(note),
+      })
+      throw reason
+    }
+  }
+
   // Browser review controls retain their staged-only contract.
   const updateStagedPlanBatch: AgentTeamsRuntime['updateStagedPlanBatch'] = (captain, teamId, mutations, signal) => (
-    updatePlanBatch(captain, teamId, mutations, signal)
+    updatePlanBatchTraced(captain, teamId, mutations, signal)
   )
 
   const updateStagedPlan: AgentTeamsRuntime['updateStagedPlan'] = async (captain, teamId, mutation, signal) => (
@@ -1927,6 +2473,56 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     const approved = await withTeamLock(teamLockKey(stateRoot, teamId), async () => {
       const fresh = await requireFreshCaptainTeam(stateRoot, teamId, captain.id)
       requireStagedTeam(fresh)
+      /**
+       * ── ★★★ N5 / t8：计划环的**放行条件**（两条，缺一不可）──────────────────────
+       *
+       * 位置是刻意的：**紧挨着** `requireStagedTeam`，在解析 LLM 之前。
+       * ⇒ 一次必然被拒的批准不该先付出"逐成员解析模型 + 校验"的代价才被拒
+       *   （那是本仓那条纪律：一句必然被拒的话，越早说越便宜）。
+       *
+       * ★★ **改之前这里什么都不读** —— 既不看 `planReviewEscalated`，也不看轮次
+       *   （逐字读过：`requireStagedTeam` → `validateStagedGraph` → 解析 LLM → `phase='running'`）。
+       *   ⇒ 于是一个已经被读成"审到顶了"的计划，**批准即变成 approved，而 `rounds=4` 仍在盘上**。
+       *   那不是"上限生效"，那是**上限在唯一的放行点上不存在**。
+       *
+       * ★ 放行条件①：图结构合法 —— 上面那行 `validateStagedGraph(fresh, true)` 已经管了。
+       * ★ 放行条件②：`planReviewRounds < maxRounds`，**或**它被**显式归零**过。
+       *
+       * ★★★ 而"显式归零"必须**同时**满足两格才叫解除（N5.17 B4 实测的死码）：
+       *   ```
+       *   {rounds:3, escalated:true}  ⇒ 只清 flag ⇒ 仍然 escalated   ← 因为 rounds>=max 立刻重算
+       *   {rounds:0, escalated:false} ⇒ 解除                          ← 这才是"显式归零"
+       *   ```
+       *   ⇒ 所以这一条读的是 `rounds`（那个单调不减的度量），flag 只是它的缓存。
+       *   ★ 若这里只读 flag，一次"清 flag 不归零"就能把 4 轮的记录洗成可批准。
+       */
+      const rounds = typeof fresh.planReviewRounds === 'number' && Number.isFinite(fresh.planReviewRounds)
+        ? Math.max(0, Math.floor(fresh.planReviewRounds))
+        : 0
+      if (rounds >= PLAN_REVIEW_MAX_ROUNDS || fresh.planReviewEscalated === true) {
+        /**
+         * ★ 措辞要点（本仓纪律：一句读不出"该去做什么"的消息会让人去做另一件事）：
+         *   ① 逐条给出读数（轮次几/上限几、flag 是什么、phase 是什么）；
+         *   ② 说清**为什么**这不能靠"再调一次 edit_plan"糊过去（那只会把轮次推得更高）；
+         *   ③ 给出**唯一**的解除动作，并明写它只允许在 resume 或人点名时发生；
+         *   ④ 明写**负向对照**：只清 flag 不归零不算（否则下一个人会去写那段死码）。
+         */
+        throw new Error(
+          `approve refused: the plan review loop has hit its ceiling — ${rounds} round(s) against a limit of `
+          + `${PLAN_REVIEW_MAX_ROUNDS} (\`planReviewRounds\`=\`${String(fresh.planReviewRounds)}\`, `
+          + `\`planReviewEscalated\`=\`${String(fresh.planReviewEscalated)}\`, \`phase\`=\`${String(fresh.phase)}\`). `
+          + '★ Approving it now would set `phase = running` and leave those rounds on disk — that is not "the ceiling '
+          + 'took effect", that is "the ceiling does not exist at the only point that lets work start". '
+          + '★ Why calling `edit_plan` again will NOT help: it increments the round counter, so it walks further '
+          + 'from the ceiling instead of toward it. '
+          + '★ The ONE way out is an explicit zeroing — `planReviewRounds = 0` **and** `planReviewEscalated` cleared — '
+          + 'and that is only allowed on `agent_teams_resume` or when a human names it in person, because zeroing it '
+          + 'throws away the single reading that says "this plan was revised N times". '
+          + '★ Negative control, and this is the part that must not be re-implemented as "clearing the flag": '
+          + 'clearing `planReviewEscalated` alone leaves `rounds` at 4 and re-derives escalated on the very same data '
+          + '(measured dead code, N5.17 B4). Read the counter, not the cache.',
+        )
+      }
       // A staged removal has no child session to retain in history. Drop those
       // placeholders before transitioning to the stricter running shape.
       fresh.members = fresh.members.filter((member) => member.status !== 'removed')
@@ -2031,29 +2627,37 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     return { teamId: discarded.teamId }
   }
 
+  /**
+   * ── ★★★ 装配顺序：成员 **hydration 必须在所有工具注册之后** ──────────────────────
+   *
+   * `installMemberSelectionRuntime` 会在安装时就把**已经活着的**成员补一遍 setup
+   * （冷恢复/热重载路径），而那份 setup 会 `childCtx.tools.restrict(savedFilter)`
+   * —— deny 里点名的是本插件自己的队长专用工具。工具还没注册就 restrict，
+   * 宿主会把它当"未知全局工具"拒绝，于是热重载后成员恢复直接报错。
+   * ⇒ 顺序必须是：注册完全部 `agent_teams_*` → 再让 selection runtime 上线。
+   *
+   * ★ 但 `register_create` / `dispatchMember` 在**注册期**就需要这个对象。
+   *   ⇒ 用一个**延迟门面**：注册期拿到的是转发对象，调用发生在运行期，
+   *     那时真正的 runtime 已经装好（同一次同步调用内完成）。
+   */
+  let installedSelections: MemberSelectionRuntime | undefined
+  const deferredSelections: MemberSelectionRuntime = {
+    isPendingMember: agent => installedSelections?.isPendingMember(agent) ?? false,
+    withPending: (parentSessionId, label, selection, operation, setup) => {
+      const runtime = installedSelections
+      if (runtime === undefined) throw new Error('agent-teams: member selection runtime is not installed')
+      return runtime.withPending(parentSessionId, label, selection, operation, setup)
+    },
+  }
+
   const runtime: AgentTeamsRuntime = {
-    isPendingMember: memberSelections.isPendingMember,
+    isPendingMember: deferredSelections.isPendingMember,
     updateStagedPlan,
     updateStagedPlanBatch,
     approveStagedTeam,
     continueStagedPlanning,
     discardStagedTeam,
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   /**
    * ── t39：16 个工具各自注册（一个工具一个文件）────────────────────────────
@@ -2063,8 +2667,8 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
    *   顺序与原 tools.ts 里 `ctx.tools.register(...)` 的书写顺序【逐条一致】。
    * ★ 共享实体由这里注入，而不是让子模块 import 本文件 —— 否则会成环。
    */
-  register_create(ctx, memberSelections, scheduler, config)
-  register_edit_plan(ctx, scheduler, updatePlanBatch, config)
+  register_create(ctx, deferredSelections, scheduler, config)
+  register_edit_plan(ctx, scheduler, updatePlanBatchTraced, config)
   register_approve(ctx, approveStagedTeam, runtime, config)
   register_members(ctx, scheduler, config)
   register_create_task(ctx, clock, runtime, scheduler, config)
@@ -2077,7 +2681,13 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   register_delivery(ctx, clock, config)
   register_resume(ctx, scheduler, config)
   register_delete(ctx, config)
+  register_halt(ctx, config)
   register_restart(ctx, config)
+  register_review_plan(ctx, config)
+  // Live-member hydration validates saved filters against registered tools.
+  installedSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
+    scheduler.kickMember(workspace, teamId, memberName)
+  ))
   return runtime
 }
 

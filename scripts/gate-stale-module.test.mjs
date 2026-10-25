@@ -39,7 +39,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { moduleFreshness, moduleFreshnessMessage } from '../lib/tools.js'
+import { moduleFreshness, moduleFreshnessFrom, moduleFreshnessMessage, isAncestorOf } from '../lib/tools.js'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
@@ -271,7 +271,7 @@ async function statusFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -438,7 +438,7 @@ async function rejectionFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -872,7 +872,7 @@ test('★ 臂 16（★ schema 对齐臂）：`status` 的 deployment schema 必�
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -897,4 +897,123 @@ test('★ 臂 16（★ schema 对齐臂）：`status` 的 deployment schema 必�
   for (const key of ['built_commit', 'head']) {
     assert.ok(declared.includes(key), `★ schema 必须声明 "${key}"。实测：${JSON.stringify(declared)}`)
   }
+})
+
+/**
+ * ── ★★★ 臂 N：`commitBehind` 用【祖先关系】判，而不是用【不相等】──────────────
+ *
+ * MEASURED（2026-10-09，captain 自己踩进去的）：
+ *   `commitBehind = builtCommit !== head` 把"构建时的提交是 HEAD 的**祖先**"
+ *   也读成了落后（实测：stamp=49894d0、HEAD=d457d9c，`git merge-base --is-ancestor`
+ *   为**真**，而那条门报了 stale）。
+ *
+ * ★★ 而它的后果是一个【循环】：
+ *   `build` 之后 `commit`（把 lib/ 与 stamp 一起提交）⇒ stamp 必然落后 HEAD 一格
+ *   ⇒ ★ 那条门【每轮都会说话】—— 而它挡着每一次 update_task。
+ *
+ * ⇒ ★ 判据是：**"HEAD 前进过"不构成"你手上的代码旧了"**；
+ *   只有【构建时那条提交不在当前历史里】（换分支 / rebase）才是。
+ */
+test('★★★ 臂 N1：祖先关系【已可注入】，而它暂不参与裁决 —— 而那条待决记在这里', () => {
+  /**
+   * ── ★★★ 一条【未决的冲突】，而不是一条缺陷 ─────────────────────────────────────
+   *
+   * MEASURED（2026-10-09，captain 自己踩进去的）：
+   *   `build` 之后 `commit`（把 lib/ 与 stamp 一起提交）⇒ stamp 落后 HEAD 一格
+   *   ⇒ 那条门【每一轮都说话】⇒ 它挡着每一次 update_task。
+   *
+   * ★ 而我试过把 `commitBehind` 改成祖先关系 —— 而它让**臂 9（f-0026 核心）**红了：
+   *   ```
+   *   臂 9 逐字: 「stamp 没变、而 HEAD 前进了一个提交 ⇒ 必须报 stale」
+   *             现实依据 = "有人改了 src 又改回来 / amend / 只因别的原因动了历史"
+   *   ```
+   *
+   * ★★ 而两者**同形**（都是"构建于 A，而 A 是 HEAD 的祖先"）
+   *   ⇒ 所以那不是两个需求，是【同一个判据的两种希望】。
+   *   ⇒ ★ 而分开它们需要【第三维】：那两个提交之间，有没有改动到构建的输入。
+   *
+   * ⇒ 所以本臂钉的是【当前的口径】+【那个待决】：
+   *   `builtCommitIsAncestorOfHead` 已经可以注入（夹具能精确驱动），
+   *   而它**暂不参与** `commitBehind` —— 等第三维的判据落地再接。
+   */
+  const verdict = moduleFreshnessFrom({
+    loaded: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    onDisk: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    builtCommitIsAncestorOfHead: true,
+  })
+  assert.equal(
+    verdict.status,
+    'stale',
+    '★ 当前口径：祖先关系【不】参与裁决 ⇒ 它仍报 stale（与臂 9 一致）。'
+    + '★ 而那不是"正确"，是【已记的待决】—— 见本臂的注释与那条任务。',
+  )
+  assert.equal(
+    verdict.why,
+    'commit',
+    '★ 而且成因必须仍然报 commit（"提交维落后"），而不是 content',
+  )
+})
+
+test('★★★ 臂 N2：构建时的提交【不是】HEAD 的祖先 ⇒ 真落后（stale）', () => {
+  const verdict = moduleFreshnessFrom({
+    loaded: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    onDisk: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    builtCommitIsAncestorOfHead: false,
+  })
+  assert.equal(verdict.status, 'stale', '★ 构建基于一条不在当前线上的提交 ⇒ 那才是真的旧了')
+  assert.equal(verdict.why, 'commit')
+})
+
+test('★★★ 臂 N3：判不了（跑不了 git）⇒ ★ 保守维持落后', () => {
+  /**
+   * ★ `builtCommitIsAncestorOfHead === undefined` 的意思是"**没能测量**"。
+   *   ⇒ 而"说不清"不得读成"没事"（本队那条三态纪律）。
+   *   ★ 所以它必须落 stale，与"不是祖先"落在【同一侧】——
+   *     而两者【不同形】：一个说"换了线"，一个说"我判不了"。
+   */
+  const verdict = moduleFreshnessFrom({
+    loaded: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    onDisk: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    head: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  })
+  assert.equal(verdict.status, 'stale', '★ 判不了时保守 —— "没能测量"不得读成"没事"')
+})
+
+test('★★ 臂 N4：两者相等 ⇒ current（那条快路径没被改坏）', () => {
+  const verdict = moduleFreshnessFrom({
+    loaded: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    onDisk: { schema: 1, output: 'same-sha', commit: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  })
+  assert.equal(verdict.status, 'current')
+})
+
+test('★★★ 臂 N5：`isAncestorOf` 的三态（`git merge-base` 的退出码 1 是【答案】不是【失败】）', () => {
+  /**
+   * ★ `git merge-base --is-ancestor` 用退出码表达答案：0 = 是，1 = **不是**。
+   *   ⇒ ★ 把 `1` 并进 `undefined` 会让"不是祖先"与"判不了"同形 ——
+   *     而那正是本队记账最久的那个合流。
+   */
+  const root = mkdtempSync(join(tmpdir(), 'ancestor-'))
+  execFileSync('git', ['init', '-q'], { cwd: root })
+  execFileSync('git', ['config', 'user.email', 't@e.st'], { cwd: root })
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: root })
+  writeFileSync(join(root, 'a.txt'), 'one\n')
+  execFileSync('git', ['add', '-A'], { cwd: root })
+  execFileSync('git', ['commit', '-qm', 'first'], { cwd: root })
+  const first = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+  writeFileSync(join(root, 'a.txt'), 'two\n')
+  execFileSync('git', ['add', '-A'], { cwd: root })
+  execFileSync('git', ['commit', '-qm', 'second'], { cwd: root })
+  const second = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+
+  assert.equal(isAncestorOf(first, second, root), true, '★ 父提交是 HEAD 的祖先')
+  assert.equal(isAncestorOf(second, first, root), false, '★ ★ 而反过来的答案是【false】，不是 undefined')
+  assert.equal(
+    isAncestorOf('0000000000000000000000000000000000000000', second, root),
+    undefined,
+    '★ 那条提交不在库里 ⇒ 判不了（而那与"不是祖先"必须不同形）',
+  )
 })

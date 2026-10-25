@@ -154,6 +154,92 @@ import * as deliveryConvergence from './delivery/convergence.ts'
  */
 import * as runtimeLiveness from './runtime/liveness.ts'
 /**
+ * ── T6 ——— 已接：runtimeStall（runtime 位置的第二条判据，C4 的机械哨兵）★ t6 ──────────
+ *
+ * ★ 位置内的顺序：liveness → stall。理由与那两条 delivery 判据同源：
+ *   liveness 判"**这一次等待**还在不在动"（单次观察面），
+ *   stall 判"**这个任务**是不是已经停下了"（任务级、跨轮次的累计读数）。
+ *   ⇒ 先看这一次，再看它是不是已经反反复复 —— 后者是前者的**累加**，
+ *     顺序反过来会让读日志的人先看到"停住了"再看到"这次没在动"。
+ *
+ * ★★ 而它与 liveness 有**一条结构性差别**，写在这里因为它决定本行的纪律：
+ *   liveness 靠"约定 + 调用方"避免拒绝；stall 把**返回类型**收窄到
+ *   `GateVerdict` 里**不拒绝的那一半**（`StallVerdict`）⇒ "不能拒绝任务"
+ *   是**编译期**的事实，而不是一次 code review 才能发现的事（t6 验收第 2 条）。
+ */
+import * as runtimeStall from './runtime/stall.ts'
+/**
+ * ── 2026-10-20 ——— 已接：runtimeShapeExecution（runtime 位置的**第三条**判据）────────
+ *
+ *      id = 'runtime.shape-execution' · point = 'runtime'
+ *
+ * ★ 它补的是上一轮形态验证亲手撞上的那个缺口（`docs/SHAPE-VERIFICATION-PROBE-1.md`
+ *   §4 逐字）：「**`shape` 是一条声明，而"声明有没有被执行"今天没有读数。**
+ *   一个 `shape: 'dispatch'` 的队如果成员全都自己干活，**没有任何一条臂会红**。」
+ *
+ * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+ */
+import * as runtimeShapeExecution from './runtime/shape-execution.ts'
+/**
+ * ── T4（t4 接线）——— 已接：判据「任务在原子粒度上可判吗」（contract 位置第三条）──────
+ *
+ *      id = 'contract.task-atomicity' · point = 'contract'
+ *
+ * ★ 它此前【已在盘上、夹具也有，而一次都不会跑】—— `ALL_GATES` 里没有它
+ *   ⇒ `registry.list().contract` 里读不到它 ⇒ 往那里挂的判据永远不会被求值。
+ *   ★ 这与 `admission` 那三条是**同一个病**：「写了但没接线」。
+ *
+ * ── ★★ 它【一定会误报】，所以本判据自己写明要先进观察集 ──────────────────────────
+ *
+ * 见 `src/gates/contract/task-atomicity.ts` 的文件头。本队的定论是
+ * 「**噪音会教人忽略门禁，与误报同样有害**」⇒ 它照常求值、照常记录，
+ * 但裁决**先不阻止流程**。
+ *
+ * ★★★ 而"观察"的落点**不是这一行**（t4 的裁定，也是本文件 138-153 行那条禁令的理由）：
+ *
+ *     · 观察集是**运行时数据**，不是装配字段；
+ *     · 写在这里的观察期只在"模块加载"与"插件 apply()"之间生效 ——
+ *       而生产里没有夹在中间的人，它**等于没有**；
+ *     · 而且夹具随后 `unobserve()` 清掉的正是产品写下的那一句
+ *       ⇒ "观察生效"与"被夹具关掉"在读数上同形。
+ *
+ *   ⇒ 两个**已经存在**的入口，本行一个都不加：
+ *     · `AGENT_TEAMS_OBSERVE_GATES=contract.task-atomicity`（部署改动）
+ *     · `registry.observe(id, {reason})`（运行时调用）
+ *   ⇒ `scripts/gate-index-assembly.test.mjs` 臂 3e 钉住"装配点里没有第三句话"；
+ *     而臂 3h 钉住"走环境变量时，它的裁决进 `observed.*` 而不是 `blockers`"。
+ */
+import * as contractTaskAtomicity from './contract/task-atomicity.ts'
+/**
+ * ── T10（t10 接线）——— 已接：判据「派发前这份计划审过了吗」（dispatch 位置第三条）─────
+ *
+ *      id = 'dispatch.plan-reviewed' · point = 'dispatch'
+ *
+ * ★ 它此前【本体已在盘上（t8），而一次都不会跑】—— `ALL_GATES` 里没有它
+ *   ⇒ `registry.list().dispatch` 里读不到它 ⇒ 往那里挂的判据永远不会被求值。
+ *   ★ 与 t4 的 `contract.task-atomicity`、以及 `admission` 那三条是**同一个病**：
+ *     **写了但没接线。**
+ *
+ * ── 它是**用户已定的路由规则**在判据层上的落点 ────────────────────────────────
+ *
+ *   「带 `reviewed` ⇒ 放行；不带 ⇒ **必须先审一遍才能派**。
+ *     ★ 而『不带』**不是错误** —— 它是『这条路没走自动生成』的正常状态。」
+ *
+ * ★ 而它补上的正是 `docs/PLAN-REVIEW.md` §8 里那条**没有人读**的准入条件：
+ *   ① 值得做  ② **审查通过（带 `reviewed`）**  ③ 分档是【小档】
+ *   ⇒ 在本次接线之前，② 只活在文档里。
+ *
+ * ★ 三态且在判据本体里已经分开（见 `src/gates/dispatch/plan-reviewed.ts`）：
+ *     `ok` ⇒ 放行 · `blocked` ⇒ 去**审** · `unmeasured` ⇒ 审了而**记录读不出来**
+ *   ⇒ 三者的补救动作不同，所以不许合成两种。
+ *
+ * ★★ 而它【不进观察集】—— 本行不是那个开关（与 `contract.task-atomicity` 同一条裁定：
+ *   观察集是运行时数据，写在这里的观察期只活在"加载与 apply() 之间"，生产里等于没有）。
+ *   ★ 而它**不需要**先进观察集：用户那条规则本身就写明"不带"是正常状态，
+ *     拦住的也是"还没审"这件事，而不是一条会误报的判断。
+ */
+import * as dispatchPlanReviewed from './dispatch/plan-reviewed.ts'
+/**
  * ── T7 ——— 已接：判据「verify 命令可判性」（contract 位置第二条）──────────────
  *
  *      id = 'contract.verify-command' · point = 'contract'
@@ -199,6 +285,67 @@ import * as contractVerifyCommand from './contract/verify-command.ts'
  * ★ 四个人各自只改自己那一行；未接的槽位保持注释 —— 它不会被 register() 看见，
  *   也不会有半条判据被装上去。
  */
+
+/**
+ * ── T5 ——— 已接：`admission` 位置的三条判据（★ 本位置此前**一条都没有**）───────────
+ *
+ * ★ 这一行由 t85 落。**本位置是空的，而那不是缺陷** —— t5 只加位置、不加判据，
+ *   而 `index.ts` 顶部那两段注释**逐字预告了今天这一步**：
+ *     · 「t6/t7/t8 会往里挂判据（审查检查点 / 吸收痕迹 / 成团闸门）；
+ *        任何夹具都不许把"admission 现在没有判据"写成断言：
+ *        接上第一条判据的那一刻它就会**按设计变红**」
+ *   ⇒ 于是有四个夹具**自己声明了它们该在这一刻被改**（见 `docs/ADMISSION-WIRING.md`）。
+ *     本行的提交把那句预告执行掉。
+ *
+ * ★ 顺序 = `absorb`（吸收痕迹）→ `checkpoint`（审查检查点）→ `convene`（成团闸门）。
+ *   理由与别处一致：**先问"该记的记了吗"与"该审的审了吗"，最后才问"能不能开会"** ——
+ *   前面两步没过时，第三步的结论没有意义（而三条各自 `appliesTo` 不同，
+ *   实际不会互相屏蔽；这个顺序只决定 blocker 的排列）。
+ *
+ * ★ id = 'admission.absorb' / 'admission.checkpoint' / 'admission.convene'，
+ *   三条的 `point` 都是 `'admission'`（见各自文件的 `export const point`）。
+ */
+import * as admissionAbsorb from './admission/absorb.ts'
+import * as admissionCheckpoint from './admission/checkpoint.ts'
+import * as admissionConvene from './admission/convene.ts'
+/**
+ * ── T5 ——— 已接：`collection` 位置的四条采集判据（★ t86 加，第七个位置的第一批）───────
+ *
+ *      id = 'collection.dedupe' / '.cooldown' / '.attributable' / '.immunity'
+ *      四条都是**纯函数级**：输入 = 一条信号 + 已有索引，输出 = 三态裁决。
+ *
+ * ★ 顺序 = dedupe → cooldown → attributable → immunity，理由与别处一致：
+ *   先问最便宜也最致命的（**是不是同一件事**，实测占 85.5%），
+ *   再问来源频率（cooldown），最后才问"说不说得清"（attributable / immunity）。
+ *
+ * ★★ 这一层的 `blocked` 含义与前六个位置**不同**：它说的是"**这条信号不采**"，
+ *   而那**不是错误**，是正常结局（重复 / 太勤 / 已知噪声）。
+ *   ⇒ 所以四条**都不进任何裁决路径** —— 它们是采集层的守卫，不是任务的门禁。
+ */
+/**
+ * ── T186 ——— 已接：去重（`collection` 位置的第 1 条）───────────────────────
+ *
+ *      id = 'collection.dedupe' · point = 'collection'
+ */
+import * as collectionDedupe from './collection/dedupe.ts'
+/**
+ * ── T187 ——— 已接：冷却（`collection` 位置的第 2 条）───────────────────────
+ *
+ *      id = 'collection.cooldown' · point = 'collection'
+ */
+import * as collectionCooldown from './collection/cooldown.ts'
+/**
+ * ── T188 ——— 已接：可分性（`collection` 位置的第 3 条）───────────────────────
+ *
+ *      id = 'collection.attributable' · point = 'collection'
+ */
+import * as collectionAttributable from './collection/attributable.ts'
+/**
+ * ── T189 ——— 已接：免疫（`collection` 位置的第 4 条）───────────────────────
+ *
+ *      id = 'collection.immunity' · point = 'collection'
+ */
+import * as collectionImmunity from './collection/immunity.ts'
 
 /**
  * 一个判据模块必须交出的四个名字（+ 可选的 `appliesTo`）。
@@ -277,6 +424,145 @@ const ALL_GATES = [
    *     实测见 `scripts/gate-index-assembly.test.mjs` 臂 3f（三条读法对照）。
    */
   runtimeLiveness,
+  /**
+   * ── T6 ——— 已接：runtimeStall（runtime 位置的**第二条**判据）★ t6 ────────────────
+   *
+   * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   *
+   * ★★ 它**必须**在 `ALL_GATES` 里 —— 这是 t6 三次失败记录里最贵的一课：
+   *   "判据本体已在盘上、夹具也有，而一次都不会跑" 在本仓出现过**不止一次**
+   *   （见上面 `runtimeLiveness` 与 `deliveryCoverage` 两段注释里各记着一次）。
+   *   ⇒ 一条判据进 `ALL_GATES` 才叫接上了；盘上有文件不算。
+   *
+   * ★ 位置纪律（与 liveness 逐字相同）：runtime 位置的任何裁决**只被记录**，
+   *   不参与控制流（契约 §5）。而本判据比那更强一层：它的返回类型
+   *   排除了 `blockers` 那一支 ⇒ 它**在类型上就拒绝不了**。
+   */
+  runtimeStall,
+  /**
+   * ── 2026-10-20 ——— 已接：runtimeShapeExecution（runtime 位置的第三条判据）──────────
+   *
+   * ★ 位置内的顺序 = liveness（这一次等待还在动吗）→ stall（这个任务是不是停下了）
+   *                → shape-execution（**这个队是不是按它声明的形态在干活**）。
+   *   ⇒ 前两条问的是"这一次/这一条"的进展，这一条问的是**队级的形态**：
+   *     它是最慢变的那一格，排在最后，读的人先看到具体的、再看到结构性的。
+   *
+   * ★★ 位置纪律（与 liveness / stall 逐字相同）：runtime 位置的任何裁决**只被记录**，
+   *   不参与控制流（契约 §5）。⇒ 一个声明了 dispatch 却全员自己干的队，
+   *   今天会**留下一条可读的违规记录**，而不会被拒绝派发 —— 那是刻意的：
+   *   一条判据第一次上线就否决，会把"我的读数可能有 bug"变成"所有队都停下来"。
+   */
+  runtimeShapeExecution,
+  /**
+   * T4（t4 接线）——— 已接：contractTaskAtomicity（contract 位置第三条）
+   * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   *
+   * ★ 位置内的顺序 = build-artifact-scope（scope 里有没有漏产物）
+   *                → verify-command（这条命令判不判得出来）
+   *                → task-atomicity（这一份工作**该不该**被拆/能不能被原子地判）。
+   *   ⇒ 前两条问的是"契约**写**得对不对"，这一条问的是"这份工作**本身**在不在
+   *     一个可被判的粒度上" —— 它是三条里最靠近"该不该做"的那一条，
+   *     所以排在最后：读 blocker 的人先看到机械性的、再看到判断性的。
+   *   ★ 三条互不依赖 ⇒ 顺序只影响 blocker 的排列，不影响任何裁决。
+   *
+   * ★★ 而它【不进观察集】—— 本行不是那个开关（见上面 import 那一段的裁定）。
+   */
+  contractTaskAtomicity,
+  /**
+   * T10（t10 接线）——— 已接：dispatchPlanReviewed（dispatch 位置第三条）
+   * ★ 只加自己这一行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   *
+   * ★ 位置内的顺序 = changed-paths（自报的改动清单对得上真实写入吗）
+   *                → worktree（成员真的在隔离目录里干活吗）
+   *                → plan-reviewed（**这份计划审过了吗**）。
+   *   ⇒ 前两条问的是"这次派发**做**得对不对"，这一条问的是"**该不该**派" ——
+   *     它是三条里最前置的那一条（计划本身没审过，前面两条的结论也无从谈起），
+   *     所以排在最后：读 blocker 的人先看到"这次派发哪里不对"，再看到"这次派发本就不该发生"。
+   *   ★ 三条互不依赖 ⇒ 顺序只影响 blocker 的排列，不影响任何裁决。
+   *
+   * ★★ 而它与 P2 的 `dispatch.plan-reviewed` 是**同一条**：t8 出本体、t10 出接线。
+   */
+  dispatchPlanReviewed,
+  /**
+   * ── T5 ——— `admission` 位置的三条判据：**已注册，生产零求值点** ────────────────────
+   *
+   * ★ 只加自己这三行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   *
+   * ── ★★★ 2026-10-20 更正（本文档此前说的是**反的**，逐字见下面「被推翻的旧判断」）──
+   *
+   * 现状 = **两句话都要说**，缺一句就又是一句假话：
+   *
+   *   ① **已注册**：三条进了 `ALL_GATES` ⇒ 注册表读得到。
+   *      `node --input-type=module -e "import {registry} from './lib/gates/index.js';
+   *        console.log(registry.count('admission'))"` ⇒ `3`
+   *
+   *   ② **生产零求值点**：全仓**没有**任何 `evaluate('admission', …)` 调用。
+   *      `grep -rn "evaluate('admission'" src/ --include=*.ts` ⇒ **空**（exit 1）
+   *      ⇒ 三条判据一次都不会在真实流程里跑。
+   *
+   * 二者**不是同一件事**：只报 ① 会读出"这一格已经有人看着了"，只报 ② 会读出
+   * "没写过判据"。★ 本仓反复记账的形态正是"一个读数过期之后，它比没有那个读数更坏"
+   * —— 所以这里把**两个读数各自**写出来，而不是合成一句。
+   *
+   * ── ★★ 成因：它们等的那个入口【还没实现】─────────────────────────────────────
+   *
+   * 三条判据的输入面是四格：`producedDocuments` / `documentsRead` /
+   * `observedDocumentChanged` / `currentRevisions`。MEASURED（2026-10-20）：
+   * 这四格在**生产代码里一个都没有被产出**（除 `src/gates/admission/` 自身之外）：
+   *
+   *     for k in producedDocuments documentsRead observedDocumentChanged currentRevisions; do
+   *       printf "%-26s " "$k"
+   *       grep -rn "$k" src/ --include=*.ts | grep -v "src/gates/admission/" | wc -l
+   *     done
+   *     # ⇒ 四行全是 0（`lib/` 侧同样为 0）
+   *
+   * ⇒ 它们是为「**自动成团**」那个入口设计的，而那个入口**还没实现**。
+   *   `src/gates/admission/convene.ts` 的文件头逐字记着用户对这一段的形态要求：
+   *   「产物非空 + 无未审改动 + 无待确认问题 ⇒ 自动成团（用户明确不需要点头）」。
+   *   ★ 于是"注册了"是真的，"会跑"是假的 —— **接线的前置条件（输入面）不在**，
+   *     而不是"接线漏了一步"。补一个不产出这四格的假求值点，只会让它恒 `unmeasured`。
+   *
+   * ── ★ 被推翻的旧判断（★ 刻意**不逐字重述**那一句，见下）────────────────────────
+   *
+   * 旧判断的形状是：把「三条判据进了 `ALL_GATES`」当成「**这一格接完了**」，
+   * 并据此宣布"写了但没接线"这个形态在本仓已经绝迹。
+   *
+   * ★ 为什么**不把原句抄在这里**（这是本任务的一次自我修正）：
+   *   第一版把原句**逐字**引在上面，而验收项是一条**机械 grep**
+   *   （在**本文件**里搜旧句的判别词，必须**一个都不命中**）。
+   *   逐字引用让那条 grep **照样命中** —— 于是"改成真话"的验收会红，
+   *   而红得**看起来像没改**。★ 这不是格式问题：**一句被引用的假话仍然是假话**，
+   *   而任何按字符串找它的读者/夹具都会被它绊住。
+   *   ⇒ 记录旧判断只需**说清它的形状与错在哪**，不需要复制它的字节。
+   *   要读原文的，去 `git log -S'再也没有' -- src/gates/index.ts`。
+   *
+   * ★ 为什么推翻：进 `ALL_GATES` 只是"**注册**了"，不是"**接**了"。接的完整口径是
+   *   「注册 + 有生产求值点 + 输入面真有产出」三者都有；`admission` 只满足第一条。
+   *   ⇒ 旧判断把"注册完成"当成了"接线完成"，代价是**下一个人不再去查这一格**。
+   *
+   * ★ 用户裁定（2026-10-20）：**只改文档说真话，不接线**（也不删判据）。
+   *   待办与缺口登记见 `docs/REQUIREMENTS.md` 第 18 条。
+   *
+   * ★ 顺序 = absorb（吸收痕迹）→ checkpoint（审查检查点）→ convene（成团闸门）：
+   *   先问"该记的记了吗"与"该审的审了吗"，最后才问"能不能开会"。
+   */
+  admissionAbsorb,
+  admissionCheckpoint,
+  admissionConvene,
+  /**
+   * ── ★ T5（collection）：四条采集判据（由 t86 接线）──────────────────────────────
+   *
+   * ★ 只加自己这四行：别人的行一个字都不动（见文件顶部的槽位约定）。
+   * ★ 顺序 = dedupe → cooldown → attributable → immunity（理由见上面 import 那段）。
+   */
+  // T186 ——— 已接：collectionDedupe
+  collectionDedupe,
+  // T187 ——— 已接：collectionCooldown
+  collectionCooldown,
+  // T188 ——— 已接：collectionAttributable
+  collectionAttributable,
+  // T189 ——— 已接：collectionImmunity
+  collectionImmunity,
 ] as const
 
 /**

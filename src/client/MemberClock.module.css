@@ -1,0 +1,19 @@
+
+
+/* ── Member elapsed clock (identity + status only; no logs or outputs) ───────── */
+
+.memberClock {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ★ Stalled is qualitatively different from elapsed work: a dead session's open
+ *   task keeps counting, and counting that as progress is the reading t4 removed. */
+.memberClock[data-kind='stale'] {
+  color: var(--dsw-alias-state-warn-primary);
+}

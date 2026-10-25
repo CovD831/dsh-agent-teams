@@ -4,57 +4,184 @@
   "_why": "为什么需要它（MEASURED：t66/t67/t69/t71/t74 五次独立撞到，全部卡在终态上）：completion.backtest 的 L1 前置要一份【全绿的基线】，exitCode !== 0 就报 blocked「attribution is impossible」。而在这个仓库里基线【几乎从不全绿】—— 总有已知失败（今夜实测：10 条）。⇒ ★ 它要求的那件事在当前工作方式下【不可满足】。★ 而它自己的措辞早就写对了方向：「fix or pin the baseline first」—— 缺的是 pin 那一半。",
   "_how": "三条问句，各自不同形：① 基线绿 ⇒ 照常归因；② 基线不绿 + 本清单在场 ⇒ 按【差异】归因（新增失败 ⇒ 拒；只是已知那些 ⇒ 不算本次的）；③ 基线不绿 + 本清单缺席 ⇒ 仍是「attribution is impossible」（不许凭空归因）。★ 而第 ③ 态【不许】被读成第 ② 态：一份缺席的清单与一份「恰好覆盖了所有失败」的清单必须不同形。",
   "_adding": "加一条的判据（写给下一个人）：那条失败必须【在你这条改动之前就存在】，且你能指出它属于哪个夹具/哪次事故。★ 不许把「本次改动新造成的失败」写进来 —— 那是这条判据唯一要抓的东西，而把它写进清单等于把判据拆掉。宁可去修，也不要加。",
-  "_verified_at": "26b7223（本 worktree 的父版本）",
+  "_verified_at": "c56ce16404caf524693efd75de2a22a7ae43fad6（2026-10-20 队长把 pin 与盘面对齐：18 → 36 条）。★ 这个十六进制串必须在**开头** —— pinRefFromVerifiedAt（src/quality-gates.ts:1421）只接受 7-40 位 hex 或 refs/…，写成日期会让整份基线读不出来（那就把 29 条存量重新变成 undecidable）。",
   "knownFailures": [
     {
-      "test": "臂 1 ★ 对照臂：盘上与加载时一致 ⇒ current",
-      "fixture": "scripts/gate-stale-module.test.mjs",
-      "because": "宿主持有旧构建 ⇒ 该夹具读到的 loaded 与盘上不一致。★ 这是 f-0020 的成因之一（今晚 20+ 次），与本次改动无关。"
+      "test": "★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是零（逐位置实测，不是读源码）",
+      "fixture": "scripts/gate-input-wiring.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/gate-input-wiring.test.mjs）同一条核对接线上的第二个读数（同文件、同机制）：它断言八个调用点都不因核对而拒绝。⇒ 与清单改动无关。"
     },
     {
-      "test": "★ 臂 4（边界臂）：stamp 一致**不等于**每一段都新 —— 这一格本读数测不了，必须写明",
-      "fixture": "scripts/gate-stale-module.test.mjs",
-      "because": "同上：stamp 相关的臂在同一条链上，随旧构建一起红。"
+      "test": "臂 4 ★★ 全仓读数（如实报出）：合格多少、不合格多少、判不了多少",
+      "fixture": "scripts/gate-producer-consumer.test.mjs",
+      "because": "（成因类：全仓普查；夹具：scripts/gate-producer-consumer.test.mjs）★ t7 复核并【改正了本条前面那段已经过时的实录】—— 它原写\"「完全无消费」实测 14、pin 12\"，而 t7 实测：`unconsumed` 现在**恰好是 12**（那条上限**已不再红**，原文的漂移已经不存在了），真正红的是**另一条**上限：`fixtureOnly` 实测 **21** > 记账值 **20**。★ 而多出来的那一条**不是**可以记账的存量：臂 4 自己的长注释（④）逐字判定它是`readContractGateVerdict`（`src/quality-gates.ts:1301`），形状正是 t41 —— 该做的是【去接线】，**不许**把上限调成 21。★★ t7 实测：`src/` 全仓对它的引用为【零】（只出现在 `quality-gates.ts` 自己的定义处），于是\"这条读数从未上过生产\"是可核的。★★★ 而 t7 **没有**接线，因为它现在被另一条已生效的裁定挡住（如实报告，不是没做）：`readContractGateVerdict` 对 `unmeasured` 的处置是 `rejects: false`（放行、但留痕），而 t5 的裁定（A.5）明确要求契约位置**保留拒绝** `unmeasured`（见 `src/gates/contract/verify-command.ts:88-97`，以及 `scripts/gate-position-wiring.test.mjs` 臂 2）。⇒ 直接把生产接到这条读数上，会让\"判不了契约的任务静默进入工作\" —— 那是 t5 刚裁定不许做的事。★ 修它需要先裁定【这条读数的口径】与【t5 的裁定】哪一个是对的，而那是一个跨 src/tools/shared/entities.ts 与 src/quality-gates.ts 的语义变更，两者都在 t7 的 inScope 之外 ⇒ 归 t21（它正是\"契约位置合并策略\"那条任务）。"
     },
     {
-      "test": "★ 臂 6（★ 出口臂，t34）：新鲜度必须能从 `status` 的返回值读到",
-      "fixture": "scripts/gate-stale-module.test.mjs",
-      "because": "同上。★ 这三条是一族：all read the build stamp, and a stale host module shifts it。"
+      "test": "scripts/gate-readout-uniform.test.mjs",
+      "fixture": "scripts/gate-readout-uniform.test.mjs",
+      "because": "（成因类：夹具自身加载面；夹具：scripts/gate-readout-uniform.test.mjs）：scripts/gate-readout-uniform.test.mjs 会合成一份 bundle，而它需要 node_modules/.cache/ 与 rolldown 的深路径。⇒ 属【夹具自身的加载面】，与清单改动无关。 ★★ 2026-10-22 复核：本臂在**主树**上确实转绿，而它**不该退场** —— 转绿的原因是**主树有语料 / 有缓存**，而那两样在独立 worktree 里不存在。⇒ 它是**环境依赖**，不是「缺陷已修」。退场的判据（`_retiring` 逐字）要求「那条失败已经被修好了」—— 而这里**没有**任何提交修好了它，是环境变了。★★ 退它会让下一次 worktree 里那次**真实**的红被当成\"已知\"吞掉。"
     },
     {
-      "test": "★ 臂 10（三态在拒绝里也分形）：unknown **不得**说成 current；stale 那一态必须指向 reload",
-      "fixture": "scripts/gate-stale-module.test.mjs",
-      "because": "同上（stamp 族）。"
+      "test": "臂 3 ★ 对照臂：派发 → 观察到产出 → 推进时钟 → 两次探活，时刻真的在前进（不真等）",
+      "fixture": "scripts/gate-runtime-clock.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/gate-runtime-clock.test.mjs）的对照臂：它断言两次探活之间时刻真的前进。⇒ 红在时钟注入面，与清单改动无关。"
     },
     {
-      "test": "★★ 臂 1b（现状臂）：把**当前仓库**的接线现状如实报出来（不因为它红就把它删掉）",
-      "fixture": "scripts/gate-wiring-pinned.test.mjs",
-      "because": "t41 的 worktree-aware 接线在 f8fc671 被再次回退（observeWorkspaces 零调用方）。★ 这是一条【真实的、待修的】缺陷，而它属于接线而不属于本次改动 —— 而本清单的作用正是把它与「本次改动造成的」分开。"
+      "test": "★ 输入面的第二条纪律：活动观察在【成员上报那一刻】也必须活着（独立于 t5 的夹具）",
+      "fixture": "scripts/gate-runtime-liveness.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/gate-runtime-liveness.test.mjs）runtime 位置「成员上报那一刻」的活动观察接线缺口（该臂明确独立于 t5 的夹具）。⇒ 属运行时接线面，与清单改动无关。"
     },
     {
-      "test": "★★ 臂 1c（清单完整性臂）：清单里的符号必须真的在**源码里**被调用过",
-      "fixture": "scripts/gate-wiring-pinned.test.mjs",
-      "because": "同上：同一次回退的两个读数。"
-    },
-    {
-      "test": "臂 4 ★★ 核心：只差一个尾斜杠的【同一件工作】必须同裁 —— 否则判的是写法，不是工作",
-      "fixture": "scripts/verify-task-atomicity.test.mjs",
-      "because": "6baaf1a 专门写明「它红，而那是对的」—— 作者 t38、独立验证者 t43 都确认那是一条被故意留着的红。★ 它是【记录在案的已知失败】，正是本清单该收的那一类。"
+      "test": "★★ 臂 1（★★ 核心臂）：全仓普查，把\"多少处直接读 src/**、其中多少处该走统一口径\"如实报出",
+      "fixture": "scripts/gate-source-reading-convention.test.mjs",
+      "because": "（成因类：全仓普查；夹具：scripts/gate-source-reading-convention.test.mjs）全仓普查臂：它找的是「有夹具直接读 src/tools/** 的文本」这种写法。⇒ 随别的任务新增夹具而漂，与清单改动无关。"
     },
     {
       "test": "臂 1 ★ 文档点名的每一个 f-XXXX 都真的存在于台账里",
       "fixture": "scripts/moment-facts.test.mjs",
-      "because": "台账与文档之间的一条一致性读数；它的红属于台账维护，与任何单次代码改动无关。"
+      "because": "（成因类：环境（worktree / 语料 / 台账）；夹具：scripts/moment-facts.test.mjs）文档与卡点台账之间的一致性读数。★ 注意：台账目录（`.agent-teams/`）是 gitignored ⇒ 在**独立 worktree 里恒红**。⇒ 与清单改动无关。 ★★ 2026-10-22 复核：本臂在**主树**上确实转绿，而它**不该退场** —— 转绿的原因是**主树有语料 / 有缓存**，而那两样在独立 worktree 里不存在。⇒ 它是**环境依赖**，不是「缺陷已修」。退场的判据（`_retiring` 逐字）要求「那条失败已经被修好了」—— 而这里**没有**任何提交修好了它，是环境变了。★★ 退它会让下一次 worktree 里那次**真实**的红被当成\"已知\"吞掉。"
     },
     {
-      "test": "★ 臂 4（★ 本条是\"记录 vs 日志\"的分水岭）：用记录重跑，卡点必须再发生一次",
-      "fixture": "scripts/gate-friction-capture.test.mjs",
-      "because": "卡点台账的可重放读数；它依赖本仓的历史记录状态，而不是本次改动。"
+      "test": "臂 0 ★ 读数：admission 现在是什么，如实说出来（空位置 ≠ 三条判据都通过）",
+      "fixture": "scripts/verify-admission.test.mjs",
+      "because": "（成因类：存量；夹具：scripts/verify-admission.test.mjs）。⇒ 应另立任务修断言，而不是把注册表改回去。"
+    },
+    {
+      "test": "★ 臂 7（⑤）：第四种形态排查 —— 断言有没有\"恒真/恒红/读错出口\"的漏网",
+      "fixture": "scripts/verify-input-requires.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/verify-input-requires.test.mjs）全仓普查臂：它扫的是**别的夹具的断言形状**（找恒真/恒红/读错出口）。⇒ 随别的任务新增夹具而漂；本条红说明有一处漏网，而它在别人的夹具里。"
+    },
+    {
+      "test": "★ 臂 3b：三态**两两不同形** —— 在同一个位置、同一份 ctx 形状上只动一个自变量",
+      "fixture": "scripts/verify-readout-uniform.test.mjs",
+      "because": "（成因类：断言腐化（口径漂移）；夹具：scripts/verify-readout-uniform.test.mjs）读数出口（`input_surface`）在某个位置上的三态分形读数；本条红是**出口接线**的既有缺口（某个位置没有交出结构化结论）。⇒ 与清单改动无关。"
+    },
+    {
+      "test": "① 另外五个调用点：task-created / task-update / task-update-settled / task-status / delivery-declared 每一个都真的被求值到",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs），与清单改动无关。"
+    },
+    {
+      "test": "★ ② 硬要求（a）：真判据被换成\"永远 blocked\"⇒ 建任务/上报/查状态/宣告交付全部照常走完",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）同一条【运行时接线】链上的第二个读数：契约 §5 的硬要求是「runtime 位置的裁决不得阻止流程」，而该臂实测把真判据换成永远 blocked 之后流程没有照常走完。⇒ 缺口在 src/tools 的 runtime 调用点，与清单改动无关。"
+    },
+    {
+      "test": "★ ③ 有状态（噪声臂）：反复的工具调用不是\"在动\" —— 成员 40 分钟零产出仍是 blocked",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）同一条链的第三个读数：探活判据的**有状态**口径（反复工具调用 ≠ 在动）。⇒ 与清单改动无关。"
     },
     {
       "test": "臂 6 真实语料分布（独立重算）：它在这批真实任务上是什么形状",
       "fixture": "scripts/verify-task-atomicity.test.mjs",
-      "because": "语料统计臂：它读的是【当前语料】的形状，而语料随每一轮任务增长 —— 与本次改动无关。"
+      "because": "（成因类：存量；夹具：scripts/verify-task-atomicity.test.mjs）语料统计臂：读的是**当前语料**的形状，而语料随每一轮任务增长。★ 本 worktree 没有 `.agent-teams/` 语料 ⇒ 在独立树里恒红。⇒ 与清单改动无关。 ★★ 2026-10-22 复核：本臂在**主树**上确实转绿，而它**不该退场** —— 转绿的原因是**主树有语料 / 有缓存**，而那两样在独立 worktree 里不存在。⇒ 它是**环境依赖**，不是「缺陷已修」。退场的判据（`_retiring` 逐字）要求「那条失败已经被修好了」—— 而这里**没有**任何提交修好了它，是环境变了。★★ 退它会让下一次 worktree 里那次**真实**的红被当成\"已知\"吞掉。"
+    },
+    {
+      "test": "★ 输入面臂：`execVerifyCommand` 缺席与在场 ⇒ 判据裁决不同形（★ 但要在【判据层】看）",
+      "fixture": "scripts/gate-contract-build-artifacts.test.mjs",
+      "because": "（成因类：存量；夹具：scripts/gate-contract-build-artifacts.test.mjs）。t10 的记账点用 git worktree add --detach 抽 pristine 基线跑 TAP 对照，同一测试、同一断言、逐字相同。"
+    },
+    {
+      "test": "arm 9 — ★ FLIPPED (t33): the real path no longer reports the f-0020 wording",
+      "fixture": "scripts/gate-repair-completion.test.mjs",
+      "because": "（成因类：断言腐化（口径漂移）；夹具：scripts/gate-repair-completion.test.mjs）；t33 是既有记账点。同上由 t10 记账点的 pristine 对照证得。"
+    },
+    {
+      "test": "臂 8 ★★★ 真实盘面上不存在\"早于这道门上线\"的 reviewed 戳",
+      "fixture": "scripts/gate-plan-reviewed-stamp.test.mjs",
+      "because": "（成因类：记录在案的故意红；夹具：scripts/gate-plan-reviewed-stamp.test.mjs）+ 接真实台账上逐字复现：'★ 盘上有 90 个 reviewed 戳早于这道门上线（2026-10-09T01:33:50.000Z）'，8 tests / 7 pass / 1 fail。处置不是把 at 改成今天（那是伪造），是让戳指向它审过的产物（reviewedArtifacts），见 scripts/gate-plan-reviewed-stamp.test.mjs:291 的注释 A 与 docs/ 里的设计题 —— 那件事在另一个任务的写域里，不在本清单能解决的范围。"
+    },
+    {
+      "test": "① 任务级调用点的输入面：有等待记录时 `wait` 到位；没有派发记录的任务不伪造一个起点",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "① 等待起点的时机：记在【派发被接受】那一刻，不是任务被创建那一刻",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "① 调用点 member-dispatched：真实的 kickTeam 真的把 runtime 判据求值到了",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "④ 三态在【真实路径】上也不同形：先\"没检查\"，再 ok，再 blocked —— 三者在返回值里可分辨",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ ② 硬要求（b）：不加任何东西，把【真实】判据逼到 blocked ⇒ 流程照样走完",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ ③ 有状态（伪造臂）：同样过了 10 分钟，成员【一句话都没说】⇒ blocked",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ ③ 有状态（对照臂）：派发后 10 分钟里成员【说过话】⇒ ok",
+      "fixture": "scripts/verify-runtime-integration.test.mjs",
+      "because": "（成因类：运行时接线；夹具：scripts/verify-runtime-integration.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 10（覆盖臂）：八处 evaluate 调用点每一处都在求值之前核对了输入面",
+      "fixture": "scripts/gate-input-wiring.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/gate-input-wiring.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 10：五处调用点的输入面核对在【求值之前】—— 且核对不改求值结果",
+      "fixture": "scripts/verify-input-requires.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/verify-input-requires.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 11：本文件【没有】改任何被判据的源码（纪律自证）",
+      "fixture": "scripts/verify-input-requires.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/verify-input-requires.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 1（P4 · 注册）：注册表逐位置枚举，并与基线**逐条**比对",
+      "fixture": "scripts/verify-unified-pipeline.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/verify-unified-pipeline.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路径的判据，在缺格时被读出缺哪一格",
+      "fixture": "scripts/verify-input-requires.test.mjs",
+      "because": "（成因类：核对接线；夹具：scripts/verify-input-requires.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★ 臂 5：`resolveBaseRevision` 的两条来源与两个\"没有\"的成因**不同形**",
+      "fixture": "scripts/gate-t1-completion-probe.test.mjs",
+      "because": "（成因类：环境（worktree / 语料 / 台账）；夹具：scripts/gate-t1-completion-probe.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★★★ 臂 2（普查臂）：对注册表里**每一条**判据报出三态，且「无法构造」必须附理由",
+      "fixture": "scripts/gate-falsification-pairs.test.mjs",
+      "because": "（成因类：存量；夹具：scripts/gate-falsification-pairs.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★★★★ 臂 2b（反向半边）：`reviewedTaskId` 那一族**没被动过** —— 沿用它而不是改它",
+      "fixture": "scripts/gate-reviewed-passthrough.test.mjs",
+      "because": "（成因类：断言腐化（口径漂移）；夹具：scripts/gate-reviewed-passthrough.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "★★★★★ 臂 3：第三站那行【在源码里】，而它等的是 t11 —— 且那条等待**可核**",
+      "fixture": "scripts/gate-reviewed-passthrough.test.mjs",
+      "because": "（成因类：断言腐化（口径漂移）；夹具：scripts/gate-reviewed-passthrough.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
+    },
+    {
+      "test": "臂 1 ★ 对照臂：每个工具带上它会返回的诊断字段 ⇒ 通过自己的 output schema",
+      "fixture": "scripts/gate-tool-output-schema.test.mjs",
+      "because": "（成因类：断言腐化（口径漂移）；夹具：scripts/gate-tool-output-schema.test.mjs）2026-10-20 队长在盘上实测到的既有失败；t15 的 preround 读数证明它在本轮开工前就已红（§7.2）。★ 登记它不等于允许它 —— 清单只改变问句：不问「基线绿吗」，而问「这次改动【新增】了失败吗」。"
     }
-  ]
+  ],
+  "_pinned_by": "captain（2026-10-20 由 t15 独立复核发现 pin 与盘面分叉后重钉）",
+  "_measured_caveat": "★ 名单会【随队友活动抖动】：在队友并发 build 时，同一提交、零碰撞的读数也曾得到 30/31/39 条。成因不是 ERR_MODULE_NOT_FOUND（那几次 ERR 也是 0），而是 `lib/` 被并发 build 改写成不同的中间/最终态，于是不同夹具在不同时刻看到不同的库。⇒ 本清单是**某一时刻的集合比对结果**，不是不变量；而判据用它是做**减法**（已知失败不算本次改动造成的），所以它宁可少收一条，也不要多收一条其实绿着的。",
+  "_not_self": "★ 本清单**不许**包含它自己的夹具（`scripts/gate-baseline-known-failures.test.mjs`）的臂 —— 否则会自指：该夹具一红就被 pin，于是\"它红\"这件事再也不被发现。这是一条可断言的规则（见该夹具的臂 5/臂 6），而不是一句忠告。",
+  "_snapshot_caveat": "★ 本清单是【某一时刻的集合比对结果】，不是不变量 —— 见 `_measured_caveat`。⇒ 因此夹具断言的是【结构】（每条 because 具体、三态不同形、装载器可达、不含自己的臂），而「与当前红的差集」只作【报告】不作【断言】：那个量会随队友的并发 build 抖动。",
+  "_retiring": "退一条的判据（写给下一个人）：那条失败【已经被修好了】—— 你能指出是哪个提交/哪次交付让它转绿，并且实测它在当前 HEAD 上确实不红了。★ 退场与加入【方向相反、风险也相反】：加入的风险是把新造成的失败洗成已知的；退场的风险是把一条【仍然红着】的红说成好了，于是它下次再红时会被读成已知的。⇒ 退一条必须【附上实测的绿读数】与【是哪个交付让它转绿的】，且只在它真的不红了之后才退。宁可留着，也不要凭我猜它该好了退。★ 本条的由来：t3 把臂 4 从判字符串末字符修成真结构判断，臂 4 由红转绿 ⇒ 它那条 pin 就此过时。（在此之前，本文件只写了 _adding 那一半，退场无人被授权 —— 那本身是一个缺口。）",
+  "_repaired_at": "981cb4f（2026-10-11，t10 终态写入被拒后由 captain 补）。MEASURED：这两条在 pristine a176e5d 上逐字复现 ⇒ 属存量，而 _verified_at=ba32130 的快照漏收了它们。★ 这正是本文件 _measured_caveat 预言的『清单腐化』第四次兑现（前三次是 inScope 漏构建产物：t1 漏 .d.ts、t9/t10 漏 stamp+client.js）。共同形状：『手写清单』与『工具生成的集合』靠人肉对齐必然漏。",
+  "_retired_at": "t7（2026-10-11）：19 条 → 17 条。★ 按本条上面那条 _retiring 判据退场，两条各附实测绿读数。（1）`scripts/gate-tool-split.test.mjs` 臂 3（结构臂：import 图无环、工具模块之间不许互相 import）—— ★ 实测当前 HEAD 上该文件 **6/6 绿**；让它的那条【结构违规】不再成立：`update-task/` 一族（`dispatch.ts` / `completion.ts`）现在是 `update-task.ts` 自己的私有子目录，是【同一个单元】而不是 A↔B；该臂自己的注释已写明这层分辨（由 `e7c889c` 提取）。★ 反证：把 `src/tools/status.ts` 加一行 `import … from \"./update-task.ts\"` ⇒ 臂 3 立刻红（实测）⇒ 该臂仍然可证伪，不是恒绿。（2）`scripts/gate-shared-artifact-writes.test.mjs` 臂 4（全仓扫描 ⇒ 违规清单恰好等于已知存量）—— ★ 该臂此前红是对的：实测 **5 条**新增共享写入（不是 pin 里记的 2 条），是 t7 在【成因处】修掉它们、而不是把上限往上抬：① `scripts/worktree-reclaim.mjs` 的 `recordReclaim` 收了 `repo=` 却【从未使用】，一律写模块级 `RECLAIM_LOG` ⇒ 夹具传私有树也落在共享树上（这正是 t68 那个\"两个动作在同一共享资源上没有序关系\"的形状）；改成由 `repo` 算出落点（缺省 `REPO_ROOT` ⇒ 生产落点逐字节不变）。② `scripts/verify-reload.mjs` + `verify-reload.test.mjs` 把 marker/backup 写死在 `ROOT/.agent-teams/` ⇒ 新增 `AGENT_TEAMS_RELOAD_STATE_DIR` 注入点，夹具注入 `mkdtemp` 私有树（缺省仍退回原行为：手工三阶段跨进程共享 marker 的性质一个字未变）。★ 实测退场后：该文件 **5/5 绿**，`verify-reload` 8/8 绿，`worktree-reclaim` 36/36 绿。★ 反证：把 `recordReclaim` 写回 `RECLAIM_LOG` ⇒ 臂 4 立刻红（实测）⇒ 扫到的确实是那条违规。★★ 另如实记一笔（本任务实测发现的【扫描器本身的】边界，未修，见 knownFailures 之外的记账）：该扫描器的共享别名解析只有【一层】—— `const logPath = RECLAIM_LOG` 之后写 `logPath`，它读不出那是共享落点（实测：把修复改成这种间接写法，臂 4 不红）。⇒ 本修**没有**用它来规避判据（落点是用 `join(repo, …)` 直接算出来的）；但这是一条真实的漏报面，应另立任务，不要以为\"绿了\"就等于\"这一格被封住\"。 ★ 2026-10-22：35 → 34 条。退一条（`gate-input-wiring` 臂 4：验核对结论报出缺格，已由接线修复转绿；实测当前 HEAD 上该文件 15/17，另两条（臂 10 / 臂 12）仍红并留在清单里）。★ 另三条（readout-uniform / moment-facts 臂 1 / task-atomicity 臂 6）**主树上绿而刻意不退**：它们是环境依赖，转绿不构成「缺陷已修」的证据。"
 }

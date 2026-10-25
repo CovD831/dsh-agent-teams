@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 940" font-family="-apple-system, 'PingFang SC', sans-serif">
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#8b94a3"/></marker>
+  <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#6ea8fe"/></marker>
+  <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#e06c75"/></marker>
+  <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#b48ead"/></marker>
+</defs>
+<rect width="1420" height="940" fill="#16191d"/>
+<text x="40" y="46" font-size="21" font-weight="700" fill="#e6e9ee">③ 采集模块 · 从&quot;卡点&quot;到&quot;能用的信号&quot;</text>
+<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · 旧 frictions/ 已冻结（386 条 · 15.1 MB · 平均 38 KB）</text>
+<text x="40" y="112" font-size="14" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">汇合点（宿主已经在的地方）</text>
+<rect x="40" y="136" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="162" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">recordFriction()</text>
+<text x="300" y="162" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">entities.ts:4175</text>
+<text x="58" y="186" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">三处调用：create-task / entities / update-task</text>
+<text x="58" y="206" font-size="11" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 只在【判据拒绝】时触发</text>
+<rect x="40" y="242" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="268" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">工具拒绝抛出点</text>
+<text x="300" y="268" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">tools.ts</text>
+<text x="58" y="292" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">参数不合法、越权、状态不允许</text>
+<text x="58" y="312" font-size="11" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 非判据类的拒绝</text>
+<rect x="40" y="348" width="470" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="374" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">validateCreateTask</text>
+<text x="300" y="374" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">quality-gates.ts:980</text>
+<text x="58" y="398" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">建任务的契约校验</text>
+<text x="58" y="418" font-size="11" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 纯函数，只依赖 types.ts</text>
+<text x="560" y="112" font-size="14" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">collection 插入点 · 4 条判据</text>
+<rect x="560" y="136" width="400" height="62" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="578" y="162" font-size="13" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">dedupe</text>
+<text x="578" y="183" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">(kind, component, message) 在窗口内出现过</text>
+<path d="M512 160 L556 160" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="560" y="214" width="400" height="62" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="578" y="240" font-size="13" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">cooldown</text>
+<text x="578" y="261" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">同一来源距上次采集不足 cooldownMs</text>
+<path d="M512 238 L556 238" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="560" y="292" width="400" height="62" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="578" y="318" font-size="13" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">attributable</text>
+<text x="578" y="339" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">能不能归因到某个模块？归不了 ⇒ unmeasured</text>
+<path d="M512 316 L556 316" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="560" y="370" width="400" height="62" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="578" y="396" font-size="13" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">immunity</text>
+<text x="578" y="417" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">已知噪声源（如 worktree 路径差异）免疫</text>
+<path d="M512 394 L556 394" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<text x="560" y="452" font-size="11.5" fill="#7dd3a0" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 四条都是纯函数：缺输入 ⇒ unmeasured，绝不是 ok</text>
+<text x="560" y="472" font-size="11.5" fill="#e0a15c" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 添加一个插入点是【五处登记】，漏一处则判据不生效</text>
+<text x="1010" y="112" font-size="14" fill="#b48ead" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">落盘</text>
+<rect x="1010" y="136" width="370" height="100" rx="8" fill="#1b1f26" stroke="#b48ead" stroke-width="1.4" opacity="1"/>
+<text x="1028" y="162" font-size="13" fill="#b48ead" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">evolution/signals.jsonl</text>
+<text x="1028" y="186" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">appendSignalClaimingId() —— 进程内互斥</text>
+<text x="1028" y="202" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ id 在临界区内才读，否则并发撞车</text>
+<text x="1028" y="218" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">（实测：12 次并发曾全返回 e-0001）</text>
+<rect x="1010" y="256" width="370" height="96" rx="8" fill="#1b1f26" stroke="#b48ead" stroke-width="1.4" opacity="1"/>
+<text x="1028" y="282" font-size="13" fill="#b48ead" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">states/{team,member,task}/</text>
+<text x="1028" y="306" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">内容寻址，去重靠 substructure</text>
+<text x="1028" y="322" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">实测 4.92 MB → 0.75 MB（约 7×）</text>
+<text x="1028" y="338" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">whole-block 只压 1%，substructure 压 70%</text>
+<path d="M960 168 L1006 186" fill="none" stroke="#b48ead" stroke-width="1.8" marker-end="url(#arrP)"/>
+<rect x="40" y="540" width="1340" height="168" rx="8" fill="#191d23" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="566" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">采集健康度 · collectionHealthOf()（两个元指标，出自 AutoLibra / ICLR 2026）</text>
+<text x="58" y="594" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">coverage   —— 采到的信号覆盖了多少种 (component, kind) 对</text>
+<text x="58" y="614" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">redundancy —— 唯一对数 / 总记录数。★ 实测 54/372 = 0.145（补录后 71/382 = 0.186）</text>
+<text x="58" y="634" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1"></text>
+<text x="58" y="654" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 口径陷阱：必须按「(component, 单个 kind) 对」算，不能按「kind 集合桶」算 ——</text>
+<text x="58" y="674" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">  两者差 18 条多 kind 记录（如 f-0078 · [unwired, cross-ecosystem]），按对算 54、按桶算 38。</text>
+<rect x="40" y="728" width="1340" height="88" rx="8" fill="#1a1e24" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="754" font-size="13" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">现在的真实状态</text>
+<text x="58" y="778" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 采集在跑，但只有 3 个导出有消费者（observe 49 · collectionHealthOf 8 · readSignalsHealth 2）。三条自进化路径里只有②接上了。</text>
+<text x="58" y="797" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 旧 frictions/ 不迁移（用户裁定），新 signals.jsonl 与它并存。</text>
+<text x="40" y="858" font-size="11.5" fill="#5a6472" font-weight="600" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">── 图例</text>
+<rect x="40" y="870" width="14" height="14" rx="3" fill="#6ea8fe" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="62" y="882" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">插入点与判据</text>
+<rect x="180" y="870" width="14" height="14" rx="3" fill="#b48ead" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="202" y="882" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">落盘</text>
+<rect x="272" y="870" width="14" height="14" rx="3" fill="#e0a15c" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="294" y="882" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">需要留意</text>
+<rect x="400" y="870" width="14" height="14" rx="3" fill="#7dd3a0" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="422" y="882" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">不变量</text>
+</svg>

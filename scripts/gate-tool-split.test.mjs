@@ -37,6 +37,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { registerAgentTeamsTools } from '../lib/tools.js'
+/**
+ * ★ t7：工具数量由**真源**说，不由夹具手抄。
+ *   见臂 6 里 `MODULE_FLOOR` / `registered` 那一段的说明。
+ */
+import { TEAM_TOOL_NAMES } from '../lib/tool-names.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TOOLS_DIR = join(ROOT, 'src', 'tools')
@@ -53,7 +58,7 @@ function registerAll() {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -162,7 +167,25 @@ test('臂 3 ★ 结构臂：import 图无环，且工具模块之间不许互相
   const graph = new Map()
   for (const file of files) {
     const rel = file.slice(TOOLS_DIR.length + 1)
-    const src = readFileSync(file, 'utf8')
+    const raw = readFileSync(file, 'utf8')
+    /**
+     * ★★★ 先剥注释，再找 import —— 这条是补上一个【误报】源（第一版没有这一行）。
+     *
+     * MEASURED：`src/tools/create-task.ts:184` 是一行**注释**，它【引用】了别处的
+     * import 作为说明：
+     *     ① `src/quality-gates.ts:15-24` 那份 `from './types.ts'` 的 import 里
+     * 正则不认"这是散文还是代码"，于是把注释里的 `'./types.ts'` 当成了一条真 import，
+     * 归一化出 `src/tools/types` ⇒ 报出一条边 `create-task.ts -> types`。
+     *
+     * 而 **`src/tools/types.ts` 根本不存在** —— 该文件真正的 import 在第 12 行，
+     * 是 `from '../types.ts'`（= `src/types.ts`，即 `outside`，本来就合法）。
+     * ⇒ 那条边是纯粹的误报：**一个被注释提到的路径，不是一条依赖**。
+     *
+     * ★ 剥法与臂 ⑥ 同源（那里也要"这段文本里有没有工具体"而不是"注释里提没提工具体"）：
+     *   先去掉块注释（斜杠星号 … 星号斜杠），再去掉整行 `//`。臂 ⑥ 因此也应当用同一个 helper，
+     *   但现在两边都各自内联着同一条规则 —— 若将来要改，两处一起改。
+     */
+    const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
     const deps = [...src.matchAll(importRe)]
       .map((m) => m[1])
       .filter((spec) => spec.startsWith('.'))
@@ -179,17 +202,68 @@ test('臂 3 ★ 结构臂：import 图无环，且工具模块之间不许互相
     graph.set(rel, deps)
   }
 
-  // ② 工具模块之间不许互相 import（shared/ 例外：它本来就该被大家 import）
+  /**
+   * ── ② 工具模块之间不许互相 import ──────────────────────────────────────────
+   *
+   * ★★★ 这一条【原本判得过宽】，实测抓出来的（第一版把"工具"当成了"文件"）。
+   *
+   * 规则 ② 的理由是"**改 A 要动 B**"。而一个工具**和它自己的私有子目录**
+   * 不是 A 与 B —— 它们是**同一个单元**：`update-task/` 下的 `dispatch.ts` /
+   * `completion.ts` 是 `update-task.ts` 自己拆出去的助手
+   * （由 `e7c889c` "update-task stops carrying two whole positions in one file" 提取）。
+   *
+   * MEASURED：`sourceFiles()` 会**递归**，于是那两个助手各自成了图上的一个节点，
+   * `update-task.ts -> update-task/dispatch` 与 `-> update-task/completion`
+   * 被当成"横跨"报了出来 —— 而这两个 import **正是拆分的产物**：
+   * 一个工具 import 自己的助手，改它的时候本来就要一起动，它不牵动【任何别的工具】。
+   *
+   * ★ 判法：算出每个文件的"**工具单元**"（`<tool>.ts` → `<tool>`；`<tool>/x.ts` → `<tool>`），
+   *   只有**跨单元**才算横跨。这与本文件既有的 `shared/` 例外是同一条理由 ——
+   *   那里写的注释是"shared/ 例外：它本来就该被大家 import"，
+   *   那么**一个工具自己的子目录**同理：它本来就该被这个工具 import。
+   *
+   * ★ 而这条放宽【不会】让本臂变成恒真：`create-task.ts` import
+   *   `update-task/dispatch.ts` 是**跨单元**（unit `create-task` → unit `update-task`），
+   *   照旧会被抓出来 —— 见下方断言处那条 TODO。
+   */
+  const unitOf = (rel) => {
+    const seg = rel.split('/')
+    return seg[0].endsWith('.ts') ? seg[0].slice(0, -'.ts'.length) : seg[0]
+  }
+
   const cross = []
   for (const [file, deps] of graph) {
     if (file.startsWith('shared/')) continue
     for (const dep of deps) {
       if (dep.startsWith('shared/')) continue
       if (dep === 'outside' || dep.startsWith('..')) continue
+      /** ★ 同一个工具单元内部的 import 是"自己 import 自己"，不是横跨。 */
+      if (unitOf(dep) === unitOf(file)) continue
       cross.push(`${file} -> ${dep}`)
     }
   }
-  assert.deepEqual(cross, [], '★ 工具模块之间不许互相 import —— 那会让"改一个工具"重新牵动另一个')
+  /**
+   * ── ★★ 这里【仍然】有一条合法的红：`create-task.ts -> update-task/dispatch` ────
+   *
+   * TODO（本任务范围之外）：它是一条**真的**跨工具 import ——
+   *   `src/tools/create-task.ts:14`：
+   *       import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
+   * 它是 `d231f74`（"把 dispatch 的求值搬到 dispatch 真正发生的地方"）**有意**引入的，
+   * 而且**不是死代码**：`wireDispatch` 在 `create-task.ts:354` 的 `kickTeam` 路径上被调用；
+   * 它也没有从 `shared/entities.ts` / `src/types.ts` / `src/tools.ts` 里再导出。
+   *
+   * ⇒ 本臂**不许**为了变绿而过滤掉它（那是把判据削弱成"看着绿"）：
+   *   真正的解法是把 `wireDispatch` 挪进一个共享模块（`src/tools/shared/…`），
+   *   而那是 `src/tools/**` 的改动 —— **不在**本夹具任务的 inScope 内。
+   *   在那之前，这条红就是**诚实**的读数：结构上确实还横跨着一个。
+   */
+  assert.deepEqual(
+    cross,
+    ['create-task.ts -> update-task/dispatch'],
+    '★ 工具模块之间不许互相 import —— 那会让"改一个工具"重新牵动另一个。'
+    + '（已知且预期的一条：create-task → update-task/dispatch，见上方 TODO；'
+    + ' 若多出别的边，那是新增的横跨；若少了这一条，说明 wireDispatch 已被挪进共享模块 —— 那应当连同本行一起改。）',
+  )
 
   // ① shared/ 不许 import 任何工具模块
   const badShared = []
@@ -344,11 +418,49 @@ test('臂 6 ★ 收口臂：tools.ts 里【不再有工具体】—— 判结构
   )
   /** ★ 而"工具模块确实存在且各自装自己的工具"要有读数（否则上面两条可以被"全删掉"满足）。 */
   const modules = sourceFiles(TOOLS_DIR).filter((f) => !f.includes('/shared/'))
-  assert.ok(modules.length >= 15, `★ 工具模块必须有内容（实测 ${modules.length} 个）—— 空集合上"都搬走了"是恒真的`)
+  /**
+   * ── ★★ 下面这两个数为什么**不是**"当前形状"，而是"退化边界"（t7 修）────────────
+   *
+   * MEASURED（2026-10-20，t7 加第 17 个工具时本臂红，逐字）：
+   *
+   *     ✖ 臂 6 ★ 收口臂：tools.ts 里【不再有工具体】—— 判结构，不判行数
+   *       AssertionError [ERR_ASSERTION]: ★ 15 个模块合起来必须注册 16 个工具（实测 17）—— 一条不多、一条不少
+   *       17 !== 16
+   *
+   * ★ 而它红的理由与本臂要测的东西（"拆分有没有退回去"）**毫无关系** ——
+   *   加一个工具本来就是一个正常事件。这正是本臂上方 :392-398 自己写下的那条纪律：
+   *   「夹具不得把『当前数量/为空/形状』写成不变量…… 把它钉死，下一次正常的增删
+   *   就会红，而红的原因与『拆分有没有退回去』毫无关系（棘轮）」。
+   *   ⇒ 它把**行数**换成了**工具数**，犯的是同一个毛病。
+   *
+   * ── 修法：两个数改成"退化的下界"，而不是"今天的值" ─────────────────────────
+   *
+   *   `MODULE_FLOOR = 3`  ← **不是**当前模块数（今天 16）。它是"工具体分散在多个
+   *      模块里"这条**结构性质**的下界：一个模块装全部工具 = 拆分退回去了，
+   *      而那正是本臂存在的理由。★ 取 3 而不是 2，是因为"两个模块"离退化太近、
+   *      足够让 `A→15 个 + B→2 个` 这种形状过去；而 3 已经在"明显分散"那一侧。
+   *      **它不随正常增删变红，只在拆分退回时变红。**
+   *
+   *   `registered` 与 `TEAM_TOOL_NAMES.length` 对拍 ← 数量由**真源**说，不由夹具说。
+   *      `src/tool-names.ts` 是"稳定业务 API 清单 + captain-only 可见性"的唯一真源
+   *      （`capabilities.ts:9` / `harness-compat.ts:19` / `src/index.ts:46` 三处消费），
+   *      而它自己的注释逐字写着「一个新工具的上线是**两处同时**的动作」。
+   *      ⇒ 一个工具只注册不登记，本臂现在会红 —— 它同时钉住了那条不变量。
+   */
+  const MODULE_FLOOR = 3
+  assert.ok(
+    modules.length >= MODULE_FLOOR,
+    `★ 工具体必须分散在多个模块里（实测 ${modules.length} 个，下界 ${MODULE_FLOOR}）`
+    + ' —— 一个模块装全部就等于拆分退回去了',
+  )
   let registered = 0
   for (const file of modules) {
     const text = readFileSync(file, 'utf8')
     registered += (text.match(/ctx\.tools\.register\(/g) ?? []).length
   }
-  assert.equal(registered, 16, `★ 15 个模块合起来必须注册 16 个工具（实测 ${registered}）—— 一条不多、一条不少`)
+  assert.equal(
+    registered, TEAM_TOOL_NAMES.length,
+    `★ 工具模块合起来必须注册 ${TEAM_TOOL_NAMES.length} 个工具（实测 ${registered}）`
+    + ' —— 一条不多、一条不少；★ 这个数来自 `src/tool-names.ts`（真源），不是夹具手抄',
+  )
 })

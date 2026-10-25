@@ -1,0 +1,143 @@
+/**
+ * ── ★★★ 房间的样式（需求 §27.5）────────────────────────────────────────────────
+ *
+ * ── 第一版错在哪（写下来，防止再犯）──────────────────────────────────────────────
+ *
+ * 第一版用 CSS grid 画"一排排格子" ⇒ 用户截图里看到的是**一张表格**。
+ * 用户评语：「**目前这个很显然跟我想要的风格、跟我想的画面不一样**」。
+ * ★★ 根因不是配色，是**画法**：房间必须是**画出来的**（canvas、等距、有体积），
+ *   而不是**排出来的**（div grid）。
+ *
+ * ── 所以本文件只剩三件事 ────────────────────────────────────────────────────────
+ *
+ * ```
+ * ① 给 canvas 一个**暗色舞台**（房间本身是夜晚）
+ * ② 像素风的放大纪律：`image-rendering: pixelated`（**这一行是物理前提**）
+ * ③ 底下的成员读数表（画面上是像素小人，表里是可读的名字与状态）
+ * ```
+ * ★ 地板、墙、桌椅、小人**一条 CSS 都不画** —— 它们全在 canvas 里。
+ */
+
+.room {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 100%;
+  padding: 16px 20px;
+  background: #0b0a10;
+  color: #d7d2e0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ★ 舞台：房间的"屏幕"。四周留边距，让等距房间的斜角不被切。 */
+.stage {
+  display: flex;
+  justify-content: center;
+  align-self: stretch;
+  overflow: auto;
+  padding: 4px;
+}
+
+/**
+ * ★★ `image-rendering: pixelated` 是像素风的**物理前提**：
+ *   没有它，浏览器会对放大后的 1 像素做双线性插值 ⇒ 边缘变糊 ⇒ 不再是像素画。
+ * ★ 而 `display: block` 去掉行内元素底部的基线间隙（否则画布下会多几像素）。
+ */
+.canvas {
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/**
+ * ★ 操作提示：滚轮缩放 / 双击切换 / 点房间放大。
+ * ★★ 它必须**写明**这三条 —— 否则用户不知道这个画布是能操作的，
+ *   而"能缩放但没人知道"与"不能缩放"在体验上同形。
+ */
+.hint {
+  margin: 6px 0 0;
+  color: #6e6878;
+  font-size: 10px;
+  text-align: center;
+  user-select: none;
+}
+
+/* ── 成员读数表（画布下方的名字与状态）────────────────────────────────────────── */
+
+.roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 0;
+  padding: 8px 0 0;
+  list-style: none;
+  border-top: 2px solid #2a2536;
+}
+
+.rosterItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid #2a2536;
+  background: #141220;
+  font-size: 10px;
+}
+
+.actorName {
+  color: #d7d2e0;
+  font-weight: 700;
+}
+
+/**
+ * ★ 五态各有自己的颜色 —— 与画布上的五种画法**一一对应**。
+ * ★★ 而"颜色"不是判据：判据读的是 `data-doing-label`。
+ *   只用颜色区分两种状态，对色弱是不可用的（本仓既有纪律）。
+ */
+.actorDoing {
+  color: #8b8598;
+}
+
+.rosterItem[data-actor-doing='working'] {
+  border-color: #2f6f5f;
+}
+
+.rosterItem[data-actor-doing='working'] .actorDoing {
+  color: #4fe0c0;
+}
+
+.rosterItem[data-actor-doing='unknown'] {
+  border-style: dashed;
+}
+
+.rosterItem[data-actor-doing='unknown'] .actorDoing {
+  color: #c8a24a;
+}
+
+.rosterItem[data-actor-doing='not-spawned'] .actorDoing {
+  color: #6e6878;
+}
+
+.rosterItem[data-actor-doing='away'] .actorDoing {
+  color: #6e6878;
+  text-decoration: line-through;
+}
+
+/* ── 两种通知（读不到 / 空房间）──────────────────────────────────────────────── */
+
+.notice {
+  margin: 0;
+  padding: 18px 20px;
+  border: 2px dashed #2a2536;
+  color: #8b8598;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas {
+    /* ★ 动画在 JS 里（只在有 working 时才开定时器）；这里只声明偏好被尊重。 */
+    transition: none;
+  }
+}

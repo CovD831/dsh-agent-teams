@@ -1,0 +1,769 @@
+{
+  "at": "2026-10-17T20:34:56.468Z",
+  "head": "4b648fb7794d4a532bb220f08f70139f5bd9c8a2",
+  "branch": "task-mutation-integrate",
+  "corpus": {
+    "teamJsons": 23,
+    "teams": 23,
+    "unreadableTeams": 0,
+    "unreadableDetail": [],
+    "tasks": 425,
+    "status": {
+      "completed": 215,
+      "failed": 86,
+      "pending": 21,
+      "cancelled": 101,
+      "in_progress": 2
+    },
+    "fieldUsage": {
+      "coverageOf": 0,
+      "parentTaskId": 0,
+      "handoffCommit": 0,
+      "deliverableCommit": 100,
+      "delivery": 0,
+      "inScope": 362,
+      "acceptance": 391,
+      "verify": 332,
+      "objective": 396,
+      "deliverables": 61
+    },
+    "teamsWithDescription": 23
+  },
+  "handoff": {
+    "taskRecords": 100,
+    "distinctCommits": 92,
+    "noDownstreamConsumer": 38,
+    "reachability": {
+      "inHead": 1,
+      "inOtherBranchRef": 5,
+      "inOtherRef": 0,
+      "onlyLiveWorktree": 6,
+      "fullyOrphan": 80
+    },
+    "orphanContent": {
+      "identicalToHead": 7,
+      "differFromHead": 70,
+      "touchesFilesAbsentFromHead": 3
+    },
+    "atRiskPaths": [
+      {
+        "sha": "05fdc4ea881e7e45768f291200bfb67ae59118b1",
+        "file": "docs/P0-DECOUPLING.md",
+        "inAnyRef": false
+      },
+      {
+        "sha": "3153092bce2e49dd358af20106914ce41a400ed7",
+        "file": "docs/P0-DECOUPLING.md",
+        "inAnyRef": false
+      },
+      {
+        "sha": "51925ed3c7e7e5f42dca17b98a129f0bddddd1a6",
+        "file": "E2E-COMMIT-PROBE.md",
+        "inAnyRef": false
+      }
+    ],
+    "agentTeamsRefs": 0,
+    "unreachableObjects": 624,
+    "countObjects": "count: 2937\nsize: 60960\nin-pack: 7807\npacks: 3\nsize-pack: 40694\nprune-packable: 0\ngarbage: 0\nsize-garbage: 0"
+  },
+  "verifierWrites": {
+    "considered": 84,
+    "wroteOutsideLib": 12,
+    "rows": [
+      {
+        "team": "agent-teams-hardening",
+        "task": "t11",
+        "kind": "integration",
+        "written": [
+          "docs/HANDOVER.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t15",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-ARCHITECTURE.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t21",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-GATE-EFFICACY.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t26",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-PLAN-2.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t27",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-PLAN-3.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t32",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-PLAN-2b.md"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t35",
+        "kind": "review",
+        "written": [
+          "docs/REVIEW-PLAN-2c.md"
+        ]
+      },
+      {
+        "team": "agent-teams-gates",
+        "task": "t14",
+        "kind": "integration",
+        "written": [
+          "src/tools.ts",
+          "src/gates/completion/r5.ts",
+          "scripts/lifecycle-verify.mjs",
+          "scripts/gate-r5.test.mjs"
+        ]
+      },
+      {
+        "team": "gate-inputs",
+        "task": "t7",
+        "kind": "integration",
+        "written": [
+          "src/tools.ts",
+          "scripts/gate-input-wiring.test.mjs",
+          "src/gates/index.ts",
+          "src/gates/registry.ts"
+        ]
+      },
+      {
+        "team": "gate-inputs",
+        "task": "t8",
+        "kind": "verification",
+        "written": [
+          "scripts/verify-input-requires.test.mjs",
+          "package.json"
+        ]
+      },
+      {
+        "team": "gate-inputs",
+        "task": "t9",
+        "kind": "integration",
+        "written": [
+          "scripts/gate-index-assembly.test.mjs"
+        ]
+      },
+      {
+        "team": "gate-inputs",
+        "task": "t10",
+        "kind": "integration",
+        "written": [
+          "src/tools.ts",
+          "scripts/gate-input-wiring.test.mjs",
+          "src/gates/index.ts",
+          "src/gates/registry.ts"
+        ]
+      }
+    ],
+    "membersWithTasks": 93,
+    "mixedMembers": 18,
+    "mixedRows": [
+      "agent-teams-refactor/archaeologist (v2/w23)",
+      "agent-teams-refactor/test-triage (v1/w27)",
+      "agent-teams-refactor/ui-dissect (v2/w18)",
+      "agent-teams-refactor/captain (v7/w3)",
+      "agent-teams-refactor/reviewer-glm (v1/w9)",
+      "agent-teams-gates/integrator (v1/w3)",
+      "mutation-cost-live/friction-eng (v2/w1)",
+      "mutation-cost-live/runtime-eng (v4/w1)",
+      "planning-loop/point-dev (v1/w2)",
+      "planning-loop/admission-dev (v2/w5)",
+      "planning-loop/captain (v20/w53)",
+      "mutation-quality/ledger (v8/w14)",
+      "mutation-quality/captain (v6/w2)",
+      "mutation-quality/auditor (v4/w2)",
+      "mutation-quality/integrator (v4/w4)",
+      "unified-pipeline/decompose-author (v1/w7)",
+      "unified-pipeline/wire-author (v1/w15)",
+      "unified-pipeline/verifier (v3/w8)"
+    ],
+    "verifierSourceWriters": 1
+  },
+  "prematureClosure": {
+    "completed": 215,
+    "withBadDownstream": 55,
+    "rows": [
+      {
+        "team": "agent-teams-hardening",
+        "task": "t3",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t4",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t5",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t6",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t7",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t8",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t9",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t12",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t13",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t14",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t15",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t16",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t18",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t19",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t20",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t21",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t22",
+        "kind": "implementation",
+        "badDownstream": [
+          "t10:verification"
+        ]
+      },
+      {
+        "team": "agent-teams-hardening",
+        "task": "t29",
+        "kind": "implementation",
+        "badDownstream": [
+          "t30:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t3",
+        "kind": "work",
+        "badDownstream": [
+          "t10:review",
+          "t11:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t12",
+        "kind": "repair",
+        "badDownstream": [
+          "t13:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t16",
+        "kind": "work",
+        "badDownstream": [
+          "t17:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t18",
+        "kind": "repair",
+        "badDownstream": [
+          "t19:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t28",
+        "kind": "repair",
+        "badDownstream": [
+          "t29:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t31",
+        "kind": "repair",
+        "badDownstream": [
+          "t32:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t34",
+        "kind": "repair",
+        "badDownstream": [
+          "t35:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t36",
+        "kind": "repair",
+        "badDownstream": [
+          "t37:review"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t63",
+        "kind": "implementation",
+        "badDownstream": [
+          "t65:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t66",
+        "kind": "implementation",
+        "badDownstream": [
+          "t67:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t68",
+        "kind": "implementation",
+        "badDownstream": [
+          "t69:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t93",
+        "kind": "implementation",
+        "badDownstream": [
+          "t94:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t97",
+        "kind": "implementation",
+        "badDownstream": [
+          "t99:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t98",
+        "kind": "implementation",
+        "badDownstream": [
+          "t99:implementation"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t103",
+        "kind": "work",
+        "badDownstream": [
+          "t104:work"
+        ]
+      },
+      {
+        "team": "agent-teams-refactor",
+        "task": "t105",
+        "kind": "work",
+        "badDownstream": [
+          "t106:work"
+        ]
+      },
+      {
+        "team": "agent-teams-gates",
+        "task": "t1",
+        "kind": null,
+        "badDownstream": [
+          "t8:implementation",
+          "t9:implementation",
+          "t11:implementation"
+        ]
+      },
+      {
+        "team": "gate-readout",
+        "task": "t3",
+        "kind": "implementation",
+        "badDownstream": [
+          "t2:work"
+        ]
+      },
+      {
+        "team": "gates-positions",
+        "task": "t6",
+        "kind": "implementation",
+        "badDownstream": [
+          "t7:implementation",
+          "t8:implementation"
+        ]
+      },
+      {
+        "team": "gates-positions",
+        "task": "t9",
+        "kind": "implementation",
+        "badDownstream": [
+          "t7:implementation",
+          "t8:implementation",
+          "t10:implementation"
+        ]
+      },
+      {
+        "team": "integrate-probe2",
+        "task": "t2",
+        "kind": "implementation",
+        "badDownstream": [
+          "t3:integration"
+        ]
+      },
+      {
+        "team": "mutation-cost-live",
+        "task": "t1",
+        "kind": "implementation",
+        "badDownstream": [
+          "t7:review"
+        ]
+      },
+      {
+        "team": "mutation-cost-live",
+        "task": "t2",
+        "kind": "implementation",
+        "badDownstream": [
+          "t8:review"
+        ]
+      },
+      {
+        "team": "mutation-cost-live",
+        "task": "t3",
+        "kind": "implementation",
+        "badDownstream": [
+          "t9:review"
+        ]
+      },
+      {
+        "team": "planning-loop",
+        "task": "t5",
+        "kind": "implementation",
+        "badDownstream": [
+          "t9:verification"
+        ]
+      },
+      {
+        "team": "planning-loop",
+        "task": "t6",
+        "kind": "implementation",
+        "badDownstream": [
+          "t8:implementation"
+        ]
+      },
+      {
+        "team": "planning-loop",
+        "task": "t7",
+        "kind": "implementation",
+        "badDownstream": [
+          "t8:implementation"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t1",
+        "kind": "implementation",
+        "badDownstream": [
+          "t2:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t5",
+        "kind": "implementation",
+        "badDownstream": [
+          "t6:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t9",
+        "kind": "repair",
+        "badDownstream": [
+          "t10:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t21",
+        "kind": "repair",
+        "badDownstream": [
+          "t23:integration"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t1",
+        "kind": "implementation",
+        "badDownstream": [
+          "t2:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t5",
+        "kind": "implementation",
+        "badDownstream": [
+          "t6:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t9",
+        "kind": "repair",
+        "badDownstream": [
+          "t10:review"
+        ]
+      },
+      {
+        "team": "mutation-quality",
+        "task": "t21",
+        "kind": "repair",
+        "badDownstream": [
+          "t23:integration"
+        ]
+      },
+      {
+        "team": "unified-pipeline",
+        "task": "t1",
+        "kind": "implementation",
+        "badDownstream": [
+          "t3:implementation"
+        ]
+      },
+      {
+        "team": "unified-pipeline",
+        "task": "t26",
+        "kind": "implementation",
+        "badDownstream": [
+          "t28:implementation"
+        ]
+      }
+    ]
+  },
+  "readyPending": {
+    "ready": 8,
+    "unassigned": 3,
+    "rows": [
+      {
+        "team": "agent-teams-hardening",
+        "task": "t38",
+        "assignee": "friction-eng"
+      },
+      {
+        "team": "gates-positions",
+        "task": "t4",
+        "assignee": null
+      },
+      {
+        "team": "integrate-probe",
+        "task": "t1",
+        "assignee": null
+      },
+      {
+        "team": "integrate-probe",
+        "task": "t2",
+        "assignee": null
+      },
+      {
+        "team": "mutation-cost",
+        "task": "t4",
+        "assignee": "friction-eng"
+      },
+      {
+        "team": "unified-pipeline",
+        "task": "t29",
+        "assignee": "pipeline-author"
+      },
+      {
+        "team": "unified-pipeline",
+        "task": "t32",
+        "assignee": "verifier"
+      },
+      {
+        "team": "unified-pipeline",
+        "task": "t35",
+        "assignee": "wire-author"
+      }
+    ],
+    "caveat": "n=8 —— 样本太小，不足以支撑\"rank 选人有大用\"的收益主张"
+  },
+  "admissionWiring": {
+    "evaluateCallSites": 9,
+    "byPoint": {
+      "collection": 3,
+      "delivery": 2,
+      "runtime": 1,
+      "contract": 1,
+      "dispatch": 1,
+      "completion": 1
+    },
+    "admissionCallSites": 0,
+    "note": "admission 在生产路径上没有求值点（≠ 求值了 0 次）"
+  },
+  "frictions": {
+    "files": 386,
+    "unreadable": 0,
+    "byComponent": {
+      "contract.build-artifact-scope": 1,
+      "contract.verify-command": 2,
+      "runtime.liveness": 2,
+      "(位置级) admission": 1,
+      "admission.absorb": 1,
+      "admission.convene": 2,
+      "(工具层) agent_teams_*": 1,
+      "dispatch.changed-paths": 1,
+      "completion.backtest": 1,
+      "scripts/verify-input-requires.test.mjs 臂 11": 1,
+      "(分析)": 1,
+      "(台账机制)": 1,
+      "(调度层) unsatisfiedDependencies": 1,
+      "(调用层) delivery 的两个消费点": 1,
+      "(调度层) collectCompletedDependencyOutputs": 1,
+      "(任务图校验) inScopeOverlap 的豁免方向": 1,
+      "(完工门) worktree worker 的终态": 1,
+      "(重载闸门 + 旧模块) 互相锁死": 1,
+      "(夹具构造) 与产品缺陷同形": 1,
+      "(派发层) worktree 写入 vs 队长工作区观察面": 1,
+      "(台账落点) stateRoot 的作用域": 1,
+      "(模块加载) ESM 命名绑定": 1,
+      "(模块新鲜度检测) stamp 缺少构建时的提交": 1,
+      "(检测器的使用) 进程归属": 1,
+      "(执行器) node:test 嵌套限制": 1,
+      "(夹具期望值) 行号即身份": 1,
+      "(宿主) reload 的语义": 1,
+      "(金快照) 基线的来源": 1,
+      "split-relative-paths-and-interface": 1,
+      "verify-field-vs-concurrency": 1,
+      "task-atomicity-gate": 1,
+      "restart-mechanism": 1,
+      "dispatch": 168,
+      "completion": 163,
+      "contract": 20
+    },
+    "byKind": {
+      "unwired": 360,
+      "misclassified": 24,
+      "mismatched": 5,
+      "uncalled": 2,
+      "unread": 1,
+      "overreaching": 2,
+      "unsatisfiable": 5,
+      "brittle": 4,
+      "cross-ecosystem": 1
+    },
+    "recordsMentioningPlanReviewed": 40
+  }
+}

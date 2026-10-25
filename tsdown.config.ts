@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { basename, dirname, resolve as resolvePath, sep } from 'node:path'
+import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transform } from 'lightningcss'
 import { defineConfig, type UserConfig } from 'tsdown'
@@ -25,6 +25,15 @@ const PLATFORM_MODULES = [
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
 ]
+
+/**
+ * ── ★★★ 仓库根（用于让产物**可复现**）───────────────────────────────────────────────
+ *
+ * ★ 它只用于把**绝对路径**折成相对路径 —— 因为 lightningcss 的 CSS Modules `[hash]`
+ *   是由 `filename` 派生的，传绝对路径会让同一份 `src/` 在两棵树里构建出不同的类名。
+ * ★★ 见 `tsdown.config.ts` 里 CSS 那段长注释（R19.1 的根因与实测 md5）。
+ */
+const ROOT_DIR = dirname(fileURLToPath(import.meta.url))
 
 /** alpha.2 has no parser-preloaded runtime bundle. */
 const PRELOADED_CLIENT_EXTERNALS: string[] = []
@@ -98,8 +107,36 @@ const config: UserConfig = {
       const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
       this.addWatchFile(fileId)
       const source = readFileSync(fileId)
+      /**
+       * ── ★★★ 2026-10-22：`filename` 必须是**相对路径**（R19.1）─────────────────────
+       *
+       * MEASURED（本轮实测，同一个 commit、两棵树）：
+       * ```
+       * 主树    /Users/abab/Desktop/agent-teams-dev   ⇒ lib/client.js md5 f8567dd035e6d5b9c8e97f67a9056c1c
+       * worktree /tmp/wtt                              ⇒ lib/client.js md5 5690c8bbbf65583d5a21d9860bced66a
+       * ⇒ 同一份 src/、同一个 tsdown 配置，产出**字节不同**
+       * ```
+       *
+       * ── 根因 ──────────────────────────────────────────────────────────────────
+       * lightningcss 的 `[hash]` 是由 **`filename`** 派生的；而原来是
+       * `filename: fileId`（**绝对路径**）⇒ 类名 radix 随树的位置变 ⇒
+       * `lib/client.js` 里 484 行 CSS 类名整片不同。
+       *
+       * ★★ 为什么这是**缺陷**而不是"worktree 的固有属性"（推翻旧判断）：
+       *   旧记录（`docs/REQUIREMENTS.md` §19 逐字）写「主树可复现，worktree 不可复现 ——
+       *   这不是缺陷，是 worktree 的固有属性」。**那句话错了一半**：
+       *   不可复现的成因是**我们传了一个绝对路径给一个会哈希它的工具**，
+       *   而 worktree 只是让这个 bug **显形**（同一条路径在两棵树里不同）。
+       *   ⇒ "worktree 的固有属性"是不可复现的**诱因**，不是它的**理由**。
+       *
+       * ── 修法：只改派生类名的那一个输入 ──────────────────────────────────────────
+       * 传**相对仓库根**的路径 ⇒ 同一份 `src/` 在任何位置构建出同一份类名。
+       * ★ 返回值里那行 `tagId` 仍然用 `basename(fileId)`（它是运行时选择器，不经哈希）；
+       *   `this.addWatchFile(fileId)` 仍用绝对路径（watch 需要真路径）——
+       *   两者**不受影响**，因为它们不参与哈希。
+       */
       const { code, exports: cssExports } = transform({
-        filename: fileId,
+        filename: relative(ROOT_DIR, fileId).split(sep).join('/'),
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,

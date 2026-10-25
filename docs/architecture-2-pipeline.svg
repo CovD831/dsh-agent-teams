@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1420 1080" font-family="-apple-system, 'PingFang SC', sans-serif">
+<defs>
+  <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#8b94a3"/></marker>
+  <marker id="arrC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#6ea8fe"/></marker>
+  <marker id="arrR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#e06c75"/></marker>
+  <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,1 L9,5 L0,9 z" fill="#b48ead"/></marker>
+</defs>
+<rect width="1420" height="1080" fill="#16191d"/>
+<text x="40" y="46" font-size="21" font-weight="700" fill="#e6e9ee">② 运行管线 · 一次任务从派发到完成</text>
+<text x="40" y="70" font-size="12.5" fill="#8b94a3">实测 2026-10-17 · ★ 没有后台循环（setInterval / timer. 在 scheduler.ts 与 index.ts 均无命中）⇒ 工具调用才是发动机</text>
+<rect x="40" y="104" width="560" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="130" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">create_task</text>
+<text x="56" y="152" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">队长调 agent_teams_create_task</text>
+<text x="56" y="172" font-size="10.5" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">写状态 → 过 admission / contract 判据</text>
+<path d="M320 192 L320 208" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="208" width="560" height="88" rx="8" fill="#1b2028" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="56" y="234" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">kickTeam()</text>
+<text x="56" y="256" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">src/scheduler.ts:687</text>
+<text x="56" y="276" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">三个早退：halted · staged · dispatchHeldByReload</text>
+<path d="M320 296 L320 312" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="312" width="560" height="88" rx="8" fill="#1b2028" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="56" y="338" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">for each member</text>
+<text x="56" y="360" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">逐成员 kick —— 不是广播</text>
+<text x="56" y="380" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">serializeMember(queueKey, …) 每人一把锁</text>
+<path d="M320 400 L320 416" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="416" width="560" height="88" rx="8" fill="#1b2028" stroke="#7dd3a0" stroke-width="1.4" opacity="1"/>
+<text x="56" y="442" font-size="13.5" fill="#7dd3a0" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">锁内再读 team</text>
+<text x="56" y="464" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">readTeam 第二次</text>
+<text x="56" y="484" font-size="10.5" fill="#7dd3a0" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 这是防竞态的设计，不是冗余</text>
+<path d="M320 504 L320 520" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="520" width="560" height="88" rx="8" fill="#1b2028" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="56" y="546" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">kickMember()</text>
+<text x="56" y="568" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">src/scheduler.ts:709</text>
+<text x="56" y="588" font-size="10.5" fill="#6ea8fe" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">判成员可用 → 取 prompt → startContinuable</text>
+<path d="M320 608 L320 624" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="624" width="560" height="88" rx="8" fill="#1b2028" stroke="#7dd3a0" stroke-width="1.4" opacity="1"/>
+<text x="56" y="650" font-size="13.5" fill="#7dd3a0" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">ctx.subagents.startContinuable</text>
+<text x="56" y="672" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">成员 = 真正的子代理</text>
+<text x="56" y="692" font-size="10.5" fill="#7dd3a0" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 上下文独立 —— 因而前缀缓存不共享</text>
+<path d="M320 712 L320 728" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="728" width="560" height="88" rx="8" fill="#1e232a" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="56" y="754" font-size="13.5" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">成员执行 turn</text>
+<text x="56" y="776" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">它能调全部 agent_teams_* 工具</text>
+<text x="56" y="796" font-size="10.5" fill="#5a6472" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">claim_task · update_task · send_message</text>
+<path d="M320 816 L320 832" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="40" y="832" width="560" height="88" rx="8" fill="#241a1c" stroke="#e06c75" stroke-width="1.4" opacity="1"/>
+<text x="56" y="858" font-size="13.5" fill="#e06c75" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">update_task（成员自报）</text>
+<text x="56" y="880" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 这是唯一的&quot;完成&quot;信号</text>
+<text x="56" y="900" font-size="10.5" fill="#e06c75" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">没有它 ⇒ 任务永远停在 in_progress</text>
+<text x="640" y="116" font-size="15" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">完成之后：消息去哪里</text>
+<path d="M600 876 L622 876 L622 152 L638 152" fill="none" stroke="#e06c75" stroke-width="2.0" marker-end="url(#arrR)"/>
+<rect x="640" y="140" width="740" height="76" rx="8" fill="#1e232a" stroke="#b48ead" stroke-width="1.4" opacity="1"/>
+<text x="656" y="166" font-size="13.5" fill="#b48ead" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">appendMailbox</text>
+<text x="980" y="166" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">update-task.ts:2058</text>
+<text x="656" y="190" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">消息落进 inbox/captain.jsonl</text>
+<path d="M1010 216 L1010 236" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="640" y="236" width="740" height="76" rx="8" fill="#1e232a" stroke="#e06c75" stroke-width="1.4" opacity="1"/>
+<text x="656" y="262" font-size="13.5" fill="#e06c75" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">readCaptainSession</text>
+<text x="980" y="262" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">★ 可能失败</text>
+<text x="656" y="286" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">inactive context ⇒ 拿不到 agents</text>
+<path d="M1010 312 L1010 332" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="640" y="332" width="740" height="76" rx="8" fill="#1e232a" stroke="#6ea8fe" stroke-width="1.4" opacity="1"/>
+<text x="656" y="358" font-size="13.5" fill="#6ea8fe" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">steerCaptainReport</text>
+<text x="980" y="358" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">members.ts:146</text>
+<text x="656" y="382" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">captain.steer(…) —— 唯一唤醒手段</text>
+<path d="M1010 408 L1010 428" fill="none" stroke="#8b94a3" stroke-width="1.8" marker-end="url(#arr)"/>
+<rect x="640" y="428" width="740" height="76" rx="8" fill="#1e232a" stroke="#7dd3a0" stroke-width="1.4" opacity="1"/>
+<text x="656" y="454" font-size="13.5" fill="#7dd3a0" font-weight="700" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">markMailboxDelivered</text>
+<text x="980" y="454" font-size="10.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="'SF Mono', Menlo, monospace" opacity="1">update-task.ts:2147</text>
+<text x="656" y="478" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">成功才标记已投递</text>
+<rect x="640" y="546" width="740" height="190" rx="8" fill="#241a1c" stroke="#e06c75" stroke-width="1.4" opacity="1"/>
+<rect x="640" y="530" width="84.0" height="22" rx="4" fill="#e06c75" stroke="none" stroke-width="1.4" opacity="1"/>
+<text x="649" y="546" font-size="10" fill="#12151a" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">实测到的断点</text>
+<text x="658" y="584" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">成员 update_task 完成 → kickTeam 只 kick【其他成员】</text>
+<text x="658" y="605" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">⇒ ★ 队长【不被唤醒】</text>
+<text x="658" y="626" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">⇒ 队长只在【自己主动调 status】时才看到那条消息</text>
+<text x="658" y="647" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">⇒ 而队长通常在本回合【已经结束】，没人叫它</text>
+<text x="658" y="668" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1"></text>
+<text x="658" y="689" font-size="12" fill="#e6e9ee" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 这就是你描述的：&quot;成员做完了，但主规划这边没收到任何消息&quot;。</text>
+<rect x="640" y="758" width="740" height="118" rx="8" fill="#1b2028" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="658" y="784" font-size="13" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">为什么 kickTeam 会【什么都不做】</text>
+<text x="658" y="808" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">① team.halted === true            —— 被显式停下</text>
+<text x="658" y="826" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">② team.phase === &#x27;staged&#x27;          —— 计划还没批</text>
+<text x="658" y="844" font-size="11.5" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">③ dispatchHeldByReload(tasks)     —— 有 reload 排队</text>
+<text x="658" y="868" font-size="11" fill="#e06c75" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">★ 三者都【不报错】—— 一个不派发的 kick 与&quot;没有活&quot;同形</text>
+<rect x="40" y="966" width="1340" height="92" rx="8" fill="#191d23" stroke="#2b323c" stroke-width="1.4" opacity="1"/>
+<text x="58" y="992" font-size="13" fill="#e6e9ee" font-weight="700" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">由此推出的三个弱点（它们决定了&quot;救援&quot;该补哪里）</text>
+<text x="58" y="1016" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">① 没有超时、没有救援 —— 成员静默停下只能靠人看见。runtime.stall 判据只在【被拒 ≥2 次】或【in_progress 超 N 轮】时记一笔，且【只告警不干预】。</text>
+<text x="58" y="1035" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">② 没有推送 —— 客户端轮询单一路径，状态晚一个周期。人不需要毫秒级，可接受。</text>
+<text x="58" y="1054" font-size="11" fill="#8b94a3" font-weight="400" text-anchor="start" font-family="-apple-system, 'PingFang SC', sans-serif" opacity="1">③ 没有汇合点 —— 非工具触发的逻辑永远不跑。这正是 evaluator 成为孤儿的结构原因。</text>
+</svg>

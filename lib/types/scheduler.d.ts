@@ -13,11 +13,73 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { BaselineResolution, UpstreamTaskInput } from './worktree.ts';
 import type { TaskStatus, TeamTask } from './types.ts';
 /** Per-dependency output cap in the assignment prompt. */
 export declare const DEPENDENCY_OUTPUT_MAX_CHARS = 2000;
 /** Combined dependency-output budget in the assignment prompt. */
 export declare const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12000;
+/**
+ * ── ★★★ 一次邮箱投递的**硬上限** ────────────────────────────────────────────────
+ *
+ * MEASURED：投递外层套着 `serializeMember`，而那条队列是**链式**的 ——
+ * 一次不返回，`release()` 就永不执行，**之后所有**对同一成员的写入永久排队；
+ * 又因为 `withTeamLock(teamLockKey…)` 在它内部，**整个团队**的写入一起卡住。
+ * 表现出来就是工具调用"卡在 complete / reassign_task 上"。
+ *
+ * ★ 30 秒是**取决于用途**的：投递是"把一条已经在邮箱里的消息推给一个活着的会话"，
+ *   正常是毫秒级。超过 30 秒它不是慢，而是**那个会话已经不接东西了** ——
+ *   此时正确的处置是把消息**留在邮箱**（`releaseMailboxDelivery`），
+ *   让下一次扫描再试，而不是**无限期占着队列**。
+ */
+export declare const DELIVER_TIMEOUT_MS = 30000;
+/**
+ * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
+ *
+ * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
+ *
+ *     .DS_Store        12K
+ *     .agent-teams    4.7G   ← ★ 本仓自己的运行时状态（而且它里面有所有 worktree！）
+ *     .pnpm-store     1.1G   ← 共享包仓
+ *     node_modules    1.6G   ← 唯一真正该注入的那一件
+ *     ─────────────────────
+ *     合计            ~6.9G/棵      而当时磁盘可用仅 8.2G
+ *
+ * ⇒ ★ **照 `missingIgnored` 原样接上去会立刻爆盘** —— 而它"看起来"完全正常：
+ *   一个"把缺的东西补上"的循环，逐条都说得通，合起来是自我复制 + 撑爆磁盘。
+ *
+ * ── 为什么是【带理由的排除】而不是一个静默的 filter ─────────────────────────────
+ *
+ * ★ 静默过滤的后果与本队记账过的那条同形：**"我决定不注入它"与"它不在候选里"
+ *   在读数上同形** ⇒ 于是"排除清单错了"永远不会被发现。
+ * ⇒ 每一条排除都带一句**可读的理由**，而理由会被打出来（调用方那里）。
+ *
+ * ── 而这份清单是【闭集 + 默认注入】而不是【开集 + 默认排除】─────────────────────
+ *
+ * ★ 默认必须是"注入"：候选里出现一个我们不认识的新条目时，正确的动作是
+ *   **试图注入它**（那是 `missingIgnored` 的结论），而不是静默丢掉它。
+ *   一个"默认排除"的白名单会让下一个依赖**静默地不在 worktree 里** ——
+ *   而那正是本机制要消灭的那个失败（成员因缺依赖失败，却读成"工作没做出来"）。
+ *
+ * ★ 而要拦的是那两类**有明确理由不该进 worktree 的**：本仓运行时状态（自我复制）
+ *   与共享包仓（注入无意义）。它们用名字 + 理由显式列在这里。
+ */
+export interface DependencyInjectionPlan {
+    /** 真的要注入的条目（候选减去带理由排除的）。 */
+    injected: string[];
+    /** 被排除的条目 + **可读的理由**（不许静默）。 */
+    excluded: Array<{
+        entry: string;
+        reason: string;
+    }>;
+}
+/**
+ * 把 `missingIgnored` 的【候选】变成【该注入的清单】。
+ *
+ * ★ 这是唯一一处做这个决定的地方 —— 而它的输入仍是 `missingIgnored`（唯一来源），
+ *   没有另读 `.gitignore`（那是 git 的事，t24 边界）。
+ */
+export declare function planDependencyInjection(candidates: readonly string[]): DependencyInjectionPlan;
 export interface SchedulerConfig {
     readonly stateDir: string;
     readonly executionPrompt?: string;
@@ -28,8 +90,27 @@ export interface SchedulerConfig {
      * ★ 这是 R5 / 回测唯一的父版本来源。判据层在成员【汇报完成】时需要它，
      *   而那时派发已经结束 ⇒ 由调用方在这里记下来。
      *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
+     *
+     * ── ★★★ 第三个参数 `stateRoot`：把"团队住在哪"由【调用方猜】改成【调度器交】──
+     *
+     * MEASURED（2026-10-10 实测，本轮）：只有 `taskId` / `base` 时，调用方
+     * （`tools.ts` 的 `persistTaskBaseRevision`）**必须自己推出 stateDir 的根**，
+     * 而它手上没有 workspace ⇒ 两版实现都锚错了地方：
+     *   · 第一版 `process.cwd()` ⇒ 跟着**宿主进程的工作目录**走。实测宿主 cwd 是
+     *     profile 目录（`profiles/desktop`），而团队住在用户的仓库里
+     *     ⇒ `readdir` 不抛错、只是候选集为空 ⇒ **零错误、零日志、零迹象**；
+     *   · 第二版 `pluginRoot()` ⇒ 那是**插件自己的**目录，与 workspace **无关**；
+     *     两者相等**当且仅当插件恰好装在 workspace 里**（本机正是这个巧合）。
+     * ⇒ 两版的共同错误不是"层数算错了"，而是**这一格上根本没有可用的锚点**：
+     *   调用方拿不到 workspace，就永远只能猜。
+     *
+     * ★ `stateRoot` 已经在 `kickMember` 的作用域里（`stateRootOf(workspace, config)`），
+     *   而它与 web 路由 / 判据读的是**同一个**解析结果 ⇒ 这里交出去，锚点就只剩一个。
+     * ★ 为什么是"追加第三个位置参数"而不是改成一个对象：既有调用方只有一处
+     *   （`tools.ts`），位次追加是最小改动；而 `stateRoot` 声明为**必填**，
+     *   于是任何旧的两参实现会在**编译期**报错，而不是静默拿到一个错的值。
      */
-    readonly onWorktree?: (taskId: string, base: string) => void;
+    readonly onWorktree?: (taskId: string, base: string, stateRoot: string) => void;
     /**
      * ── ★ runtime 位置的接线点：一个成员【真的被派发出去】了 ─────────────────────
      *
@@ -154,6 +235,32 @@ export interface DispatchTicket {
     readonly profileProtocol?: string;
     readonly profileSeedId?: string;
     readonly dependencyOutputs: readonly DependencyOutput[];
+    /**
+     * ── ★★★ 直接依赖的**终态全貌**（一句话；全 completed 时是空串）──────────────────
+     *
+     * 与 {@link dependencyOutputs} **并存而不是替换**，理由是 `src/state.ts:336` 逐字写的：
+     * `unsatisfiedDependencies`（闸门）与 `dependencyStatuses`（证据）「两者**必须**都能
+     * 被读到……合成一个"能开工 + 一个布尔"会让第二件事消失」。
+     *
+     * ★ 两者的**问题不同**，所以两份都要在票里：
+     *   · `dependencyOutputs` —— 上游**交出了什么**（传递闭包里的终态任务 + 它们的 output）；
+     *     它按【任务】铺开，下游据此接着干。
+     *   · 本格 —— 我这条任务的**每一条直接依赖**落在哪一态、算不算了结；
+     *     它按【我声明的 dependencies 原序】铺开，下游据此知道"我欠不欠前置条件"。
+     *   ⇒ 只印其中一份，都会让另一件事在派发文本里消失。
+     *
+     * ★ 空串语义：**全 completed 时为空**（见 `describeDependencyOutcomes`）——
+     *   一个每次派发都出现的"上游都做完了"是噪音，而噪音会教人忽略真正要看的那一行。
+     */
+    readonly dependencyOutcomes: string;
+    /**
+     * ── ★★★ 直接上游的产物读数（t5）：建树基线的输入 ──────────────────────────────
+     *
+     * ★ 在**票里**算，而不是在建树那一刻再读一次队状态：两者之间隔着 `await`
+     *   （`writeTeam` 与一整个 `createTaskWorktree`），期间上游可能被 reassign 或
+     *   回收。票里的这一格是"决定派发那一刻的上游成品"，而它正是判据要的那个口径。
+     */
+    readonly upstreamBaselines: readonly UpstreamTaskInput[];
     readonly executionPrompt?: string;
     readonly kind?: string;
     readonly round?: number;
@@ -184,7 +291,38 @@ export interface DispatchTicket {
      *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
      */
     readonly worktreeUnavailable?: string;
+    /**
+     * ── ★★★ 建树基线的**出处**（t5）────────────────────────────────────────────────
+     *
+     * 在场 ⇔ 真的建出了树。它是"这棵树里看得见什么"的唯一读数，而此前那一格
+     * **不存在** —— 读的人只能假设"基线 = 主树 HEAD"，而在有上游产物时那假设是错的。
+     */
+    readonly worktreeBaseline?: BaselineResolution;
 }
+/**
+ * ── ★★★ 一条任务的**直接上游**（t5）：它们是建树基线的唯一来源 ──────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边此前只表达**顺序**，不表达**可见性** ——
+ * 于是下游的树从主树 HEAD 建，上游的提交**不在**里面 ⇒ 下游在旧代码上干活，
+ * 且两者写域重叠时下游会整文件覆盖掉上游的修复（实测 94 条实现→实现边里
+ * 60 条写域重叠、47 条上游真的提交了）。
+ *
+ * ── 为什么只取【直接】边，而不是全祖先 ─────────────────────────────────────────
+ *
+ * 递归会让"可见性"从一个可核对的**局部**性质变成一次闭包推理。而直接边已经
+ * 足够，理由是**归纳的**：B 依赖 A ⇒ B 的树含 A 的产物 commit ⇒ B 自己的产物
+ * commit 是 A 的后代 ⇒ C 依赖 B ⇒ C 的树含 B（因而也含 A）。
+ * ★ 而这条归纳**只在每一层都真的按产物定基线时成立** —— 所以这里宁可少收，
+ *   也不要把"我以为它含了"当成读数。
+ *
+ * ── ★ 反向半边：没有依赖边 ⇒ 返回空数组 ────────────────────────────────────────
+ *
+ * 空数组是**有意义**的：它让 `resolveWorktreeBaseline` 走 `source: 'trunk'`，
+ * 也就是"这条任务的上游就是主干本身"。⇒ 与之并行的任务**看不见**彼此的产物，
+ * 那是**对的**（它们之间没有边），而这一格必须与"有边但上游没提交"不同形
+ * （后者是 `[{kind:'not-committed'}]`，见 `describeBaseline` 的措辞）。
+ */
+export declare function collectUpstreamBaselines(tasks: readonly TeamTask[], task: TeamTask): readonly UpstreamTaskInput[];
 /**
  * ── ★★ 递归收集【已了结】的上游及其结论（t28 修 f-0018）─────────────────────────
  *

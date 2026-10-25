@@ -146,3 +146,111 @@
 .chatEntry:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary); outline-offset: 2px; }
 .turnCards { display: grid; gap: 8px; margin-block: 10px; }
 @media (max-width: 600px) { .head { flex-wrap: wrap; } }
+
+/* ── 读数槽位读端（readout-panel，2026-10-24）────────────────────────────────────
+ * 三个已接线槽位各一行：槽位名 + 四态徽标 + summary。
+ * not-wired 必须显式显示"未接线"（不许用"—"/空白，那与"没接线"同形）。
+ */
+.readouts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--dsw-alias-border-l2);
+}
+
+.readoutRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.readoutName {
+  flex: none;
+  width: 64px;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.readoutBadge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.badge_not-wired {
+  border: 1px solid var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.badge_unmeasured {
+  border: 1px solid var(--dsw-alias-state-warning-border, #c79a3a);
+  background: var(--dsw-alias-state-warning-fill, #fbf2dc);
+  color: var(--dsw-alias-state-warning-label, #8a6400);
+}
+
+.badge_measured {
+  border: 1px solid var(--dsw-alias-state-success-border, #4a9d6b);
+  background: var(--dsw-alias-state-success-fill, #e6f4ec);
+  color: var(--dsw-alias-state-success-label, #1f7a4d);
+}
+
+/* partial：外层测到了，但某块嵌套读数没测成（如 capability.<id>.unmeasured） */
+.badge_partial {
+  border: 1px solid var(--dsw-alias-state-warning-border, #c79a3a);
+  background: var(--dsw-alias-state-warning-fill, #fbf2dc);
+  color: var(--dsw-alias-state-warning-label, #8a6400);
+}
+
+/* no-discrimination：读数是恒真式，无判别力（如 22 项全是 {true,true}） */
+.badge_no-discrimination {
+  border: 1px solid var(--dsw-alias-state-warning-border, #c79a3a);
+  background: var(--dsw-alias-state-warning-fill, #fbf2dc);
+  color: var(--dsw-alias-state-warning-label, #8a6400);
+}
+
+.badge_partial {
+  border: 1px solid var(--dsw-alias-state-business-border, #3a7bd5);
+  background: var(--dsw-alias-state-business-fill, #e8f0fc);
+  color: var(--dsw-alias-state-business-label, #1f5fb0);
+}
+
+.readoutSummary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readoutReason {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+}
+
+.readoutReason > summary {
+  cursor: pointer;
+  color: var(--dsw-alias-state-warning-label, #8a6400);
+  list-style: none;
+}
+
+.readoutReason > summary::-webkit-details-marker { display: none; }
+
+.readoutDetail {
+  margin: 2px 0 0;
+  padding-left: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  white-space: pre-wrap;
+}

@@ -46,7 +46,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+/**
+ * ★ t5 追加了 `existsSync` / `mkdirSync` / `writeFileSync` 与 `spawnSync`：臂 13..17
+ *   要**真的造树、真的跑子进程**去驱动 `scripts/gate-fixture-registry.mjs`。
+ *   ⇒ 增加的是 import，既有 12 臂用到的符号一个都没动。
+ */
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,6 +65,11 @@ import { toolsSource } from './tools-source.mjs'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
+/**
+ * ★ plan-reviewed 门要求 reviewed 戳（详见该文件头）。
+ *   本夹具测的是输入面接线，不是那条门 ⇒ 盖一个全 pass 的戳让它过。
+ */
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 const cleanups = []
@@ -130,7 +141,7 @@ function pluginFixture(workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -208,7 +219,7 @@ test('★ 臂 1（对照臂）：输入面齐 ⇒ 核对不报 —— contract �
    */
   const probe = withProbe('contract', ['task', 'execVerifyCommand'])
   try {
-    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.equal(typeof result?.task_id, 'string', 'create_task must return')
     assert.equal(gapsFromLogs(warnings).length, 0, '★ 输入面齐时【一句缺格告警都不许有】（不是"少几句"，是零）')
   } finally {
@@ -229,7 +240,7 @@ test('★ 臂 2（对照臂）：缺一格 ⇒ 恰好报那一格；在场的那
    */
   const probe = withProbe('contract', ['task', 'execVerifyCommandThatWasNeverInjected'])
   try {
-    await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     const lines = gapsFromLogs(warnings)
     assert.equal(lines.length, 1, '★ 缺格时必须**恰好**报一次（报零次 = 没抓到；报多次 = 每个调用点各报一遍）')
     assert.match(lines[0], /execVerifyCommandThatWasNeverInjected/, '★ 一个【一定不在】的格子必须被报出来 —— 否则核对根本没读 ctx')
@@ -311,7 +322,7 @@ test('★ 臂 3（历史缺口 ①）：inScope 缺席 —— 核对报出它（
     workspace,
     probePoint: 'contract',
     requires: ['task.inScope'],
-    invoke: () => call('agent_teams_create_task', { subject: 'w', kind: 'work' }),
+    invoke: () => call('agent_teams_create_task', { subject: 'w', kind: 'work', reviewed: reviewedStamp() }),
     warnings,
   })
   /**
@@ -394,6 +405,8 @@ test('★ 臂 5（历史缺口 ③）：执行器缺席 —— 两个位置各�
     await call('agent_teams_create_task', {
       subject: 'w', kind: 'implementation', objective: 'o', inScope: ['src/a.ts', 'lib/a.js'],
       acceptance: ['a'], verify: ['node -e "process.exit(0)"'],
+      /** ★ 同上传记：本夹具测的是输入面接线，不是 plan-reviewed 那条门。 */
+      reviewed: reviewedStamp(),
     })
     assert.doesNotMatch(
       logsText(warnings), /execVerifyCommand/,
@@ -405,7 +418,7 @@ test('★ 臂 5（历史缺口 ③）：执行器缺席 —— 两个位置各�
 
   const absent = withProbe('contract', ['execVerifyCommandThatWasNeverInjected'])
   try {
-    await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.match(
       logsText(warnings), /execVerifyCommandThatWasNeverInjected/,
       '★ 漏报方向：一个没有被注入的执行器必须被报出来（否则这个机制抓不住"输入面没接"）',
@@ -504,7 +517,7 @@ test('★ 臂 7（历史缺口 ⑤）：窗口表没接线（waits 缺席）—�
   const child = { id: 'member-1', status: 'idle', steer() {}, session: { header: { cwd: workspace }, events: [] } }
   const schedulerCtx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get() { return child } },
+    agents: { list: () => [], get() { return child } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -567,12 +580,12 @@ test('★ 臂 8（噪音臂）：不适用的事件上缺失清单为空 —— 
   const { call, warnings } = pluginFixture(workspace)
 
   /** ★ 基线：不挂探针时，create_task 上【一条缺格告警都没有】。 */
-  await call('agent_teams_create_task', { subject: 'w0', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+  await call('agent_teams_create_task', { subject: 'w0', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
   assert.equal(gapsFromLogs(warnings).length, 0, '★ 基线：不挂探针时这个位置一条缺格都没有（否则下面的"恰好一次"读的是别人的话）')
 
   const probe = withProbe('contract', ['task', 'noSuchFieldAtAll'], () => false)
   try {
-    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const result = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     /**
      * ★ 构造：一条 `appliesTo: () => false` 的判据，声明一组**真实 ctx 上一格都没有**
      *   的路径（其中 `noSuchFieldAtAll` 是任何 ctx 上都不存在的哨兵）。
@@ -593,7 +606,7 @@ test('★ 臂 8（噪音臂）：不适用的事件上缺失清单为空 —— 
     probe.dispose()
     const active = withProbe('contract', ['task', 'noSuchFieldAtAll'], () => true)
     try {
-      await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+      await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
       assert.equal(gapsFromLogs(warnings).length, 1, '★ 同一个声明、闸门翻成"适用"之后必须**恰好**报一次')
       assert.match(logsText(warnings), /noSuchFieldAtAll/, '★ 且要报出那个一定不存在的哨兵')
       assert.doesNotMatch(logsText(warnings), /\btask\b(?!\.)/, '★ 在场的那一格（`task`）仍然不许被报成缺（误报方向）')
@@ -638,10 +651,10 @@ test('★ 臂 9（先软后硬）：核对报缺时流程照常走完 —— 删
   const workspace = track(mkdtempSync(join(tmpdir(), 'input-soft-')))
   await seedRunningTeam(workspace)
   const { call, warnings } = pluginFixture(workspace)
-  const before = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+  const before = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
   const probe = withProbe('contract', ['definitelyNotAContextPath', 'neitherIsThis'])
   try {
-    const after = await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+    const after = await call('agent_teams_create_task', { subject: 'w2', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
     assert.equal(typeof after?.task_id, 'string', '★ 核对报缺【不得】拒绝流程（先软后硬）：create_task 必须照常返回')
     assert.equal(typeof before?.task_id, 'string', '★ 对照：不挂探针时也返回 —— 两次同形，差别只能在核对结论里')
     const lines = gapsFromLogs(warnings)
@@ -852,7 +865,7 @@ test('★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是
       label: 'contract',
       point: 'contract',
       run: async ({ call }) => {
-        const r = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })
+        const r = await call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'], reviewed: reviewedStamp() })
         assert.equal(typeof r?.task_id, 'string', '★ contract 位置：核对报缺时 create_task 必须照常返回')
       },
     },
@@ -927,5 +940,281 @@ test('★ 臂 12：八处调用点【都不拒绝】—— 核对的裁决权是
     } finally {
       probe.dispose()
     }
+  }
+})
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 臂 13..17（t5 追加）：夹具登记普查 `scripts/gate-fixture-registry.mjs`
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ── ★ 这五臂钉的是一件事：**没人跑的夹具不会红** ───────────────────────────────
+ *
+ * 上一个 DAG 里同一个人就造出过两个这样的文件。它们不是"失败的测试"，而是
+ * **不会失败的测试** —— 在任何 CI 里都不变红，于是既保护不了任何东西，
+ * 也不会有人发现它没用。⇒ 普查脚本把这件事变成读数，这五臂钉住那份读数的
+ * 五个要害：
+ *
+ *   臂 13  两态**不合并**（存在 test:gates 入口；已注册与未注册是两个槽）
+ *   臂 14  可复跑（同一棵树上跑两次逐字节相同；清单有序）
+ *   臂 15  游离夹具（造一个新的 `*.test.mjs`，必须报未注册）+ 注册面生效
+ *   臂 16  跑不了就**不读数**（exit 2 且不打印"全部已注册"）
+ *   臂 17  真实仓库臂（自洽：total === 两态之和；每个被点名的文件真的存在）
+ *
+ * ★ 全部经由**子进程**驱动真脚本、对着 `mkdtempSync(tmpdir())` 的**合成树**取证 ——
+ *   与 `verify-fast.mjs` 的自检同一条隔离纪律（`scripts/gate-shared-artifact-writes`
+ *   要求：写的地方在私有副本，不是共享树）。
+ */
+
+const CENSUS = join(ROOT, 'scripts', 'gate-fixture-registry.mjs')
+
+/** 合成树：`{ 'package.json': {...}, 'scripts/x.test.mjs': '<source>', … }`。 */
+function makeCensusTree(files) {
+  const dir = track(mkdtempSync(join(tmpdir(), 'census-')))
+  for (const [rel, content] of Object.entries(files)) {
+    const target = join(dir, rel)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content, null, 2))
+  }
+  return dir
+}
+
+/** 一条最小但真的测试源码（`node --test` 能跑它）。 */
+function testSource(label) {
+  return `import test from 'node:test'\nimport assert from 'node:assert/strict'\ntest(${JSON.stringify(label)}, () => { assert.equal(1, 1) })\n`
+}
+
+/** 跑普查脚本。返回 { code, stdout, stderr }。 */
+function runCensus(rootDir, extraArgs = []) {
+  const result = spawnSync(process.execPath, [CENSUS, '--root', rootDir, ...extraArgs], { encoding: 'utf8' })
+  return { code: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+}
+
+/**
+ * 从文本报告里抽出 `已注册 …` / `未注册 …` 的条目（按出现顺序）。
+ *
+ * ★ 行的形状是 `已注册  <path>  ← <证据>`（带箭头那一半是证据），所以这里只取
+ *   **第一个字段**，不要求行尾对齐 —— 早先写成 `(\S+)$` 时它一个都匹配不上，
+ *   而"一个都匹配不上"与"确实零条已注册"**同形**。⇒ 用 `\s+` 分隔取首段。
+ */
+function censusEntries(stdout, kind) {
+  const out = []
+  for (const line of stdout.split('\n')) {
+    const match = line.match(new RegExp(`^${kind}\\s+(\\S+)(?:\\s|$)`))
+    if (match) out.push(match[1])
+  }
+  return out
+}
+
+/** 从文本报告里读出 `total=N  registered=N  unregistered=N  undecidable=N`。 */
+function censusTotals(stdout) {
+  const match = stdout.match(/^total=(\d+)\s+registered=(\d+)\s+unregistered=(\d+)\s+undecidable=(\d+)$/m)
+  if (!match) return undefined
+  return { total: Number(match[1]), registered: Number(match[2]), unregistered: Number(match[3]), undecidable: Number(match[4]) }
+}
+
+test('★ 臂 13（两态臂）：已注册与未注册是两个槽、两个计数 —— 不许合并成一个"多少跑过"', () => {
+  /**
+   * ★ 定向突变：把 `registered.count + unregistered.count` 合并成一个数字，
+   *   或让两态共用一条计数/一个 key ⇒ 本臂红。
+   *
+   * ★ 为什么这条排在最前：验收 1 要的是"两态"，而"两态"的最弱形式就是
+   *   【两个独立的槽】。一份只有一个数字的报告读起来像"我普查过了"，
+   *   而它回答不了"哪一个没跑" —— 那正是本任务要问的那个问句。
+   *
+   * ★ 这棵树里同时有已注册与未注册的夹具，且注册面只由 package.json 提供：
+   *   `test:gates` 点名 `scripts/wired.test.mjs`（直连词元）与 glob
+   *   `scripts/gate-*.test.mjs`（⇒ 覆盖 `scripts/gate-covered.test.mjs`）。
+   */
+  const tree = makeCensusTree({
+    'package.json': { name: 'census-13', scripts: { 'test:gates': 'node --test scripts/gate-*.test.mjs scripts/wired.test.mjs' } },
+    'scripts/gate-covered.test.mjs': testSource('covered-by-glob'),
+    'scripts/wired.test.mjs': testSource('named-explicitly'),
+    'scripts/stray.test.mjs': testSource('nobody-runs-this'),
+  })
+
+  const { code, stdout } = runCensus(tree)
+  assert.equal(code, 0, '★ 前置：普查必须跑得完（exit 0）—— 发现未注册不是失败')
+
+  const registered = censusEntries(stdout, '已注册')
+  const unregistered = censusEntries(stdout, '未注册')
+  assert.deepEqual(registered.sort(), ['scripts/gate-covered.test.mjs', 'scripts/wired.test.mjs'],
+    '★ (a) 已注册槽必须恰好是那两条真的被 package.json 点名的夹具 —— 多一个（把游离合进来了）或少一个都红')
+  assert.deepEqual(unregistered, ['scripts/stray.test.mjs'],
+    '★ (b) 未注册槽必须恰好是那条谁都没点名的夹具 —— 这就是"两态"的实质：它不出现在已注册里')
+
+  /** ★ (c) 两态**不相交**：同一个夹具不许同时出现在两个槽里。 */
+  for (const path of registered) {
+    assert.ok(!unregistered.includes(path), `★ ${path} 同时出现在两态里 —— 那说明两态被合并了`)
+  }
+
+  /**
+   * ★ (d) 两态的数字各自独立可读，且和 total 对得上 —— 不合并成"多少跑过"。
+   *   `--json` 是这条断言的出口：文本报告是给人读的，机器读数必须有结构。
+   */
+  const json = runCensus(tree, ['--json'])
+  assert.equal(json.code, 0)
+  const report = JSON.parse(json.stdout)
+  assert.equal(typeof report.registered.count, 'number', '★ registered 必须有独立的 count')
+  assert.equal(typeof report.unregistered.count, 'number', '★ unregistered 必须有独立的 count')
+  assert.equal(report.registered.count, 2)
+  assert.equal(report.unregistered.count, 1)
+  assert.equal(report.registered.count + report.unregistered.count + report.undecidable.count, report.total,
+    '★ 三态之和必须等于 total（任何一个夹具都不许掉出模型）')
+})
+
+test('★ 臂 14（可复跑臂）：同一棵树上跑两次逐字节相同；未注册清单有序且完整', () => {
+  /**
+   * ★ 定向突变：遍历顺序改成 `readdirSync` 的原始顺序（不排序）⇒ 本臂红。
+   *
+   * ★ 为什么"可复跑"是验收 2 的要害：一个顺序随文件系统变的清单没法被引用
+   *   （"上次说的那 6 个"与"这次的 6 个"逐个比不了），而**数量对了但名字换了**
+   *   正是本队反复记的那类缺陷。⇒ 跑两次逐字节相同，是最省事的可证伪形式。
+   */
+  const tree = makeCensusTree({
+    'package.json': { name: 'census-14', scripts: { 'test:gates': 'node --test scripts/gate-*.test.mjs' } },
+    'scripts/gate-z.test.mjs': testSource('z'),
+    'scripts/gate-a.test.mjs': testSource('a'),
+    'scripts/gate-m.test.mjs': testSource('m'),
+    'scripts/zz-orphan.test.mjs': testSource('orphan-z'),
+    'scripts/aa-orphan.test.mjs': testSource('orphan-a'),
+    'scripts/fixtures/nested-orphan.test.mjs': testSource('orphan-nested'),
+  })
+
+  const first = runCensus(tree)
+  const second = runCensus(tree)
+  assert.equal(first.code, 0)
+  assert.equal(second.code, 0)
+  assert.equal(first.stdout, second.stdout, '★ 同一棵树上两次普查必须逐字节相同（确定性）')
+
+  const listed = censusEntries(first.stdout, '未注册')
+  assert.equal(listed.length, 3, '★ 未注册清单必须完整（三条游离夹具一个都不许漏）')
+  assert.deepEqual(listed, [...listed].sort(), '★ 未注册清单必须按稳定顺序（码位序）排列')
+  assert.deepEqual(listed, ['scripts/aa-orphan.test.mjs', 'scripts/fixtures/nested-orphan.test.mjs', 'scripts/zz-orphan.test.mjs'],
+    '★ 三个游离夹具必须**逐条**报出，且 `scripts/fixtures/**` 也在普查口径内')
+
+  const totals = censusTotals(first.stdout)
+  assert.ok(totals !== undefined, '★ 报告里必须有一行机器可读的 total/registered/unregistered/undecidable')
+  assert.equal(totals.total, 6)
+  assert.equal(totals.registered, 3)
+  assert.equal(totals.unregistered, 3)
+  assert.equal(totals.total, totals.registered + totals.unregistered + totals.undecidable)
+})
+
+test('★ 臂 15（游离夹具臂）：新造一个谁都不认识的夹具 ⇒ 必须报未注册（反向半边：默认成已注册就红）', () => {
+  /**
+   * ★ 定向突变（两条，都能打红本臂）：
+   *   (a) 让普查把"找不到入口"的夹具默认记成**已注册** ⇒ 本臂红；
+   *   (b) 把新夹具塞进 `registered` 的名单里（实现层面把两态混起来）⇒ 本臂红。
+   *
+   * ★ 这一臂就是验收 3 的逐字形式。它的**反向半边**在同一个测试里跑：
+   *   先证明那棵树的未注册数是 N，再**真的造一个**新夹具，然后要求它变成 N+1
+   *   且新文件**确实**出现在清单里 —— 一个"恒报同一个清单"的实现过不了后半句。
+   */
+  const base = {
+    'package.json': { name: 'census-15', scripts: { 'test:gates': 'node --test scripts/gate-*.test.mjs' } },
+    'scripts/gate-real.test.mjs': testSource('real'),
+  }
+  const tree = makeCensusTree(base)
+
+  const before = runCensus(tree, ['--json'])
+  assert.equal(before.code, 0)
+  const beforeReport = JSON.parse(before.stdout)
+  assert.equal(beforeReport.unregistered.count, 0, '★ 对照：这棵树一开始没有游离夹具（未注册必须是 0，不是"还没看过"）')
+
+  /** ★ 现在真的往树里放一个游离夹具 —— 与"上一个 DAG 里那两个没人跑的文件"同形。 */
+  const stray = 'scripts/brand-new-nobody-runs-this.test.mjs'
+  writeFileSync(join(tree, stray), testSource('brand-new'))
+
+  const after = runCensus(tree, ['--json'])
+  assert.equal(after.code, 0)
+  const afterReport = JSON.parse(after.stdout)
+  assert.equal(afterReport.unregistered.count, 1,
+    '★ 造了一个游离夹具 ⇒ 未注册数必须从 0 变成 1。若仍是 0，说明"没测到"被并进了"已注册"')
+  assert.deepEqual(afterReport.unregistered.fixtures.map((fixture) => fixture.path), [stray],
+    '★ (b) 那一半：新夹具必须**逐条**出现在未注册清单里，而不是"数字变了但清单没变"')
+  assert.equal(afterReport.registered.count, 1,
+    '★ 而原来那条被 glob 覆盖的夹具**仍然**是已注册 —— 新文件不许把它的状态带偏')
+  assert.ok(!afterReport.registered.fixtures.some((fixture) => fixture.path === stray),
+    '★ 新夹具绝不能出现在已注册槽里（那正是本任务要抓的失效）')
+
+  /** ★ 未注册条目必须带证据行：勘了哪些面。光说"没注册"不足以让人复核。 */
+  const evidence = afterReport.unregistered.fixtures[0].searched
+  assert.ok(evidence !== undefined, '★ 未注册条目必须带证据（searched），否则它只是一句断言')
+  assert.ok(Array.isArray(evidence.npmScripts), '★ 证据里要说清勘了哪些 package.json 脚本')
+})
+
+test('★ 臂 16（不读数臂）：普查跑不了 ⇒ exit 2，且【不许】打印任何"全部已注册"的读数', () => {
+  /**
+   * ★ 定向突变：把"`scripts/` 不可识别"改成 exit 0 并照常输出空报告 ⇒ 本臂红。
+   *
+   * ★ 这条钉的是本队记账最久的那一格：**缺席与零必须不同形**。
+   *   一棵根本不对的根目录，如果输出 `registered=0 unregistered=0`，
+   *   读起来就是"我普查过了，全都注册好了" —— 而那与真相完全相反。
+   *   ⇒ 跑不了的时候，连 `registered` / `unregistered` 这两个槽都不许出现。
+   */
+  const noScripts = makeCensusTree({ 'package.json': { name: 'census-16', scripts: {} }, 'README.md': '# nothing here\n' })
+  const missingRoot = join(noScripts, 'definitely-not-here')
+
+  for (const [label, dir] of [['没有 scripts/', noScripts], ['根目录不存在', missingRoot]]) {
+    const { code, stdout, stderr } = runCensus(dir)
+    assert.equal(code, 2, `★ ${label} ⇒ 必须 exit 2（"跑不了"不是"通过"）`)
+    assert.doesNotMatch(stdout, /total=/, `★ ${label} ⇒ 不许打印任何总量读数（缺席不是零）`)
+    assert.doesNotMatch(stdout, /^已注册/m, `★ ${label} ⇒ 不许打印"已注册"槽`)
+    assert.doesNotMatch(stdout, /^未注册/m, `★ ${label} ⇒ 不许打印"未注册"槽`)
+    assert.match(stderr, /无法普查/, `★ ${label} ⇒ 必须把原因说在 stderr 上`)
+  }
+
+  /** ★ JSON 模式同一条纪律：跑不了时**没有** registered/unregistered 两个 key。 */
+  const json = runCensus(noScripts, ['--json'])
+  assert.equal(json.code, 2)
+  const payload = JSON.parse(json.stdout)
+  assert.equal(payload.status, 'error')
+  assert.ok(!('registered' in payload), '★ 跑不了时的 JSON 不许带 registered 键（缺席与零必须不同形）')
+  assert.ok(!('unregistered' in payload), '★ 跑不了时的 JSON 不许带 unregistered 键')
+})
+
+test('★ 臂 17（真实仓库臂）：普查是真仓自洽的 —— 每个被点名的文件都真的存在，三态之和等于 total', () => {
+  /**
+   * ★ 定向突变：把普查的夹具集合改成"硬编码的清单" ⇒ 本臂红（总数与磁盘对不上）。
+   *
+   * ★ 前面四臂全部跑在**合成树**上，于是它们证明的是"模型在玩具上对了"。
+   *   这一臂把它接到**真仓**：读数必须是可复核的，而不是一个只在夹具里成立的数字。
+   * ★ 但**不**断言具体的未注册个数：那个数字会随真实改动合法地变。它断言的是
+   *   **自洽**（三态之和 = total、每个文件在盘上、两态不相交）。
+   *   ⇒ 若真实读数变了，**更新的是快照/说明，不是删掉这一臂**。
+   */
+  const { code, stdout } = runCensus(ROOT)
+  assert.equal(code, 0, '★ 真仓普查必须跑得完')
+
+  const totals = censusTotals(stdout)
+  assert.ok(totals !== undefined, '★ 真仓报告里必须有机器可读的总量行')
+  assert.equal(totals.total, totals.registered + totals.unregistered + totals.undecidable,
+    '★ 三态之和必须等于 total')
+
+  const registered = censusEntries(stdout, '已注册')
+  const unregistered = censusEntries(stdout, '未注册')
+  assert.equal(registered.length, totals.registered, '★ 已注册槽的条目数必须等于它自己的计数')
+  assert.equal(unregistered.length, totals.unregistered, '★ 未注册槽的条目数必须等于它自己的计数')
+  assert.ok(totals.total > 0, '★ 这个仓库不该有零个夹具 —— 零意味着"根目录不对"，不是"全部已注册"')
+
+  /** ★ 每一个被点名的夹具都必须在盘上真的存在（清单不是凭空写的）。 */
+  for (const path of [...registered, ...unregistered]) {
+    assert.ok(existsSync(join(ROOT, ...path.split('/'))), `★ 报告点名的 ${path} 在盘上不存在 —— 清单与磁盘分叉了`)
+    assert.match(path, /\.test\.mjs$/, `★ 普查只该谈夹具（*.test.mjs），出现了 ${path} 说明口径漂了`)
+  }
+
+  /** ★ 两态不相交。 */
+  const registeredSet = new Set(registered)
+  for (const path of unregistered) {
+    assert.ok(!registeredSet.has(path), `★ ${path} 在真仓上同时出现在两态里`)
+  }
+
+  /**
+   * ★ 对照半边：**已知**有一条真的游离夹具吗？不硬编码名字 —— 但要求报告
+   *   对每一个未注册条目给出证据行（否则"未注册"就只是一句断言）。
+   */
+  if (totals.unregistered > 0) {
+    assert.match(stdout, /searched:/, '★ 未注册清单必须带证据行（勘了哪些面）')
   }
 })

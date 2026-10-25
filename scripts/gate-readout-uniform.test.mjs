@@ -406,7 +406,7 @@ function pluginFixture(module, workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -591,16 +591,97 @@ const SITES = {
   contract: (module, workspace) => ({
     label: 'contract（create_task）',
     point: 'contract',
+    /**
+     * ── ★★ t39：这条也带 `reviewed` —— 而理由是【两个位置现在同在 create_task 上】──
+     *
+     * ★ `create_task` 现在【同时】求值 `contract` 与 `dispatch`（后者由本任务搬来）。
+     *   ⇒ 不带 `reviewed` 时，`dispatch.plan-reviewed` 会报缺格，而那条缺格告警
+     *     会与 `contract` 的读数**混在同一份 `warnings` 里** ——
+     *     于是本臂（"contract 都齐 ⇒ 一句缺格告警都不许有"）会读到**别人的**告警。
+     *
+     * ★★ 而那正是今晚那条一般形式的又一面：
+     *   **两个位置共用一次调用时，一个位置的读数会污染另一个位置的读数。**
+     *   ⇒ 所以这里让本臂的输入**只留下它自己那一个自变量**（contract 的齐与不齐）。
+     *
+     * ★ 而"没审要拦"仍由 t39 自己的夹具覆盖 —— 不塞进这条形状臂。
+     */
     run: (fixture) => fixture.call('agent_teams_create_task', {
       subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
+      reviewed: {
+        at: 1, by: 'probe',
+        /**
+         * ★★ 五问都答 —— 而这条 stamp 在本臂里**不被检验**（本臂跑在假面上，
+         *   它的 `registry.evaluate` 是替身）⇒ ★ 那正是补它的理由：
+         *   一个"只答一问"的 stamp 在这里侥幸可过，而**真实注册表会拒它**
+         *   （实测措辞：「A stamp that answers 1 of 5 questions is not a review」）。
+         *   ⇒ 补全之后，若哪天本臂改用真实注册表，它不会突然红 ——
+         *     而"夹具依赖假面的宽容"正是本文件记载过的那种假绿（见臂 8b 的 FINDING-1）。
+         */
+        checks: [
+          { id: 'scope', verdict: 'pass' },
+          { id: 'prerequisite', verdict: 'pass' },
+          { id: 'move', verdict: 'pass' },
+          { id: 'acceptance', verdict: 'pass' },
+          { id: 'boundary', verdict: 'pass' },
+        ],
+      },
     }),
   }),
+  /**
+   * ── ★★★ t39：`dispatch` 走的工具从 `update_task` 改成 `create_task` ──────────────────
+   *
+   * ★ 而这【不是】改不变量：本表的语义是【每个位置自己的名字 ⇒ 它的结论从哪个字段读】，
+   *   即"落点知识"，而不是"所有位置都在同一个工具上"。
+   *   ⇒ ★ 反例本来就在这张表里：`contract` 走 `create_task`、`delivery_status` 走 `status`。
+   *
+   * ★★ 而为什么搬：`dispatch` = 「派发前（成员开工）」，而把活交给成员发生在
+   *   `kickTeam`（`create_task` 建完后调它，`reassign.ts` 亦然）。
+   *   `update_task` 的四种状态**没有一次是派发**（`in_progress` 是成员报到说"我开工了"）。
+   *
+   * ★ 而不变量本身（臂 4c「四处出口形状一致」）**仍然在、仍然绿** —— 下面它照旧跑。
+   */
   dispatch: (module, workspace) => ({
-    label: 'dispatch（update_task，第一步）',
+    label: 'dispatch（create_task）',
     point: 'dispatch',
-    run: (fixture) => fixture.call('agent_teams_update_task', {
-      task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'],
-    }, 'member-1'),
+    /**
+     * ── ★★★ t39（裁定 乙）：建这条任务时【带上 `reviewed`】──────────────────────────
+     *
+     * ★ 为什么必须带（实测）：不带时 `dispatch.plan-reviewed` 会报
+     *   ```
+     *   missing = ["[dispatch.plan-reviewed] declares 1 ctx path(s) that this context
+     *               does not carry: task.reviewed"]
+     *   ```
+     *   ⇒ ★ 而本表这三条臂（臂 2 / 8 / 8b）的本职是断【出口形状】：
+     *     四处一致、一次穿两位置不覆盖、真实拒绝也交结论。
+     *   ⇒ ★★ 而"任务不带 `reviewed`"是【夹具的默认】，与它们的本职无关 ——
+     *     让它带着，`missing` 就回到那一条既有的 `dispatch.worktree` 缺格上。
+     *
+     * ★★★ 而"不带 `reviewed` ⇒ 派发前拦住"那一条【不由这里钉】——
+     *   它由 t39 自己的夹具 `scripts/gate-plan-reviewed-point.test.mjs` 覆盖。
+     *   ⇒ ★ 两件事各归各处：**出口形状**是一件事，**"没审要拦"**是另一件事。
+     *     混在一条臂里会让"形状变了"与"规则松了"在读数上同形。
+     */
+    run: (fixture) => fixture.call('agent_teams_create_task', {
+      subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'],
+      reviewed: {
+        at: 1, by: 'probe',
+        /**
+         * ★★ 五问都答 —— 而这条 stamp 在本臂里**不被检验**（本臂跑在假面上，
+         *   它的 `registry.evaluate` 是替身）⇒ ★ 那正是补它的理由：
+         *   一个"只答一问"的 stamp 在这里侥幸可过，而**真实注册表会拒它**
+         *   （实测措辞：「A stamp that answers 1 of 5 questions is not a review」）。
+         *   ⇒ 补全之后，若哪天本臂改用真实注册表，它不会突然红 ——
+         *     而"夹具依赖假面的宽容"正是本文件记载过的那种假绿（见臂 8b 的 FINDING-1）。
+         */
+        checks: [
+          { id: 'scope', verdict: 'pass' },
+          { id: 'prerequisite', verdict: 'pass' },
+          { id: 'move', verdict: 'pass' },
+          { id: 'acceptance', verdict: 'pass' },
+          { id: 'boundary', verdict: 'pass' },
+        ],
+      },
+    }),
   }),
   completion: (module, workspace) => ({
     label: 'completion（update_task，第二步）',
@@ -787,15 +868,54 @@ test('★ 臂 2：dispatch 位置【都齐】⇒ dispatch_input_surface 在场�
    *   对它自己有利的假设。夹具只钉**形状**与**可读性**；缺口本身由这条注释与
    *   `missing` 的内容如实记录（`pnpm verify` 的其他臂与判据各自负责自己的那一块）。
    */
-  const gapText = surface.missing.join('\n')
-  assert.match(gapText, /dispatch\.worktree/, '★ 缺格名单要指名那条判据（这句同时也证明核对真的读了真实 ctx）')
-  assert.match(gapText, /worktreePath/, '★ 以及那一格')
+  /**
+   * ── ★★★ t39：这一段的期望已按【搬动之后的真相】重写 ───────────────────────────
+   *
+   * ★ 而此前它断言的是「`missing` 里**只有** `dispatch.worktree` 一条」——
+   *   而那依赖一个前提：**dispatch 点在 `update_task` 上**（那里 `changedPaths` 有值）。
+   *   ⇒ ★ 那是本任务要修的错落点 ⇒ 本臂原先绿的基础就是那个错。
+   *
+   * ★★ 搬动之后的实测（夹具打印，逐字）：
+   *   ```
+   *   {"checked":1,"incomplete":0,"skipped":2,"missing":[]}
+   *   ```
+   *   · `checked: 1` —— ★ 只有 `plan-reviewed` 适用（它读 `task.reviewed`，建任务时就有）
+   *   · `skipped: 2` —— `changed-paths` / `worktree` 【不适用】
+   *   · `missing: []` —— ★ 而那是**对的**：不适用 ⇒ 不该产生缺格
+   *
+   * ── ★★ 而"不适用"必须变成一条【可读的读数】，而不是一个字都不说 ──────────────────
+   *
+   * ★ 理由：`skipped` 与 `ok` 在返回值上都是"没有 blockers" ⇒
+   *   一个**静默失效的判据**与一个**跑了而结论是通过**在读数上同形。
+   *   ⇒ ★ 所以下面【显式断言】那两条判据此刻不适用，并把成因写进措辞。
+   */
+  assert.equal(surface.incomplete, 0, '★ 此刻不该有缺格（不适用 ⇒ 不产生 missing）')
   assert.deepEqual(
-    surface.missing.map((line) => line.replace(/^\[(\w[\w.-]*)\].*$/, '$1')),
-    ['dispatch.worktree'],
-    '★ 当前 dispatch 位置上**只有一条**判据缺格；多了或少了都说明输入面接线变了，那件事必须在报告里说出来',
+    surface.missing, [],
+    '★ `missing` 必须为空 —— 空是【不适用】的正确表现，而不是"缺了东西没说"',
   )
-  assert.ok(gapLogs(fixture.warnings).length >= 1, '★ logger.warn 保留：缺格时给人看的那一条照旧')
+  /**
+   * ★★★ 而那两条判据"不适用"的原因，是**结构性**的（见 `worktree.ts:152` 自己的话）：
+   *   它们问的是「**成员自报**的 changedPaths 与真实写入对得上吗」——
+   *   而"成员自报"这件事**只可能发生在 `update_task` 那一刻**（`create_task` 根本不接受
+   *   `changedPaths`，实测 `grep -c` = 0）⇒ ★ 建任务时成员还没干活 ⇒ 它们永不适用。
+   */
+  assert.equal(
+    surface.skipped, 2,
+    '★★ 此刻【恰好两条】判据不适用（`dispatch.changed-paths` / `dispatch.worktree`）——'
+    + ' 它们是【成员申报改动】那一刻的判据，而"成员自报"在建任务时还不存在。'
+    + ' ★ 而这个数字若变了，说明那个点的适用性变了，而那件事必须被报出来',
+  )
+  console.log(`    ℹ dispatch 点（create_task）：checked ${surface.checked} · skipped ${surface.skipped} · missing ${surface.missing.length}`)
+  /**
+   * ★★ 而"给人看的那一条 logger.warn"：本臂原先断言它 ≥1（那时有缺格）。
+   *   ⇒ 此刻**没有缺格** ⇒ 那条 warn 不该出现 —— 而"没有缺格所以没有告警"是**对的**，
+   *     不是"告警丢了"。★ 所以这里断的是【没有缺格 ⇒ 没有缺格告警】这条对应关系。
+   */
+  assert.equal(
+    gapLogs(fixture.warnings).length, 0,
+    '★ `missing` 为空 ⇒ 不该有缺格告警（★ 若这里红了，要分清"没缺格"与"告警丢了"）',
+  )
 })
 
 test('★ 臂 3：completion 位置【有缺格】⇒ completion_input_surface 在场且 incomplete: N + 名单', async () => {
@@ -1106,20 +1226,31 @@ test('★ 臂 8：被拒的调用也交得出结论 —— 且一次穿过两个
   void worktree
   const fixture = pluginFixture(module, workspace)
   await seedTeam(module, workspace, { tasks: [IMPL_TASK], members: [RUNNING_MEMBER] })
-  const rejected = await fixture.call('agent_teams_update_task', {
-    task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1',
-    /** ★ 越界路径：不在 inScope 里 ⇒ dispatch 位置的判据有话可说。 */
-    changedPaths: ['src/out-of-scope.ts'],
-  }, 'member-1')
+  /**
+   * ── ★★★ t39（裁定 甲）：构造改成【两个工具各挂各的】──────────────────────────────
+   *
+   * ★ 旧构造：`update_task { changedPaths: ['src/out-of-scope.ts'] }`
+   *   ⇒ 靠 `dispatch.changed-paths` 拒 —— 而那条判据**现在不适用**了：
+   *     `changedPaths` 的唯一来源是 `update_task`，而【真正的派发点 `create_task`
+   *     根本不接受它】（实测 `grep -c` = 0）⇒ ★ 那条构造已经造不出来。
+   *
+   * ★★ 而本臂真正要测的是【两个位置各挂各的、不被覆盖】—— 而那个不变量**【没变】**：
+   *   它说的是"每个位置有出口"，不是"必须在同一次调用里"。
+   *   ⇒ ★ 而 `create_task` 上**现在有两个位置**（`contract` 与 `dispatch`），
+   *     所以"同一次调用里不被覆盖"这件事**在这里仍然测得到** —— 见下面那一段。
+   */
+  const created = await fixture.call('agent_teams_create_task', {
+    subject: 'w', kind: 'work', inScope: ['src/a.ts'],
+  })
   /**
    * ★ 无论这一次是不是被拒，本臂要的两件事都要读得到：
    *   (a) 结论**交得出来**（成功走返回值、被拒走抛出）；
    *   (b) 它不是"某个别的位置"的结论。
    */
-  const surface = surfaceFor('dispatch', rejected)
+  const surface = surfaceFor('dispatch', created)
   assert.notEqual(
     surface, undefined,
-    `★ 结论必须交得出来，无论这次调用成不成功（这一次 ${rejected.ok ? '成功' : `被拒：${rejected.error?.message?.slice(0, 120)}`}）`,
+    `★ 结论必须交得出来，无论这次调用成不成功（这一次 ${created.ok ? '成功' : `被拒：${created.error?.message?.slice(0, 120)}`}）`,
   )
   requireShape(surface)
   assert.ok(surface.checked >= 1, '★ 反向半边：真的核对了（否则下面的"是哪一份"无从谈起）')
@@ -1130,11 +1261,23 @@ test('★ 臂 8：被拒的调用也交得出结论 —— 且一次穿过两个
    *   若搬运层允许后到者覆盖，那么交出来的会是 completion 的结论。
    */
   assert.equal(
-    Object.hasOwn(rejected.ok ? rejected.value : rejected.raw, 'dispatch_input_surface'),
+    Object.hasOwn(created.ok ? created.value : created.raw, 'dispatch_input_surface'),
     true,
-    '★ 成功路径上两个位置**各挂各的**（`dispatch_input_surface` / `completion_input_surface`），'
-    + '不是"一个字段谁后写谁赢"',
+    '★ 成功路径上各位置**各挂各的**（`dispatch_input_surface` 等），不是"一个字段谁后写谁赢"',
   )
+  /**
+   * ── ★★ 而我先在这里加过一条"不带 reviewed 必须被拦"，而那【放错了地方】──────
+   *
+   * ★ MEASURED（我自己抓到并撤掉的）：本臂跑在**假面**上 ——
+   *   它的 `registry.evaluate` 是一个**永远 `{ok: true}`** 的替身
+   *   （见本臂上面那段自己的说明）⇒ ★ **判据驱动的拒绝在这里根本造不出来**。
+   *   ⇒ 所以那条断言必然红，而它红的原因是【我把断言放进了它证明不了的那条路】。
+   *
+   * ★★ 而"不带 `reviewed` ⇒ 派发前拦住"由 **t39 自己的夹具**
+   *   （`scripts/gate-plan-reviewed-point.test.mjs`）覆盖 —— 那里用真实注册表。
+   *   ⇒ ★ 与本臂的分工同源：**成功路径各挂各的**（本臂）/ **拒绝路径交得出结论**（臂 8b）
+   *     / **"没审要拦"**（t39 新夹具）。三件事各归各处。
+   */
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1199,14 +1342,33 @@ test('★ 臂 8b：真实注册表下的**真实拒绝**也要交出结论 —�
   const fixture = pluginFixture(fixtureModule, workspace)
   await seedTeam(stateModule, workspace, { tasks: [IMPL_TASK], members: [RUNNING_MEMBER] })
 
-  const rejected = await fixture.call('agent_teams_update_task', {
-    task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1',
+  /**
+   * ── ★★★ t39（裁定 甲）：改成【本插值点自己的判据】造这次真实拒绝 ──────────────────
+   *
+   * ★ 旧构造：`update_task { changedPaths: ['src/out-of-scope.ts'] }`
+   *   ⇒ 靠 `dispatch.changed-paths` 拒 —— 而那条判据问的是"**成员自报**的改动对得上吗"，
+   *     而 `changedPaths` 的唯一来源是 `update_task`、且【它现在不在 dispatch 点上】。
+   *   ⇒ ★ 那个构造随搬动**消失了**（不是被我改坏）。
+   *
+   * ★★ 新构造：`create_task` **不带 `reviewed`** 建一条新任务
+   *   ⇒ `dispatch.plan-reviewed` 判 `blocked`（"派发前还没审"）
+   *   ⇒ 而那是【这个插入点上唯一的、真实的、判据驱动的拒绝】——
+   *     正是本臂要的"由判据自己产生的拒绝"。
+   *
+   * ★ 而"新任务"是关键：判据用 `createdAt` 区分存量与新建（`predatesThisGate`），
+   *   而 `create_task` 建的 `createdAt = Date.now()` ⇒ 晚于门的上线时刻 ⇒ **适用**。
+   *   ⇒ ★ 而 `seedTeam` 造的那条 `IMPL_TASK` 是 `createdAt: 1` ⇒ 会被判"早于门" ⇒ 不适用。
+   *     所以本臂**不能**借用它 —— 必须让 `create_task` 真的建一条。
+   */
+  const rejected = await fixture.call('agent_teams_create_task', {
+    subject: 'w', kind: 'work',
     /**
-     * ★ 越界路径：它不在 `IMPL_TASK.inScope` 里，而成员会话里**观察到**的写入是
-     *   `src/a.ts` ⇒ `dispatch.changed-paths` 有话说 ⇒ 判据自己把这次调用拒掉。
+     * ★ `src/a.ts` 必须配一个 `lib/` 对应物 —— 否则 **contract 位置**先拒
+     *   （`contract.build-artifact-scope`），而那时本臂读到的就不是 dispatch 的结论了。
+     *   ⇒ ★ 本臂要的是【dispatch 位置自己拒】，所以要让前面那个位置先通过。
      */
-    changedPaths: ['src/out-of-scope.ts'],
-  }, 'member-1')
+    inScope: ['src/a.ts', 'lib/a.js'],
+  })
 
   /** ① 真的被拒。 */
   assert.equal(
@@ -1247,10 +1409,61 @@ test('★ 臂 8b：真实注册表下的**真实拒绝**也要交出结论 —�
     rejected.raw.checked >= 1,
     '★ 反向半边：真的核对了至少一条（否则读到的是一份空结论）',
   )
+  /**
+   * ── ★★★ t39：这一条的【见证物】换了，而换的理由是可核的 ────────────────────────
+   *
+   * ★ 旧构造（越界 `changedPaths`）能靠 **缺格名单** 证明"这份结论来自 dispatch"：
+   *   那时 `dispatch.changed-paths` 会报 `[dispatch.changed-paths] declares …`。
+   *
+   * ★★ 新构造（`plan-reviewed` 的 `blocked`）**不产生缺格** —— 实测：
+   *   ```
+   *   {"checked":2,"incomplete":0,"skipped":1,"missing":[]}
+   *   ```
+   *   ⇒ ★ 因为那个 ctx **带着** `task.reviewed` 那一格（值是 `undefined`），
+   *     所以核对层**没有缺格可报** —— 而判据拒的理由是【那一格缺席】，
+   *     不是【我读不到那一格】。★ 两者不同形，而那正是本队那条最贵的纪律。
+   *
+   * ★★ 所以见证物换成【拒绝消息本身】：判据报 `blocked` 时会把它的 id 写进
+   *   `blockers`，而那条消息随 `throwWithSurface` 一路到边界。
+   *   ⇒ 这仍然证明"结论来自 dispatch 位置"，只是它现在是以**拒绝理由**的形式在场，
+   *     而不是以**缺格清单**的形式。
+   */
+  assert.match(
+    String(rejected.error?.message ?? ''),
+    /dispatch\.plan-reviewed/,
+    '★ 这份拒绝必须由 **dispatch 位置**的判据产生（消息里要点名它的 id）——'
+    + ' 否则读的是别的位置的出口，也就是本队记账的第三种恒真写法。'
+    + ` 实际消息：${JSON.stringify(rejected.error?.message?.slice(0, 160))}`,
+  )
+  /**
+   * ★★★ 而实测把我在上一条注释里的推断【推翻了】—— 记下来，因为它是一次真读数：
+   *
+   * ★ 我先前从**假面那一侧**的读数（`missing: []`）推断"`plan-reviewed` 的拒绝
+   *   不以缺格形式出现"。**而真实注册表下实测是**：
+   *   ```
+   *   {"checked":1,"incomplete":1,"skipped":2,
+   *    "missing":["[dispatch.plan-reviewed] declares 1 ctx path(s) that this context
+   *                does not carry: task.reviewed"]}
+   *   ```
+   *   ⇒ ★ **它确实产生缺格**，因为真实 `create_task` 交出去的那条任务里
+   *     `reviewed` 那一格是**真的不在**（不是"在场而值为 undefined"）。
+   *
+   * ★★ 而两者为什么读数不同：假面那一侧我传的是**我拼的** `{id, reviewed}`，
+   *   于是 `reviewed` 那一格**在场**（值为 undefined）⇒ 核对层认为"这一格有"。
+   *   而真实路径交的是**整条 task** ⇒ 那一格**不在** ⇒ 核对层报缺。
+   *   ⇒ ★ 那正是"漏传一格"与"传了但值为 undefined"的差别 —— 而它们**不同形**，
+   *     只是要真实注册表才看得出来。
+   *
+   * ⇒ 所以见证物【两种都在场】，而两条都断（它们各自证明不同的东西）。
+   */
   assert.ok(
     rejected.raw.missing.some((line) => line.includes('[dispatch.')),
-    `★ 这份结论必须来自 **dispatch** 位置（缺格名单里要出现 \`[dispatch.<id>]\`）——`
+    '★ 见证物之一：缺格名单里指名 `[dispatch.<id>]` —— 证明这份结论来自 dispatch 位置。'
     + ` 实际：${JSON.stringify(rejected.raw.missing)}`,
+  )
+  assert.ok(
+    rejected.raw.checked >= 1,
+    '★ 反向半边：真的核对了至少一条（否则读到的是一份空结论）',
   )
 })
 

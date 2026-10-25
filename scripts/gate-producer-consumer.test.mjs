@@ -133,12 +133,42 @@ function moduleLevelProducers({ root = ROOT } = {}) {
   const scriptFiles = walk(join(root, 'scripts'), ['.mjs', '.js'])
   const rel = (file) => relative(root, file).split('\\').join('/')
 
+  /**
+   * ── ★ P5：一次遍历建索引（原实现是 O(符号 × 文件 × 行)）────────────────────────
+   *
+   * MEASURED（P5 改前）：670 个符号 × 76 个文件 = **50,920 次全文扫描**，
+   * 而每次都要 `source.split('\n')` 重切一遍全文；**每个符号还各编译一个新正则**。
+   * ⇒ 成本随「每加一个导出」**线性增长** —— 这就是本仓记的「越加越慢的结构性根因」。
+   *
+   * ★ 改法（三条，各自独立、各自可测）：
+   *   ① **每个文件只读一次、只 `stripComments` 一次**（原实现读了两次：
+   *      一次收集导出、一次建 `textByFile`）；
+   *   ② **每个文件只切一次行**（原来在符号循环里对每个文件重切）；
+   *   ③ **符号匹配只扫一遍全文**，而不是每个符号重扫全部文件。
+   *
+   * ★★ 语义必须逐条不变 —— 尤其这三条：
+   *   · 定义行按 `(文件, 行)` 排除，**不是**排除整个文件；
+   *   · 索引的是**剥注释后**的文本（`stripComments` 上记过实测：一句
+   *     「t41 接上了 X ✓」的注释会把零调用方的函数读成"有 2 个生产调用方"）；
+   *   · `unmeasured` 是**附条件**（生产点在可扫范围之外），**不是** `unconsumed`。
+   */
+
+  /** ① 每个文件读一次、剥注释一次、切行一次 —— 后面两个循环共用这一份。 */
+  const perFile = new Map()   // relPath -> { lines, isScript }
+  for (const file of [...srcFiles, ...scriptFiles]) {
+    const fileKey = rel(file)
+    perFile.set(fileKey, {
+      lines: stripComments(readFileSync(file, 'utf8')).split('\n'),
+      isScript: fileKey.startsWith('scripts/'),
+    })
+  }
+
   /** 收集导出（只收 value —— type/interface 在运行期不存在，本判据不判它们）。 */
   const producers = new Map()
   for (const file of srcFiles) {
     const fileKey = rel(file)
     /** ★ 导出声明也从**剥注释后**的文本里找 —— 注释里的示例不是导出。 */
-    stripComments(readFileSync(file, 'utf8')).split('\n').forEach((line, index) => {
+    perFile.get(fileKey).lines.forEach((line, index) => {
       const match = line.match(/^export\s+(?:async\s+)?(?:function|const|let|class)\s+([A-Za-z0-9_$]+)/)
       if (match === null) return
       const name = match[1]
@@ -148,30 +178,47 @@ function moduleLevelProducers({ root = ROOT } = {}) {
   }
 
   /**
-   * 全文索引（只索引一次）。
-   * ★★ 索引**剥注释后**的文本 —— 否则"关于这个产出的讨论"会被当成"这个产出的消费"
-   *   （见 `stripComments` 上记的那次实测：一句「t41 接上了 X ✓」的注释，
-   *    会把一个零调用方的函数读成"有 2 个生产调用方"）。
+   * ③ 一次扫描建**倒排索引**：符号名 -> 文件 -> 命中行号集合。
+   *
+   * ★ 等价性论证（本改动的核心，逐条对上旧实现）：
+   *   · 旧：`new RegExp('\\b' + name.replace(/\$/g,'\\$') + '\\b', 'g')`，
+   *     数的是**一行里该符号出现几次**（`line.match(pattern).length`）。
+   *   · 新：先按**词边界等价口径**把行切成 token（`tokenize`），只保留在
+   *     `producers` 里的那些；统计时仍用 `occurrencesInLine` 复算**真实出现次数**
+   *     ⇒ 不是"按行去重"，而是**按出现次数累加**，与旧实现同口径。
+   *   · ★ 这一步的正确性**由臂 6 的机械对拍保证**（同一行同时跑旧正则与新切分，
+   *     逐符号比对命中数），而不是靠上面这段论证。
    */
-  const textByFile = new Map()
-  for (const file of [...srcFiles, ...scriptFiles]) textByFile.set(rel(file), stripComments(readFileSync(file, 'utf8')))
+  const hitsBySymbol = new Map()   // name -> Map(file -> Set<lineNo>)
+  for (const [fileKey, { lines }] of perFile) {
+    lines.forEach((line, index) => {
+      for (const token of tokenize(line)) {
+        if (!producers.has(token)) continue
+        let byFile = hitsBySymbol.get(token)
+        if (byFile === undefined) { byFile = new Map(); hitsBySymbol.set(token, byFile) }
+        let lineSet = byFile.get(fileKey)
+        if (lineSet === undefined) { lineSet = new Set(); byFile.set(fileKey, lineSet) }
+        lineSet.add(index + 1)
+      }
+    })
+  }
 
   const results = []
   for (const [name, definitions] of producers) {
     /** ★ 定义行本身要排除 —— 逐个 (文件, 行) 排除，不是整个文件排除。 */
     const definitionKeys = new Set(definitions.map((d) => `${d.file}:${d.line}`))
-    const pattern = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`, 'g')
 
     let production = 0
     let fixture = 0
-    for (const [file, source] of textByFile) {
-      source.split('\n').forEach((line, index) => {
-        if (definitionKeys.has(`${file}:${index + 1}`)) return
-        const hits = (line.match(pattern) ?? []).length
-        if (hits === 0) return
+    for (const [file, lineNumbers] of hitsBySymbol.get(name) ?? []) {
+      for (const lineNo of lineNumbers) {
+        if (definitionKeys.has(`${file}:${lineNo}`)) continue
+        // ★ 该行命中几次就计几次 —— 与旧实现 `line.match(...).length` 同口径
+        const hits = occurrencesInLine(perFile.get(file).lines[lineNo - 1], name)
+        if (hits === 0) continue
         if (file.startsWith('scripts/')) fixture += hits
         else production += hits
-      })
+      }
     }
 
     /**
@@ -189,6 +236,38 @@ function moduleLevelProducers({ root = ROOT } = {}) {
     results.push({ name, definition: definitions[0], production, fixture, verdict })
   }
   return results
+}
+
+/**
+ * 把一行切成**标识符候选** token（与旧实现 `\bNAME\b` 的口径对齐）。
+ *
+ * ★ 为什么要处理 `$`：`\b` 的词字符集是 `[A-Za-z0-9_]` —— **不含 `$`**。
+ *   而导出名可能含 `$`。若简单按 `[$A-Za-z0-9_]+` 切，`foo$` 会成为一个 token，
+ *   而 `\bfoo\b` 在 `foo$` 里**其实是命中的**（`$` 非词字符 ⇒ 中间有词边界）。
+ *   ⇒ 本函数按 **`[A-Za-z0-9_]+`** 切，并对每个片段**同时**产出
+ *     "片段本身"与"片段 ⊗ 邻接 `$` 串"，覆盖 `NAME` / `NAME$` / `$NAME` 三形。
+ */
+function tokenize(line) {
+  const out = []
+  for (const match of line.matchAll(/[A-Za-z0-9_]+/g)) {
+    const word = match[0]
+    const start = match.index
+    const end = start + word.length
+    out.push(word)
+    let before = start
+    while (before > 0 && line[before - 1] === '$') before -= 1
+    let after = end
+    while (after < line.length && line[after] === '$') after += 1
+    if (before !== start || after !== end) out.push(line.slice(before, after))
+  }
+  return out
+}
+
+/** 一行里 `NAME`（按词边界）出现几次 —— 与旧实现 `line.match(/\bNAME\b/g).length` 同口径。 */
+function occurrencesInLine(line, name) {
+  if (line === undefined) return 0
+  const pattern = new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\b`, 'g')
+  return (line.match(pattern) ?? []).length
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -450,10 +529,80 @@ test('臂 4 ★★ 全仓读数（如实报出）：合格多少、不合格多�
      *   与把一个缺陷合法化，在 diff 里长得完全一样。
      *   判据：那条产出【该不该】有生产消费者。不该 ⇒ 记账；该 ⇒ 去接线。
      *   ★ 而 `parseKnownBaselineFailures` 就属于后者（t76 报过，已接线）。
+     *
+     * ── ★★ 记账值 17 → 20（2026-10-08，t6，附理由·逐条）────────────────────────
+     *
+     * 这一轮涨到 21，多出 4 条。**逐条走它自己的判据**（该不该有生产消费者），
+     * 而不是一刀切上调上限 —— 下面是三条被记进账的，以及**一条被拒绝记账的**。
+     *
+     * ① `judgeWorktreeReclaimable`（`src/worktree.ts:709`）—— **不该记"没接线"**，
+     *    因为它【已经接上了】：消费它的是一条**生产 CLI**，只是它物理位置在
+     *    `scripts/` 下 —— 本装置按【路径】分桶，于是这条生产消费被数进了夹具桶。
+     *    MEASURED：`scripts/worktree-reclaim.mjs` 有 `#!/usr/bin/env node` 与真的
+     *    `main()`，`package.json:112-113` 把它挂成生产命令
+     *    （`reclaim:worktrees` / `reclaim:worktrees:apply`），它在 `:103` 真的
+     *    `import { judgeWorktreeReclaimable, describeReclaimability } from '../lib/worktree.js'`，
+     *    并在 `:182` 真的调用；它的头注释还写明"本文件里**不留**那份实现的副本"。
+     *    ⇒ ★ 这是本装置**按设计就有的盲区**（`scripts/**` 一律算夹具），不是 t41。
+     *      ★★ 而它**不是**本装置该去修的 bug：**不许**为此放宽
+     *        「`src/` = 生产、`scripts/` = 夹具」那条**路径**规则 —— 它正是本判据
+     *        能抓到 t41 的机制（见文件顶 `stripComments` 旁那段）。
+     *        正确的做法是**记账并写明**：消费它的是 `scripts/` 下的生产 CLI。
+     *      ★ 补充（t6 审核轮实测）：该 CLI 还经**运行期动态 import** 被生产调用 ——
+     *        `src/tools/update-task.ts` 的交付后回收路径按 `pluginRoot()` 动态加载
+     *        `scripts/worktree-reclaim.mjs`。⇒ 这是扫描期看不见的消费点的
+     *        **第二重成因**：本装置按路径静态分桶，两重都数不到。
+     *
+     * ② `describeReclaimability`（`src/worktree.ts:789`）—— 与 ① 同一条路径上的
+     *    另一条：它是那条裁决的**人读描述**，由同一个生产 CLI 在 `:189` / `:201` /
+     *    `:229` 调用（`human:` 那一格）。⇒ 同上，记账，不是 t41。
+     *
+     * ③ `verdictState`（`src/gates/admission/checkpoint.ts:645`）—— **不该有生产消费者**，
+     *    它的用途就是给夹具看的：定义处自己的文档注释逐字写着
+     *    「★ 一条只在夹具里用得到的出口（导出是为了让三态**结构上**可分辨）」
+     *    —— 导出是为了让夹具直接断言"返回对象上有没有那个字段"，
+     *    而不是去匹配告警里的一段自然语言（后者会因为改一个标点而静默失效）。
+     *    `src/` 里唯一提到它的地方是 `convene.ts:304` 的**注释**，明说**故意不 import**
+     *    （契约 §2：判据之间不互相调用），而两处读数的漂移由
+     *    `gate-admission-convene.test.mjs` 的一致性臂兜住。
+     *    ⇒ 与 `rehydrateReplayCtx` 同类：合法的纯夹具出口。
+     *
+     * ④ ★★ **被拒绝记账的那一条：`readContractGateVerdict`（`src/quality-gates.ts:1301`）。**
+     *    它**没有**被记进这个数 —— 因为它的形状恰恰是 t41：
+     *    `src/` 全仓对它**零引用**（连它自己的 `ContractGateReading` 类型也只出现在
+     *    定义处），而它返回的 `{disposition, rejects, leavesTrace, reason}` 里，
+     *    `rejects` 是"要不要**拒绝**这次调用"的**控制位**、`leavesTrace` 是
+     *    "要不要**留痕**" —— 那是给调用方的**处置指令**，不是一份给人看的读数。
+     *    ⇒ 它**该有**生产消费者 ⇒ 正解是**去接线**，不是记账。
+     *    ★ 而接线点**待定**：`evaluateQualityCompletion` 不消费契约裁决（它的 `ok`
+     *      是任务完成度的另一种形状）；`canDeclareDelivery` 返回 `{ok, blockers}`
+     *      而**没有** `unmeasured`，接上去是语义错配。
+     *    ★★ 而接线点**已实测定位**（t6 审核轮）：真正的调用方是
+     *      `src/tools/shared/entities.ts:2350` 的 `rejectOnContractGates` ——
+     *      它在 `gates.ok === false` 时**一律拒绝**（`:2389` `throwWithSurface`），
+     *      而 `unmeasured` 也落在这一支里。
+     *      ⇒ ★★ 这与本读数自己的口径**正好相反**：本读数说 `unmeasured` ⇒
+     *        `rejects: false, leavesTrace: true`（放行、但别静默），而生产在
+     *        `unmeasured` 上是**拒绝**。那正是 t38 声称修掉的那个缺陷
+     *        （把测不了读成不行）**仍在生产路径上活着** —— 一条写好、测过、
+     *        而从未被调用的读数，与它不存在，在上生产这件事上没有区别。
+     *    ⇒ 而 `src/tools/shared/entities.ts` 在本任务 in-scope **之外**。
+     *    ★★ 上限的取值 = 17（原记账）+ 3（本轮记账的 ①②③）= **20**。
+     *       ★ 这个式子**不是**"取实测值"：实测 `fixtureOnly` 是 **21**，而 ④ 按上面的
+     *         判据**不许入账** ⇒ 上限**故意停在 20、比实测少 1**。
+     *       ⇒ 本臂**保持红**（21 > 20），而那**是设计的结果、不是漏改**：
+     *         它红着正说明"有一条疑似 t41 尚未处置"，从而**不许**本批把它悄悄记掉。
+     *       ★ 反之，把 ④ 也记进账里（上限改成 21）能让它立刻变绿 ——
+     *         而那正是这条夹具存在的理由所要阻止的事。
+     *       ★★ 因此 t6 的交付状态就是"**红着**"：④ 需要一条**独立的后续任务**
+     *         （把 `rejectOnContractGates` 接到 `readContractGateVerdict`，
+     *         该文件在 t6 in-scope 之外），而不是由本批记账消化。
      */
-    fixtureOnly.length <= 17,
-    `★ "只有夹具消费"的产出涨到了 ${fixtureOnly.length}（记账值 17：16 + rehydrateReplayCtx）—— `
-    + '新增的那些正是 t41 的形状：在夹具里看起来被使用，在生产里从未被调用',
+    fixtureOnly.length <= 20,
+    `★ "只有夹具消费"的产出涨到了 ${fixtureOnly.length}（记账值 20：17 + worktree-reclaim 的两条 + verdictState）—— `
+    + '★ 而若多出的那一条是 readContractGateVerdict（src/quality-gates.ts:1301），它【不许】被记账：'
+    + '它带着 rejects / leavesTrace 两个控制位，是给调用方的处置指令，形状正是 t41 —— '
+    + '该做的是【去接线】，而不是把这条上限再往上调',
   )
   assert.ok(
     unconsumed.length <= 12,

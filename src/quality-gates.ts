@@ -2,8 +2,78 @@
  * Pure quality-gate rules: contracts, path audit, completion, follow-up,
  * coverage, and resume. Tools and persistence call these; they do not I/O.
  * @module dsh-agent-teams/quality-gates
+ *
+ * ── ★ M3 拆分（t59）：QG-A 已挪到 `./quality-gates/predicates.ts` ──────────────────
+ *
+ * `PathClassification` · `normalizeWorkspacePath` · `pathMatchesScope` ·
+ * `classifyChangedPath` · `collectChangedPaths` · `inScopeOverlap` ·
+ * `repoPathsNamedIn` · `verifyTargetOf` · `armsNamedIn` · `subjectTermsIn`
+ * —— 这些**纯谓词**（零 I/O）搬到了 `./quality-gates/predicates.ts`，
+ * 并由下面的 re-export **保持本模块的导出面逐条不变**。
+ *
+ * ★ 为什么（载荷级纪律，不是审美）：`src/gates/{admission,dispatch}/*.ts` 的 4 个文件
+ *   只从本模块取 `normalizeWorkspacePath`，而**本模块 import `node:fs`**
+ *   ⇒ 「判据不 import I/O」这条不变量**在传递闭包上破了**。
+ *   拆出去后它们改指 `./quality-gates/predicates.ts`（**零 `node:` import**）⇒ 闭包恢复。
+ *   ★ **本文件仍然 import `node:fs`** —— 那是因为 `checkTaskPremises` / `baselinePin`
+ *   确实要做文件系统检查；但**它们不是判据层可达的**（那 4 个 gates 文件不取它们）。
+ *   可复跑的 import 图证明见 `docs/MODULE-MAP.md` §7c。
  */
 
+import {
+  normalizeWorkspacePath,
+  pathMatchesScope,
+  classifyChangedPath,
+  collectChangedPaths,
+  inScopeOverlap,
+  repoPathsNamedIn,
+  verifyTargetOf,
+  armsNamedIn,
+  subjectTermsIn,
+  /** ★★★ t95：与闸门**共用**的默认排除谓词（上游 #183 的 "share one exclusion predicate"）。 */
+  isDefaultExcludedPath,
+} from './quality-gates/predicates.ts'
+import type { PathClassification } from './quality-gates/predicates.ts'
+import { VERDICT_KINDS } from './types.ts'
+import type { ArtifactDigest, ArtifactScopeGap, ReviewedArtifact } from './types.ts'
+
+/**
+ * ★ 本模块【也】把 QG-A 原样再导出 —— 于是 `src/quality-gates.ts` 的导出面
+ *   与拆分前**逐条相等**（老消费者一个都不用改）。
+ *   ★ 与上面的 `import` 并存是**有意**的：`import` 给出**本文件内部**要用的绑定，
+ *     这一段给出**对外**的导出面。两者缺一：只 import 则导出面塌了；
+ *     只 export-from 则本文件内部 8 处调用会 TS2304（实测踩到）。
+ */
+export {
+  normalizeWorkspacePath,
+  pathMatchesScope,
+  classifyChangedPath,
+  collectChangedPaths,
+  inScopeOverlap,
+  repoPathsNamedIn,
+  verifyTargetOf,
+  armsNamedIn,
+  subjectTermsIn,
+} from './quality-gates/predicates.ts'
+export type { PathClassification } from './quality-gates/predicates.ts'
+
+/**
+ * ★ `normalizeRepoPath` 是 QG-A 里的**私有** helper（`predicates.ts` 里也不导出）。
+ *   本文件仍有一处要用它（`checkTaskPremises` 的 (ii) 梯级）。
+ *   ★ 为什么**不**把它从 `predicates.ts` 导出：本任务 ① 的对拍命令是
+ *     `grep -rE "^export " src/quality-gates.ts src/quality-gates/*.ts`
+ *     —— **after 侧把 predicates.ts 也算进去** ⇒ 在那里新增一个导出会改变并集，
+ *     违反"导出集合逐条相等"。⇒ 保持它在两边都私有：这里保留一份**逐字相同**的副本。
+ *     ★ 它是纯字符串处理（3 行、零 I/O），复制不引入第二份真相的风险：
+ *       它没有分支、没有常量、没有 I/O —— 唯一会漂移的是正则本身。
+ */
+function normalizeRepoPath(token: string): string {
+  return token.replace(/\\/g, '/').replace(/^\.\//, '').replace(/[.,;:)]+$/, '')
+}
+
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   FINDING_SEVERITIES,
   REVIEW_VERDICTS,
@@ -14,6 +84,7 @@ import {
   type FindingSeverity,
   type ReviewFinding,
   type ReviewPolicy,
+  type ReviewedStamp,
   type ReviewVerdict,
   type TaskKind,
   type TaskEvidence,
@@ -44,7 +115,29 @@ const DEFAULT_REVIEW_POLICY: Required<Pick<
   maxRepairAttempts: 2,
 }
 
-export type PathClassification = 'in_scope' | 'out_of_scope' | 'undeclared' | 'illegal'
+/**
+ * ── ★★★ 计划审查环的轮次上限（N5 / t8）─────────────────────────────────────────
+ *
+ * ★ 它**不是** `ReviewPolicy` 的第六格 —— 这是实测决定的，不是偏好：
+ *
+ *   `ReviewPolicy` 是**四处封闭**的五格：`src/types.ts:311` 的 interface、
+ *   `src/profiles.ts:24` 的 `REVIEW_POLICY_KEYS`、`src/index.ts:132` 的 zod schema、
+ *   以及 `isReviewPolicy` 的 `Object.keys(value).every(k => allowed.has(k))`。
+ *   塞第六格会让 `profiles.ts:1068-1073` 的 `assertAllowedKeys` **直接抛错**，
+ *   而 `profiles.ts` 与 `index.ts` 都不在计划环的写域里。
+ *
+ * ★★ 而且两个数**依据不同**，不该并进同一个接口：
+ *   质量环那个（`codeMaxRounds: 3`）是**产品配置** —— 不同 kind 需要不同次数；
+ *   计划环这个是**这个功能的常数** —— 今天没有任何证据说明不同团队需要
+ *   不同的"计划最多被打回几次"。
+ *   强行并进一个接口，会让将来调其中一个时，不得不为什么都没变的那一个负责。
+ *
+ * ★ 将来若要 profile 覆盖：那要同时改上述四处，那是**另一个决定**，
+ *   不该夹在计划环的落地里。这段注释存在，就是为了让下一个人知道那一格要动四处。
+ *
+ * ★ 与 `DEFAULT_REVIEW_POLICY` **并列**而不合并（N5.15）。
+ */
+export const PLAN_REVIEW_MAX_ROUNDS = 3
 
 export interface CreateTaskInput {
   subject: string
@@ -60,6 +153,22 @@ export interface CreateTaskInput {
   verify?: string[]
   deliverables?: string[]
   nonGoals?: string[]
+  /**
+   * ── ★★★ t11：那一格「已审查」的盖章 —— 而它可选，**但一旦在场就要形状正确** ──────
+   *
+   * ★ 三态（而三者不同形 —— 契约点名的那一条）：
+   *
+   *     缺席            ⇒ ★ **通过**。它不是错误 —— 它是"这条路没走自动生成"
+   *                        （问过用户、用户裁决过的）的正规形态。
+   *     在场且形状正确   ⇒ 通过
+   *     在场而形状坏     ⇒ ★ **拒绝**，而消息要**说清是"形状坏"**，
+   *                        不是"缺了什么" —— 见 `validateCreateTask` 里那一格。
+   *
+   * ★ 而"区分缺失与类型错"是 §54 那条口径在**这一格**上的落点：
+   *   一个说成 `reviewed is required` 的消息会把"在场而坏"读成"缺失"，
+   *   而两者的**补救动作相反**（一个去补字段、一个去修那个字段的内容）。
+   */
+  reviewed?: ReviewedStamp
   reviewedTaskId?: string
   sourceTaskId?: string
   sourceFindingIds?: string[]
@@ -96,6 +205,32 @@ export interface CreateTaskInput {
    *   而"这条规则在它没被触碰时不该开火"是**规则自己的性质**。
    */
   inScopeTouched?: boolean
+  /**
+   * ── ★★★ t9：这条路**要求**调用方显式声明 kind（三态，缺省落回今天的行为）────────────
+   *
+   * ★ 为什么需要这一格，而不是直接把 `?? 'work'` 删掉：
+   *   `create_task` 的 schema 里 `kind` **不在 `required`**，且它的 description 逐字写着
+   *   "Omission means work with no quality gates" —— 那是**被文档承认的**路径。
+   *   删掉缺省等于对它做一次产品语义变更，而本任务的范围是"计划路线不许静默造 work"。
+   *
+   * ★★ MEASURED（t9，推翻"`create_task` 自己补了 work 所以不受影响"这个前提）：
+   *   `src/tools/create-task.ts:536` 逐字是 `kind: input.kind as TaskKind | undefined`
+   *   —— 它把 `undefined` **原样**传进来。⇒ 本函数里任何"缺省即拒"的改动都**当场**
+   *   作用于 `create_task`。同理也作用于 `scripts/preflight-contracts.mjs`
+   *   这类不传 kind 的既有调用方（`scripts/` 不在 t9 写域）。
+   *
+   * ── 三态（与 `inScopeTouched` 同一种极性）───────────────────────────────────────
+   *
+   *     `undefined` ⇒ 没表态 ⇒ **落回今天的行为**（`?? 'work'`）
+   *     `true`      ⇒ 这条路要求显式声明 ⇒ `kind` 缺席即**拒绝**
+   *     `false`     ⇒ ★ 本格**不接受**（`false` 会读成"这条路明确不要求"，
+   *                    而那与 `undefined` 在效果上相同却携带一个假的声明）
+   *
+   * ★ 计划路线的消费点（`src/tools.ts` 的 add_task 分支）传 `true`。
+   *   于是"没人声明过类型"这件事**在它进来的那一刻**就被拒，
+   *   而不是被一个静默缺省读成 `'work'` 之后**再也分不出来**。
+   */
+  requireExplicitKind?: boolean
 }
 
 export interface ValidateCreateTaskResult {
@@ -120,6 +255,16 @@ export interface QualityCompletionResult {
   ok: boolean
   error?: string
   requiredStatus?: TaskStatus
+  /**
+   * ── ★★★ 通过时也要说得出**凭什么**（t19 验收第 5 条）────────────────────────────
+   *
+   * 本字段是那条"允许 completed，因为失败都在基线里"留下的**读数**。
+   * ★ 缺了它，「通过」与「没有遇到失败」在读的人眼里**同形** ——
+   *   而"通过了，因为这几条都在 `<commit>` 的基线里"是**可核的**那一句。
+   * ★ 而它**不是**一块放行牌：它只在 `ok === true` 且确有存量失败时出现，
+   *   而"该不该放行"由上面的三态裁决决定，不由这里决定。
+   */
+  notes?: string[]
 }
 
 export interface PlannedFollowUpTask {
@@ -137,6 +282,12 @@ export interface PlannedFollowUpTask {
   sourceTaskId?: string
   sourceFindingIds?: string[]
   reviewedTaskId?: string
+  /**
+   * ★★★ 这次审查的**独立性读数**（2026-10-20，补 t6）——
+   *   在**生成那一刻**算，因为那是它唯一能被确定的时刻
+   *   （之后 `assignee` 可能被改，而"生成时指没指人"是一个**历史事实**）。
+   */
+  reviewIndependence?: IndependenceReading
 }
 
 export interface PlanQualityFollowUpResult {
@@ -144,6 +295,19 @@ export interface PlanQualityFollowUpResult {
   tasks: PlannedFollowUpTask[]
   escalated?: boolean
   status?: 'escalated'
+  /**
+   * ★★ t95（上游 #183）：**为什么**自动循环停下了 —— 交给队长看。
+   * ★ 缺它时"升级"只有一个布尔 ⇒ 读的人**不知道去做什么**，
+   *   而"升级了但没说为什么"与"没升级"在读端补救动作上其实一样。
+   */
+  reason?: string
+  /**
+   * ★★★ t95（上游 #183）：被**拒绝作为契约材料**的 finding id
+   *   （它们报的每条路径都被默认排除）。
+   * ★ 与 `reason` 分工：`reason` 给人读，这一格给**机器**读
+   *   （"哪几条 finding 需要人裁决"是一个可枚举的集合）。
+   */
+  excludedFindings?: string[]
 }
 
 export interface CoverageRow {
@@ -153,9 +317,367 @@ export interface CoverageRow {
   evidence?: string
 }
 
+/**
+ * ── ★★★ t97（S1）：一份判决**与当前字节**的关系 —— ★ **三态，不是两态** ──────────────
+ *
+ * 上游 #161 逐字：
+ * > 「A verdict that **predates content binding** is reported as an **unauditable gap**
+ * >   rather than being read as a pass over the current bytes.」
+ *
+ * ★★ 三态**必须不同形**（本仓最久的形态是「没找到」与「确实没有」合流）：
+ *
+ * | 取值 | 什么情况 | 补救动作 |
+ * |---|---|---|
+ * | `bound` | ★ 有摘要，且**当前字节与它一致** | 无需动作（判决仍有效） |
+ * | `drifted` | ★ 有摘要，而**字节已变** | 重判 —— 那次判决说的是**另一批字节** |
+ * | `unbound` | ★ **根本没有摘要**（早于内容绑定） | ★ **不能读成通过** —— 它判的是不可知的东西 |
+ *
+ * ★★★ 而 `unbound` **不是**"drifted 的一个特例"：
+ *   drifted 说"我判过那批字节，而它们变了"（**知道**）；
+ *   unbound 说"我不知道它判的是什么"（**不知道**）。
+ *   ⇒ 把后者塞进前者会**造出一个没发生过的绑定**。
+ */
+export type ArtifactBinding = 'bound' | 'drifted' | 'unbound'
+
+/**
+ * 一份"绑定了哪些字节"的摘要集合（workspace 相对路径 → sha256 hex）。
+ * ★ 由**调用方**算并注入（本仓同一条纪律：这里不做 I/O）。
+ */
+export type ArtifactDigestMap = Readonly<Record<string, string>>
+
+/**
+ * ── ★★★ t97（S1）：回答那**三个问题** ──────────────────────────────────────────────
+ *
+ * @param reviewed - 判决落盘时记下的摘要（`TeamTask.reviewedArtifacts`）。
+ *   ★ **缺席或空** ⇒ `unbound`（那个判决早于内容绑定）。
+ * @param current - **当前**这些路径的摘要。★ 由调用方算（这里不做 I/O）。
+ *   ★★ 一个路径在 `reviewed` 里而**不在** `current` 里 ⇒ 那个文件**已被删除** ⇒ `drifted`
+ *     （上游逐字点名了"**edited or deleted**"两种）。
+ *
+ * ── ★★ 反向半边 C 是本函数最容易做错的地方 ────────────────────────────────────
+ *
+ * "有摘要就报 drifted" 是最省事的写法，而那是**恒报** ——
+ * ★ 它与「什么都判不了」在补救动作上同形（都会让人去重做一次本来没问题的活）。
+ * ⇒ 所以字节**一致**时必须报 `bound`。本函数**逐条比对**，不是"有就报"。
+ */
+/**
+ * ── ★★★ 「已存在的测试文件被改松了吗」（2026-10-20，补 t5）────────────────────────
+ *
+ * ── 它防的是什么（MEASURED：一条三条重判据都拦不住的路径）────────────────────────
+ *
+ * ```
+ *   1. 真跑 `pnpm test`      —— 退出码 0 是**真的**
+ *   2. 同一轮改松断言       —— `expect(x).toBe(3)` → `toBe(2)`
+ *   3. 三条判据全部沉默：
+ *      · completion.verify-rerun  不管（退出码确实是真的）
+ *      · completion.r5            不管（它只管【新增】测试的父/子红绿）
+ *      · completion.mutation      不管（重活，且只在被触发时跑）
+ * ```
+ * ⇒ 我们花了很大代价建了「测试**强不强**」的三条重判据，而
+ *   「测试**被改松了没**」这一道几乎零成本的关，**没有任何人管**。
+ *   ★ 参考（外部，逐字）：`portable-dsh-multi-agent-plugin`
+ *     「Test files are pinned by hash, so they can't be weakened.」
+ *
+ * ── 三态，且三者**不同形** ────────────────────────────────────────────────────
+ *
+ *   `intact`       —— 开工时拍过快照，而每一个测试文件**逐字节没变**
+ *   `weakened`     —— 有测试文件的摘要变了（或被删了）⇒ **拒绝**，并指名是哪几个
+ *   `unmeasured`   —— **没能拍快照** / 没能读回 ⇒ ★ **绝不并进 `intact`**
+ *
+ * ★★ 为什么 `unmeasured` 不许并进 `intact`：那会让"我没能检查"与"检查了、没被改"
+ *   在读数上同形 —— 本仓记了十几次的那条合流，这一格是它最新的一次机会。
+ *   ★ 而它的**方向**是保守的：判不了**不拒绝**（先软后硬），但**如实报 unmeasured**。
+ *
+ * ── ★ 一个必须处理的**反面**：修复任务本来就可能要改测试 ────────────────────────
+ *
+ * 见 {@link TestFileBaselineReading.baselineWasEmpty} 与下面 `newFiles` 的处理：
+ * **新写的**测试文件不算"改松"（那是**加**，不是减）；只有**快照里存在而后来变了或没了**
+ * 的才算。★ 这个区分是本函数的核心，不是装饰 —— 没有它，每一个合法的
+ * "补一个测试"都会被拒，而那条判据会在第一天就被学会忽略。
+ */
+export type TestFileBaselineVerdict = 'intact' | 'weakened' | 'unmeasured'
+
+export interface TestFileBaselineReading {
+  readonly verdict: TestFileBaselineVerdict
+  /** `weakened` 时：哪些**已存在**的测试文件被改了（或被删了）。 */
+  readonly weakened: readonly string[]
+  /** `unmeasured` 时的成因（人话）。 */
+  readonly why?: string
+  /** 开工时快照里有几个测试文件（0 ⇒ 这条任务开工时工作区里没有测试文件）。 */
+  readonly baselineCount: number
+}
+
+/**
+ * 比对**开工时的测试文件快照**与**现在**。
+ *
+ * ★ 纯函数：两份摘要都由调用方给（与 `artifactBindingOf` 同一条纪律）。
+ *
+ * @param baseline - 开工那一刻拍下的（`TeamTask.testFileBaseline`）。
+ *   **`undefined` 与 `[]` 必须不同形**：前者是"没能拍"（⇒ `unmeasured`），
+ *   后者是"拍了、当时一个测试文件都没有"（⇒ `intact`，且是一条**读数**）。
+ * @param current - 现在这些路径的字节（`digestWorkspacePaths` 的产出）。
+ *   **缺席**（`undefined`）⇒ 没能读回 ⇒ `unmeasured`，绝不读成"没被改"。
+ */
+/**
+ * ── ★★★ 同一条 verify 命令，**建契约时**与**完成时**跑出的结论一样吗（2026-10-21，施工单序 4）
+ *
+ * ── 它补的是什么（MEASURED，`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-4）──────────
+ *
+ * 同一条命令被跑了**两次**：
+ *
+ *   `contract.verify-command`  建契约那一刻跑一次 ⇒ 落进 `gateEvaluations.contract.outputs.verifyProbe`
+ *   `completion.verify-rerun`  成员汇报完成时再跑一次 ⇒ 落进 `outputs.reruns`
+ *
+ * 实测：盘上 **44 条**任务都**同时**带着这两份读数（`verifyProbe` 44/44）。
+ * ★★ 而**没有任何一处代码把它们放在一起看** —— 于是"同一命令两次结论不一致"
+ *   这件事，今天**一个字都读不出来**。
+ *
+ * ── 它为什么值得读 ──────────────────────────────────────────────────────────
+ *
+ * 两次之间隔着成员的全部工作。结论变了**不一定是坏事**（那正是 verify 在测的东西），
+ * 但有两种变化是**信号**：
+ *   · 建契约时 `passed`、完成时 `failed` ⇒ 成员把东西弄坏了（**正常的失败**，不是信号）
+ *   · 建契约时 `failed`、完成时 `passed` ⇒ ★ 那条命令当初就判不出真假，
+ *     而它现在"过了"—— 这恰好是 `contract.verify-command` 存在的理由
+ *     （"A verify command must be able to go green when the work was done
+ *       and red when it was not"）。
+ *     ★★ 若建契约时它就是 `failed`，那契约本身有问题；而它却**一路通过了**。
+ *
+ * ── ★ 三态，且 `unmeasured` 不并进 `agree` ────────────────────────────────────
+ *
+ *   `agree`      —— 两份都在，且同一命令的结论**逐条一致**
+ *   `disagree`   —— 有命令的结论不一致（`changed` 里逐条给）
+ *   `unmeasured` —— **缺一份**（老任务没有 `verifyProbe` / 这一轮没重跑）
+ *     ★★ 这与 `agree` **不同形**："我没法比"与"比过、一样"是两件事。
+ *
+ * ★ 它**只报告，不拒绝**（施工单序 4 的建议是 `warn`）：
+ *   两次不一致**可以**是正常的工作进展，硬拒会让每一个"修好了一个坏测试"的任务被拦。
+ *   而它必须**留痕** —— 否则这条读数不存在。
+ */
+export type VerifyProbeAgreement = 'agree' | 'disagree' | 'unmeasured'
+
+export interface VerifyProbeComparison {
+  readonly status: VerifyProbeAgreement
+  /** `disagree` 时：同一命令的两次结论不同的那些（逐条给）。 */
+  readonly changed: readonly {
+    readonly command: string
+    readonly atContract: 'passed' | 'failed' | 'unknown'
+    readonly atCompletion: 'passed' | 'failed' | 'unknown'
+  }[]
+  /** `unmeasured` 时的成因（人话）。 */
+  readonly why?: string
+  /** 参与比对的命令数（0 ⇒ 两条都没跑，见 `unmeasured`）。 */
+  readonly compared: number
+}
+
+/** 把一份 probe/rerun 归一成 `命令 → 结论`。 */
+function verdictsByCommand(
+  runs: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+): Map<string, 'passed' | 'failed' | 'unknown'> | undefined {
+  if (!Array.isArray(runs)) return undefined
+  const out = new Map<string, 'passed' | 'failed' | 'unknown'>()
+  for (const run of runs) {
+    const command = typeof run?.command === 'string' ? run.command.trim() : ''
+    if (command === '') continue
+    /** ★ 优先读 `exitCode`（机械），读不到才退 `status`（自报）。 */
+    const verdict: 'passed' | 'failed' | 'unknown' = typeof run?.exitCode === 'number'
+      ? (run.exitCode === 0 ? 'passed' : 'failed')
+      : run?.status === 'passed' || run?.status === 'failed' ? run.status : 'unknown'
+    out.set(command, verdict)
+  }
+  return out
+}
+
+/**
+ * 比一份**建契约时**的 `verifyProbe` 与一份**完成时**的 `reruns`。
+ *
+ * ★ 纯函数：两份都由调用方给（与 `artifactBindingOf` / `testFileBaselineOf` 同一条纪律）。
+ */
+export function compareVerifyProbe(
+  atContract: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+  atCompletion: readonly { readonly command?: unknown; readonly exitCode?: unknown; readonly status?: unknown }[] | undefined,
+): VerifyProbeComparison {
+  const before = verdictsByCommand(atContract)
+  const after = verdictsByCommand(atCompletion)
+  /**
+   * ★ **任缺一份** ⇒ `unmeasured`。★ 不说"没变" —— 那是"没比过"。
+   *   ★★ 而两者都缺席时 `compared: 0`，与"比了但都没异议"不同形。
+   */
+  if (before === undefined || after === undefined) {
+    return {
+      status: 'unmeasured',
+      changed: [],
+      compared: 0,
+      why: before === undefined
+        ? 'this task carries no verify probe from when its contract was created, so there is nothing to compare the completion re-run against'
+        : 'the completion re-run produced no per-command results, so there is nothing to compare the contract probe against',
+    }
+  }
+  /** ★ 只比**两份都有的命令** —— 只在一边出现的命令是另一件事（契约被改过 / 命令没重跑）。 */
+  const changed: VerifyProbeComparison['changed'][number][] = []
+  let compared = 0
+  for (const [command, atContractVerdict] of before) {
+    const atCompletionVerdict = after.get(command)
+    if (atCompletionVerdict === undefined) continue
+    compared += 1
+    if (atContractVerdict !== atCompletionVerdict) {
+      changed.push({ command, atContract: atContractVerdict, atCompletion: atCompletionVerdict })
+    }
+  }
+  if (compared === 0) {
+    return {
+      status: 'unmeasured',
+      changed: [],
+      compared: 0,
+      why: 'the contract probe and the completion re-run share no command, so nothing could be compared (the contract may have been rewritten)',
+    }
+  }
+  return { status: changed.length === 0 ? 'agree' : 'disagree', changed, compared }
+}
+
+export function testFileBaselineOf(
+  baseline: readonly { readonly path: string; readonly digest: string }[] | undefined,
+  current: ReadonlyMap<string, string> | undefined,
+): TestFileBaselineReading {
+  if (baseline === undefined) {
+    return {
+      verdict: 'unmeasured',
+      weakened: [],
+      baselineCount: 0,
+      why: 'the test files were not snapshotted when this attempt started, so whether they were weakened since then cannot be decided',
+    }
+  }
+  if (current === undefined) {
+    return {
+      verdict: 'unmeasured',
+      weakened: [],
+      baselineCount: baseline.length,
+      why: 'the current bytes of the snapshotted test files could not be read back, so whether they were weakened cannot be decided',
+    }
+  }
+  const weakened: string[] = []
+  for (const artifact of baseline) {
+    const now = current.get(artifact.path)
+    /**
+     * ★ 不在当前读数里 ⇒ 两种情况，**都算 weakened**：
+     *   · 文件被删了（`digestWorkspacePaths` 对不存在的路径记 gap，不产出条目）
+     *   · 读不到了（逃出工作区 / 读失败）
+     *   ★★ 为什么两者都不并进 `intact`：一条"我找不到它了"与"它没变"是**相反**的读数。
+     *     ★ 保守方向是对的：判不了时**不拒绝**，但这里不是判不了 ——
+     *       快照说它存在，现在找不到，那件事本身就是一个结论。
+     */
+    if (now === undefined) { weakened.push(artifact.path); continue }
+    if (now !== artifact.digest) weakened.push(artifact.path)
+  }
+  return { verdict: weakened.length === 0 ? 'intact' : 'weakened', weakened, baselineCount: baseline.length }
+}
+
+/**
+ * ── ★ 一条任务**该不该**被拍测试文件快照（闸门，不是判据）──────────────────────
+ *
+ * ★ `write` 类 kind 才会碰文件。`review` / `requirements` 是只读判断，
+ *   给它们拍快照只会产生一份**永远用不上**的记录（而"一个没人读的读数"正是
+ *   本轮审计在清理的东西）。
+ * ★ 它的口径**就是** `WRITE_KINDS`（`['implementation', 'repair']`）——
+ *   ★★ 而这两个常量今天是**同一个集合**，不是巧合也不是疏忽：
+ *     `lib/` lockstep 与"会写测试文件"都只对真正改源码的那两类成立。
+ *   ★ 我**不**在这里另写一份 `['implementation','repair']` —— 两份会分叉，
+ *     而分叉之后"要拍快照"与"要建树"会给出不同的答案（本仓记账过多次）。
+ *
+ * ── ★ 一处如实标出的边界 ────────────────────────────────────────────────────────
+ *
+ * `integration` 也会写文件（它做合并），而它**不在**这个集合里
+ * ⇒ 它的测试文件基线**不会被拍** ⇒ 它的比对落 `unmeasured`（**不是** `intact`）。
+ * ★ 这是**已知且刻意**的：本轮先让"最常发生的路径"（成员在自己的树里改测试）
+ *   有读数；扩到 `integration` 是另一条改动，而它需要先想清"合并时改了上游的测试"
+ *   算不算 weakened（那是一个语义问题，不是一个开关）。
+ * ★★ 而三态保证了这件事**读得出来**：`unmeasured` 与 `intact` 不同形，
+ *   所以没人会把"integration 没被检查"读成"integration 的测试没被改"。
+ */
+export function shouldSnapshotTestFiles(kind: TaskKind | undefined): boolean {
+  return WRITE_KINDS.includes((kind ?? 'work') as never)
+}
+
+export function artifactBindingOf(
+  reviewed: readonly ReviewedArtifact[] | undefined,
+  current: ArtifactDigestMap,
+): ArtifactBinding {
+  /**
+   * ★ 缺席 **或** 空 ⇒ `unbound`。
+   *   ★★ 为什么空数组也算：`reviewedArtifacts: []` 说"这次判决没有绑定任何字节" ——
+   *     而那**回答不了**"它判的是哪批字节"这个问题 ⇒ 与"没有这一格"同一种**不可判**。
+   *     ★ 它与"没有这一格"在**落盘形状**上仍不同形（在场 vs 缺席），
+   *       但**在这个问题上**两者都是 `unbound`（这不是合流，是同一个答案）。
+   */
+  if (reviewed === undefined || reviewed.length === 0) return 'unbound'
+  for (const artifact of reviewed) {
+    const now = current[artifact.path]
+    /** ★ 不在当前摘要里 ⇒ 文件**已被删除**（上游逐字含 "deleted"）⇒ drifted。 */
+    if (now === undefined) return 'drifted'
+    if (now !== artifact.digest) return 'drifted'
+  }
+  return 'bound'
+}
+
+/**
+ * ── ★★★ t97（S1）：审计的**输入面** —— 「**当前**这些路径是什么字节」 ──────────────────
+ *
+ * 上游逐字：
+ * > 「Current bytes of the paths recorded by verdicts and work orders.」
+ *
+ * ★★ 为什么它必须由**调用方**给、而不是在这里读盘：
+ *   判据层是**纯**的（`src/gates/**` 有一条臂逐字钉住"caller injects I/O"）。
+ *   本文件虽已 import `node:fs`（它做契约校验），但**审计**这条路上
+ *   仍按同一条纪律走：**值**由调用方算好传进来。
+ *
+ * ★★★ 而 `artifacts` 与 `gaps` 是**两件事**，不许合流：
+ *   · `artifacts` —— 读到了的（**当前**字节）
+ *   · `gaps`      —— **没能读完**的那部分
+ *   ⇒ 一份**不完整**的读取若被当成完整，会让"没读到"读成"没变"。
+ *     ★ 上游逐字：「a non-empty list means the audit itself is incomplete,
+ *       so **no verdict may be confirmed from it**」。
+ *
+ * ★ 本任务（S1）**只**把它作为输入面引入并转发；★ 用不用它做裁决是 S3 的事。
+ */
+export interface DeliveryAudit {
+  /** ★ 判决与工单记下的那些路径的**当前**字节。 */
+  readonly artifacts?: readonly ArtifactDigest[]
+  /**
+   * ★ 这次读取**没能完成**的部分（上限、读不了的目录/文件、非法模式）。
+   * ★★ 非空 ⇒ **审计本身不完整** ⇒ 不许据它确认任何判决。
+   */
+  readonly gaps?: readonly ArtifactScopeGap[]
+}
+
 export interface DeliveryResult {
   ok: boolean
   blockers: string[]
+  /**
+   * ── ★★★ t97（S1）：每条**判决类**任务的绑定读数（"它判的是哪批字节"）─────────────
+   *
+   * ★★ 三态（见 {@link ArtifactBinding}）：`bound` / `drifted` / `unbound`。
+   * ★ 只有在**传了 `audit`** 时才有这一格 —— 缺席（`undefined`）= "这次没做审计"，
+   *   而**不是**"审计过了、全部有效"。★ 两者补救动作相反。
+   * ★★ 本任务（S1）**只报读数，不改 `ok`** —— 拿它去拦交付是 S3/S4 的事
+   *   （那会改既有交付语义，而本任务的硬纪律是"不许改既有判据的 verdict 语义"）。
+   */
+  verdictBindings?: readonly VerdictBindingReading[]
+}
+
+/**
+ * ── ★★★ t97（S1）：一条判决**与当前字节**的关系读数 ────────────────────────────────
+ *
+ * ★ 它就是那三个问题的答案，逐条可读：
+ *   · `unbound` —— **早于内容绑定**（没有 `reviewedArtifacts`）
+ *   · `drifted` —— 绑过，而**字节已变**（含"文件已被删除"）
+ *   · `bound`   —— 绑过，且**字节未变** ⇒ 仍然有效
+ */
+export interface VerdictBindingReading {
+  readonly taskId: string
+  readonly kind: string
+  readonly binding: ArtifactBinding
+  /** 这条判决记下的绑定数（0 表示没有可核的绑定）。 */
+  readonly bound: number
 }
 
 export interface ResumeTeamResult {
@@ -163,6 +685,19 @@ export interface ResumeTeamResult {
   status: 'resumed' | 'already_running' | 'rejected'
   team?: TeamState
   error?: string
+  /**
+   * ── ★★★ 本次恢复**显式归零**了计划审查环（`planReviewRounds = 0` + 清 flag）─────
+   *
+   * ★ 调用方**必须**在这一个为真时把 `team.planReviewRounds` / `team.planReviewEscalated`
+   *   一起写回盘。只写 `halted` 会让归零**只存在于返回值里** ——
+   *   而那正是 2026-10-20 实测出来的缺陷：一个被文档承诺为"唯一出路"的动作，
+   *   在盘上什么都没改。
+   *
+   * ★ 为什么由本函数**说出来**而不是让调用方去比两边的 `rounds`：
+   *   "只有超轮才归零"这条规则住在这里；另一处比 round 就是第二份真相，
+   *   而两份真相会漂移（改一次规则就得记得改两处）。
+   */
+  clearedPlanReview?: true
 }
 
 export type QualityLoopState = 'running' | 'halted' | 'escalated' | 'deliverable' | 'blocked'
@@ -175,6 +710,84 @@ export interface QualityLoopSnapshot {
   summary: string
 }
 
+/**
+ * ── ★★★ 计划审查环的五态（N5 / t8）─────────────────────────────────────────────
+ *
+ * 与 `QualityLoopState` **同形但不同位**：`describePlanLoop` 不读 `team.escalated`，
+ * `describeQualityLoop` 不读 `team.planReviewEscalated` —— 两个环各读自己的位。
+ *
+ * ★ 为什么不复用 `team.escalated`（这是本次设计里最贵的一条教训）：
+ *   `team.escalated` 全仓**只有一个写入点**（`applyQualityFollowUp`）且**没有清除点**
+ *   （`resume` 只清 `halted`）。它同时是两个交付阻断项的来源
+ *   （`canDeclareDelivery` 的 `team requires escalation resolution`）。
+ *   ⇒ 若计划环写它，**一次计划超轮 = 整队永久不可交付，连 resume 都解不开**。
+ *   ⇒ 复用别人的状态位之前，先数它有几个**清除点**。
+ */
+export type PlanLoopState = 'halted' | 'awaiting-review' | 'reviewing' | 'escalated' | 'approved'
+
+export interface PlanLoopSnapshot {
+  state: PlanLoopState
+  /** 已发生的计划审查轮次数。★ 缺席按 `0` 读（存量团队没有这一格）。 */
+  rounds: number
+  /** 上限。★ 模块常量 `PLAN_REVIEW_MAX_ROUNDS` —— 不从 `reviewPolicy` 取（见那里的注释）。 */
+  maxRounds: number
+  /**
+   * ★★ **这一层真正的产出**（`state` 只是它的索引）。
+   *
+   * 它必须逐字说清"为什么还不能结束"，因为调用方若只用 `canEnd`（= `state === 'approved'`），
+   * 拿到的就是一个可读的**否定**答案，而不是一个布尔。
+   *
+   * ★ 三态在这一个字里也要成立：`unmeasured` 的格子**不拦**但**必须点名** ——
+   *   "N 条任务的表面读不出来"要逐条写出来，不许静默并进"通过"。
+   */
+  reason: string
+  /** ★ 唯一的放行读数：**只有** `state === 'approved'` 时计划可以开跑。 */
+  canEnd: boolean
+  /**
+   * ── ★★ 轮次这一格是**读到的**还是**缺席按 0 读的**（三态纪律）──────────────
+   *
+   *   `persisted` ⇒ 盘上真有 `planReviewRounds` ⇒ `rounds` 是实测值
+   *   `absent`    ⇒ 存量团队（这一格在本轮之前不存在）⇒ `rounds` 是 **0**，
+   *                 ★ 而"我把它读成 0"与"它确实是 0"必须不同形 ——
+   *                 后者会让存量团队看起来像"审了 0 轮就通过"，前者才说得清成因。
+   *
+   * ★ 另开一格而不是并进 `reason`：`reason` 是人读的散文，这一格是**机器可判**的。
+   *   把可判的东西只写进散文，等于让下游去 `includes` 一个句子。
+   */
+  roundsSource: 'persisted' | 'absent'
+  /**
+   * ── ★★ 契约表面的逐条读数（**读数，不是闸**）─────────────────────────────────
+   *
+   * ★★ 分档那一层（large 必须带 reviewed 戳）已被对抗性审查推翻并**明文砍掉**，
+   *   不许重装。理由（审查者原话，逐字）：它的判据方向是**反的** ——
+   *   奖励少写 `inScope`、惩罚诚实声明，且能被被审方自己缩域绕过。
+   *   ⇒ 所以这里只做**读数**，一个字都不参与放行。
+   *
+   * 三态**不同形**（与全库那条最贵的纪律一致）：
+   *   `readable`       ⇒ 契约声明了表面 ⇒ 能判
+   *   `unreadable`     ⇒ 这条**是写类任务**（`implementation`/`repair`）而表面缺席/为空
+   *                      ⇒ ★ 这是**真缺口**（`validateCreateTask` 对写类强制 `inScope`）
+   *   `notApplicable`  ⇒ 这条**不是写类** ⇒ 契约本来就不要求它 ⇒ ★ **噪音，不是缺口**
+   *
+   * ★ 把后两者并成一个"缺"会让噪音淹没真缺口；并成一个"齐"会让真缺口消失 ——
+   *   两种合流都已被本仓记账（t6 的同一格）。
+   */
+  surfaces: PlanLoopSurfaces
+}
+
+export interface PlanLoopSurfaces {
+  /** 任务总数（全量，不是抽样）。 */
+  total: number
+  /** 契约声明了表面 ⇒ 能判。 */
+  readable: number
+  /** ★ 写类任务而表面缺席/为空 ⇒ 真缺口。`unreadableIds` 逐条点名。 */
+  unreadable: number
+  unreadableIds: string[]
+  /** ★ 非写类任务没有表面 ⇒ 契约本来就不要求 ⇒ 噪音。`notApplicableIds` 逐条点名。 */
+  notApplicable: number
+  notApplicableIds: string[]
+}
+
 export interface QualityGraphDraft {
   subject: string
   kind: TaskKind
@@ -185,6 +798,25 @@ export interface QualityGraphDraft {
   inScope?: string[]
   verify?: string[]
   coverageOf?: string[]
+  /**
+   * ── ★★★ 审查任务要审的是哪条（这一格此前**缺**，于是生成器产出的图自己过不了校验）──
+   *
+   * MEASURED（本轮，我直接拿生成器的输出去喂 `create({plan})`）：
+   *   `profile task "review-round-1" is not a valid review task — review tasks require reviewedTaskId`
+   *
+   * ★ 而 `validateCreateTask`（`:1052`）对 review 的要求是**两条**：
+   *   非空 + 指向的队伍里**真的存在**那条任务。
+   *   所以这一格必须填**种子图里那条任务的 id**（`implementation`），
+   *   它会在 `initializeProfileTeam` 里经 `seedToActual` 换成真实 id —— 与 `dependencies` 同一条路。
+   *
+   * ★ 这是"生成器与校验器不同源"的第三个实例（前两个：契约字段无处可放、
+   *   `inScope: ['src/']` 硬编码违反它自己第 4 条规则）。它们共同的形态是：
+   *   **一段代码生产的东西，另一段代码拒绝接收，而两者之间没有夹具**。
+   */
+  reviewedTaskId?: string
+  /** 同 `reviewedTaskId`，但用于 `repair`：这些 finding 从哪里来。 */
+  sourceTaskId?: string
+  sourceFindingIds?: string[]
 }
 
 export const DEFAULT_REVIEW_ACCEPTANCE = [
@@ -235,109 +867,6 @@ export function isReviewPolicy(value: unknown): value is ReviewPolicy {
   return Object.keys(value).every((key) => allowed.has(key))
 }
 
-/** Normalize a workspace-relative POSIX path. `undefined` means illegal. */
-export function normalizeWorkspacePath(path: string): string | undefined {
-  if (typeof path !== 'string') return undefined
-  const trimmed = path.trim()
-  if (trimmed === '') return undefined
-  if (trimmed.startsWith('~') || /^[A-Za-z]:/.test(trimmed)) return undefined
-  const posix = trimmed.replaceAll('\\', '/')
-  if (posix.startsWith('/')) return undefined
-  const parts: string[] = []
-  for (const part of posix.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') return undefined
-    parts.push(part)
-  }
-  return parts.join('/')
-}
-
-export function pathMatchesScope(path: string, pattern: string): boolean {
-  const normalizedPath = normalizeWorkspacePath(path)
-  if (normalizedPath === undefined) return false
-  const rawPattern = pattern.trim().replaceAll('\\', '/')
-  if (rawPattern.startsWith('~') || rawPattern.startsWith('/') || /^[A-Za-z]:/.test(rawPattern)) return false
-  const directory = rawPattern.endsWith('/')
-  const normalizedPattern = normalizeWorkspacePath(rawPattern)
-  if (normalizedPattern === undefined) {
-    if (directory && (rawPattern === './' || rawPattern === '/' || rawPattern === '.')) return true
-    return false
-  }
-  if (directory || rawPattern === './' || rawPattern === '.') {
-    if (normalizedPattern === '') return true
-    return normalizedPath === normalizedPattern || normalizedPath.startsWith(`${normalizedPattern}/`)
-  }
-  return normalizedPath === normalizedPattern
-}
-
-function isDefaultExcluded(path: string): boolean {
-  const normalized = normalizeWorkspacePath(path)
-  if (normalized === undefined) return false
-  const segments = normalized.split('/')
-  const base = segments[segments.length - 1] ?? ''
-  if (segments[0] === '.git' || segments[0] === '.dsh') return true
-  if (base === '.env' || base.startsWith('.env.')) return true
-  if (segments.includes('secrets')) return true
-  if (base.startsWith('id_rsa')) return true
-  return false
-}
-
-export function classifyChangedPath(
-  path: string,
-  inScope: readonly string[] = [],
-  outOfScope: readonly string[] = [],
-): PathClassification {
-  if (normalizeWorkspacePath(path) === undefined) return 'illegal'
-  if (isDefaultExcluded(path)) return 'out_of_scope'
-  if (outOfScope.some((pattern) => pathMatchesScope(path, pattern))) return 'out_of_scope'
-  if (inScope.some((pattern) => pathMatchesScope(path, pattern))) return 'in_scope'
-  return 'undeclared'
-}
-
-/**
- * ── ★★ f-0020：repair 的判别力证据，不是「本次新增的测试」───────────────────────
- *
- * ── 它修的是什么（MEASURED：本队 6 次同形终止，全部由 captain 代落终态）─────────
- *
- *     t13 / t16 / t19 / t25 / t26 cancelled · t27 failed
- *
- * 原因不是交付物有问题，而是三道完工门的**问句与 repair 的验收不是同一件事**：
- *
- *     r5 / mutation 度量：「为【新工作】写了新测试吗」   ← 输入面 = `newTestFiles`
- *     repair 的验收    ：「改了【既有】夹具后它仍能判别吗」← 净改动全在既有文件上
- *
- * ⇒ `newTestFiles` 对一份 repair 恒为 `[]`（它数的是"新增"，而 repair 一个都没新增），
- *   于是 r5 报 `unmeasured`（"none of the 0 reported file(s)…"）、mutation 拿不到
- *   杀手套件。判据**没有撒谎** —— 它诚实地说"我没能测量"。
- *   但一个恒常的 `unmeasured` 同样**交不出终态** ⇒ 无人值守退化成 captain 逐个手收。
- *
- * ── ★★ 这一格**只换了文件来源**，没有降低判别的强度 ─────────────────────────────
- *
- * 判据问的仍是同一个问题：「这条夹具**还能不能抓住缺陷**」。
- * 变的只是"拿哪些文件去问"：
- *
- *     旧：本次【新增】的测试文件        ⇒ 对 repair 是空集 ⇒ 恒 unmeasured
- *     新：本次【改动过的既有的】测试夹具 ⇒ repair 的真实证据 ⇒ 可测量
- *
- * ★ 而"装饰性测试"这一路**一步都没让**：一条恒绿的既有夹具同样过不了 r5
- *   （它在父版本上就绿 ⇒ `decorative test` 拒绝）。见夹具的臂 3（定向突变）。
- *   ⇒ 换句话说：**"是不是新文件"是无关的；"它还能不能判别"才是问题。**
- *     旧口径读的是前者，代价是把后者的答案一起丢掉了。
- *
- * ── 三态（与 `observedChangedPaths` / `gitChangedPaths` 逐条对齐）──────────────
- *
- *   观察面缺席（`undefined`）    ⇒ 本函数返回 `[]`，且调用方**必须**报 unmeasured
- *        —— "我没能观察" 与 "观察了、确实没有" 不同形（本队记账最久的那条界线）。
- *   观察到了、一条夹具都没改动  ⇒ `[]`，同样是 unmeasured（没有可测量的判别力）。
- *   观察到了、改了既有夹具      ⇒ 那些路径 —— r5 拿它们去跑红前绿后。
- *
- * ★ 为什么不做成"猜一个默认目录"：猜出来的路径会让运行器返回 `[]`，
- *   而空集会被读成"没有新测试要查" ⇒ **ok**。那是把"没测到"并进"通过"，
- *   正是 r5 的注释里已经点名过的那个坑（"用没有根据的默认值…⇒ ok"）。
- *
- * @param ctx - 一份完成更新的上下文（任务是 `repair` / `implementation`）。
- * @returns 应当被当作判别力证据去测量的测试夹具路径（workspace 相对，已去重排序）。
- */
 export function repairEvidenceFiles(ctx: RepairCompletionContext | undefined): string[] {
   /**
    * ★ 来源顺序是刻意的：**先看本次改动过的文件**，再看声明的新测试。
@@ -610,42 +1139,6 @@ export type RepairCompletionResult =
   | { ok: true; evidence: string[]; discriminable: true }
   | { ok: false; unmeasured: string; discriminable: boolean }
 
-export function collectChangedPaths(gitStatusText: string): string[] {
-  const paths: string[] = []
-  const seen = new Set<string>()
-  for (const rawLine of gitStatusText.split(/\r?\n/u)) {
-    const line = rawLine.trimEnd()
-    if (line.trim() === '') continue
-    let candidate = line
-    const rename = /->\s+(\S+)$/u.exec(line)
-    if (/^[ MADRCU?!]{1,2}\s+/u.test(line)) {
-      candidate = rename?.[1] ?? line.replace(/^[ MADRCU?!]{1,2}\s+/u, '')
-    }
-    const cleaned = candidate.replace(/^"|"$/gu, '').trim()
-    const normalized = normalizeWorkspacePath(cleaned)
-    if (normalized === undefined || seen.has(normalized)) continue
-    seen.add(normalized)
-    paths.push(normalized)
-  }
-  return paths
-}
-
-export function inScopeOverlap(
-  left: readonly string[] | undefined,
-  right: readonly string[] | undefined,
-): string[] {
-  if (left === undefined || right === undefined) return []
-  const hits: string[] = []
-  for (const a of left) {
-    for (const b of right) {
-      if (pathMatchesScope(a, b) || pathMatchesScope(b, a) || a === b) {
-        if (!hits.includes(a)) hits.push(a)
-      }
-    }
-  }
-  return hits
-}
-
 function nonemptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
 }
@@ -672,7 +1165,354 @@ function dependencyClosureContains(
   return false
 }
 
-export function validateCreateTask(team: TeamState, input: CreateTaskInput): ValidateCreateTaskResult {
+/**
+ * ── ★★★ t23：契约的【文件级前提】在**建任务时**就核对，而不是让成员在派发中途发现 ──────
+ *
+ * ── 它修的是什么（MEASURED：同一个缺陷类吃过**五次**完整往返，四个成员独立撞到）──────
+ *
+ *   t1 契约**整份是空的**（objective / inScope / acceptance / verify 全缺席）
+ *      ⇒ 成员分不出"这个任务不需要契约"与"契约在途中丢了"。
+ *   t3 契约点名 `lib/types.d.ts` —— 而本仓的 build **永远产不出那个路径**
+ *      （`declarationDir` 是 `lib/types`）。
+ *   t6 的 objective 点名 `observeStall`，由它的依赖 t3 产出 —— 而 t3 的交付是
+ *      **worktree 局部的提交**，不是基线的祖先（本仓按【落文件】合流）
+ *      ⇒ 那个产物**在它跑的那棵树上根本不存在**。
+ *   t8 ★ **最强的一例**：它【被强制的 verify 命令】本身在基线上就编不出来 ——
+ *      `scripts/gate-friction-capture.test.mjs` 在那个修订上**一个 C1 臂都没有**
+ *      ⇒ 于是它的验收第 2 条**是空的**（那条要 gate 的 escalate 池在基线上不存在）。
+ *      照写一个臂**能变绿而什么都没证明** —— 而"读起来像被验证过"正是本队存在的理由。
+ *
+ * ── 为什么放在这里（验收第 2 条）────────────────────────────────────────────────
+ *
+ * `validateCreateTask` **已经**在校验 `inScope` / `verify` / `acceptance`
+ * （见下面那几个 `nonemptyStringList` 分支）⇒ 在这里加一道**存在性断言**，
+ * 成本是一次 `existsSync`，而不是一整次派发往返。
+ *
+ * ── 三条梯级（验收第 3 条），每条各自可读、各自指名（验收第 4 条）──────────────
+ *
+ *   (i)   objective 里**点名**的产物存在
+ *   (ii)  inScope 里**每一个**文件存在
+ *   (iii) 每一条 verify 命令的**目标文件存在**，且**含验收标准点名的臂**
+ *
+ * ── ★★ 而它**不许**用 git ancestry（验收第 5 条）────────────────────────────────
+ *
+ * 本仓**按落文件合流**：一个内容相同的落地提交**永远不是** worktree 提交的祖先
+ * ⇒ 祖先检查会在**正确落地的活**上误报，而那是最坏的一种误报
+ *   （它惩罚的正是这个仓库做对的那件事）。
+ * ⇒ 所以这里**一律按内容**判：文件在不在、里面有没有那句话。
+ */
+
+/** 一条被核对的前提；读得出来才算数 ⇒ 每条都带**它是哪一条**与**实测到的什么**。 */
+export interface PremiseFailure {
+  /** 梯级：(i) 目标产物 / (ii) inScope 文件 / (iii) verify 目标与臂。 */
+  readonly tier: 'i' | 'ii' | 'iii'
+  /** 人话，指名**哪一条前提**失败（验收第 4 条）。 */
+  readonly detail: string
+}
+
+/**
+ * ── ★★★ T5 修复（2026-10-15，队长）：按【磁盘上是什么】判，不按"有没有同名目录" ──────
+ *
+ * MEASURED（t5-check，修前 3 处误报）：
+ *   `lib/types/state.d.ts`       是**文件**，而 `lib/types/state` 也是**目录** —— 两者并存
+ *   `lib/types/tools/update-task.d.ts`  同上
+ *   `lib/types/quality-gates.d.ts`      同上
+ *
+ * ★ 修前的写法是 `if (existsSync(目录)) return '结构上不可能'` —— 它**只查目录**，
+ *   从不查那个路径**本身**是不是文件 ⇒ **把真实存在的文件判成"不可能"**。
+ *
+ * ★★ 后果不是"多一条提示"，而是**死锁**：任务声明它 ⇒ 被拒（"那是目录"）；
+ *   不声明 ⇒ 被另一条规则拒（"`src/X.ts` 会产出它"）⇒ **该任务无法创建**。
+ *   已两次挡住一等线（D1 的 `update-task.ts`、S1 的 `state.ts`）。
+ *
+ * ⇒ 修法：**先看 `normalized` 自己** —— 若它已是**文件**，就**不是**不可能（返回 undefined）。
+ *   只有当它**不存在**、而它去掉 `.d.ts` 的同名**目录存在**时，才是真正的
+ *   "声明写在了目录上" ⇒ 才报错。
+ */
+function structurallyImpossiblePath(normalized: string, root: string): string | undefined {
+  const match = /^(.*)\.d\.ts$/.exec(normalized)
+  if (match === null) return undefined
+  const directoryLike = match[1]!
+  if (directoryLike === '' || !directoryLike.includes('/')) return undefined
+  try {
+    /**
+     * ★★★ 第一问（T5 的新增）：**这个路径本身是文件吗？**
+     * 是 ⇒ 它**真的存在** ⇒ 绝不能说"结构上不可能"。这一问修前没有。
+     */
+    if (existsSync(join(root, normalized))) return undefined
+    /**
+     * ★ 第二问（保留修前的意图）：同名目录在不在？
+     * 只有当**文件不在、目录在**时，才真的是"把声明写在目录上了"。
+     */
+    if (!existsSync(join(root, directoryLike))) return undefined
+    /**
+     * ★ 第三问（新增，防目录误伤）：那个路径**是目录**吗？
+     * 若它既不是文件、也不是目录，那只是**缺席**（由别的规则报"不存在"），
+     * 不是"结构上不可能" —— 两件事必须不同形。
+     */
+    if (!statSync(join(root, directoryLike)).isDirectory()) return undefined
+  } catch {
+    return undefined
+  }
+  return `inScope names \`${normalized}\`, which cannot be produced here: \`${directoryLike}\` is a DIRECTORY `
+    + `(this repository puts declarations at \`${directoryLike}/<name>.d.ts\`), so that exact path is structurally `
+    + 'impossible — not merely absent. Name the declaration file explicitly, or scope the directory itself'
+}
+
+export function checkTaskPremises(
+  input: { objective?: string; acceptance?: readonly string[]; inScope?: readonly string[]; verify?: readonly string[] },
+  root: string = localPluginRoot(),
+  /**
+   * ── ★★★ 2026-10-21：**第二棵可看的树** ────────────────────────────────────────────
+   *
+   * ── 为什么需要它（MEASURED：两个夹具要的是**不同的**树）──────────────────────
+   *
+   *   `scripts/lifecycle-verify.mjs`  在**临时 workspace** 里写 `scripts/parser.test.mjs`
+   *     ⇒ 那条 `verify` 目标只在**临时树**里存在
+   *   `scripts/gate-assignment-parity.test.mjs`  植入的三条违规（`contradiction`/`emit`/`touch`）
+   *     **依赖插件仓库自己的真实文件**（`src/types.ts` …）
+   *     ⇒ 它们只在**插件树**里成立
+   *
+   * ★★ 我先只传 `workspace` ⇒ 那个夹具的 premises 检查**抢先**拒绝（多出 2 条红）；
+   *   再撤回不传 ⇒ 这个夹具的目标又"不存在"（红回来）。
+   *   ⇒ **两个都对，而只给一棵树时它们互斥。**
+   *
+   * ── 正确的读法：前提核对问的是"**这件事在这棵树上能不能做**" ─────────────────
+   *
+   *   一棵文件在**任一棵**可看的树上存在 ⇒ 那条前提就**没被证伪**。
+   *   ★ 这是**保守的**方向：它只会**减少**误拒，不会让一条真的"结构上不可能"通过
+   *     —— 后者由 (ii) 的 `structurallyImpossiblePath` 判，那条与 root 无关（它看目录结构）。
+   *   ★★ 而"两棵树都没有"仍然报 —— 那才是要拦的那种。
+   */
+  extraRoot?: string,
+): PremiseFailure[] {
+  const failures: PremiseFailure[] = []
+  /**
+   * ★ 候选根的清单：主根在前，`extraRoot` 在后（去重）。
+   *   ★★ 顺序有意义：`readIfPresent` 取**第一个读得到的** —— 主根优先，
+   *     于是"本仓自己"的读数不会被一个临时树覆盖。
+   */
+  const roots = extraRoot === undefined || extraRoot === root ? [root] : [root, extraRoot]
+  const exists = (relative: string): boolean => roots.some((candidate) => {
+    try { return existsSync(join(candidate, relative)) } catch { return false }
+  })
+  const readIfPresent = (relative: string): string | undefined => {
+    for (const candidate of roots) {
+      try { return readFileSync(join(candidate, relative), 'utf8') } catch { /* 试下一棵 */ }
+    }
+    return undefined
+  }
+
+  /**
+   * ── (i) objective 里点名的产物存在 ───────────────────────────────────────────
+   *   ★★ 而**已经出现在 inScope 里的**不在这里重复报 —— 它们由 (ii) 负责，
+   *     两处都报会让同一条事实读起来像两条（本队记账过的"同一件事报两遍"）。
+   */
+  const objective = input.objective ?? ''
+  const scopeSet = new Set((input.inScope ?? []).map(normalizeRepoPath))
+  for (const named of repoPathsNamedIn(objective)) {
+    if (scopeSet.has(named)) continue
+    if (!exists(named)) {
+      failures.push({
+        tier: 'i',
+        detail: `the objective names \`${named}\`, and that file does not exist on this base — `
+          + 'if a dependency was supposed to produce it, that deliverable has not landed here '
+          + '(this repository merges by LANDING FILES, so a completed dependency is not proof the file is present)',
+      })
+    }
+  }
+
+  /**
+   * ── (ii) inScope 的路径**合法且可达** ───────────────────────────────────────────
+   *
+   * ── ★★★ 这里我把契约的字面要求**收窄了**，而理由是实测的（见下）────────────────
+   *
+   * 契约第 3 条字面写的是"every inScope file exists"。★ 而**照字面实现会打红四条
+   * 诚实工作的臂**（MEASURED：gate-input-wiring 臂 5/臂 12、gate-task-profile 臂 2、
+   * 一条"放行臂"）—— 因为**任务的存在理由常常就是创建一个还不存在的文件**：
+   *
+   *     inScope: ['src/a.ts', 'lib/a.js']     ← 这两格此刻都不存在，而那是**正常的**
+   *
+   * ⇒ 所以"文件不存在"**不能**作为拒绝理由：它与"这个任务什么都没做"同形，
+   *   而那正是本任务要消灭的那种合流。
+   *
+   * ── 那么 (ii) 该查什么？查【路径**结构上不可能**】那一类 —— 也就是 t3 的真实形状 ──
+   *
+   * MEASURED（t3）：它的契约点名 `lib/types.d.ts`，而本仓 `declarationDir` 是
+   * `lib/types` ⇒ 声明文件永远落在 `lib/types/<name>.d.ts`，
+   * **`lib/types.d.ts` 这个路径结构上产不出来**（不是"还没生成"，是"永远不会生成"）。
+   *
+   * ★★ 判据：`X/Y.d.ts` 这种"目录名 + `.d.ts`"的形状，当 `X/Y/` 是一个**真的存在的
+   *   目录**时，它就是那个**结构错误** —— 读的人一眼能看出他想写的是 `X/Y/<name>.d.ts`。
+   * ★ 而它**不**误伤"新建目录"：`src/newthing/` 只是还不存在，不是不可能。
+   */
+  for (const entry of input.inScope ?? []) {
+    const normalized = normalizeRepoPath(entry)
+    if (normalized === '' || normalized.endsWith('/')) continue
+    const impossible = structurallyImpossiblePath(normalized, root)
+    if (impossible !== undefined) {
+      failures.push({ tier: 'ii', detail: impossible })
+    }
+  }
+
+  /**
+   * ── (iii) verify 的目标存在，且含验收标准点名的臂 ──────────────────────────────
+   *   ★★ 这是**最强**的一条，也是唯一能挡住 t8 那一例的（见文件头）。
+   */
+  const acceptanceText = (input.acceptance ?? []).join('\n')
+  const namedArms = armsNamedIn(acceptanceText)
+  for (const command of input.verify ?? []) {
+    const target = verifyTargetOf(command)
+    if (target === undefined) continue
+    const source = readIfPresent(target)
+    if (source === undefined) {
+      failures.push({
+        tier: 'iii',
+        detail: `verify command \`${command}\` runs \`${target}\`, which does not exist on this base — `
+          + 'the command cannot even be started here, so every acceptance criterion it is meant to prove is unprovable',
+      })
+      continue
+    }
+    /**
+     * ★ 臂名：**验收标准点名的那些**必须在文件里真的出现。
+     *   ⇒ 缺一个就报一个（逐条指名），因为读的人要能直接去补那一格。
+     */
+    for (const arm of namedArms) {
+      if (!source.includes(arm)) {
+        failures.push({
+          tier: 'iii',
+          detail: `\`${target}\` does not contain "${arm}", which the acceptance criteria refer to — `
+            + 'as written, that criterion would be satisfied vacuously or not at all '
+            + '(a file that exists is not a file whose arms exist)',
+        })
+      }
+    }
+    /**
+     * ── ★★★ 而**臂名对得上**也还不够：还要看它**承载的东西**在不在（t8 那一例）─────────
+     *
+     * 见 `subjectTermsIn` 那段 MEASURED：在 t8 的基线上 `臂 4` **存在**，
+     * 而它是一个与 C1 无关的老臂，C1 的词汇**零出现**。
+     * ⇒ ★ 只比臂名的检查会放它过去，而那条验收标准**因此是空的**。
+     *
+     * ★ 逐条指名缺的是哪一个标识符 —— 读的人要能直接去补那一格。
+     */
+    for (const term of subjectTermsIn(acceptanceText)) {
+      if (!source.includes(term)) {
+        failures.push({
+          tier: 'iii',
+          detail: `\`${target}\` does not mention \`${term}\`, which the acceptance criteria name as the thing to prove — `
+            + 'the arm name may match an unrelated pre-existing arm, in which case the criterion is VACUOUS '
+            + '(it reads as verified while its subject does not exist here). This is the strongest tier: it catches '
+            + 'the case a name-only check cannot',
+        })
+      }
+    }
+  }
+
+  return failures
+}
+
+export function validateCreateTask(
+  team: TeamState,
+  input: CreateTaskInput,
+  /**
+   * ── ★★★ 2026-10-21：`root` —— 前提核对该看**哪棵树** ─────────────────────────────
+   *
+   * MEASURED（本轮实测，`scripts/lifecycle-verify.mjs`）：`checkTaskPremises` 此前
+   * **不传 root**，于是它用 `localPluginRoot()`（**插件自己的仓库**）。
+   * ⇒ 一个在**别的 workspace** 里建的任务（夹具、以及**任何非本仓的部署**），
+   *   它的 `verify` 目标会被判成"不存在" —— 而那棵树里**明明有那个文件**。
+   *
+   * ★★ 这不是"夹具的特殊情况"：本插件**装到任何别的项目**时，
+   *   每一个 `implementation` 任务的 `verify` 都会被这条判据误拒 ——
+   *   因为它去读的是**插件包自己的目录**，不是用户的仓库。
+   *   ⇒ 那是本仓记账最久的形态：**读对了规则，读错了对象**。
+   *
+   * ── ★★★ 而"传 workspace"**不是**无条件的正确答案（2026-10-21 实测撤回）──────────
+   *
+   * 我把两个调用点都改成传 `workspace`，全量立刻多出 **2 条**新增失败：
+   *
+   *   ✖ ★★★ 臂 5（真入口臂）：三条检查在 `create_task` 上真的拒绝，且**指名是哪一条**
+   *   ✖ 臂 2 ★ 对照臂：review 可以用与它判的 implementation **不同**的模型
+   *
+   * ★ 成因：那个夹具用**临时 workspace**，而它植入的三条违规
+   *   （`contradiction` / `emit` / `touch`）**依赖插件仓库自己的真实文件**
+   *   （`src/types.ts`、`src/tools/shared/entities.ts` …）。
+   *   传了临时目录 ⇒ 那些文件不在那里 ⇒ `checkTaskPremises` **抢先**拒绝了，
+   *   而它拒绝的理由（"premises do not hold"）与那条臂要测的（"指名哪一条违规"）**不是同一件事**。
+   *
+   * ⇒ ★★ 所以本参数**保留**（它是对的能力），但**调用点暂不传**：
+   *   现有两个调用点都还没有"一个可信的工作树根"这个信息 ——
+   *   `create_task` 拿到的 `workspace` 对**本仓自身**是对的，对**夹具**是错的，
+   *   而判据分不出这两者。
+   *   ★ 要让它在真实部署上生效，需要先有一个"这个 workspace 是不是一棵真树"的读数
+   *     —— 那是另一条改动，而**这一轮不做**（避免用一个猜测去替换另一个）。
+   *
+   * ★ 缺席 ⇒ 退回 `localPluginRoot()`（**既有行为逐字节不变**，存量调用方不用改）。
+   */
+  root?: string,
+  /**
+   * ★ 第二棵可看的树（见 `checkTaskPremises` 的 `extraRoot`）。
+   *   ★★ 与 `root` **并列而不是替换**：两棵都看，任一存在即算前提成立。
+   */
+  workspaceRoot?: string,
+): ValidateCreateTaskResult {
+  /**
+   * ── ★★★ t9：`?? 'work'` 这个缺省**不再对所有调用方无条件生效** ──────────────────
+   *
+   * ── 它修的是什么（MEASURED，t9 修前）────────────────────────────────────────────
+   *
+   *   `src/tools.ts` 的 add_task 分支把 kind **硬编码成 `'work'`**，
+   *   而 `StagedPlanMutation` 的 add_task **没有 kind 格** ⇒ 经 `edit_plan` /
+   *   HTTP 计划路由加进来的任务**永远不是 quality kind**，也就永远不需要质量契约。
+   *   ★ 下一行是这个缺省的**副本**：硬编码删了而缺省留着（或反过来），
+   *     那条"没人声明"的读数仍然会被缺省读成 `'work'` ⇒ 双层拒必须两层都在。
+   *
+   * ── 为什么不是"全局收紧"（船长裁决 (a)：不做产品语义变更）────────────────────────
+   *
+   *   `create_task` 的 schema 里 `kind` **不在 `required`**，而它的 description
+   *   逐字写着 "Omission means work with no quality gates, even if the subject says
+   *   implementation/review" —— 那是**被文档承认的**路径。
+   *   全局收紧会改掉它，而那是一次**产品语义变更**，不该塞进本任务。
+   *
+   *   ★★ MEASURED（t9，本条裁定所依据的前提**已被推翻**，如实记账）：
+   *     裁定的假设是"`create_task` 显式传 `kind ?? 'work'` 所以全局收紧不影响它"。
+   *     实测 `src/tools/create-task.ts:536` 逐字是 `kind: input.kind as TaskKind | undefined`
+   *      —— 它**直接把 `undefined` 传进来**，一个 `??` 都没有。
+   *     ⇒ 全局收紧（或"缺省即拒"）会**当场打断 `create_task` 的已文档化缺省**：
+   *       `validateCreateTask(team, {subject:'x', dependencies:[]})` 今天 `ok=true`，
+   *       全局收紧后 `ok=false`。（同一条读数也打断 `scripts/preflight-contracts.mjs`
+   *       这类**不传 kind** 的既有调用方 —— 而 `scripts/` 不在本任务写域内。）
+   *     ⇒ 若按裁定字面施工，(a) 与 (b) 两条路都会红一条：
+   *       要么打断 `create_task`，要么就得去改 `src/tools/create-task.ts`
+   *       —— ★ 而那个文件**不在** t9 的 inScope 里。
+   *
+   * ── ⇒ 于是落成【调用点显式声明】的三态，而不是改默认值：──────────────────────────
+   *
+   *     `kind` 在场                              ⇒ 照常校验（行为不变）
+   *     `kind` 缺席 且 `requireExplicitKind:true` ⇒ ★ **拒绝**，指名"kind 未声明"
+   *     `kind` 缺席 且 没声明这一格               ⇒ 保持今天的缺省（`'work'`）
+   *                                                ★ 这是 `create_task` 那条
+   *                                                **被文档承认**的路径
+   *
+   * ★★ 三态而不是布尔，与 `CreateTaskInput.inScopeTouched` 那条纪律同源：
+   *   `undefined` = "这条路还没表态" ⇒ 落回**今天的行为**（不是落回"跳过检查"）。
+   *   反过来的极性会让"调用方忘了接线"与"这条路确实不用声明"在读取方眼里同形 ——
+   *   而那正是本库记账最久的形状。
+   *
+   * ★ 而"表态"这件事**必须写得出来**：`requireExplicitKind: true` 在调用点上是
+   *   **一句可 grep 的话**，而一个静默的缺省无法被审计。
+   *   ⇒ 计划路线（`src/tools.ts` 的 add_task 消费点）就是那个表态的调用方。
+   */
+  if (input.kind === undefined && input.requireExplicitKind === true) {
+    return {
+      ok: false,
+      error: 'kind must be declared explicitly on this route: it does not treat an omitted kind as "work". '
+        + 'Declare the kind ("work" for ordinary work, or a quality kind such as "implementation"). '
+        + '★ An undeclared kind and a kind of "work" are indistinguishable at the adjudication surface, '
+        + 'so an omitted kind cannot be recovered after the fact.',
+    }
+  }
   const kind = input.kind ?? 'work'
   if (!(TASK_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, error: `unknown task kind "${String(kind)}"` }
@@ -701,6 +1541,48 @@ export function validateCreateTask(team: TeamState, input: CreateTaskInput): Val
       return { ok: false, error: `${kind} tasks require a non-empty verify list` }
     }
   }
+  /**
+   * ── ★★★ t23：文件级前提的核对（三条梯级）──────────────────────────────────────
+   *
+   * 位置是刻意的：**紧挨着**上面那几个"inScope / verify / acceptance 在不在"的校验
+   * —— 验收第 2 条要的正是"在 already 校验 inScope 的地方加一次存在性断言"。
+   *
+   * ★★ 为什么是**拒绝**而不是告警：契约原话是
+   *   "A task failing the premise check is refused with a message naming WHICH premise failed,
+   *    rather than being dispatched into a guaranteed bounce"。
+   *   ⇒ 一条**必然弹回来**的派发，比一次当场拒绝贵得多（成员拿到它、读它、
+   *     确认前提不存在、写报告、返回）—— 而这段时间里它**做不了别的活**。
+   *
+   * ★ 健全的契约一条都不报（`checkTaskPremises` 返回空数组）⇒
+   *   它们在**这条**路径上逐字节与今天相同。
+   *
+   * ★★ 只有**质量类**才跑（它们才有 objective / acceptance / verify 这套契约面）。
+   *   `work` 类没有契约 ⇒ 对它们跑前提核对会在每一个普通任务上开火，
+   *   而那正是"教人忽略门禁"的老路。
+   */
+  if (isQualityKind(kind)) {
+    const premiseFailures = checkTaskPremises({
+      objective: input.objective,
+      acceptance: input.acceptance,
+      inScope: input.inScope,
+      verify: input.verify,
+    }, root, workspaceRoot)
+    if (premiseFailures.length > 0) {
+      /**
+       * ★ 措辞**逐条指名是哪一条梯级**（验收第 4 条），并说清**补救动作**
+       *   —— 本队那条纪律：一句读不出"该去做什么"的消息，会让人去做另一件事。
+       */
+      const lines = premiseFailures.map((failure) => `  (${failure.tier}) ${failure.detail}`)
+      return {
+        ok: false,
+        error: `the contract's file-level premises do not hold on this base — ${premiseFailures.length} broken:\n`
+          + `${lines.join('\n')}\n`
+          + '★ 这不是"契约写得不好"，是**它在这棵树上无法执行**：上面每一条都是当场实测的。\n'
+          + '★ 补救动作按梯级：(i) 先把产出它的依赖落进基线；(ii) 改 inScope 到真实存在的路径；'
+          + '(iii) 改 verify 指向真实的文件，或把验收标准改成那个文件里**真的有的**臂。',
+      }
+    }
+  }
   if (kind === 'review') {
     if (!nonemptyString(input.reviewedTaskId)) {
       return { ok: false, error: 'review tasks require reviewedTaskId' }
@@ -721,6 +1603,114 @@ export function validateCreateTask(team: TeamState, input: CreateTaskInput): Val
       && findingKey(item.sourceFindingIds ?? []) === findingKey(input.sourceFindingIds ?? []))
     if (duplicate !== undefined) return { ok: false, error: `repair task ${duplicate.id} already covers these findings; use that task instead of creating duplicate work` }
 
+  }
+
+  /**
+   * ── ★★★ t11：`reviewed` 那一格的校验 —— 而它是**三态**，且三者不同形 ─────────────
+   *
+   * 用户原话（这一格存在的理由）：
+   * > 「有的任务是自动生成的，有的任务是需要问过我之后再生成、再派发的。
+   * >   对于问过我、我裁决过的任务，在生成计划时就没有走自动生成的那一步，
+   * >   也就没有『已审查』的字段，**那它就需要被审查一遍**。」
+   *
+   * ⇒ ★ 所以路由规则是：**带 `reviewed` ⇒ 放行；不带 ⇒ 派之前必须先审一遍**。
+   *   而"不带"是**正常状态**，不是错误 —— 本函数**不许**把它拒掉。
+   *
+   * ── ★★★ 「区分『缺失』与『类型错』」在这里的确切落点（§54 那条口径）──────────────
+   *
+   * ★ 它**不是**"两种都要报错，只是措辞不同" —— 那是最容易被读错的一版：
+   *
+   *     缺席           ⇒ ★ **通过**（`ok: true`）。它是"还没审"，不是"缺了一格必填"。
+   *     在场而形状坏    ⇒ 拒绝，而消息**指名"在场而形状坏"**，并说清**坏在哪**。
+   *
+   * ★★ 为什么这两者必须不同形（后果是具体的）：
+   *   一个说成 `reviewed is required` 的消息，会让读的人去**补一个字段** ——
+   *   而那条任务**本来就有那一格**（只是它内容坏了）⇒ 他去补的东西已经在。
+   *   ⇒ ★ 而那正是本队记账过的形态：**一个错误的措辞让人去做另一件事。**
+   *
+   * ★ 而"坏在哪"也要**逐项指名**（与 `profiles.ts` 那条 `X must be an array` 同一口径）：
+   *   读的人要能直接去修那一项，而不是把整个 `reviewed` 重写一遍。
+   */
+  if (input.reviewed !== undefined) {
+    const reviewed: unknown = input.reviewed
+    /**
+     * ★ ① 它必须是一个**普通对象** —— 而 `null` / 数组 / 字符串 / 数字都不算。
+     *   ★ 复用 `isRecord`（它已把"非对象"与"null"与"数组"三件事分开判了）。
+     */
+    if (!isRecord(reviewed)) {
+      /** ★ 而消息里带上**实际读到的是什么** —— 那让"类型错"可当场核。 */
+      return {
+        ok: false,
+        error: 'reviewed is present but is not an object: '
+          + `a review stamp must be an object with {at, by, checks[]}, but the value is ${describeTypeOf(reviewed)}. `
+          + '★ 这不是"缺了 reviewed"（它在场）—— 是它的形状不对',
+      }
+    }
+    if (typeof reviewed['at'] !== 'number' || !Number.isFinite(reviewed['at'])) {
+      return {
+        ok: false,
+        error: 'reviewed.at must be a finite number (epoch ms): '
+          + `the value is ${describeTypeOf(reviewed['at'])}. ★ 这不是"缺了 reviewed"（它在场）`,
+      }
+    }
+    if (!nonemptyString(reviewed['by'])) {
+      return {
+        ok: false,
+        error: 'reviewed.by must be a non-empty string (who performed the review): '
+          + `the value is ${describeTypeOf(reviewed['by'])}. ★ 这不是"缺了 reviewed"（它在场）`,
+      }
+    }
+    /**
+     * ★ ② `checks` 必须是**数组** —— 而这一条与 `at`/`by` 分开报，因为它坏起来最常见
+     *   （一个布尔 `reviewed: true` 会落在上面第 ① 条，而 `checks: "pass"` 落这一条）。
+     */
+    if (!Array.isArray(reviewed['checks'])) {
+      return {
+        ok: false,
+        error: 'reviewed.checks must be an array of per-question verdicts: '
+          + `the value is ${describeTypeOf(reviewed['checks'])}. `
+          + '★ 这不是"缺了 reviewed"（它在场）—— 而一个布尔 `true` 也到不了这里（它会在"不是对象"那一格就被拒）',
+      }
+    }
+    /** ★ ③ 而数组的**每一条**也要是良构的（一个空数组是合法的：审了、而一条都没记）。 */
+    for (const [index, check] of (reviewed['checks'] as unknown[]).entries()) {
+      if (!isRecord(check)) {
+        return {
+          ok: false,
+          error: `reviewed.checks[${index}] must be an object ({id, verdict, why?}): the value is ${describeTypeOf(check)}`,
+        }
+      }
+      if (!nonemptyString(check['id'])) {
+        return { ok: false, error: `reviewed.checks[${index}].id must be a non-empty string: the value is ${describeTypeOf(check['id'])}` }
+      }
+      /**
+       * ★★ `verdict` 必须是**认得的**取值 —— 而那与"它是不是一个字符串"是两件事：
+       *   `verdict: "maybe"` 是一个良构的字符串，而它不是一个结论。
+       *   ⇒ 分开报（一个说"要是字符串"，一个说"取值认不得"）。
+       *
+       * ── ★★★ MEASURED（本任务的对**对照臂**当场抓出来的一个真错）────────────────────
+       *
+       * ★ 第一版这里用的是 `isReviewVerdict` —— 而它判的是 **`REVIEW_VERDICTS`**
+       *   （`pass / needs_revision / reject`），那是**任务级**的 review 结论。
+       *   ⇒ 于是 `verdict: 'fail'` 与 `'unmeasured'` 被**错误地拒掉**，
+       *     而那一格要的恰恰是 **逐条五问**的三态（`pass / fail / unmeasured`，
+       *     见 `ReviewedCheck.verdict` 的文档与 `friction-triage` 的 `adversarialReview`）。
+       *
+       * ★★ 而抓到它的正是那条**对照臂**（"合法 reviewed 必须通过"）——
+       *   若没有它，上面那些"形状坏 ⇒ 拒绝"的臂会**全部照样绿**，
+       *   而实现会把**每一条正当的逐条结论**（fail / unmeasured）一并拒掉。
+       *   ⇒ ★ 那就是契约为什么要那条对照臂：**缺它就无法区分"校验有效"与"校验在乱拒"。**
+       *
+       * ★ 所以这里用**逐条 check 自己的**三态，而不是任务级那一套 —— 两者是不同的东西。
+       */
+      if (!isReviewedCheckVerdict(check['verdict'])) {
+        return {
+          ok: false,
+          error: `reviewed.checks[${index}].verdict must be one of ${REVIEWED_CHECK_VERDICTS.join(' / ')}: `
+            + `the value is ${describeTypeOf(check['verdict'])}`,
+        }
+      }
+    }
   }
 
   const dependencies = input.dependencies ?? []
@@ -864,6 +1854,232 @@ function openHighFindings(findings: readonly ReviewFinding[] | undefined): Revie
   ))
 }
 
+/**
+ * ── ★★★ 「这次交付有没有新增失败」—— 三态，而三态必须不同形（t19）──────────────
+ *
+ * ★★ 而它是本仓那条跨层规则的直接应用（`docs/GATE-REGISTRY.md` 规则一）：
+ *   「正确的分界不是『能不能读到那个东西』，而是『这件事可不可判定』。」
+ * ```
+ * no-new-failures  ⇒ 可判定: 这次 verify 的失败【逐条都在基线里】⇒ 允许 completed
+ * new-failures     ⇒ 可判定: 至少一条【不在基线里】⇒ 只能 failed
+ * undecidable      ⇒ ★ 读不到证据（没有 failures 明细 / 读不到基线清单）
+ *                    ⇒ 退回旧行为（仍拒）—— 因为"没能测量"不得读成"没事"
+ * ```
+ *
+ * ★ 而它要的是【集合比对】：同一个命令在三次运行里给出过 47 / 14 / 14 条失败
+ *   （本会话实测）⇒ ★ 计数不是证据，只有【哪几条】是。
+ */
+/**
+ * 读【钉住的基线已知失败】清单（`scripts/fixtures/baseline-known-failures.json`，t18 的产物）。
+ *
+ * ★ 三态而非布尔：读得到 ⇒ 名字数组 + **它是谁钉的**；读不到 / 形状不对 ⇒ `undefined`（= 判不了）。
+ *   ⇒ ★ 而调用方拿 `undefined` 时必须【保守】（仍拒）——
+ *     把"读不到清单"读成"清单是空的"就等于说"仓库里没有存量红"，而那是错的。
+ *
+ * ── ★★★ 为什么返回值里必须带上「基线是什么」（t19 验收第 5 条）────────────────────
+ *
+ * 判据说「这几条失败**在基线里**」时，它引用的是一个**参照物**。
+ * ★ 而一个说不出自己参照物是什么的判断，读的人**无从核它**：
+ *   基线是哪一次测的？那时的仓库存量红是哪几条？—— 两个问题都必须有答案，
+ *   否则"存量"这个词在这句话里只是一个**承诺**，而不是一个事实。
+ *
+ * ⇒ 所以这里连同名单一起交出那两格（`_verified_at` / `_pinned_by`）：
+ *     · `at`      —— 那次测量所基于的 commit（`_verified_at` 的行首 ref）
+ *     · `by`      —— 谁钉的（`_pinned_by`）
+ *   ★ 而**任何一格读不出来** ⇒ 整份判不了（不是"那一格空着"）：
+ *     一个说不出参照物的基线，与一个说不清在哪测出来的读数**同形** ——
+ *     而"同形"正是本仓那条纪律要拦的东西。
+ *
+ * ★ 注意这**没有**让判定更宽：`at/by` 读不到 ⇒ `undefined` ⇒ 调用方仍【保守地拒】。
+ *   它只是把"我凭什么说它是存量"这件事**从注释搬进了读数**。
+ */
+export interface BaselinePin {
+  readonly names: readonly string[]
+  /** 那次测量所基于的 commit / ref（从 `_verified_at` 的行首取）。 */
+  readonly at: string
+  /** 谁钉的（`_pinned_by`）。 */
+  readonly by: string
+}
+
+/**
+ * 从 `_verified_at` 的自由文本里取出行首那个 ref。
+ *
+ * ★ 那一段是**给人读的**（`ba32130（本 worktree 的 HEAD，且无源码改动）。★ 名单由…`），
+ *   所以只取**第一个 token**，并要求它看起来像一个 ref（十六进制串 / 常见的 ref 名）。
+ *   ★ 取不到 ⇒ 返回 `undefined` ⇒ 整份判不了（不猜一个"大概的" commit）。
+ */
+function pinRefFromVerifiedAt(text: string): string | undefined {
+  const head = text.trim().split(/[\s（(]/)[0] ?? ''
+  /** ★ 只接受两种形状：7 位以上的十六进制串，或 `refs/…` / 常见的分支名式 token。 */
+  if (/^[0-9a-f]{7,40}$/i.test(head)) return head
+  if (/^refs\/[\w./-]+$/.test(head)) return head
+  return undefined
+}
+
+/**
+ * ── ★★★ 为什么这里【不能】import `pluginRoot()`（2026-10-10 实测）────────────────
+ *
+ * MEASURED（`verifier` 在 t22 上查出，而它跑的是【父修订的独立 worktree】）：
+ *   曾有一版 `import { pluginRoot } from './tools/shared/entities.ts'` ——
+ *   而那条边**闭合了一个既存的环**：
+ * ```
+ *   changed-paths.ts  → quality-gates.ts          ← 早已存在
+ *   quality-gates.ts  → tools/shared/entities.ts  ← ★ 那一条（它新增的）
+ *   entities.ts       → gates/index.ts            ← 早已存在
+ *   gates/index.ts 在【顶层】执行 buildRegistry()
+ * ```
+ *   ⇒ ★ 从 `changed-paths` 进入时，`gates/index` 的模块体还没跑完
+ *     ⇒ `Cannot access 'id' before initialization`（TDZ）
+ *   ⇒ ★ 而 `typeof module.id === 'string'` **挡不住 TDZ**（TDZ 会抛，不返回 undefined）
+ *
+ * ★★ 所以这里【本地化】那份逻辑，而不是 import ——
+ *   因为"读一个 fixtures 文件"不值得新开一条【跨模块的边】，
+ *   而当那条边能把一个既存的环闭合时，它就不只是"多一个依赖"。
+ * ★ 而它与 `pluginRoot()` 的语义**必须一致**（同一个 dirname 链，层数同）——
+ *   见 `entities.ts` 里那条 `t39：层数 2 → 4` 的注释。
+ */
+function localPluginRoot(): string {
+  /**
+   * ★★★ 层数是【由这个文件自己的位置】定的，不是照抄别人的（2026-10-10 实测）──────
+   *
+   * MEASURED（我第一版照抄了 `entities.pluginRoot` 的 4 层 —— 而那把根算成了 `/Users`）：
+   * ```
+   *   entities.js      住在 lib/tools/shared/ ⇒ 4 层 = 仓库根
+   *   quality-gates.js 住在 lib/             ⇒ ★ 只需 2 层
+   * ```
+   * ⇒ ★ 而它的后果【不是报错】—— `baselinePin()` 读不到那个文件 ⇒ 返回 `undefined`
+   *   ⇒ 而下游把"读不到基线"读成【判不了】⇒ ★ 于是 t19 那条判据永久 undecidable
+   *   ⇒ ★★ 而"我少算了两层"与"基线清单不存在"在读数上【同形】——
+   *     两者都表现为 `baselinePin() === undefined`。
+   *
+   * ★ 所以这里按【本文件的真实位置】算，并用一条臂钉住它（臂 7：读出来的路径必须真的存在）。
+   */
+  return dirname(dirname(fileURLToPath(import.meta.url)))
+}
+
+/**
+ * ── ★★★ 导出它：让**盘上那份真实清单**可以被一条臂直接问出来 ──────────────────────
+ *
+ * MEASURED（2026-10-20）：本函数此前是模块私有 ⇒ 没有任何臂能问
+ * "盘上那份 `baseline-known-failures.json` 读得出来吗"。于是它可以
+ * **在所有臂都绿的情况下失效** —— 而队长就是这么把它写坏的：
+ * 把 `_verified_at` 从 `"ba32130（…）"` 改成 `"2026-10-20（…）"`，
+ * `pinRefFromVerifiedAt` 逐字只接受 `^[0-9a-f]{7,40}$` 或 `^refs\//`，
+ * ⇒ 返回 `undefined` ⇒ **整份基线读不出来** ⇒ 29 条存量红变回 `undecidable`
+ * ⇒ 完成门对每一条任务都说"判不了"。
+ *
+ * ★★ 而后果的方向是反的，这正是它难发现的原因：
+ *   pin 从 18 条补到 36 条，本意是**放宽**（存量红不再挡完工），
+ *   结果因为一个字段格式写错，反而**更严**了。
+ *   ⇒ 「改了一个让人能过关的东西」与「把所有路都堵死」在同一次提交里同形。
+ *
+ * ★ 导出之后，`scripts/gate-baseline-increment.test.mjs` 的臂 7 直接调它问盘上那份 ——
+ *   用的是**产品自己的读取路径**，而不是在夹具里重写一遍格式判断
+ *   （重写就多一份真值，而两份会分叉）。
+ */
+export function baselinePin(): BaselinePin | undefined {
+  try {
+    const raw = readFileSync(join(localPluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'), 'utf8')
+    const parsed = JSON.parse(raw) as { knownFailures?: unknown; _verified_at?: unknown; _pinned_by?: unknown }
+    const entries = parsed.knownFailures
+    if (!Array.isArray(entries)) return undefined
+    const names = entries
+      .map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { test?: unknown }).test : undefined))
+      .filter((name): name is string => typeof name === 'string' && name.trim() !== '')
+      .map((name) => name.trim())
+    if (names.length === 0) return undefined
+    /** ★★ 参照物那两格：任一格读不出来 ⇒ 判不了（见上面的注释）。 */
+    const atText = typeof parsed._verified_at === 'string' ? parsed._verified_at.trim() : ''
+    const by = typeof parsed._pinned_by === 'string' ? parsed._pinned_by.trim() : ''
+    const at = atText === '' ? undefined : pinRefFromVerifiedAt(atText)
+    if (at === undefined || by === '') return undefined
+    return { names, at, by }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * ★ 前两态都带上 `at`/`by`：**这份判断引用的基线是什么**（t19 验收第 5 条）。
+ *   `undecidable` 不带 —— 它没有引用任何基线（那正是它判不了的原因）。
+ */
+type VerifyFailureDistinction =
+  | { kind: 'no-new-failures'; total: number; baseline: number; at: string; by: string }
+  | { kind: 'new-failures'; names: string[]; alsoInBaseline: string[]; at: string; by: string }
+  | { kind: 'undecidable'; why: string }
+
+function classifyVerifyFailures(failedCommands: readonly CommandResult[]): VerifyFailureDistinction {
+  /** ① 每一份失败明细都要能读出来 —— 缺一条就判不了（不猜）。 */
+  const names: string[] = []
+  for (const command of failedCommands) {
+    const failures = command.failures
+    if (!Array.isArray(failures)) {
+      return { kind: 'undecidable', why: `the failed verify command "${command.command}" reported no per-test failures, so which tests failed could not be read` }
+    }
+    for (const failure of failures) {
+      if (typeof failure !== 'string' || failure.trim() === '') {
+        return { kind: 'undecidable', why: `the failed verify command "${command.command}" has a failure entry that is not a readable test name` }
+      }
+      names.push(failure.trim())
+    }
+  }
+  /**
+   * ② 而"一条失败明细都没有"与"read 不出明细"是两件事：
+   *    前者是"失败了而说不出哪几条" ⇒ ★ 那仍然判不了（不是"没有新增"）。
+   */
+  if (names.length === 0) {
+    return { kind: 'undecidable', why: 'a verify command failed but named no failing tests' }
+  }
+  /**
+   * ③ 基线读不出来 ⇒ 判不了（不许读成"基线是空的"）。
+   *   ★ 而"读不出来"含**两种**：名单读不出，或**参照物读不出**（见 `BaselinePin`）。
+   */
+  const pin = baselinePin()
+  if (pin === undefined) {
+    return { kind: 'undecidable', why: 'the pinned baseline of known failures could not be read (either its list or the commit it was measured at), so "is this one new" could not be answered' }
+  }
+  const known = new Set(pin.names)
+  const fresh = names.filter((name) => !known.has(name))
+  const alsoInBaseline = names.filter((name) => known.has(name))
+  return fresh.length === 0
+    ? { kind: 'no-new-failures', total: names.length, baseline: known.size, at: pin.at, by: pin.by }
+    : { kind: 'new-failures', names: fresh, alsoInBaseline, at: pin.at, by: pin.by }
+}
+
+function distributionError(distinction: VerifyFailureDistinction): string {
+  if (distinction.kind === 'new-failures') {
+    return 'verify failure must fail the task: these failures are NOT in the pinned baseline, so this delivery introduced them — '
+      + distinction.names.join(' · ')
+      + ` (baseline: ${distinction.at}, pinned by ${distinction.by})`
+      /**
+       * ★★ 而**基线里那几条也要点名**（t19 臂 2）：否则读的人只看到"新的那些"，
+       *   无从分辨"这一堆里哪条是旧的、哪条是新的" —— 而分辨它们**正是这条判据的产物**。
+       *   ★ 而措辞必须说清"这些**不是**拒的原因"，免得读的人以为它们也有问题。
+       */
+      + (distinction.alsoInBaseline.length === 0
+        ? ''
+        : `. Not the reason for the refusal (they are in the baseline): ${distinction.alsoInBaseline.join(' · ')}`)
+  }
+  if (distinction.kind === 'undecidable') {
+    return 'verify failure must fail the task, and whether it is new could not be measured: '
+      + distinction.why
+      + ' — "could not measure" is not "nothing new", so this stays refused.'
+  }
+  return 'verify failure must fail the task'
+}
+
+/**
+ * ── ★★ 而这句是**读数**，不是错误信息：交付【允许通过】时也必须说得出参照物 ─────────
+ *
+ * 它给调用方用来在"允许 completed"那条路上留痕 ——
+ * ★ 否则"它通过了"与"它没有遇到失败"在读的人眼里同形，
+ *   而"通过了，因为这几条都在 `<commit>` 的基线里"是**可核的**那一句。
+ */
+function noNewFailuresNote(distinction: VerifyFailureDistinction & { kind: 'no-new-failures' }): string {
+  return `${distinction.total} verify failure(s) are all in the pinned baseline `
+    + `(${distinction.at}, pinned by ${distinction.by}; ${distinction.baseline} known), so none of them is new here`
+}
+
 function acceptanceCovered(required: readonly string[] | undefined, results: readonly AcceptanceResult[] | undefined): boolean {
   if (results === undefined) return false
   const byCriterion = new Map(results.map((item) => [item.criterion, item]))
@@ -875,11 +2091,53 @@ function acceptanceCovered(required: readonly string[] | undefined, results: rea
   return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
 }
 
+/**
+ * ── ★★★ `verify` 的每一条都被"覆盖"了吗（t19 修）─────────────────────────────────
+ *
+ * MEASURED（t19，本任务把这条量了出来）：
+ *   本函数**曾经**只认 `status === 'passed'`（逐字）：
+ *
+ *     if ((required ?? []).every((command) => byCommand.get(command)?.status === 'passed')) return true
+ *     return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+ *
+ *   ⇒ ★★ 而它与 `classifyVerifyFailures` **对同一份 `commandsRun` 说话**：
+ *     后者刚刚（在它之前）判出"这些失败都在基线里 ⇒ 允许 completed"，
+ *     而本函数随后**无条件**要求每条 `passed` ⇒ **放行被架空**。
+ *
+ *   机械读数（t19 实测，同一份输入只动 `verify` 列表）：
+ *     verify = ['pnpm test:gates']（该命令红、而失败全在基线里）
+ *       ⇒ `{ ok: false, error: '… requires a passed commandsRun entry for every verify command' }`
+ *       ★ 而那句来自【本函数】，不是来自三态裁决 —— 三态的放行【到不了】
+ *     verify 只声明会绿的那条、把红的放进 `commandsRun` 但不列进 `verify`
+ *       ⇒ `{ ok: true, notes: ['1 verify failure(s) are all in the pinned baseline …'] }`
+ *   ⇒ ★ 同一个仓库事实，只因【它有没有被列进 verify】而给出相反裁决。
+ *
+ * ── 修法的边界（**不许放宽方向**）──────────────────────────────────────────────
+ *
+ *   一条 `failed` 的命令只有当**它的失败逐条都在钉住的基线里**时才算"覆盖"。
+ *   ⇒ 而"新增了失败"仍然不覆盖（那一半不许松）；"判不了"也仍然不算覆盖（保守）。
+ *   ★ 判据**不是**"命令是红的也能算覆盖"，而是"**这条红不是这次带来的**"。
+ */
 function verifyCovered(required: readonly string[] | undefined, results: readonly CommandResult[] | undefined): boolean {
   if (results === undefined) return false
   const byCommand = new Map(results.map((item) => [item.command, item]))
+  /** ① 老路：每条都被一条 `passed` 的记录覆盖 ⇒ 覆盖（这一支一个字没动）。 */
   if ((required ?? []).every((command) => byCommand.get(command)?.status === 'passed')) return true
-  return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+  /**
+   * ② 新路：某条 `verify` 命令是 `failed`，而**它的失败逐条都在基线里** ⇒ 也算覆盖。
+   *    ★ 而它复用**同一个** `classifyVerifyFailures` —— 不许在这里另写一套"算不算存量"
+   *      （两套会分叉，而分叉之后"这条算不算新"在两处给出不同答案，本仓那条纪律正是拦这个）。
+   */
+  const failedRequired = (required ?? [])
+    .map((command) => byCommand.get(command))
+    .filter((item): item is CommandResult => item !== undefined && item.status === 'failed')
+  if (failedRequired.length === 0) {
+    /** 没有任何一条 `verify` 是"有记录且红"的 ⇒ 老路那条 `every(passed)` 已经判过了。 */
+    return results.length === (required ?? []).length && results.every((item) => item.status === 'passed')
+  }
+  const distinction = classifyVerifyFailures(failedRequired)
+  /** ★ 只有 `no-new-failures` 才算覆盖；`new-failures` 与 `undecidable` 都不算。 */
+  return distinction.kind === 'no-new-failures'
 }
 
 /**
@@ -894,11 +2152,71 @@ function verifyCovered(required: readonly string[] | undefined, results: readonl
  *   本文件（`quality-gates.ts`）保持【零 I/O 的纯规则】这一纪律，判据层在它外面。
  */
 
+
+export type ContractGateDisposition = 'ok' | 'blocked' | 'unmeasured'
+
+export interface ContractGateReading {
+  /** ★ 三态之一 —— 而它决定**处置**，不是决定"要不要看一眼"。 */
+  readonly disposition: ContractGateDisposition
+  /** ★ 要不要**拒绝**这次调用。`blocked` ⇒ 是；另两态 ⇒ 否。 */
+  readonly rejects: boolean
+  /**
+   * ★ 要不要**留痕**（"这一步没被检查"）。
+   *   ★ 只有 `unmeasured` 为真 —— 它是那条口径的落点：**放行，但别静默**。
+   *   ★ `ok` **不留痕**：一个每次都通过的判据不该把日志淹掉。
+   */
+  readonly leavesTrace: boolean
+  /** ★ 可读的理由（给人看的那一份）。三态**措辞不同形**。 */
+  readonly reason: string
+}
+
+export function readContractGateVerdict(gates: {
+  readonly ok: boolean
+  readonly blockers: readonly string[]
+  readonly unmeasured?: string | undefined
+}): ContractGateReading {
+  /**
+   * ★★★ 顺序有理由：**`unmeasured` 先判**。
+   *   一份裁决可以同时 `ok:false` 而 `blockers` 为空（那就是 `unmeasured` 的形状）。
+   *   ⇒ 先判 `blockers` 会把"测不了"读成"不行"，而那是本条要修的那条错的**镜像**。
+   */
+  if (gates.unmeasured !== undefined) {
+    return {
+      disposition: 'unmeasured',
+      rejects: false,
+      leavesTrace: true,
+      reason: `the contract gate could not measure this: ${gates.unmeasured}`
+        + ' ★ That is "I could not tell", not "it is wrong" — so the contract is allowed through '
+        + 'and the fact that this step was NOT checked is recorded. A safety constraint that does '
+        + 'not fire must not refuse everything.',
+    }
+  }
+  if (gates.blockers.length > 0) {
+    return {
+      disposition: 'blocked',
+      rejects: true,
+      leavesTrace: false,
+      reason: `the contract gate refused this: ${gates.blockers.join('; ')}`,
+    }
+  }
+  return {
+    disposition: 'ok',
+    rejects: false,
+    leavesTrace: false,
+    reason: 'the contract gate evaluated this and found nothing to refuse',
+  }
+}
+
 export function evaluateQualityCompletion(
   task: TeamTask,
   update: QualityCompletionUpdate,
 ): QualityCompletionResult {
   const nextStatus = update.status
+  /**
+   * ★ 存量失败那一格的读数**跨块**要用（`ok: true` 那几条路上要把它交出去）⇒ 声明在这里。
+   *   ★ 放在内层块里会让最后那个 `return` 读不到它（而那正是"编译期就能抓到"的一类错）。
+   */
+  let baselineNote: string | undefined
   if (nextStatus !== undefined && nextStatus !== task.status) {
     if (!STATUS_TRANSITIONS[task.status].includes(nextStatus)) {
       return { ok: false, error: `task status cannot move from "${task.status}" to "${nextStatus}"` }
@@ -928,12 +2246,53 @@ export function evaluateQualityCompletion(
 
   if (kind === 'implementation' || kind === 'repair' || kind === 'verification' || kind === 'integration') {
     const commands = update.commandsRun ?? task.commandsRun
-    if (commands?.some((item) => item.status === 'failed') === true) {
+    /**
+     * ── ★★★ 区分【本任务新增的失败】与【仓库存量失败】（t19）────────────────────
+     *
+     * 由来（MEASURED 2026-10-09，`verifier` 在 t5 上给出，而 captain 复核）：
+     *   ```
+     *   pnpm test:gates 真实 exit=1（23 条红，**没有一条属本夹具**）
+     *   ⇒ 而本规则说「commandsRun 里有 failed ⇒ 不许 completed」
+     *   ⇒ ★ 于是【17 条任务全部不可达 completed】—— 而它们的工作都做完了
+     *   ```
+     *   ★ 而 t5 的七次尝试里，最后一次的成因正是这一条（前六次各有各的因）。
+     *
+     * ★★ 而正确的分界是【这次交付有没有新增失败】：
+     *   · 新增了失败（本任务自己的 verify 真红）⇒ 仍然只能 `failed`（那一半不许放宽）
+     *   · 新增 0 条而仓库有存量红  ⇒ ★ 允许 `completed`，而那【不是撒谎】——
+     *     `exit=1` 说的是"仓库里有红"，而它说的是"我没有新增红"。★ 两者是不同的量。
+     *
+     * ★ 而判据要的是【集合比对】，不是计数：
+     *   同一个命令在三次运行里给出过 47 / 14 / 14 条失败（本会话实测）
+     *   ⇒ ★ 计数不是证据，只有【哪几条】是。
+     *
+     * ★★★ 而"看不清"时不许读成"没有新增"：
+     *   读不到证据行 / 读不到基线清单 ⇒ 退回旧行为（仍拒）——
+     *   因为"我没能测量"不得读成"它没问题"（本会话最贵那条）。
+     */
+    const failedCommands = commands?.filter((item) => item.status === 'failed') ?? []
+    if (failedCommands.length > 0) {
       if (nextStatus === 'completed') {
-        return { ok: false, error: 'verify failure must fail the task', requiredStatus: 'failed' }
+        const distinction = classifyVerifyFailures(failedCommands)
+        if (distinction.kind !== 'no-new-failures') {
+          return {
+            ok: false,
+            error: distributionError(distinction),
+            requiredStatus: 'failed',
+          }
+        }
+        /**
+         * ★★ 放行了，而**留痕**：这一条就是"凭什么"。★ 它同时把基线**是哪一次**说出来 ——
+         *   否则读的人无法核"那几条当初真的在基线里"。
+         */
+        baselineNote = noNewFailuresNote(distinction)
       }
     }
-    if (nextStatus !== 'completed') return { ok: true }
+    /**
+     * ★ 非完成态：`baselineNote` 若在场（= 这次交付带着存量失败、而没要求 completed）
+     *   也一并交出 —— "仓库现在有红"这件事与"我要不要交完成态"无关，而读的人该知道。
+     */
+    if (nextStatus !== 'completed') return baselineNote === undefined ? { ok: true } : { ok: true, notes: [baselineNote] }
     const acceptanceResults = update.acceptanceResults ?? task.acceptanceResults
     if (acceptanceResults === undefined || !acceptanceCovered(task.acceptance, acceptanceResults)) {
       return { ok: false, error: `${kind} completion requires passed acceptanceResults for every acceptance item` }
@@ -954,7 +2313,7 @@ export function evaluateQualityCompletion(
       }
     }
   }
-  return { ok: true }
+  return baselineNote === undefined ? { ok: true } : { ok: true, notes: [baselineNote] }
 }
 
 function unresolvedFindings(task: TeamTask): ReviewFinding[] {
@@ -974,6 +2333,47 @@ function findingKey(ids: readonly string[]): string {
  */
 const REPAIR_SCOPE_PATH_PATTERN = /(?:[A-Za-z0-9_.\-]+(?:\/[A-Za-z0-9_.\-]+)+|[\w.\-]+\.(?:tsx?|jsx?|mjs|cjs|json|md|txt|ya?ml|py|rs|go|java|html?|css|scss|sh|ps1|toml|xml|sql))(?::\d+)?/gu
 const REPAIR_SCOPE_LINE_SUFFIX = /:\d+$/
+
+/**
+ * ── ★★★ t96（上游 #174 的一半）：**行号锚点在编辑后无法存活** ───────────────────────
+ *
+ * Root cause (upstream #174, verbatim): "Auto-generated repair work orders were
+ * frozen at finding-generation time." A finding carries `file + line` (and its
+ * `requiredFix` text often spells `file.ts:42` or `foo.go:503-505`). The moment
+ * ANY edit lands above that line, every downstream line number shifts — and the
+ * acceptance text then points at code that is no longer the finding. The anchor
+ * that DOES survive an edit is the file path plus the fix's own wording: a
+ * content anchor. So generated contract text loses the line suffix and keeps
+ * everything else.
+ *
+ * ★★ 为什么"剥得准"是本函数全部的难点（反向半边 B/C 的落点）：
+ * ```
+ *   ✅ 该剥：  src/a.ts:42 · foo.go:503-505 · lib/x.ts:12      ← 路径 + 行号
+ *   ❌ 不该剥：12:30（时间）· https://x（URL）· v1:2（版本段）
+ * ```
+ * 判据（三条 lookbehind，缺一不可 —— 不是一刀切）：
+ *   1. **锚点之前必须有一个"带点的路径形态"的词**（lookbehind：
+ *      `[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_./\\-]*` —— 词内**必须含一个点**）——
+ *      这一条排掉 `12:30`（裸数字无点）、`3:1`（比分）、`v1:2`（版本段的 `v1` 无点）；
+ *   2. **前面不能是 `//`**（`(?<!\/\/)`）—— URL 的 scheme；
+ *   3. **前面那段路径不能以 `//` 开头**（`(?<!\/\/[A-Za-z0-9_./\\-]*)`，词类含 `/` 可左伸）——
+ *      排掉 `http://localhost:3000` / `http://example.com:8080` 这类**主机带端口**的 URL
+ *      （`localhost` 与 `example.com` 本身就"带点形态"，第 1 条拦不住它，必须靠这条）。
+ * ★ 上游用的是同一条思路（lookbehind + 路径字符前缀）；本仓的反向半边 B/C 更严
+ *   （要保住 `http://host:port`），所以比上游多第 3 条。
+ */
+const LINE_ANCHOR_PATTERN = /(?<!\/\/)(?<!\/\/[A-Za-z0-9_./\\-]*)(?<=[A-Za-z0-9_./\\-]*\.[A-Za-z0-9_./\\-]*):\d+(?:-\d+)?\b/gu
+
+/**
+ * Remove drifting line anchors from generated contract text.
+ *
+ * 纯函数：输入文本 ⇒ 输出文本；不改写其余任何内容（时间、URL、版本号原样保留）。
+ * ★ 落点：repair/requirements 轮次的 `acceptance` 直接取 `finding.requiredFix`
+ *   （那里面常带 `file.ts:42`）⇒ 生成契约前过一遍本函数（上游 #174 的落点）。
+ */
+export function stripLineAnchors(text: string): string {
+  return text.replace(LINE_ANCHOR_PATTERN, '')
+}
 
 /**
  * Derive the repair round's inScope from the findings that caused it.
@@ -999,16 +2399,84 @@ export function repairScopeFromFindings(
   fallback: string[] | undefined,
 ): string[] | undefined {
   const derived: string[] = []
-  const push = (raw: string): void => {
-    const normalized = normalizeWorkspacePath(raw.replace(REPAIR_SCOPE_LINE_SUFFIX, ''))
-    if (normalized === undefined || derived.includes(normalized)) return
-    derived.push(normalized)
-  }
+  /**
+   * ── ★★★ t95：**推导侧现在用与闸门同一个谓词**（上游 #183）────────────────────
+   *
+   * ★ 上面那段长注释（"Keep all derived paths until the generator resolves
+   *   inherited exclusions; filtering first would silently discard a required
+   *   fix target"）**方向是对的，但只做了一半** —— 它说"等生成器去解析排除"，
+   *   而**生成器从来没有做那个解析** ⇒ 被排除的路径**原样进了 inScope**。
+   *
+   * ★★ 后果（t95 开工实测）：
+   * ```
+   * 推导 ⇒ inScope = ["secrets/k.json", …]
+   * 闸门 ⇒ classifyChangedPath("secrets/k.json") = "out_of_scope"   ← 它【第一行】就查这个
+   * ⇒ ★★★ 契约自身不可满足：成员把那条路径做完，闸门照样拒。
+   * ```
+   *
+   * ⇒ 所以排除**在这里做**，而且用 `isDefaultExcludedPath`（**同一个**）。
+   *   ★ 那正是"不改注释、改行为"的那一半 —— 注释说"稍后解析"，而这里就是"稍后"。
+   *
+   * ★ 而"silently discard a required fix target"那条顾虑**仍然成立**，所以它
+   *   **不是**被丢掉了：{@link excludedFindingsOf} 会把"每条候选路径都被排除"
+   *   的 finding **单独挑出来**，由调用方**升级并给理由**（不是静默丢）。
+   *   ⇒ 两条顾虑各有各的落点，不再互相抵消。
+   */
   for (const finding of findings) {
-    if (nonemptyString(finding.file)) push(finding.file)
-    for (const match of finding.requiredFix.matchAll(REPAIR_SCOPE_PATH_PATTERN)) push(match[0])
+    for (const path of findingDerivedPaths(finding)) {
+      if (isDefaultExcludedPath(path) || derived.includes(path)) continue
+      derived.push(path)
+    }
   }
   return derived.length > 0 ? derived : fallback === undefined ? undefined : [...new Set(fallback)]
+}
+
+/**
+ * ── ★★ t95：一条 finding 报出的**全部**候选路径（**在任何排除规则之前**）──────────────
+ *
+ * ★ 为什么要把它**单独**提出来：{@link excludedFindingsOf} 要问的是
+ *   「这条 finding 的**每一条**路径是不是都被排除了」——
+ *   而那要求"路径集合"与"排除判定"**分开**。
+ * ★★ 若把它们揉在一个函数里，就只能得到"过滤后的结果"，
+ *   而**分不出**「它本来就没路径」与「它的路径全被排除」——
+ *   两者补救动作相反（前者不是排除问题，后者要人裁决）。
+ *
+ * ★ 输入侧含 `requiredFix` 里的路径引用（与改造前[逐字同源]，只是搬了位置）。
+ */
+export function findingDerivedPaths(finding: ReviewFinding): string[] {
+  const paths: string[] = []
+  const push = (raw: string): void => {
+    const normalized = normalizeWorkspacePath(raw.replace(REPAIR_SCOPE_LINE_SUFFIX, ''))
+    if (normalized === undefined || paths.includes(normalized)) return
+    paths.push(normalized)
+  }
+  if (nonemptyString(finding.file)) push(finding.file)
+  for (const match of finding.requiredFix.matchAll(REPAIR_SCOPE_PATH_PATTERN)) push(match[0])
+  return paths
+}
+
+/**
+ * ── ★★★ t95：**每一条**候选路径都被默认排除的 finding（上游 #183）──────────────────
+ *
+ * 上游逐字：
+ * > 「findings whose every cited path is excluded **escalate with a reason
+ * >   instead of dead-locking a member.**」
+ *
+ * ★★ 为什么它必须存在（而不是"过滤掉就算了"）：
+ *   一条 finding 若**所有**路径都被排除 ⇒ 它**进不了任何可满足的契约** ⇒
+ *   成员无法诚实地完成它。⇒ **静默丢掉它 = 让那个缺陷消失**
+ *   （而"修好了"与"从来没修"在报告里同形 —— 本仓记账最久的形态）。
+ *   ⇒ 所以它被**挑出来交给调用方**，由调用方**升级 + 给理由**。
+ *
+ * ★★ 而一条**根本没报路径**的 finding **不算**被排除
+ *   （`paths.length > 0` 那个条件）—— 它不是"路径被排除"，而是"没给路径"，
+ *   两者补救动作不同：前者要人裁决，后者要审查员补一条路径。
+ */
+export function excludedFindingsOf(findings: readonly ReviewFinding[]): ReviewFinding[] {
+  return findings.filter((finding) => {
+    const paths = findingDerivedPaths(finding)
+    return paths.length > 0 && paths.every((path) => isDefaultExcludedPath(path))
+  })
 }
 
 /** Captain-only amendment payload: replacement values for contract fields. */
@@ -1168,6 +2636,107 @@ function withoutScopeConflicts(
   return outOfScope.filter((pattern) => !conflicting.has(pattern))
 }
 
+/**
+ * ── ★★★ 「这次审查**独立**吗」—— 一条**可读的**读数（2026-10-20，补 t6）──────────────
+ *
+ * ── 它补的是什么（MEASURED：一个静默的兜底）────────────────────────────────────
+ *
+ * `schedulableAssignee(preferred, team, forbidden)` 找不到可用的人时**返回 `undefined`**，
+ * 而 `makeTask` 对 `assignee === undefined` 的处理是**直接不写这一格**
+ * （`src/tools/shared/entities.ts`：`...draft.assignee === undefined ? {} : { assignee: draft.assignee }`）
+ * ⇒ 那条 review 任务落进**共享池**，**谁都能领，包括刚写完它的实现者**。
+ *
+ * ★★ 于是"这次审查其实是自审"这件事，在读数上**不可见**。
+ *   而我们在 `unmeasured` 上极严（`registry.ts` 甚至为"判据开火了但被放过"专门加了
+ *   `observedBlockers`），却在这一格没有对应读数 —— 同一个纪律，两个不同的落实程度。
+ *
+ * ── 参考（外部，市场调研逐字，两个插件独立做了同一件事）─────────────────────────
+ *
+ *   `portable-dsh-multi-agent-plugin`：独立性三档（审查者≠计划者≠作者，且**不同 provider**），
+ *     做不到时**命名拒绝** `INDEPENDENCE_REQUIRED`
+ *   `dsh-switchman`：做不到时声明 `DOWNGRADED`
+ *   ★★ 两者的共同点：**降级必须可读**。
+ *
+ * ── 三态，且三者**不同形** ────────────────────────────────────────────────────
+ *
+ *   `independent`   —— 审查者**在生成时**就被指到一个不是实现者的人
+ *   `not-independent` —— 审查者就是实现者（或生成时压根没指人 ⇒ 共享池）
+ *   `undecidable`   —— 读不出实现者是谁（实现任务没有跑到过终态的 execution）
+ *
+ * ★★ 为什么 `not-independent` 不并进 `undecidable`：
+ *   前者是一个**结论**（补救动作：给这条 review 指名一个别的成员），
+ *   后者是"判不了"（补救动作：去查那条实现任务为什么没有 execution）。
+ *   ★ 合并会让读的人去做另一件事 —— 本仓记账最久的形态。
+ *
+ * ── ★ 它**不做**硬拒绝（刻意的边界）────────────────────────────────────────────
+ *
+ * 单人团队里"没人可指"是**结构事实**，硬拒会把那种队直接死锁。
+ * ⇒ 这一轮只做**可读**：让"这次独立性如何"随任务记录交出去，由读的人决定要不要信。
+ *   ★ 而它**不是**"先软后硬"的临时状态 —— "降级必须可读"本身就是终态的设计
+ *     （`DOWNGRADED` 那两个先例就是这么用的）。
+ */
+export type ReviewIndependence = 'independent' | 'not-independent' | 'undecidable'
+
+export interface IndependenceReading {
+  readonly status: ReviewIndependence
+  /** 审查者是谁；生成时没指人 ⇒ 缺席（**不是**空串）。 */
+  readonly reviewer?: string
+  /** 实现者是谁；读不出 ⇒ 缺席。 */
+  readonly implementer?: string
+  /** 人话成因（`not-independent` / `undecidable` 时在场）。 */
+  readonly why?: string
+}
+
+/**
+ * 判一条 review / requirements 任务的**独立性**。
+ *
+ * ★ 纯函数：只读传入的两格（与 `artifactBindingOf` / `testFileBaselineOf` 同一条纪律）。
+ *
+ * @param reviewer - 生成时指给它的审查者（`assignee`）。**缺席 = 落进共享池**。
+ * @param implementer - 它审的那件事的实现者。**读不出 ⇒ 缺席**。
+ */
+export function independenceOf(
+  reviewer: string | undefined,
+  implementer: string | undefined,
+): IndependenceReading {
+  /**
+   * ★ 先判"读不出实现者" —— 因为在这一支里，即使审查者**在场**，
+   *   我们也说不出"他是不是那个人"。★ 顺序不能反：反过来会把
+   *   "审查者 ≠ 未知的人"读成 `independent`（一个**恒真**的判断）。
+   */
+  if (implementer === undefined || implementer === '') {
+    return {
+      status: 'undecidable',
+      ...reviewer === undefined || reviewer === '' ? {} : { reviewer },
+      why: 'the identity that did the work this review judges could not be read, so whether the reviewer is independent of it cannot be decided',
+    }
+  }
+  /**
+   * ── ★★ 一个**缺席的审查者**在这里**不是** `undecidable` ────────────────────────
+   *
+   * `assignee === undefined` ⇒ 这条任务落进**共享池** ⇒ **包括实现者在内的任何人**都能领它。
+   * ⇒ 那不是"判不了"，那是一个**结论**："它的独立性没有被保证。"
+   *   ★ 把这一支读成 `undecidable` 会让它看起来像"基础设施故障"，
+   *     而真相是**设计上的一个缺口** —— 两者的补救动作不同。
+   */
+  if (reviewer === undefined || reviewer === '') {
+    return {
+      status: 'not-independent',
+      implementer,
+      why: 'no reviewer was named when this review was generated, so it went to the shared pool where the implementer can claim it — its independence is not guaranteed',
+    }
+  }
+  if (reviewer === implementer) {
+    return {
+      status: 'not-independent',
+      reviewer,
+      implementer,
+      why: `"${reviewer}" would also do the work this review judges — the same identity may not review its own work`,
+    }
+  }
+  return { status: 'independent', reviewer, implementer }
+}
+
 export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQualityFollowUpResult {
   const empty = { created: [] as PlannedFollowUpTask[], tasks: [] as PlannedFollowUpTask[] }
   const kind = taskKindOf(closed)
@@ -1189,7 +2758,17 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
       dependencies: [],
       round: nextRound,
       objective: sanitizeReviewObjective(closed.objective, 'Converge remaining open questions'),
-      acceptance: sanitizeReviewAcceptance(unresolvedFindings(closed).map((finding) => finding.requiredFix)),
+      /**
+       * ★ t96：requirements 轮次的 acceptance **同样**取自 requiredFix ⇒ 同样过剥离
+       *   （同一根因：行号锚点在这里一样活不过编辑）。★ 未验证声明在 requirements
+       *   轮次同样成立 —— 那些是审查员对需求文本的判断，插件同样没验证过。
+       *   ★ 它放在 sanitize **之后**追加（sanitize 会把空清单换成缺省，
+       *     若在其前面追加会被那张缺省表淹没——而声明必须恒在场）。
+       */
+      acceptance: [
+        ...sanitizeReviewAcceptance(unresolvedFindings(closed).map((finding) => stripLineAnchors(finding.requiredFix))),
+        'the plugin has NOT verified these findings\' claims - verify each against the current requirements text before fixing',
+      ],
     }
     return { created: [next], tasks: [next] }
   }
@@ -1206,7 +2785,36 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
   // inScope is derived from the findings below: the observed file plus any
   // workspace-relative paths referenced by the requiredFix instructions.
 
-  const repairScope = repairScopeFromFindings(findings, source?.inScope)
+  /**
+   * ── ★★★ t95（上游 #183）：**每条候选路径都被排除**的 finding ⇒ 升级，不死锁 ─────────
+   *
+   * ★ 上游逐字：「findings whose every cited path is excluded **escalate with a
+   *   reason instead of dead-locking a member.**」
+   *
+   * ★★ 为什么这比"过滤掉就算了"更对：把那些 finding 静默滤掉之后，
+   *   生成的契约**看起来是干净的**（inScope 里没有被排除的路径），
+   *   而它们**指出的缺陷一条都没被修** ⇒
+   *   ★ **"修好了"与"从来没修"在报告里同形**（本仓记账最久的形态）。
+   *   ⇒ 所以这里的判据是：**一条 actionable 的 finding 都不剩** ⇒ 停下来找人。
+   *
+   * ★ 而**还有** actionable 的 ⇒ 正常运行，但那些被排除的 finding
+   *   **仍记在 `excludedFindings` 里**（不静默）—— 见下面的正常返回。
+   */
+  const excluded = excludedFindingsOf(findings)
+  const actionable = findings.filter((finding) => !excluded.includes(finding))
+  if (findings.length > 0 && actionable.length === 0) {
+    return {
+      ...empty,
+      escalated: true,
+      status: 'escalated',
+      reason: `every finding of ${closed.id} cites only default-excluded paths`
+        + ` (${excluded.map((finding) => finding.file ?? finding.id).join(', ')});`
+        + ' the completion gate classifies those out_of_scope by default,'
+        + ' so no honest repair contract exists - a human must decide',
+      excludedFindings: excluded.map((finding) => finding.id),
+    }
+  }
+  const repairScope = repairScopeFromFindings(actionable, source?.inScope)
   const implementer = schedulableAssignee(source?.assignee, team)
   const repair: PlannedFollowUpTask = {
     id: `repair-round-${nextRound}`,
@@ -1219,7 +2827,22 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
     inScope: repairScope,
     outOfScope: withoutScopeConflicts(source?.outOfScope, repairScope),
     verify: source?.verify,
-    acceptance: findings.map((finding) => finding.requiredFix),
+    /**
+     * ── ★★★ t96（上游 #174 的落点）：acceptance 的两处生成时**都过一遍**剥离 ─────────
+     *
+     * ① `stripLineAnchors` —— `requiredFix` 常带 `file.ts:42` 形态的行号锚点，
+     *    而锚点在编辑后无法存活（见 `LINE_ANCHOR_PATTERN` 的根因注释）。
+     *    ★ 文件路径保留（那是能活过编辑的内容锚点的一部分）。
+     * ② **未验证声明** —— 上游逐字："states that the plugin did not verify the
+     *    finding's claims"。审查 finding 是**人/模型的判断**，本插件生成修复任务时
+     *    **没有**独立验证过它说的是不是事实（那正是修复任务要去做的事）。
+     *    ★★ 【未验证的不许读成已验证】：不写这句，成员会把 acceptance 文本
+     *      当成"已被证实的问题清单"；写了这句，第一件事是**先核再修**。
+     */
+    acceptance: [
+      ...findings.map((finding) => stripLineAnchors(finding.requiredFix)),
+      'the plugin has NOT verified these findings\' claims - verify each against the current code before fixing (finding line numbers may have drifted)',
+    ],
     sourceTaskId: sourceId,
     sourceFindingIds: findingIds,
   }
@@ -1233,13 +2856,36 @@ export function planQualityFollowUp(team: TeamState, closed: TeamTask): PlanQual
     kind: 'review',
     subject: `review-round-${nextRound}`,
     assignee: reviewer,
+    /**
+     * ── ★★★ 独立性读数：在**生成这一刻**算，并随任务落盘（2026-10-20，补 t6）────────
+     *
+     * ★ 为什么在生成时算、不留给下游：
+     *   `reviewer` 是 `undefined` 时，那条任务进共享池 ⇒ 之后**谁领的都算数**
+     *   ⇒ 真相（"生成时没指人"）在那一刻之后**就查不回来了**。
+     *   而 `assignee` 后来被改成什么，与"它生成时独立吗"是两个量。
+     *
+     * ★★ 而没有这一格时，这个缺口是**静默**的：`reviewer === undefined`
+     *   与"指了一个恰好等于实现者的人"在盘上**都是**"assignee 缺席 / 等于实现者"
+     *   —— 但它们**不是同一件事**（一个能靠改派修，一个不能）。
+     */
+    reviewIndependence: independenceOf(reviewer, implementer),
     dependencies: [repair.id ?? `repair-round-${nextRound}`],
     round: nextRound,
     objective: sanitizeReviewObjective(closed.objective, DEFAULT_REVIEW_OBJECTIVE),
     acceptance: sanitizeReviewAcceptance(closed.acceptance),
     reviewedTaskId: repair.id,
   }
-  return { created: [repair, review], tasks: [repair, review] }
+  return {
+    created: [repair, review],
+    tasks: [repair, review],
+    /**
+     * ★★ 而那些被排除的 finding **在这一支上也不能静默**（它们在下面是有账的）：
+     *   正常支上它们不阻塞，但必须**读得出来** —— 否则"审查报了但它没进契约"这件事
+     *   只能靠人去比对 findings 与 acceptance。
+     * ★ 缺席（而不是空数组）当没有时：`undefined` = 没有，`[]` = "有这一格但是空的"。
+     */
+    ...excluded.length === 0 ? {} : { excludedFindings: excluded.map((finding) => finding.id) },
+  }
 }
 
 export function buildCoverageMatrix(goalItems: readonly string[], tasks: readonly TeamTask[]): CoverageRow[] {
@@ -1257,7 +2903,7 @@ export function buildCoverageMatrix(goalItems: readonly string[], tasks: readonl
   })
 }
 
-export function canDeclareDelivery(team: TeamState): DeliveryResult {
+export function canDeclareDelivery(team: TeamState, audit?: DeliveryAudit): DeliveryResult {
   const blockers: string[] = []
   if (team.phase === 'staged') blockers.push('team plan is awaiting approval')
   if (team.halted === true) blockers.push('team is halted')
@@ -1315,24 +2961,141 @@ export function canDeclareDelivery(team: TeamState): DeliveryResult {
     }
   }
 
-  return { ok: blockers.length === 0, blockers }
+  /**
+   * ── ★★★ t97（S1）：把每条**判决类**任务的绑定读数报出来 ────────────────────────────
+   *
+   * ★ 只在**传了 `audit`** 时算：缺席 ⇒ `verdictBindings` **缺席**
+   *   （"这次没审计"与"审计了、全有效"必须不同形）。
+   *
+   * ★★ 而本函数**不用它改 `ok`**：S1 只"回答那三个问题"。
+   *   拿它拦交付是 S3/S4 —— 那会改既有交付语义，超出本任务边界。
+   */
+  const verdictBindings = audit === undefined
+    ? undefined
+    : team.tasks
+        .filter((item) => item.status === 'completed' && VERDICT_KINDS.includes(taskKindOf(item)))
+        .map((item) => {
+          /** ★ 当前摘要：只取这条判决**自己**绑过的那些路径（别人绑的不算它的）。 */
+          const current: Record<string, string> = {}
+          for (const artifact of item.reviewedArtifacts ?? []) {
+            const now = (audit.artifacts ?? []).find((candidate) => candidate.path === artifact.path)
+            if (now !== undefined) current[artifact.path] = now.digest
+          }
+          return {
+            taskId: item.id,
+            kind: taskKindOf(item),
+            binding: artifactBindingOf(item.reviewedArtifacts, current),
+            bound: (item.reviewedArtifacts ?? []).length,
+          }
+        })
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    ...verdictBindings === undefined ? {} : { verdictBindings },
+  }
 }
 
 export function resumeTeamState(team: TeamState, reason: string): ResumeTeamResult {
   if (!nonemptyString(reason)) {
     return { ok: false, status: 'rejected', error: 'resume requires a non-empty reason' }
   }
-  if (team.halted !== true) {
+  /**
+   * ── ★★★ 2026-10-20：补上本函数**自己在注释里点名过的那个缺口** ────────────────────
+   *
+   * 下面那段长注释逐字写着：
+   * > 「**一个"已经超轮、但没被 halt"的 staged 团队，今天仍然没有解除路径**：
+   * >   `approve` 会拒、`edit_plan` 只会把轮次推得更高、`resume` 返回 `already_running` 不动它。」
+   *
+   * ⇒ MEASURED（本仓真实死锁，就在写这一段的前一小时）：一个 `phase='staged'`、
+   *   `planReviewRounds=5`、`planReviewEscalated=true`、**`halted` 为 undefined** 的队，
+   *   批准被拒（对），而错误信息指向 `resume` 这条"唯一出路" —— 而 `resume` 对它
+   *   答 `already_running` 且**一格都不动**。⇒ 那份计划**没有任何工具能放行**。
+   *
+   * ── 修法：把"已敲响计划审查上限"也算作**需要显式恢复的状态** ─────────────────
+   *
+   * ★ 它**不是**放宽：一个已经触顶的队本来就**不能开工**（`approve` 拒），
+   *   所以它事实上处于"停着"的状态 —— 只是 `halted` 那个布尔没有表达它。
+   *   把这一支并进来，等于让 `halted` 的语义从"被 halt"扩成
+   *   "**当前不允许开工**"，而解除它的动作**仍然**是那个带非空理由的人工原语。
+   *
+   * ★★ 而它**必须仍然要求非空理由**（上面第一行已经管了）——
+   *   解除一个触顶的计划是一个**决定**，不是一个清理动作。
+   *   理由会进 `agent-teams/team-resumed` 事件，于是"谁在什么时候放过了它"可查。
+   *
+   * ★ 安全边界与原来**逐字相同**：只有 `planLoopEscalated` 为真时才动那两格；
+   *   没超轮的队 ⇒ 一个字节都不变。
+   */
+  const roundsBefore = typeof team.planReviewRounds === 'number' && Number.isFinite(team.planReviewRounds)
+    ? Math.max(0, Math.floor(team.planReviewRounds))
+    : 0
+  const planLoopAlreadyEscalated = roundsBefore >= PLAN_REVIEW_MAX_ROUNDS || team.planReviewEscalated === true
+  if (team.halted !== true && !planLoopAlreadyEscalated) {
     return { ok: true, status: 'already_running', team }
   }
+  /**
+   * ── ★★★ N5 / t8：计划环的**显式归零**（这是"解除"两个允许落点之一）───────────────
+   *
+   * ★★ 为什么落在这里：N5.17 B4 实测出的死码 —— "下一次 `edit_plan` 打回 awaiting_review
+   *   时清 flag" **毫无作用**，因为 `describePlanLoop` 会立刻从 `rounds >= maxRounds`
+   *   重新算出 escalated。⇒ 解除**只能**是归零，而 `resume` 是唯一一个
+   *   「带非空理由的显式人工动作」原语（另一个落点"人在批准时点名"需要
+   *   `approveStagedTeam` 加第 4 个参数，而那个签名在 `entities.ts` 里，不在本任务写域）。
+   *
+   * ★ 安全边界是**收窄的**：只在**已经敲响上限**时才动那两格。
+   *   - 没超轮的团队 ⇒ 一个字节都不变（存量行为逐字节相同，`quality-gates-tdd` 的
+   *     `halted:true` 夹具因此仍然读到完全相同的结果）。
+   *   - 超轮的团队 ⇒ `rounds = 0` ＋ `planReviewEscalated = false`。
+   *   ★ 若把归零写成无条件，一次与计划无关的 halt/resume 就会抹掉
+   *     "这份计划被改过几轮"——那正是本任务要保住的那条读数。
+   *
+   * ★★★ 而这里有个**必须如实记下的缺口**，不许用一段看起来在解除的代码盖住它：
+   *   `resume` 只在 `halted === true` 时才走到下面（上面那行 early return）。
+   *   ⇒ **一个"已经超轮、但没被 halt"的 staged 团队，今天仍然没有解除路径**：
+   *      `approve` 会拒（t8 新加的那道闸）、`edit_plan` 只会把轮次推得更高、
+   *      `resume` 返回 `already_running` 不动它。
+   *   ⇒ 要补上它，需要一个"人点名放行"的落点（N5.16 的 `planReviewBypass`），
+   *     而那要改 `src/tools/shared/entities.ts` / `src/tools/approve.ts` 的签名 ——
+   *     **两者都不在 t8 的写域里**。⇒ 记录为已知缺口，不在这里假装解决。
+   */
+  /**
+   * ★ 复用上面那一份读数（`roundsBefore` / `planLoopAlreadyEscalated`）而不是重算 ——
+   *   两份读数分叉会让"要不要解除"与"解除之后写什么"用不同的判据。
+   */
+  const rounds = roundsBefore
+  const planLoopEscalated = planLoopAlreadyEscalated
   return {
     ok: true,
     status: 'resumed',
-    team: {
-      ...team,
-      halted: false,
-      haltedAt: undefined,
-    },
+    /**
+     * ── ★★★ 2026-10-20：新增 `clearedPlanReview` 标记 ─────────────────────────────
+     *
+     * 调用方（`src/tools/resume.ts` / `create-task.ts`）必须据此把这两格**写回盘**。
+     * ★ 为什么需要这个标记而不是让调用方自己比 `fresh.planReviewRounds !== resumed.team.planReviewRounds`：
+     *   那种比法是**第二份真相** —— 它要知道"归零"这件事的规则（只有超轮才归零），
+     *   而那条规则只住在这个函数里。改一次规则就会让两处漂移。
+     * ⇒ 让**产生归零的那一方**说出来。
+     * ★★ 而它不是可有可无的美化：**没有它，归零只活在返回值里，从不落盘** ——
+     *    本仓 2026-10-20 实测的缺陷（一个"唯一出路"在生产上不存在）。
+     */
+    ...planLoopEscalated ? { clearedPlanReview: true as const } : {},
+    team: planLoopEscalated
+      ? {
+        ...team,
+        halted: false,
+        haltedAt: undefined,
+        /**
+         * ★ 显式写成 `0` / `false`（而不是 `delete`）：让"这里发生过一次解除"
+         *   在 JSON 里**看得见** —— 一个消失的键与一个从未存在过的键同形，
+         *   而这两种情形对"它当初为什么被卡住"的回答完全不同。
+         */
+        planReviewRounds: 0,
+        planReviewEscalated: false,
+      }
+      : {
+        ...team,
+        halted: false,
+        haltedAt: undefined,
+      },
   }
 }
 
@@ -1450,16 +3213,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export function isTaskKind(value: unknown): value is TaskKind {
-  return typeof value === 'string' && (TASK_KINDS as readonly string[]).includes(value)
+/**
+ * ★ 一个值**是什么类型** —— 而它在错误消息里，所以措辞要**可读且可核**。
+ *
+ * ★ 为什么单独一个函数而不是内联 `typeof`：`typeof null === 'object'` 与
+ *   `typeof [] === 'object'` 都会把读的人引向错的方向（"它说是个对象啊"）。
+ *   ⇒ 而 `null` 与**数组**在这里是**两种不同的**形状错（一个"没有值"、一个"形状不对"），
+ *     所以它们各自的措辞要分得开。
+ */
+function describeTypeOf(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'an array'
+  if (typeof value === 'string') return `a string (${JSON.stringify(value.length > 40 ? `${value.slice(0, 40)}…` : value)})`
+  if (typeof value === 'object') return 'an object'
+  return `a ${typeof value}${value === undefined ? ' (the key is absent)' : ` (${String(value)})`}`
 }
 
 export function isReviewVerdict(value: unknown): value is ReviewVerdict {
   return typeof value === 'string' && (REVIEW_VERDICTS as readonly string[]).includes(value)
 }
 
-export function isFindingSeverity(value: unknown): value is FindingSeverity {
-  return typeof value === 'string' && (FINDING_SEVERITIES as readonly string[]).includes(value)
+/**
+ * ── ★★★ 逐条 check 的三态 —— 而它与 `REVIEW_VERDICTS` **是不同的东西** ──────────────
+ *
+ * MEASURED（t11 的对**对照臂**抓出来的）：第一版把 `reviewed.checks[i].verdict`
+ * 拿 `isReviewVerdict` 去判 ⇒ `'fail'` 与 `'unmeasured'` 被**错误地拒掉**。
+ *
+ * ★ 两套取值的**对象不同**，而那正是它们必须分开的原因：
+ *
+ *     `REVIEW_VERDICTS`            `pass / needs_revision / reject`
+ *       ⇒ 对象是**一条任务**的审查结论（`TeamTask.verdict`）
+ *
+ *     本常量                        `pass / fail / unmeasured`
+ *       ⇒ 对象是**一问**（`ReviewedCheck`）的结论 ——
+ *         三态，且 `unmeasured` **绝不并进 `pass`**（"我没能审明白"与"审过了"不同形）
+ *
+ * ★★ 而"用哪一套"不是一个措辞问题：拿错一套会让**每一条正当的 `fail` / `unmeasured`**
+ *   都被拒 —— 即"一个审查说它有问题"这件事**传不进契约**。
+ */
+export const REVIEWED_CHECK_VERDICTS = ['pass', 'fail', 'unmeasured'] as const
+
+/** `ReviewedCheck.verdict` 的取值判定。★ 不是 `isReviewVerdict` —— 见上面那一格。 */
+export function isReviewedCheckVerdict(value: unknown): boolean {
+  return typeof value === 'string' && (REVIEWED_CHECK_VERDICTS as readonly string[]).includes(value)
 }
 
 export function looksLikeGateTestContract(value: string | undefined): boolean {
@@ -1528,6 +3324,13 @@ export function defaultQualityDeliveryGraph(input: {
       objective: DEFAULT_REVIEW_OBJECTIVE,
       acceptance: [...DEFAULT_REVIEW_ACCEPTANCE],
       coverageOf: [goal],
+      /**
+       * ★ 种子 id（不是运行期 id）—— 与 `dependencies` 同一套约定：
+       *   `initializeProfileTeam` 用 `seedToActual` 把它换成 `tN`。
+       *   而 `validateCreateTask` 要的正是"队伍里真的有这条任务"，
+       *   换成真实 id 之后那个条件才成立。
+       */
+      reviewedTaskId: 'implementation',
     },
     {
       subject: 'integration',
@@ -1539,6 +3342,248 @@ export function defaultQualityDeliveryGraph(input: {
       coverageOf: [goal],
     },
   ]
+}
+
+/**
+ * ── ★★★ 自审拒斥：谁实现的不许自己判过（协议第 7 条的**硬半边**）────────────────
+ *
+ * ── 缺陷形态（本函数存在的理由）──────────────────────────────────────────────
+ *
+ * 队长协议第 7 条逐字：
+ *   `Never approve your own implementation or ask for a deliberate failure.`
+ * 而全仓**没有任何一行代码**判过它：在 `src/` 里 grep `selfReview` 与 `self-review`
+ * 都是 **0 命中**（本判据就是第一处命中）。
+ *
+ * MEASURED（本轮，盘上每个队伍的 team.json 全量）：
+ *   可判的 13 条审查任务里，**4 条是真自审**，且**全部**判 `verdict=pass`：
+ *     `mutation-quality | t4  | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t8  | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t12 | reviewer=ledger | impl=ledger | pass`
+ *     `mutation-quality | t14 | reviewer=ledger | impl=ledger | pass`
+ *   ⇒ 这不是一条"可能被违反"的规则，它**已经在生产里被违反了四次、每次都过了**。
+ *
+ * ── ★ 判据的两个输入，各自来自哪里（都在盘上，不需要新字段）────────────────────
+ *
+ * · **实现者** = 被审那条任务（`reviewedTaskId`）的 `executions` 里，最后一条
+ *   `status === 'completed'` 的 `by`。
+ *   ★ 为什么读 `executions` 而不是 `assignee`：`assignee` 说的是"派给谁"，
+ *     而 `executions[].by` 说的是"**谁真的把它做完了**"。一次重派之后两者会分叉，
+ *     而自审说的是后者。
+ * · **审查者** = 本次更新的 `identity.name`（正在提交 verdict 的那个身份）。
+ *
+ * ── ★★★ `requirements` 也在范围内（它此前被那一行 `!== 'review'` 放走了）───────────
+ *
+ * BEFORE：本函数对**任何** kind !== 'review' 的任务返回
+ *   `{ ok: true, undecidable: 'task X is requirements, not a review' }`
+ * ⇒ 而 `canDeclareDelivery`（本文件 ~`:2489`）对 requirements 的完成规则与 review
+ *   **逐字相同**：
+ *     `if ((kind === 'review' || kind === 'requirements') && item.verdict !== 'pass')`
+ *   ⇒ 于是"同一身份批准自己的产物"这件事，在 review 上被拒、在 requirements 上被放行。
+ *   ★ 而质量生成器默认 `analyst: spec.analyst ?? spec.implementer`
+ *     （`src/tools/create.ts:438`）—— **默认就由实现者写需求**，
+ *     所以这条缝不是"理论上的可能"，它是**默认路径**。
+ *
+ * ── ★★ requirements 的"作者"为什么要从【被治理的实现】读，而不是它自己的 `executions` ────
+ *
+ * 三个候选来源，只有第三个站得住：
+ *
+ *   ① requirements 自己的 `executions`（最近一条 completed 的 `by`）
+ *      ⇒ ★ **读不到**：`verdict=pass` 落盘的那一刻，这条任务**还没有** completed 的
+ *        execution（第一条 completed 恰恰是这一次收口本身）。拿它当证据，
+ *        判据在自己该说话的那一刻永远只会说"判不了"。
+ *
+ *   ② requirements 自己的 `assignee`
+ *      ⇒ ★ **不能用**，而理由不是"它不好读"，是它会让补救动作**指向自毁** ——
+ *        pass 一旦由另一个身份发出，生产流程会把这条 requirements 任务的 assignee
+ *        交给那个新身份（它要接着收敛下一轮）⇒ 于是判据下一刻读到的是
+ *        "作者 = 盖章的人"，**同一个 pass 会先绿后红**。一条判据若依赖一个
+ *        会因为它自己放行而改变的量，它就不是判据，而是回音。
+ *
+ *   ③ **被治理的实现**（本函数采用的）：`governed` = 队里 kind 是
+ *      `implementation` / `repair`、且**依赖闭包**里含这条 requirements 任务 id 的每一条
+ *      （复用 `dependencyClosureContains`，本文件 `:906`）。
+ *      ⇒ 它们最后一条 completed execution 的 `by`，就是"谁将要做 / 已经做了
+ *        这些需求所规定的工作"。而"同一身份既写需求又实现它"正是
+ *        `analyst === implementer` 那个形状要禁的东西 —— 判的是那个形状，不是纸面签名。
+ *      ★ 对**还没跑过**的实现任务（依赖闭包已建好、活还没干），
+ *        `assignee` 是盘上**唯一可读**的"谁会做它"的归属证据。
+ *        这是本函数唯一一处读 `assignee` —— 而它读的是**实现任务**的 `assignee`，
+ *        不是 requirements 的（见 ② 的不自毁理由）。
+ *
+ * ── requirements 的三态（与 review 同一套纪律，各自不同形）────────────────────
+ *
+ *   · 队里没有任何被治理的实现 ⇒ `{ ok: true, undecidable: … governs no implementation … }`
+ *     判不了，不许读成"通过"（"没有对象"≠"对象合格"）。
+ *   · 有被治理的实现、而每一条都读不出身份 ⇒ `{ ok: true, undecidable: … implementer could not be read }`
+ *   · 盖章者 ∈ 那些身份 ⇒ `{ ok: false, error: '<id> cannot pass: "<reviewer>" would also implement …' }`
+ *     ★ 措辞说 **"the same identity"**，不说 "the same name" —— 判的是身份，
+ *       而"名字相同"会把下一个读到这里的人送去查一张不存在的改名表。
+ *   · 否则 ⇒ `{ ok: true }`
+ *
+ * ── ★ 明确【没有】覆盖的：`verification` ───────────────────────────────────────────
+ *
+ * `verification` 也属于 `VERDICT_KINDS`（它的判决会记 `reviewedArtifacts`），但
+ * `canDeclareDelivery` 对它的完成**不要求** `verdict=pass`（只有 review / requirements 那一行）
+ * ⇒ 把"同一身份批准自己的 verdict"套到它身上，会拒绝一批**没有这条规则**的完成。
+ * 这是一个**单独的决定**，不是本函数的遗漏：它需要先回答"verification 的 pass
+ * 算不算一次自我批准"，而那个答案今天在仓库里**不存在**。这里如实说不知道，
+ * 而不是悄悄把它并进 requirements 那一支 —— 一条覆盖了自己说不清的 kind 的判据，
+ * 会把"我扩了范围"读成"我顺手修好了"。
+ *
+ * ── ★★ 三态（与全仓纪律同源）───────────────────────────────────────────────────
+ *
+ * · 判得了  ⇒ `{ ok: true }` 或 `{ ok: false, error }`
+ * · **判不了 ⇒ `{ ok: true }`，且 `undecidable` 说明为什么**
+ *   判不了的情形有三种，**都不许**被读成"通过"：
+ *     ① `reviewedTaskId` 缺席（这条 review 没声明审谁）
+ *     ② `reviewedTaskId` 指向的任务不在队里
+ *     ③ 被审任务没有一条 completed 的 execution（⇒ 实现者未知）
+ *   ★ 为什么不在这里硬拒这四种：它们各自已被**别的**判据管着
+ *     （`validateCreateTask` 管 ① 的存在性与悬空；`canDeclareDelivery` 管 ③ 的完成度）。
+ *     在这里再拒一次会让同一件事有两个口径，而两个口径会漂移。
+ *   ★★ **但 `undecidable` 必须可以被读出来** —— 否则"判过了、没问题"与
+ *     "判不了、放过去了"在读数里同形，而那正是本仓记录过最多的那类事故。
+ *
+ * ── ★ 反向半边（为什么不是"一律拒"）───────────────────────────────────────────
+ *
+ * 不拒的两种情形必须是**绿的**，否则这条判据会自己把正常流程打红：
+ *   · 审查者 ≠ 实现者（13 条里的 9 条）
+ *   · 实现者未知（上面 ③）
+ *
+ * @param team  本队当前状态（review 读被审任务的 `executions`；requirements 读治理到的实现任务）
+ * @param task  正在被更新的那条任务（`kind` 是 `review` 或 `requirements` 且提交 `verdict`）
+ * @param reviewerName 提交这次判决的身份名（`identity.name`）
+ */
+export function judgeSelfReview(input: {
+  team: TeamState
+  task: TeamTask
+  reviewerName: string | undefined
+}): SelfReviewJudgement {
+  const { team, task, reviewerName } = input
+  const kind = taskKindOf(task)
+  /**
+   * ── ★★★ `requirements`：判的是"写需求的人会不会同时实现它"──────────────────────
+   *
+   * 这一支必须排在下面那条 `!== 'review'` 的早返回**之前** —— 而那条早返回此前
+   * 正是把 requirements 整类放走的那一行（见函数顶部文档的 BEFORE 一段）。
+   */
+  if (kind === 'requirements') {
+    if (reviewerName === undefined || reviewerName === '') {
+      /** ★ 与 review 支同一条纪律：身份读不出来 ⇒ 判不了，不是"通过"。 */
+      return { ok: true, undecidable: `the reviewer identity for ${task.id} could not be read` }
+    }
+    /**
+     * ★ `governed`：依赖闭包里含这条 requirements 的每一条实现/修复任务。
+     *   ★ 排除 `item.id === task.id` 是**防御性**的（requirements 不是写类 kind，
+     *     不该依赖自己），而一个自依赖的坏记录若出现在盘上，下面那句
+     *     `dependencyClosureContains` 会立刻返回真 —— 那样它会把自己算成自己的实现者。
+     */
+    const governed = team.tasks.filter((item) => {
+      const candidateKind = taskKindOf(item)
+      if (candidateKind !== 'implementation' && candidateKind !== 'repair') return false
+      if (item.id === task.id) return false
+      return dependencyClosureContains(team.tasks, item.dependencies ?? [], task.id)
+    })
+    if (governed.length === 0) {
+      return {
+        ok: true,
+        undecidable: `requirements ${task.id} governs no implementation in this team, `
+          + 'so the identity that would build it could not be read',
+      }
+    }
+    /**
+     * ★ 每条被治理任务的"作者"：最近一条 completed 的 `by`（= 真做完了它的人），
+     *   否则退回 `assignee`（= **还没跑**时盘上唯一可读的"谁会做它"）。
+     *   ★ 顺序不能反：一次重派之后 `assignee` 指向的是**下一个**人，
+     *     而"谁将会实现它"在已经有人做过的情形下应当是那个人 —— 与 review 支同源。
+     */
+    const identities: string[] = []
+    for (const item of governed) {
+      const completed = (item.executions ?? []).filter((entry) => entry.status === 'completed')
+      const by = completed.length === 0 ? undefined : completed[completed.length - 1]?.by
+      const identity = by === undefined || by === '' ? item.assignee : by
+      if (identity !== undefined && identity !== '') identities.push(identity)
+    }
+    const governedIds = governed.map((item) => item.id).join(', ')
+    if (identities.length === 0) {
+      return {
+        ok: true,
+        undecidable: `requirements ${task.id} governs ${governedIds}, but its implementer could not be read`,
+      }
+    }
+    if (identities.includes(reviewerName)) {
+      return {
+        ok: false,
+        error: `requirements ${task.id} cannot pass: "${reviewerName}" would also implement `
+          + `the work these requirements specify (${governedIds})`
+          + ' — the same identity may not approve its own requirements (captain protocol rule 7)',
+      }
+    }
+    return { ok: true }
+  }
+  if (kind !== 'review') {
+    /**
+     * ★ 这个早返回**留着**，而它的措辞必须**如实**：它说的不是"这不是一次审查"
+     *   （requirements 也会走到这里吗？不会 —— 上面那一支接住了它），
+     *   而是"这一条 kind 的产出，本插件没有可绑到作者身上的被判对象"。
+     *   ★ `verification` 落在这里，而那是**刻意的缺口**（见函数顶部的说明），
+     *     不是一个遗漏。
+     */
+    return {
+      ok: true,
+      undecidable: `task ${task.id} is ${kind}, which issues no judged output the plugin can bind to an author`,
+    }
+  }
+  if (reviewerName === undefined || reviewerName === '') {
+    /**
+     * ★ 身份读不出来 ⇒ **判不了**，不是"通过"。
+     *   而这条路径在生产上不该出现（每次更新都有 identity），
+     *   所以它是一个**可读的洞**而不是一个静默的错。
+     */
+    return { ok: true, undecidable: `the reviewer identity for ${task.id} could not be read` }
+  }
+  if (task.reviewedTaskId === undefined || task.reviewedTaskId === '') {
+    return { ok: true, undecidable: `review ${task.id} declares no reviewedTaskId` }
+  }
+  if (task.reviewedTaskId === task.id) {
+    /**
+     * ★ 审自己 —— 这是**最露骨**的自审形态，比"两人同名"更直接。
+     *   它不该落到"实现者未知"那一支：`reviewedTaskId === task.id` 本身就是一个
+     *   可判定的事实，而把它读成"判不了"会让最确定的那种自审变成放行。
+     */
+    return { ok: false, error: `review ${task.id} reviews itself; a review must judge another task` }
+  }
+  const target = team.tasks.find((item) => item.id === task.reviewedTaskId)
+  if (target === undefined) {
+    return { ok: true, undecidable: `review ${task.id} points at ${task.reviewedTaskId}, which is not in this team` }
+  }
+  /**
+   * ★ 最后一条 `completed` 的 `by` —— **不是** `executions.at(-1)`：
+   *   一条任务可以是 completed 之后又被重开过（历史里最后一条就不是 completed），
+   *   而"谁把它做完了"问的是**最近一次完成**。
+   */
+  const completed = (target.executions ?? []).filter((entry) => entry.status === 'completed')
+  const implementer = completed.length === 0 ? undefined : completed[completed.length - 1]?.by
+  if (implementer === undefined || implementer === '') {
+    return { ok: true, undecidable: `${target.id} has no completed execution, so its implementer is unknown` }
+  }
+  if (implementer === reviewerName) {
+    return {
+      ok: false,
+      error: `review ${task.id} cannot pass: "${reviewerName}" both implemented ${target.id} and is judging it`
+        + ' — the same identity may not approve its own implementation (captain protocol rule 7)',
+    }
+  }
+  return { ok: true }
+}
+
+/** {@link judgeSelfReview} 的三态结果。 */
+export interface SelfReviewJudgement {
+  readonly ok: boolean
+  /** 只在 `ok === false` 时给：为什么拒。 */
+  readonly error?: string
+  /** 只在判不了时给：为什么判不了（★ 与"通过"不同形，调用方必须能区分）。 */
+  readonly undecidable?: string
 }
 
 export function qualityPlanningPrompt(): string {
@@ -1597,6 +3642,200 @@ export function describeQualityLoop(team: TeamState): QualityLoopSnapshot {
 }
 
 export { QUALITY_KINDS, WRITE_KINDS }
+
+/**
+ * ── ★★★ 计划审查环：让"这个循环能不能结束"有一个可读的答案（N5 / t8）──────────────
+ *
+ * 用户原话（m01373）：
+ * > 「加进去，然后计划是否能开始跑也是希望有一个门禁把关，
+ * >   其实就是计划的审查循环是否可以结束的问题。」
+ *
+ * ★ 它答的是**终止性**，不是**准入**：「这个循环会自己停下来吗」，
+ *   而不是「这一份计划够不够好」。两者的修法完全不同 —— 前者要一条单调不减的度量
+ *   加一个有界的天花板，后者要一套判据。
+ *
+ * ── ★★ 判定顺序（第二版；第一版被对抗性审查推翻）────────────────────────────────
+ *
+ * ```
+ *   team.halted === true                    ⇒ 'halted'          ★ 最前
+ *   team.planReviewEscalated === true       ⇒ 'escalated'       ★ 本队自己的位
+ *   rounds >= maxRounds                     ⇒ 'escalated'       ★ 读时也要能算出来
+ *   team.phase === 'running'                ⇒ 'approved'        ★★ 必须在这两条【之后】
+ *   planReviewState === 'awaiting_feedback' ⇒ 'reviewing'
+ *   否则                                     ⇒ 'awaiting-review'
+ * ```
+ *
+ * ★★★ **`halted` 必须最先**（`describeQualityLoop` 同序）：
+ *   `haltTeamWork` **不要求 `phase === 'running'`** —— 它只查 `requireFreshCaptainTeam`，
+ *   然后 `fresh.halted = true`。⇒ **一个 staged 团队也能被 halt**。
+ *   若把 `phase === 'running'` 判在最前，**一个被停止的团队会被读成 `approved`**。
+ *
+ * ★★★ **`approved` 必须排在两条 `escalated` 之后**：
+ *   ```
+ *   {phase:'staged',  rounds:4} ⇒ 'escalated'
+ *   {phase:'running', rounds:4} ⇒ 'approved'   ← 第一版就是这个结果
+ *   ```
+ *   对一个正在跑的团队，`rounds=4 > max=3` 与 `rounds=0` **读出同一个 `approved`**
+ *   ⇒ 「这个循环审到顶了没有」这条读数**恰恰在批准之后不可读** —— 而用户问的就是它。
+ *   ⇒ 上限必须在**放行之前**就拦住，而不是等它跑起来之后被 `phase` 遮掉。
+ *
+ * ★ 副作用（**必须承认的设计后果**）：一个 `rounds >= max` 的 running 团队会读成
+ *   `escalated`，而它其实已经在跑。这不是错 —— 那是「它当初是被放行的，而放行点上
+ *   没有读上限」的**如实记录**。修法不在读侧（读侧若也遮掉，那段历史就查不出来了），
+ *   在放行点（`approveStagedTeam` 的轮次闸）。
+ *
+ * ── ★★ 三态：`unmeasured` 不拦，但**必须点名** ──────────────────────────────────
+ *
+ * ★ 契约表面读不出来的那些任务**不参与放行判定**（"没说改哪里"不是"改得很大"），
+ *   但 `reason` 里要**逐条**写出来 —— 不许静默并进"通过"。
+ *   放行 ≠ 通过：一个是"它可以跑了"，一个是"它被看清楚了"。
+ */
+export function describePlanLoop(team: TeamState): PlanLoopSnapshot {
+  const maxRounds = PLAN_REVIEW_MAX_ROUNDS
+  /**
+   * ★ 存量团队**没有**这一格。缺席按 `0` 读 —— 但 `roundsSource` 把
+   *   "我把它读成 0"与"它确实是 0"分开，否则存量团队看起来像"审了 0 轮就通过"。
+   */
+  const persistedRounds = typeof team.planReviewRounds === 'number' && Number.isFinite(team.planReviewRounds)
+    ? Math.max(0, Math.floor(team.planReviewRounds))
+    : undefined
+  const rounds = persistedRounds ?? 0
+  const roundsSource: PlanLoopSnapshot['roundsSource'] = persistedRounds === undefined ? 'absent' : 'persisted'
+  const surfaces = planLoopSurfacesOf(team)
+  const surfaceSentence = planLoopSurfaceSentence(surfaces)
+  const state = planLoopStateOf(team, rounds, maxRounds)
+  return {
+    state,
+    rounds,
+    maxRounds,
+    reason: planLoopReasonOf({ team, state, rounds, maxRounds, roundsSource, surfaceSentence }),
+    canEnd: state === 'approved',
+    roundsSource,
+    surfaces,
+  }
+}
+
+/** 五态判定。★ 顺序就是语义 —— 这个函数是它**唯一**的一个落点（各调用点不许各写一遍）。 */
+function planLoopStateOf(team: TeamState, rounds: number, maxRounds: number): PlanLoopState {
+  /** ★ 最前：staged 团队也能被 halt（见函数头）。 */
+  if (team.halted === true) return 'halted'
+  /** ★ 本队自己的位，**不是** `team.escalated`（那个位没有清除点，见 N5.14）。 */
+  if (team.planReviewEscalated === true) return 'escalated'
+  /** ★ 读时也要能算出来 —— 存量团队没有那一位，而 `rounds` 可能已经在盘上。 */
+  if (rounds >= maxRounds) return 'escalated'
+  /** ★★ 这两条必须排在上面两条之后（见函数头）。 */
+  if (team.phase === 'running') return 'approved'
+  if (team.planReviewState === 'awaiting_feedback') return 'reviewing'
+  return 'awaiting-review'
+}
+
+/**
+ * 契约表面的三态读数（**只读，不做闸**）。
+ *
+ * ★★ 分档那一层已被对抗性审查推翻并明文砍掉，**不许重装** —— 理由逐字：
+ *   它的判据方向是**反的**：奖励少写 `inScope`、惩罚诚实声明，
+ *   且能被被审方自己缩域绕过（`amend_task` 是唯一能改 `inScope` 的工具，而它不计轮次）。
+ * ⇒ 这里只回答"这一份计划被看清楚了没有"，**不回答**"它该不该放行"。
+ */
+function planLoopSurfacesOf(team: TeamState): PlanLoopSurfaces {
+  const unreadableIds: string[] = []
+  const notApplicableIds: string[] = []
+  let readable = 0
+  for (const task of team.tasks) {
+    const kind = task.kind ?? 'work'
+    /**
+     * ★ 判据**不在这里新写一条**：`validateCreateTask` 已经在跑这两条
+     *   （`isQualityKind ⇒ objective+acceptance`；`WRITE_KINDS ⇒ inScope+verify`）。
+     *   这里读的是 `WRITE_KINDS` 那一条 —— 写类任务必须有 `inScope`。
+     *   ★ 抄一份判断就是同一条规则的两个副本，而副本会分叉。
+     */
+    if (!WRITE_KINDS.includes(kind)) {
+      notApplicableIds.push(task.id)
+      continue
+    }
+    if (nonemptyStringList(task.inScope)) readable += 1
+    else unreadableIds.push(task.id)
+  }
+  return {
+    total: team.tasks.length,
+    readable,
+    unreadable: unreadableIds.length,
+    unreadableIds,
+    notApplicable: notApplicableIds.length,
+    notApplicableIds,
+  }
+}
+
+/**
+ * 把表面读数写成**一句话**（`reason` 里要用）。
+ *
+ * ★ 三种情形**不同形**，绝不合流：
+ *   有真缺口     ⇒ 逐条点名是哪几条（"N 条任务的表面读不出来"）
+ *   全不适用     ⇒ 说"没有写类任务 ⇒ 这一问不适用"（★ 而"不适用"是看了之后的结论）
+ *   全读到了     ⇒ 说读到了几条（★ 不说"通过" —— 那是闸的字，这一层没有闸）
+ */
+function planLoopSurfaceSentence(surfaces: PlanLoopSurfaces): string {
+  if (surfaces.unreadable > 0) {
+    return `${surfaces.unreadable} 条任务的表面读不出来（${surfaces.unreadableIds.join(', ')}）：`
+      + '这些是写类任务，而契约没有声明 inScope ⇒ ✖ 不拦（"没说改哪里"不是"改得很大"），'
+      + '但这条读数**不进"通过"那一格** —— 放行 ≠ 通过。'
+  }
+  if (surfaces.readable === 0) {
+    return `0 条任务需要读表面（${surfaces.notApplicable} 条都不是写类，契约本来就不要求 inScope）`
+      + ' ⇒ ★ 这一问不适用 —— 而"不适用"是看了之后的结论，不是"我忘了查"。'
+  }
+  return `${surfaces.readable} 条写类任务的表面都读到了`
+    + (surfaces.notApplicable === 0 ? '' : `；另有 ${surfaces.notApplicable} 条非写类任务本来就不要求表面（${surfaces.notApplicableIds.join(', ')}）`)
+}
+
+/** `reason` 的构造 —— 它才是这一层真正的产出，`state` 只是它的索引。 */
+function planLoopReasonOf(input: {
+  team: TeamState
+  state: PlanLoopState
+  rounds: number
+  maxRounds: number
+  roundsSource: PlanLoopSnapshot['roundsSource']
+  surfaceSentence: string
+}): string {
+  const { team, state, rounds, maxRounds, roundsSource, surfaceSentence } = input
+  /**
+   * ★ 计数这一句在**每一个**分支里都要出现 —— 否则"审了几轮"会在某些状态下消失，
+   *   而那个缺口正是 N5.13 记的那一条（批准之后 `rounds` 永久丢失）。
+   */
+  const counter = roundsSource === 'absent'
+    ? `轮次：这一队没有 \`planReviewRounds\`（本轮之前建的队 ⇒ 按 0 读，★ 而"读成 0"与"确实是 0"不同形）`
+    : `轮次：${rounds}/${maxRounds}`
+  const head = `计划审查环 state=${state}；${counter}。`
+  switch (state) {
+    case 'halted':
+      return `${head} ★ 队伍被**人**停住了（halted 排在所有判定之前，包括 approved）—— `
+        + '这个环不会自己再转：要它继续，先调 `agent_teams_resume` 给一个非空理由。'
+        + ` 表面读数：${surfaceSentence}`
+    case 'escalated':
+      return team.planReviewEscalated === true
+        ? `${head} ★★ 轮次上限已敲响（\`planReviewEscalated\` 为 true）：这个环**自己不会结束** —— `
+          + `它已经改了 ${rounds} 次，而上限是 ${maxRounds}。`
+          + '解除**只能**是显式归零（`resume` 或人在批准时点名），'
+          + '★ 而"只清 flag 不归零"不算：那会让 `rounds >= maxRounds` 立刻重新算出 escalated（死码）。'
+          + ` 表面读数：${surfaceSentence}`
+        : `${head} ★★ 「已经改了 ${rounds} 次，上限 ${maxRounds}」是**当场算出来的**（不是读盘上的 flag）：`
+          + '这个环**自己不会结束**，解除只能是显式归零。'
+          + ` 表面读数：${surfaceSentence}`
+    case 'approved':
+      return `${head} ✔ 计划已被批准，环**可以**结束（\`canEnd = true\`）。`
+        + '★ 而这不是"这个计划被审明白了"—— 那件事没有闸（分档层已被对抗性审查推翻并砍掉）。'
+        + ` 表面读数：${surfaceSentence}`
+    case 'reviewing':
+      return `${head} ↻ 正在等用户反馈（\`planReviewState = awaiting_feedback\`）：`
+        + '环停在"人要说什么"上，不是停在"还能转几次"上。'
+        + ` 表面读数：${surfaceSentence}`
+    default:
+      return `${head} ⏳ 等审阅（\`planReviewState\` 缺席或为 \`awaiting_review\`）：`
+        + '这一份计划还没有被批准，环可以继续转；每调一次 `edit_plan` 记 1 轮'
+        + '（★ 一次调用含多个 operation 仍只算 1 轮 —— 那是"一轮反馈"，不是"5 轮"）。'
+        + ` 表面读数：${surfaceSentence}`
+  }
+}
 
 /** Persisted evidence must remain loadable after process restart. */
 export function isTaskEvidence(value: unknown): value is TaskEvidence {

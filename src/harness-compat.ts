@@ -11,12 +11,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import { execFileSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { CAPTAIN_TOOL_NAMES } from './tool-names.ts'
+import type { MemberToolFilter } from './types.ts'
 
 /**
  * Exact protocol exported by dsh-subagent/internal in Alpha.5 and rc.1.
@@ -37,12 +38,156 @@ type Followup = (parent: Agent, childId: SessionId, content: ContentBlock[], opt
 type Queue = (parent: Agent, childId: SessionId, content: ContentBlock[], source: MessageSource, signal: AbortSignal) => Promise<MessageId>
 type Deliver = (parent: Agent, childId: SessionId, content: ContentBlock[], source: MessageSource, signal: AbortSignal, delivery: 'queue' | 'steer') => Promise<MessageId>
 type Send = (sender: Agent, targetId: SessionId, content: ContentBlock[], options: { signal: AbortSignal }) => Promise<MessageId>
+
+/**
+ * The immutable effective tool restriction of one member.
+ *
+ * ★ 形状的**家**在叶子 `types.ts`（零 import 的地基）：`TeamMember.runtimeSetup`
+ *   引用了它，而持久记录的形状属于那里。这里重导出，让"版本相关的宿主
+ *   形状集中在本文件"这条纪律不被打破 —— 读者仍然能在这儿找到它。
+ */
+export type { MemberToolFilter } from './types.ts'
+
+
 interface RuntimeBoundary {
   followup?: Followup
   registerContinuableSetup?: (setup: LegacySetup) => () => void
   sendMessage?: Send
   [hostPromptQueue]?: Queue
   [hostPromptDeliver]?: Deliver
+}
+
+/**
+ * ── ★★★ 成员创建契约：三个世代的 API 收口（Harness 0.2.1）
+ *
+ * MEASURED（0.2.1-rc.2 宿主 asar 精确提取）：`SubagentRuntime` 的方法集合里
+ * **`startContinuable` 已经不存在**，取而代之的是 `startActivation(spec)`；
+ * 与之配套的 `drainContinuableChildren` 也改名为 `drainChildren`。
+ *
+ * ★ 而 `startActivation` **不再接受** `persona` / `toolFilter`：
+ *   宿主的 `spawn` provider 在 0.2.1 把这两个能力位从 `capabilities` 里删了
+ *   （0.2.0 是 `{agentOptions, outputSchema, depthLimit, toolFilter, persona}`，
+ *   0.2.1 是 `{agentOptions, agentPreset, outputSchema, depthLimit}`），
+ *   新的 descriptor 也不再持久化它们。
+ *   ⇒ 于是"成员角色"与"队长专用工具的限制"必须由**插件自己在子会话上装**
+ *     （`childCtx.systemPrompt.section` + `childCtx.tools.restrict`），
+ *     并且那份 setup 要**落进成员记录**，冷恢复时按身份还原。
+ *
+ * ★ 三个世代必须**同时**可走：这个插件仍声明支持 0.1.2-alpha.2 起的宿主，
+ *   在那里 `startActivation` 根本不存在。判定用**能力探测**（`typeof`），
+ *   而不是版本号比较 —— 与 `boundary()` 的既有口径一致。
+ */
+export interface MemberStartSpec {
+  provider: string
+  label: string
+  request: {
+    parent: Agent
+    prompt: ContentBlock[]
+    agentOptions?: AgentOptions
+    persona?: string
+    toolFilter?: MemberToolFilter
+  }
+  signal: AbortSignal
+}
+
+interface CreationBoundary {
+  start?: (name: string, request: MemberStartSpec['request']) => Promise<unknown>
+  startContinuable?: (spec: MemberStartSpec) => Promise<{ childId: SessionId }>
+  startActivation?: (spec: MemberStartSpec & { delivery: 'parent' }) => Promise<{
+    childId: SessionId
+    result: Promise<unknown>
+  }>
+}
+
+/**
+ * Whether the running host owns member setup through managed activations.
+ *
+ * On those hosts the activation itself installs the child composition, so the
+ * plugin's own persona/toolFilter installation is the only source of them and
+ * the provider capability bits `persona`/`toolFilter` are not required (and no
+ * longer advertised). On every older host this is false and the legacy checks
+ * stay in force.
+ */
+export function usesManagedActivations(runtime: Context['subagents']): boolean {
+  return typeof (runtime as unknown as CreationBoundary).startActivation === 'function'
+}
+
+/**
+ * Start one member through whichever creation API the host actually exposes.
+ *
+ * @param runtime - the live `ctx.subagents` service.
+ * @param spec - the version-independent creation request.
+ * @returns the durable child id (and, on managed activations, keeps the
+ *   activation's own settlement observed so a missing report or a failure
+ *   still reaches the parent the way the host intends).
+ */
+export async function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{ childId: SessionId }> {
+  const host = runtime as unknown as CreationBoundary
+  if (typeof host.startActivation === 'function') {
+    // persona/toolFilter are NOT activation fields on 0.2.1; they are installed
+    // on the child context by installMemberSelectionRuntime.
+    const { persona: _persona, toolFilter: _filter, ...request } = spec.request
+    const activation = await host.startActivation.call(runtime, { ...spec, request, delivery: 'parent' })
+    // Preserve native settlement as the missing-report/error fallback on both
+    // fresh and resumed activations. mailbox.ts deduplicates successful reports.
+    void activation.result.catch(() => undefined)
+    return activation
+  }
+  if (typeof host.startContinuable !== 'function') return unsupported('missing member creation API')
+  return host.startContinuable.call(runtime, spec)
+}
+
+/**
+ * Wrap every creation API the host exposes, so one guard bounds descendant
+ * creation regardless of which entry point a caller uses.
+ *
+ * ★ 0.2.1 adds `startActivation`; a guard that only wraps `start` and
+ *   `startContinuable` would silently stop bounding anything on that host
+ *   (the tool layer calls `startActivation` directly). Probing all three keys
+ *   keeps the delegation budget enforced across host generations.
+ * @param ctx - the plugin context (injects `subagents`).
+ * @param check - called with the exact live parent before each creation.
+ */
+export function guardSubagentCreation(ctx: Context, check: (parent: Agent) => void): void {
+  const runtime = ctx.subagents as unknown as CreationBoundary
+  ctx.effect(() => {
+    const disposers: (() => void)[] = []
+    for (const key of ['start', 'startContinuable', 'startActivation'] as const) {
+      const original = runtime[key]
+      if (typeof original !== 'function') continue
+      const descriptor = Object.getOwnPropertyDescriptor(runtime, key)
+      const guarded = async (...args: unknown[]): Promise<unknown> => {
+        const request = key === 'start' ? args[1] : (args[0] as MemberStartSpec).request
+        check((request as MemberStartSpec['request']).parent)
+        return Reflect.apply(original, ctx.subagents, args)
+      }
+      Object.defineProperty(runtime, key, { value: guarded, writable: true, configurable: true })
+      disposers.push(() => {
+        if (Object.getOwnPropertyDescriptor(runtime, key)?.value !== guarded) return
+        if (descriptor === undefined) Reflect.deleteProperty(runtime, key)
+        else Object.defineProperty(runtime, key, descriptor)
+      })
+    }
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'agent-teams: member delegation budget')
+}
+
+/**
+ * Targeted recursive cancellation, renamed with the unified activation manager.
+ *
+ * 0.2.1 renamed `drainContinuableChildren` to `drainChildren`; both mean the
+ * same thing (close admission, clear queued work, await descendants) and the
+ * older name is absent rather than deprecated on the newer host, so the call
+ * site has to pick whichever exists.
+ */
+export async function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void> {
+  const host = runtime as unknown as {
+    drainChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+    drainContinuableChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+  }
+  const drain = host.drainChildren ?? host.drainContinuableChildren
+  if (typeof drain !== 'function') return unsupported('missing targeted child drain')
+  await drain.call(runtime, parent, ids)
 }
 
 function boundary(runtime: Context['subagents']): RuntimeBoundary {
@@ -77,6 +222,122 @@ export function onAgentReady(ctx: Context, listener: (agent: Agent, vetoable: bo
 }
 
 /** Read child-owned history, excluding any descriptor inherited from a parent. */
+
+/**
+ * ── ★★★ Zstd 多帧遍历器（2026-10-21 从 `scripts/dispatch-shape-readout.mjs` **移进来**）──
+ *
+ * ── 为什么必须有一个：Node 的 `zstdDecompressSync` **静默只解第一帧** ────────────
+ *
+ * MEASURED（本仓真实会话，可复跑）：
+ * ```
+ *   node -e "zstdDecompressSync(readFileSync(p))"  ⇒ 290 字节 / 1 行
+ *   zstd -dc < p | wc -l                           ⇒ 1701 行
+ * ```
+ * 同一个文件，**差 1700 倍**，而且**不抛错、不警告**。
+ * ⇒ ★★ 一个用它写的 token 计数器会得到**看起来像真的**的错数 ——
+ *   本仓记账最贵的那种形态（"读到了，但读的不是你以为的那份"）。
+ *
+ * ── ★ 为什么**移进来**而不是各留一份 ────────────────────────────────────────────
+ *
+ * `src/` 从不 import `scripts/`（那是脚本目录，不进 `lib/` 产物）。
+ * 而 t4 的会话预算读数（`src/members.ts`）**必须**读会话 token。
+ * ⇒ 若两处各留一份，就是本仓记账过最贵的**第二份实现**。
+ *   ★ 而我为这件事**真的重复实现过一次**，并且**错了两次**：
+ *     ① 按大端比较 magic（实际要用 `readUInt32LE`）⇒ 一帧都进不去
+ *     ② RLE 块（type 1）的盘上长度写成 `blockType === 0 ? 1 : size`
+ *        ⇒ 而正确规则就在下面那一行（`blockType === 1 ? 1 : blockSize`）
+ *   ⇒ 移进来之后，`scripts/` 那份**从这里 import**，全仓只有一处。
+ *
+ * ── ★ 截断处理（原实现的语义，逐字保留）──────────────────────────────────────
+ *
+ * 会话文件可能正被写入（尾部半帧）。走到不完整的位置就**停下并记下偏移**，
+ * 把已完整的帧返回 —— 读数是**下界**，由调用方标出来，而不是整个读成
+ * `unmeasured`（那样会丢掉已经能读到的全部历史）。
+ *
+ * @param buffer - `session.v4.jsonl.zstd` 的**完整字节**。
+ * @returns 每一帧的字节切片 + 截断偏移（`null` = 完整读到最后）。
+ */
+/** Zstd 帧魔数 —— ★ **小端**读出才是这个值（`readUInt32LE`）。
+ *  ★★ 我第一版把它写成 `0x28B52FFD`（大端书写形式）⇒ 一帧都进不去。 */
+const ZSTD_MAGIC = 0xfd2fb528
+
+export function splitZstdFrames(buffer: Buffer): { frames: Buffer[]; truncatedAt: number | null } {
+  const frames = []
+  let offset = 0
+  let truncatedAt = null
+
+  while (offset < buffer.length) {
+    const start = offset
+    if (offset + 4 > buffer.length) {
+      truncatedAt = offset
+      break
+    }
+    const magic = buffer.readUInt32LE(offset)
+
+    // ── skippable frame（0x184D2A50..0x184D2A5F）：整段跳过，不含记录
+    if (magic >= 0x184d2a50 && magic <= 0x184d2a5f) {
+      if (offset + 8 > buffer.length) {
+        truncatedAt = offset
+        break
+      }
+      const next = offset + 8 + buffer.readUInt32LE(offset + 4)
+      if (next > buffer.length) {
+        truncatedAt = offset
+        break
+      }
+      offset = next
+      continue
+    }
+
+    if (magic !== ZSTD_MAGIC) {
+      throw new Error(`未知魔数 0x${magic.toString(16)} @${offset}（多帧行走器不认这个字节）`)
+    }
+
+    let cursor = offset + 4
+    const descriptor = buffer[cursor] ?? 0
+    cursor += 1
+    const fcsFlag = descriptor >> 6
+    const singleSegment = (descriptor >> 5) & 1
+    const hasChecksum = (descriptor >> 2) & 1
+    const reservedBit = (descriptor >> 3) & 1
+    const dictFlag = descriptor & 3
+    if (reservedBit !== 0) throw new Error(`frame header reserved bit 非零 @${start}`)
+
+    if (!singleSegment) cursor += 1
+    cursor += [0, 1, 2, 4][dictFlag] ?? 0
+    cursor += (fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag]) ?? 0
+
+    let sawLast = false
+    while (!sawLast) {
+      if (cursor + 3 > buffer.length) {
+        truncatedAt = start
+        break
+      }
+      const header = (buffer[cursor] ?? 0) | ((buffer[cursor + 1] ?? 0) << 8) | ((buffer[cursor + 2] ?? 0) << 16)
+      cursor += 3
+      sawLast = (header & 1) === 1
+      const blockType = (header >> 1) & 3
+      const blockSize = header >>> 3
+      // ★ RLE 块（type 1）在盘上只占 1 个字节，不是 blockSize 个字节。
+      cursor += blockType === 1 ? 1 : blockSize
+    }
+    if (!sawLast) {
+      truncatedAt = start
+      break
+    }
+    if (hasChecksum) cursor += 4
+    if (cursor > buffer.length) {
+      truncatedAt = start
+      break
+    }
+
+    frames.push(buffer.subarray(start, cursor))
+    offset = cursor
+  }
+
+  return { frames, truncatedAt }
+}
+
 export function sessionOwnEvents(session: Session): readonly SessionEvent[] {
   const current = session as unknown as { ownEvents?: () => readonly SessionEvent[] }
   if (typeof current.ownEvents === 'function') return current.ownEvents.call(session)
@@ -567,7 +828,7 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
   const installed = new WeakSet<Agent>()
   const active = new Set<() => void>()
   ctx.effect(() => {
-    const stop = onAgentReady(ctx, (agent, vetoable) => {
+    const attach = (agent: Agent, vetoable: boolean): void => {
       if (installed.has(agent)) return
       // Deliberately synchronous: awaiting here loses the first-request race.
       let teardown: () => void
@@ -600,11 +861,27 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
         dispose()
         throw error
       }
-    })
-    return () => {
+    }
+    const stop = onAgentReady(ctx, attach)
+    const cleanup = (): void => {
       stop()
       for (const dispose of [...active]) dispose()
     }
+    try {
+      /**
+       * ★★ 热重载会**丢掉上一份插件装的 child setup，但 Agent 还活着**。
+       *   而 0.2.1 起宿主不再把 persona/toolFilter 持久化进 descriptor
+       *   ⇒ 只订阅事件的话，重载之后那些已经存在的成员**永远**不会重装 setup
+       *     （它们不再触发 agent/created），于是成员以"无角色、无工具限制"的状态
+       *     继续跑 —— 那正是上游 0.1.24 记录的那条回归。
+       * ⇒ 先订阅、再把**当前活着的** Agent 补一遍；attach 是幂等的（WeakSet）。
+       */
+      for (const agent of ctx.agents.list()) attach(agent, false)
+    } catch (error) {
+      cleanup()
+      throw error
+    }
+    return cleanup
   }, 'agent-teams: member lifecycle compatibility')
 }
 

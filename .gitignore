@@ -5,3 +5,22 @@ node_modules/
 
 # pnpm 本地 store（构建缓存，不进版本控制）
 .pnpm-store/
+
+# ── ★ 2026-10-22：Agent Reach（本机互联网能力）────────────────────────────────
+#   装在工作区内是因为**沙箱只允许写工作区**（写 ~ 会被拒），而它又不该进版本控制。
+#   ★★ 用户已裁定「留在工作区 + 加 .gitignore」（而不是挪到 ~/.agent-reach-venv）。
+#   用：./.agent-reach-venv/bin/agent-reach doctor
+.agent-reach-venv/
+.agent-reach-npm/
+
+# ── ★★★ 2026-10-22：登录态隔离目录（**含凭据**）──────────────────────────────────
+#   Agent Reach 用 HOME 定位配置 ⇒ 把 HOME 指到工作区内，凭据才写不进 ~。
+#   ★ 里面是 X 的 auth_token/ct0 与 B 站 SESSDATA —— **绝不许进仓**。
+#   ★★ 这条是后补的：先建目录、后想到 gitignore，中间 `git status` 已经把它报成 untracked。
+.agent-reach-home/
+
+# ── ★ 2026-10-22：运行档案（工具产生，不进版本控制）────────────────────────────
+#   契约证据团的每次运行落在 .workbuddy/team-runs/：
+#   MANIFEST.json / DEVIATIONS.md / INDEX.tsv
+#   ★ 它们是「可复核的过程记录」，不是产品产物；进仓会让 diff 被噪音淹没。
+.workbuddy/

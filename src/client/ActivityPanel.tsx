@@ -26,6 +26,9 @@ import {
   IconStopFill16, IconWarningOutline16,
 } from './icons.tsx'
 import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { MemberScreen } from './MemberScreen.tsx'
+import { Chevron, DependencyGraph } from './DependencyGraph.tsx'
+import { ProgressSummary } from './ProgressSummary.tsx'
 import { currentSessionId } from './session-navigation.ts'
 import type { ModelDirectory, ModelDirectoryResolver } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -35,17 +38,10 @@ import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/c
 import {
   activityPanelExpandedForSession,
   activityPanelShouldAutoExpand,
-  compactDagLayout,
-  compactModelLabel,
-  COMPACT_DAG_NODE_HEIGHT,
-  COMPACT_DAG_NODE_WIDTH,
-  dependencyFocusTaskId,
+  formatTaskIds,
   memberRouteLabel,
-  orderDelegationMembers,
-  relatedTaskIds,
   taskModelLabel,
   teamIsActive,
-  usesParallelTaskGrid,
 } from './activity-model.ts'
 import {
   ACTIVITY_HALT_URL,
@@ -58,9 +54,15 @@ import {
   type ActivityTask,
   type ActivityTeam,
 } from './activity-monitor.ts'
-import { ACTION_ART, LEAD_ART, memberArtUrl } from './artwork.ts'
+/**
+ * ★ t80 缺陷③：`import { LEAD_ART } from './artwork.ts'` **已删** ——
+ *   它在本文件里**只有 import 一处**（实测 `grep -c LEAD_ART` = 1），即**死 import**：
+ *   本文件从不渲染队长头像。⇒ 四处里它是"核查后确认不显示"的那一处。
+ *   ★ **资源仍在** `artwork.ts`（`verify.mjs:311` 的打包契约钉着 `team-lead-v2.png`）。
+ */
 import { OPEN_PANEL_EVENT } from './AgentTeamsCard.tsx'
-import { StagingPlanEditor } from './StagingPlanEditor.tsx'
+import { memberModelEditability, StagingPlanEditor } from './StagingPlanEditor.tsx'
+import { MemberRow } from './MemberRow.tsx'
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts'
 import type { AgentTeamsLocaleKey, AgentTeamsTranslate } from './locales.ts'
 import {
@@ -97,6 +99,15 @@ const PANEL_CONVERSATION_GAP = 14
 const MOVE_THRESHOLD = 4
 const CAPTAIN_ASSIGNEE = 'captain'
 
+/**
+ * t16: styles for the member model control. ★ Inline rather than a CSS module
+ *   because no stylesheet is inside this task's scope; the values still come
+ *   only from host --dsw-alias-* tokens, so the host theme keeps applying.
+ */
+const MEMBER_MODEL_LINE_STYLE: CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, padding: '2px 6px 0 60px',
+}
+
 type PanelGesture = {
   readonly kind: 'move' | 'resize'
   readonly edge?: PanelResizeEdge
@@ -117,85 +128,6 @@ function initialPanelBounds(): PanelBounds {
   return { width: window.innerWidth, height: window.innerHeight, anchorRight: window.innerWidth }
 }
 
-/** Initial-letter fallback for unmatched roles. */
-function memberInitial(name: string): string {
-  return name.trim().slice(0, 1).toUpperCase() || '?'
-}
-
-function stableHash(value: string): number {
-  let hash = 0
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0
-  }
-  return Math.abs(hash)
-}
-
-const ACCENTS = [
-  'var(--dsw-alias-state-business-primary)',
-  'var(--dsw-alias-state-success-primary)',
-  'var(--dsw-alias-state-error-primary)',
-  'var(--dsw-alias-state-warn-primary)',
-  'var(--dsw-alias-label-tertiary)',
-] as const
-
-function accentOf(id: string): string {
-  return ACCENTS[stableHash(id) % ACCENTS.length] ?? ACCENTS[0]
-}
-
-/** Badge text follows the raw task status (finer than the 4 visual states):
- * claimed/pending/failed/cancelled keep their own labels and colors. */
-const TASK_STATUS_LABEL: Record<string, AgentTeamsLocaleKey> = {
-  pending: 'task.status.pending',
-  claimed: 'task.status.claimed',
-  in_progress: 'task.status.inProgress',
-  completed: 'task.status.completed',
-  failed: 'task.status.failed',
-  cancelled: 'task.status.cancelled',
-}
-
-function taskStatusLabel(status: string, t: AgentTeamsTranslate): string {
-  const key = TASK_STATUS_LABEL[status]
-  return key === undefined ? status : t(key)
-}
-
-function formatTaskIds(ids: readonly string[], t: AgentTeamsTranslate): string {
-  return ids.join(t('format.listSeparator'))
-}
-
-function taskTitle(task: ActivityTask, model: string): string {
-  const extras = [
-    task.kind,
-    task.round === undefined ? undefined : `r${task.round}`,
-    task.verdict,
-    model === '' ? undefined : model,
-  ].filter((item): item is string => item !== undefined)
-  return extras.length === 0 ? `${task.id} · ${task.subject}` : `${task.id} · ${task.subject} · ${extras.join(' · ')}`
-}
-
-/** Badge/bar coloring key: visual state, widened for terminal statuses. */
-function taskTone(state: ActivityTask['state'], status: string): string {
-  if (status === 'failed') return 'failed'
-  if (status === 'cancelled') return 'cancelled'
-  return state
-}
-
-function Chevron({ open }: { readonly open: boolean }) {
-  return (
-    <svg className={css.chevron} data-open={open} width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden>
-      <path d="M3.5 2l3 3-3 3" />
-    </svg>
-  )
-}
-
-function WorkGlyph({ active }: { readonly active: boolean }) {
-  return (
-    <svg className={css.workGlyph} data-active={active} width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden>
-      {[[0, 0], [4.2, 0], [8.4, 0], [0, 4.2], [4.2, 4.2], [8.4, 4.2]].map(([x, y], index) => (
-        <rect key={`${x}:${y}`} x={x} y={y} width="2.6" height="2.6" rx=".6" style={{ animationDelay: `${index * 0.15}s` }} />
-      ))}
-    </svg>
-  )
-}
 
 /** Collapsed badge: an always-visible corner pill while any team exists. */
 function CollapsedBadge({ count, busy, onClick, t }: {
@@ -212,277 +144,17 @@ function CollapsedBadge({ count, busy, onClick, t }: {
   )
 }
 
-function memberStateLabel(
-  member: ActivityMember,
-  tasks: readonly ActivityTask[],
-  historic: boolean,
-  t: AgentTeamsTranslate,
-): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
-  if (member.activity === 'working') return t('member.state.working')
-  if (owned.some((task) => task.status === 'failed')) return t('member.state.failed')
-  if (owned.some((task) => task.state === 'blocked')) return t('member.state.waiting')
-  if (owned.length > 0 && owned.every((task) => task.status === 'completed')) return t('member.state.delivered')
-  if (member.status === 'removed') return t(historic ? 'member.state.left' : 'member.state.removed')
-  if (owned.length > 0) return t('member.state.pending')
-  return t('member.state.unassigned')
-}
+/**
+ * ── ★★★ R2：这几段读数**搬进了 `MemberRow.tsx`** ────────────────────────────────
+ *
+ * `memberStateLabel` / `memberStatusText` / `memberDotTone` 原来长在这里，
+ * 而它们全部是**关于一行成员**的读数。R2 把成员行变成一个真正的组件
+ * （`src/client/MemberRow.tsx`）之后，它们跟着那一行走 —— 留在面板里就成了
+ * 第二份实现，而本仓对"第二份实现"的判据是：它一定会漂移。
+ *
+ * ★ 一行只应有一个"它在做什么"的口径，所以这里**不留**转发壳。
+ */
 
-function memberStatusText(
-  member: ActivityMember,
-  tasks: readonly ActivityTask[],
-  t: AgentTeamsTranslate,
-): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
-  const current = owned.find((task) => task.id === member.currentTask)
-  const blocked = owned.find((task) => task.state === 'blocked')
-  if (member.activity === 'working' && current !== undefined) {
-    const model = taskModelLabel(current, [member])
-    return model === ''
-      ? t('member.status.executing', { taskId: current.id })
-      : t('member.status.executingModel', { taskId: current.id, model })
-  }
-  if (member.activity === 'working') return t('member.status.working')
-  if (blocked !== undefined) {
-    const dependency = tasks.find((task) => blocked.dependencies.includes(task.id) && task.state !== 'completed')
-    if (dependency !== undefined) {
-      return t('member.status.waitingOn', {
-        taskId: dependency.id,
-        assignee: dependency.assignee || t('task.assignee.unclaimed'),
-      })
-    }
-    return t('member.status.waitingPrerequisite')
-  }
-  if (member.total === 0) return t('member.status.waitingAssignment')
-  if (member.done === member.total) return t('member.status.delivered')
-  if (owned.some((task) => task.status === 'failed')) return t('task.detail.failed')
-  if (owned.length > 0 && owned.every((task) => task.status === 'completed' || task.status === 'cancelled')) return t('member.status.settled')
-  return t(member.activity === 'idle' ? 'member.status.idle' : 'member.status.unknown')
-}
-
-function compactTaskLabel(subject: string): string {
-  const withoutVerb = subject.replace(/^开发\s*/u, '').replace(/^\d+[-_.、\s]*/u, '')
-  const head = withoutVerb.split(/[（(·：:]/u)[0]?.trim() ?? withoutVerb
-  return head.length > 18 ? `${head.slice(0, 17)}…` : head
-}
-
-function taskSummary(team: ActivityTeam, t: AgentTeamsTranslate, discarded = false): string {
-  const completed = team.tasks.filter((task) => task.status === 'completed')
-  const cancelled = team.tasks.filter((task) => task.status === 'cancelled')
-  const running = team.tasks.filter((task) => task.state === 'running')
-  const blocked = team.tasks.filter((task) => task.state === 'blocked')
-  const ready = team.tasks.filter((task) => task.state === 'open' && task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled')
-  const failed = team.tasks.filter((task) => task.status === 'failed')
-  if (discarded) return t('task.summary.discarded', { count: team.tasks.length })
-  if (team.tasks.length === 0) return t('task.summary.waitingBreakdown')
-  if (team.phase === 'staged') return t('task.summary.staged', { count: team.tasks.length })
-  if (completed.length === team.tasks.length) return t('task.summary.allDelivered', { count: completed.length })
-  if (completed.length + cancelled.length + failed.length === team.tasks.length) {
-    return t('task.summary.ended', {
-      completed: completed.length,
-      cancelled: cancelled.length,
-      failed: failed.length,
-    })
-  }
-  if (failed.length > 0 && running.length === 0 && ready.length === 0 && blocked.length === 0) {
-    return t('task.summary.failedSettled', { count: failed.length })
-  }
-  if (blocked.length > 0 && running.length > 0) {
-    return t('task.summary.blockedAndRunning', {
-      tasks: formatTaskIds(blocked.slice(0, 3).map((task) => task.id), t),
-      more: blocked.length > 3 ? t('task.summary.more', { count: blocked.length - 3 }) : '',
-    })
-  }
-  if (running.length > 0) return t('task.summary.running', { tasks: formatTaskIds(running.map((task) => task.id), t) })
-  if (ready.length > 0) return t('task.summary.ready', { tasks: formatTaskIds(ready.map((task) => task.id), t) })
-  if (blocked.length > 0) return t('task.summary.blocked', { tasks: formatTaskIds(blocked.map((task) => task.id), t) })
-  return t('task.summary.waitingSchedule')
-}
-
-function ProgressOverview({ team, t, discarded = false }: { readonly team: ActivityTeam; readonly t: AgentTeamsTranslate; readonly discarded?: boolean }) {
-  const running = discarded ? 0 : team.tasks.filter((task) => task.state === 'running').length
-  const blocked = discarded ? 0 : team.tasks.filter((task) => task.state === 'blocked').length
-  const completed = discarded ? 0 : team.tasks.filter((task) => task.status === 'completed').length
-  const settled = !discarded && team.tasks.length > 0 && team.tasks.every((task) => (
-    task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
-  ))
-  const summaryTone = discarded ? 'discarded' : blocked > 0 || team.tasks.some(task => task.status === 'failed' || task.status === 'cancelled') ? 'warning' : settled ? 'completed' : 'running'
-  return (
-    <section className={css.progressOverview} aria-label={t('progress.aria')} data-progress-summary>
-      <span className={css.progressTitle}>{t('progress.title')}</span>
-      {team.tasks.length > 0 ? (
-        <span className={css.progressSegments} aria-hidden>
-          {team.tasks.map((task) => <span key={task.id} data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)} />)}
-        </span>
-      ) : <span className={css.progressEmpty} />}
-      <span className={css.progressLegend}>
-        <span data-state="running">{t('progress.running', { count: running })}</span>
-        <span data-state="blocked">{t('progress.blocked', { count: blocked })}</span>
-        <span data-state="completed">{t('progress.delivered', { count: completed })}</span>
-      </span>
-      <span className={css.progressSummary} data-state={summaryTone}>
-        <span className={css.progressSummaryDot} />
-        <span>{taskSummary(team, t, discarded)}</span>
-      </span>
-    </section>
-  )
-}
-
-function DependencyMap({ tasks, members, t, discarded = false, workspace = false, onSelectTask }: {
-  readonly tasks: readonly ActivityTask[]
-  readonly members: readonly ActivityMember[]
-  readonly t: AgentTeamsTranslate
-  readonly discarded?: boolean
-  readonly workspace?: boolean
-  readonly onSelectTask?: (id: string | null) => void
-}) {
-  const [open, setOpen] = useState(true)
-  const [hoverTaskId, setHoverTaskId] = useState<string | null>(null)
-  const [keyboardTaskId, setKeyboardTaskId] = useState<string | null>(null)
-  const [pinnedTaskId, setPinnedTaskId] = useState<string | null>(null)
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const focusedTaskId = dependencyFocusTaskId(pinnedTaskId, keyboardTaskId, hoverTaskId)
-  const nodeWidth = workspace ? 164 : COMPACT_DAG_NODE_WIDTH
-  const nodeHeight = workspace ? 76 : COMPACT_DAG_NODE_HEIGHT
-  const layout = useMemo(() => compactDagLayout(tasks, workspace
-    ? { nodeWidth: 164, nodeHeight: 76, columnGap: 36, rowGap: 16 } : undefined), [tasks, workspace])
-  const parallel = useMemo(() => usesParallelTaskGrid(tasks), [tasks])
-  const related = useMemo(
-    () => focusedTaskId === null ? null : relatedTaskIds(focusedTaskId, tasks),
-    [focusedTaskId, tasks],
-  )
-  const scheduleHover = (id: string | null): void => {
-    if (hoverTimer.current !== null) {
-      clearTimeout(hoverTimer.current)
-      hoverTimer.current = null
-    }
-    if (id === null) {
-      setHoverTaskId(null)
-      return
-    }
-    hoverTimer.current = setTimeout(() => {
-      hoverTimer.current = null
-      setHoverTaskId(id)
-    }, 180)
-  }
-  useEffect(() => () => {
-    if (hoverTimer.current !== null) clearTimeout(hoverTimer.current)
-  }, [])
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') { setPinnedTaskId(null); onSelectTask?.(null) }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => { window.removeEventListener('keydown', onKeyDown) }
-  }, [onSelectTask])
-  if (tasks.length === 0) return null
-  const fallbackTask = tasks.find((task) => task.state === 'blocked')
-    ?? tasks.find((task) => task.state === 'running')
-    ?? tasks[0]!
-  const detailTask = tasks.find((task) => task.id === focusedTaskId) ?? fallbackTask
-  const detailModel = taskModelLabel(detailTask, members)
-  const waitingOn = detailTask.dependencies.filter((dependency) => (
-    tasks.find((task) => task.id === dependency)?.status !== 'completed'
-  ))
-  const dependents = tasks.filter((task) => task.dependencies.includes(detailTask.id))
-  return (
-    <section className={css.dependencySection} aria-label={t('dependency.aria')} data-dependency-map>
-      <header className={css.sectionHead}>
-        <button type="button" className={css.sectionToggleTitle} onClick={() => { setOpen((current) => !current) }} aria-expanded={open}>
-          <Chevron open={open} /><IconBranchOutline16 /> {t(parallel ? 'dependency.parallel' : 'dependency.title')}
-        </button>
-        <span className={css.sectionHint}>{pinnedTaskId === null
-          ? t(parallel ? 'dependency.hint.parallel' : workspace ? 'workspace.dependencies' : 'dependency.hint.chain')
-          : t('dependency.hint.pinned', { taskId: pinnedTaskId })}</span>
-      </header>
-      {open && (
-        <>
-          <div className={css.dagViewport}>
-            <div
-              className={css.dagCanvas}
-              data-layout={parallel ? 'parallel' : 'dependency'}
-              style={parallel ? undefined : { width: layout.width, height: layout.height }}
-            >
-              {!parallel && <svg className={css.dagEdges} width={layout.width} height={layout.height} aria-hidden>
-                {layout.edges.map((edge) => {
-                  const active = related !== null && related.has(edge.from) && related.has(edge.to)
-                  return <path key={`${edge.from}:${edge.to}`} d={edge.path} data-active={active} data-dimmed={related !== null && !active} />
-                })}
-              </svg>}
-              {layout.nodes.map(({ task, x, y }) => {
-                const model = taskModelLabel(task, members)
-                return (
-                  <button
-                    key={task.id}
-                    type="button"
-                    className={css.dagNode}
-                    style={parallel
-                      ? { height: nodeHeight }
-                      : { left: x, top: y, width: nodeWidth, height: nodeHeight }}
-                    data-task-id={task.id}
-                    data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)}
-                    data-task-model={model || undefined}
-                    data-focused={related?.has(task.id) ?? false}
-                    data-dimmed={related !== null && !related.has(task.id)}
-                    aria-pressed={pinnedTaskId === task.id}
-                    title={taskTitle(task, model)}
-                    onClick={() => { const next = pinnedTaskId === task.id ? null : task.id; setPinnedTaskId(next); onSelectTask?.(next) }}
-                    onMouseEnter={() => { scheduleHover(task.id) }}
-                    onMouseLeave={() => { scheduleHover(null) }}
-                    onFocus={() => { setKeyboardTaskId(task.id) }}
-                    onBlur={() => { setKeyboardTaskId(null) }}
-                  >
-                    <span className={css.dagNodeHead}><span className={css.dagNodeDot} />{task.id}{workspace && <span className={css.dagOwner}>{task.assignee || t('task.assignee.unclaimed')}</span>}</span>
-                    <span className={css.dagNodeLabel}>
-                      {workspace ? task.subject : compactTaskLabel(task.subject)}
-                    </span>
-                    {task.state === 'running' && (
-                      <span className={css.dagRunningState} aria-label={t('task.runningAria')}>
-                        <WorkGlyph active />
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-          <section className={css.taskDetail} data-task-detail={detailTask.id}>
-            <span className={css.taskDetailHead}>
-              <span className={css.taskDetailId}>{detailTask.id}</span>
-              <span className={css.taskDetailSubject} title={detailTask.subject}>{detailTask.subject.replace(/^开发\s*/u, '')}</span>
-              <span className={css.taskDetailBadge} data-state={discarded ? 'cancelled' : taskTone(detailTask.state, detailTask.status)}>
-                {discarded ? t('task.status.notRun') : taskStatusLabel(detailTask.status, t)}
-              </span>
-            </span>
-            <span className={css.taskDetailLine}>
-              {detailTask.assignee || t('task.assignee.unclaimed')} · {discarded
-                ? t('task.detail.notRun')
-                : detailTask.status === 'completed'
-                ? t('task.detail.completed')
-                : detailTask.status === 'cancelled'
-                  ? t('task.detail.cancelled')
-                : detailTask.status === 'failed'
-                  ? t('task.detail.failed')
-                : detailTask.dependencies.length === 0
-                ? t('task.detail.noPrerequisite')
-                : waitingOn.length === 0
-                  ? t('task.detail.ready')
-                  : t('task.detail.waitingOn', { tasks: formatTaskIds(waitingOn, t) })}
-            </span>
-            {detailModel !== '' && (
-              <span className={css.taskDetailModel} data-task-model={detailModel}>
-                {t('task.model', { model: detailModel })}
-              </span>
-            )}
-            <span className={css.taskDetailMeta}>{dependents.length === 0
-              ? t('task.detail.noDownstream')
-              : t('task.detail.unlocks', { tasks: formatTaskIds(dependents.map((task) => task.id), t) })}</span>
-          </section>
-        </>
-      )}
-    </section>
-  )
-}
 
 export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, onNavigate, t, historic = false, workspace = false }: {
   readonly team: ActivityTeam
@@ -497,10 +169,22 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
 }) {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const selectedAssignee = team.tasks.find(task => task.id === selectedTaskId)?.assignee
-  const [membersOpen, setMembersOpen] = useState(workspace)
   const [stopOpen, setStopOpen] = useState(false)
+  /**
+   * ★ 打开一个会话（成员本身，或它底下的一个子代理）。两个都走同一条路：
+   *   `navigateToSession` 会立刻收起浮动面板 —— 那是一次**明确的离开**。
+   */
+  const onNavigateMember = useCallback((childId: string): void => {
+    if (childId === '') return
+    onNavigate(team.captainSessionId as SessionId, childId as SessionId)
+  }, [onNavigate, team.captainSessionId])
   const [stopping, setStopping] = useState(false)
   const [stopError, setStopError] = useState('')
+  /**
+   * ★ 剪掉不在册的展开条目。放在 effect 里而**不是**渲染期：渲染必须是纯的。
+   *   store 只在用户真的按过某一行时才有条目，所以这里剪的永远是"被重生成
+   *   替换掉的那一行"留下的残条。
+   */
   const discarded = historic && team.phase === 'staged'
   const stopped = !historic && team.halted === true
   const busyCount = team.members.filter((member) => member.activity === 'working').length
@@ -551,9 +235,27 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
           <span className={css.teamName} title={team.name}>{team.name}</span>
           {historic && <span className={css.historicPill}>{t(discarded ? 'team.discarded' : 'team.ended')}</span>}
           {stopped && <span className={css.historicPill}>{t('team.stopped')}</span>}
+          {/**
+            * ── ★★★ R3：消息数**不在这块主面板上**（用户原话：badge-like elements）──
+            *
+            * ★ 消息计数是"队长邮箱里有多少条"，而不是第一屏要回答的那个问题
+            *   （"整队在不在动、谁在做什么"）。它作为**摘要**留在这一行里，
+            *   而不再占一格徽章位置。
+            * ★ 成员数与 completed/total 留下：前者是这一屏的主体，后者是唯一
+            *   一处说明"这一队做完了多少"的地方 —— 删了它就真的丢读数了。
+            */}
           <span className={css.teamStats}>
             <span data-stat="members">{t('team.stats.members', { count: team.members.length })}</span>
             <span data-stat="tasks">{t('team.stats.completed', { completed: completedCount, total: team.tasks.length })}</span>
+            {/**
+              * ── ★★★ R3：消息数**降级为行内文字**（不是删掉，也不是徽章）────────────
+              *
+              * 任务口径：「the message-count badge is not needed on the **primary**
+              * surface」—— 是"不该占一格徽章"，而**不是**"这条读数可以消失"。
+              * ⇒ 它仍在，只是成为这一行里的一个字串，与成员数/完成数同形。
+              * ★ 于是"删掉一个读数"与"换一种说法"在这里是两件不同的事：
+              *   前者会丢事实，后者只是减法。
+              */}
             <span data-stat="messages">{t('team.stats.messages', { count: team.messageCount })}</span>
           </span>
           {canStop && (
@@ -579,168 +281,40 @@ export function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscar
           />
         )}
 
-      <section className={css.delegationSection} aria-label={t('delegation.aria')} data-delegation-map>
-        <div className={css.captainNode}>
-          <span className={css.captainAvatar}>
-            <img className={css.leadAvatar} src={LEAD_ART} alt="" aria-hidden />
-          </span>
-          <span className={css.captainInfo}>
-            <span className={css.captainLine}>
-              <span className={css.captainName}>{t('captain.name')}</span>
-              <span className={css.captainRole}>{t('captain.role')}</span>
-            </span>
-            <span className={css.captainSummary}>{discarded
-              ? t('captain.summary.discarded', { tasks: team.tasks.length, members: team.members.length })
-              : captainBusy
-                ? t('captain.summary.withTakeover', { tasks: assignedCount, captainTasks: captainTaskIds })
-              : team.phase === 'staged'
-                ? t(team.planReviewState === 'awaiting_feedback'
-                  ? 'captain.summary.awaitingFeedback'
-                  : 'captain.summary.staged', { tasks: team.tasks.length, members: team.members.length })
-                : t('captain.summary', { tasks: assignedCount, members: team.members.length })}</span>
-          </span>
-          <span className={css.captainState} data-busy={captainBusy || busyCount > 0}>
-            <WorkGlyph active={captainBusy || busyCount > 0} />
-            {discarded
-              ? t('captain.state.discarded')
-              : captainBusy
-                ? t('captain.state.takeover', { tasks: captainTaskIds })
-              : team.phase === 'staged'
-                ? t(team.planReviewState === 'awaiting_feedback'
-                  ? 'captain.state.awaitingFeedback'
-                  : 'captain.state.staged')
-              : busyCount > 0
-                ? t('captain.state.working', { count: busyCount })
-                : t(allCompleted
-                  ? 'captain.state.collected'
-                  : allSettled
-                    ? 'captain.state.settled'
-                    : 'captain.state.waiting')}
-          </span>
-        </div>
+      <MemberScreen
+        team={team}
+        modelDirectory={modelDirectory}
+        onNavigateMember={onNavigateMember}
+        onSelectTask={setSelectedTaskId}
+        t={t}
+        historic={historic}
+        workspace={workspace}
+        discarded={discarded}
+        stopped={stopped}
+        staged={team.phase === 'staged'}
+        awaitingFeedback={team.planReviewState === 'awaiting_feedback'}
+        captainBusy={captainBusy}
+        busyCount={busyCount}
+        allCompleted={allCompleted}
+        allSettled={allSettled}
+        assignedCount={assignedCount}
+        captainTaskIds={captainTaskIds}
+      />
 
-        <ProgressOverview team={team} t={t} discarded={discarded} />
-
-        {(() => {
-          const orderedMembers = orderDelegationMembers(team.members, team.tasks)
-          const runningMembers = orderedMembers.filter((member) => (
-            member.activity === 'working' || member.status === 'working'
-            || team.tasks.some((task) => task.assignee === member.name
-              && (task.status === 'pending' || task.status === 'claimed' || task.status === 'in_progress'))
-          ))
-          const visibleMembers = membersOpen ? orderedMembers : runningMembers
-          const hiddenFinishedCount = orderedMembers.length - visibleMembers.length
-          const expandLabel = membersOpen
-            ? t('members.collapse')
-            : hiddenFinishedCount > 0
-              ? t('members.expandFinished', { count: hiddenFinishedCount })
-              : t('members.expand')
-          return (
-            <>
-              <button type="button" className={css.membersToggle} onClick={() => { setMembersOpen((current) => !current) }} aria-expanded={membersOpen} data-members-toggle>
-                <span><Chevron open={membersOpen} />{t('members.toggle', { count: team.members.length })}</span>
-                <span>{expandLabel}</span>
-              </button>
-
-              {(membersOpen || visibleMembers.length > 0) && <div className={css.delegationTree}>
-                {team.members.length === 0 && <span className={css.emptyHint}>{t('members.empty')}</span>}
-                {visibleMembers.map((member) => {
-                  const owned = team.tasks.filter((task) => task.assignee === member.name)
-                  const memberModel = memberRouteLabel(member)
-                  return (
-              <div key={member.id || member.name} className={css.memberBlock} data-activity={member.activity} data-selected-member={workspace && selectedAssignee === member.name || undefined}>
-                <span className={css.memberBranch} aria-hidden><span /></span>
-                <button
-                  type="button"
-                  className={css.memberRow}
-                  data-activity={member.activity}
-                  onClick={() => {
-                    if (member.id !== '') {
-                      onNavigate(team.captainSessionId as SessionId, member.id as SessionId)
-                    }
-                  }}
-                >
-                  <span className={css.memberAvatar} data-unread={member.unread > 0}>
-                    {memberArtUrl(member.name, member.role) !== null ? (
-                      <img className={css.memberArt} src={memberArtUrl(member.name, member.role) ?? ''} alt="" aria-hidden />
-                    ) : (
-                      <span className={css.memberInitial} style={{ background: accentOf(member.id) }}>{memberInitial(member.name)}</span>
-                    )}
-                    <img className={css.stateArt} data-activity={member.activity} src={ACTION_ART[member.activity]} alt="" aria-hidden />
-                  </span>
-                  <span className={css.memberInfo}>
-                    <span className={css.memberLine}>
-                      <span className={css.memberName}>{member.name}</span>
-                      {member.role !== '' && <span className={css.memberRole}>{member.role}</span>}
-                      {/* Inline member model badge: compact visible label, full route in
-                          title/aria-label (accessible tooltip) and the data-member-model
-                          DOM probe; noninteractive span, no tab stop. */}
-                      {memberModel !== '' && (
-                        <span className={css.memberModel} role="img" data-member-model={memberModel} title={memberModel} aria-label={memberModel}>
-                          {compactModelLabel(memberModel)}
-                        </span>
-                      )}
-                      <span className={css.memberState} data-activity={member.activity}>
-                        <WorkGlyph active={member.activity === 'working'} />
-                        {discarded
-                          ? t('member.state.notCreated')
-                          : stopped
-                            ? t('member.state.stopped')
-                            : team.phase === 'staged'
-                              ? t('member.state.staged')
-                              : memberStateLabel(member, team.tasks, historic, t)}
-                      </span>
-                    </span>
-                    <span className={css.memberStatusLine}>{discarded
-                      ? t('member.status.discarded')
-                      : stopped
-                        ? t('member.status.stopped')
-                        : team.phase === 'staged'
-                          ? t('member.status.staged')
-                      : historic && owned.length > 0 && owned.every((task) => (
-                        task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
-                      ))
-                        ? t('member.status.settled')
-                      : memberStatusText(member, team.tasks, t)}</span>
-                  </span>
-                  <span className={css.memberCount}>{member.done}/{member.total}</span>
-                </button>
-                <div className={css.assignmentLine}>
-                  <span className={css.assignmentLabel}>{t(discarded
-                    ? 'assignment.discarded'
-                    : team.phase === 'staged'
-                      ? 'assignment.staged'
-                      : 'assignment.label')}</span>
-                  <span className={css.assignmentTasks}>
-                    {owned.length === 0
-                      ? <span className={css.taskEmpty}>{t('assignment.empty')}</span>
-                      : owned.map((task) => {
-                          const model = taskModelLabel(task, team.members)
-                          const shortModel = compactModelLabel(model)
-                          return (
-                            <span
-                              key={task.id}
-                              className={css.assignmentChip}
-                              data-state={discarded ? 'cancelled' : taskTone(task.state, task.status)}
-                              data-task-model={model || undefined}
-                              title={taskTitle(task, model)}
-                            >
-                              {task.state === 'running' && shortModel !== '' ? `${task.id} · ${shortModel}` : task.id}
-                            </span>
-                          )
-                        })}
-                  </span>
-                </div>
-                  </div>
-                )
-              })}
-                </div>}
-            </>
-          )
-        })()}
-      </section>
-
-      <DependencyMap tasks={team.tasks} members={team.members} t={t} discarded={discarded} workspace={workspace} onSelectTask={setSelectedTaskId} />
+      {/**
+        * ── ★★★ R3：**第二屏只剩下依赖图**（用户原话）──────────────────────────
+        *
+        *   "screen two probably only needs to keep the dependency graph"
+        *
+        * ★ 原来的第二屏有三块：收敛循环（ReviewLoopSection）、总进度色块条、
+        *   依赖图。而：
+        *   · 总进度已经在第一屏（成员列表之上）说过一次了；
+        *   · 收敛循环的**轮次信息在 R2 里已经搬到成员行上**（`memberRound`），
+        *     所以它在这里是同一件事的第二处 —— 而两处一定会漂移；
+        *   · 依赖图是这一屏**唯一**别处没有的东西（谁解锁谁）。
+        * ⇒ 只留图。
+        */}
+      <DependencyGraph tasks={team.tasks} members={team.members} t={t} discarded={discarded} workspace={workspace} onSelectTask={setSelectedTaskId} />
       </section>
       <Modal
         open={stopOpen}
@@ -785,7 +359,32 @@ export function historicCardTeam(data: AgentTeamsCardData, owner: string): Activ
     })),
     tasks: [],
     messageCount: 0,
+    /**
+     * ── ★★★ t102：这一格**为什么是空的**（判据在下面，不是"顺手留空"）────────────
+     *
+     * 任务书问我：这是"服务端没给时的兜底"，还是"客户端还需要"的占位？
+     *
+     * MEASURED 判定 —— **两者都不是**，它是**结构必需的空**：
+     *
+     *   1. 本函数（`historicCardTeam`）是**归档卡片的合成器** ——
+     *      它把 `AgentTeamsCardData` 拼成一个 `ActivityTeam` 交给同一个面板渲染。
+     *   2. 而 `AgentTeamsCardData`（`agent-teams-card-definition.ts`）**没有任何消息字段**：
+     *      `awk '/interface AgentTeamsCardData/,/^}/' … | grep -ciE "inbox|message"` ⇒ **0**。
+     *   3. ⇒ 归档卡片**物理上**拿不到消息 ⇒ 这里**只能**是 `[]`。
+     *
+     * ★ 所以它不是缺陷 —— **缺陷在【活的那条路】**：
+     *   `activity-monitor.ts` 的 `body.teams as readonly ActivityTeam[]` 是**纯断言**，
+     *   `captainInbox` 从未被读过。那条路现在由 `readCaptainInbox` 守（见该函数的注释）。
+     *
+     * ★ 但**留空仍要与"读不到"不同形**：归档卡片是"**确实没有消息**"（`'empty'`），
+     *   不是"**读不到消息**"（`'absent'`）。
+     *   ⇒ 所以这里**显式**声明 `'empty'`，而不是让它落进 `'absent'`。
+     *   ★ 若省掉这一行，两种情形在读数上会**同形** —— 而补救动作相反
+     *     （前者什么都不用做，后者要查服务端）。
+     */
     captainInbox: [],
+    captainInboxState: 'empty',
+    captainInboxUnreadable: 0,
   }
 }
 
@@ -1273,9 +872,9 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
                     <TeamSection
                       key={team.teamId}
                       team={team}
-                      modelDirectory={team.phase === 'staged'
-                        ? modelDirectories.directoryFor(team.captainSessionId as SessionId)
-                        : undefined}
+                      modelDirectory={historic
+                        ? undefined
+                        : modelDirectories.directoryFor(team.captainSessionId as SessionId)}
                       onContinuePlanning={returnToComposer}
                       onDiscarded={returnToComposer}
                       onNavigate={navigateToSession}

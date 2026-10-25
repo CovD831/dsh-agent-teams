@@ -1,0 +1,431 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AgentTeams 判据层：六个插入点，以及每个位置上挂了什么",
+    "subtitle": "代码依据 = ba321305 · 红色 = 写在盘上但没有接线",
+    "locale": "zh-CN",
+    "visual_preset": "blueprint",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-gate-pipeline-20261008-124459/gate-pipeline.html",
+    "animation": "trace",
+    "repository": {
+      "url": "git@github.com:CovD831/dsh-agent-teams.git",
+      "revision": "ba321305baae72335e69ec826e245a45ecc9027a",
+      "link_mode": "local-only"
+    }
+  },
+  "lanes": [
+    {
+      "id": "flow",
+      "label": "流程 · 主会话与编排层"
+    },
+    {
+      "id": "gates",
+      "label": "判据层 · src/gates/<point>/"
+    },
+    {
+      "id": "verdict",
+      "label": "裁决"
+    }
+  ],
+  "phases": [
+    {
+      "id": "before",
+      "label": "⓪ 成团之前",
+      "fromCol": 0,
+      "toCol": 1,
+      "variant": "emphasis"
+    },
+    {
+      "id": "build",
+      "label": "①② 契约与派发",
+      "fromCol": 2,
+      "toCol": 3
+    },
+    {
+      "id": "settle",
+      "label": "③④⑤ 收口 · 交付 · 全程",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "groups": [],
+  "mainPath": [
+    "captain",
+    "gates_admit",
+    "gates_contract",
+    "gates_dispatch",
+    "gates_completion",
+    "gates_delivery",
+    "gates_runtime"
+  ],
+  "nodes": [
+    {
+      "id": "captain",
+      "lane": "flow",
+      "col": 0,
+      "type": "external",
+      "label": "主会话",
+      "sublabel": "聊完定计划",
+      "width": 118
+    },
+    {
+      "id": "evaluate",
+      "lane": "flow",
+      "col": 1,
+      "type": "backend",
+      "label": "evaluate(point)",
+      "sublabel": "只认插入点",
+      "tag": "编排层",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/gates/index.ts",
+          "line": 1,
+          "end_line": 8,
+          "label": "唯一装配点"
+        }
+      ]
+    },
+    {
+      "id": "create_task",
+      "lane": "flow",
+      "col": 2,
+      "type": "backend",
+      "label": "create_task",
+      "sublabel": "契约落库",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/shared/entities.ts",
+          "line": 2011,
+          "label": "contract 求值点"
+        }
+      ],
+      "tag": "契约落库"
+    },
+    {
+      "id": "member",
+      "lane": "flow",
+      "col": 3,
+      "type": "frontend",
+      "label": "成员开工",
+      "sublabel": "worktree",
+      "width": 118
+    },
+    {
+      "id": "outcome",
+      "lane": "flow",
+      "col": 5,
+      "type": "messagebus",
+      "label": "出口",
+      "sublabel": "记录/拒绝/放行",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/shared/entities.ts",
+          "line": 1958,
+          "end_line": 1970,
+          "label": "三态映射"
+        }
+      ]
+    },
+    {
+      "id": "gates_admit",
+      "lane": "gates",
+      "col": 0,
+      "type": "security",
+      "label": "admission 三条",
+      "sublabel": "★ 未接线",
+      "tag": "★ 未进 ALL_GATES",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/gates/admission/convene.ts",
+          "line": 123,
+          "label": "convene.ts 在盘上"
+        },
+        {
+          "path": "src/gates/index.ts",
+          "line": 231,
+          "end_line": 280,
+          "label": "却没列它"
+        }
+      ]
+    },
+    {
+      "id": "gates_contract",
+      "lane": "gates",
+      "col": 1,
+      "type": "backend",
+      "label": "contract 两条",
+      "sublabel": "①②",
+      "tag": "verify-command",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/gates/contract/verify-command.ts",
+          "line": 63,
+          "label": "id"
+        }
+      ]
+    },
+    {
+      "id": "gates_dispatch",
+      "lane": "gates",
+      "col": 2,
+      "type": "backend",
+      "label": "dispatch 两条",
+      "sublabel": "②",
+      "tag": "派发前",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/update-task/dispatch.ts",
+          "line": 117,
+          "label": "dispatch 求值点"
+        }
+      ]
+    },
+    {
+      "id": "gates_completion",
+      "lane": "gates",
+      "col": 3,
+      "type": "backend",
+      "label": "completion 四条",
+      "sublabel": "③",
+      "tag": "汇报完成",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/update-task/completion.ts",
+          "line": 430,
+          "label": "completion 求值点"
+        }
+      ]
+    },
+    {
+      "id": "gates_delivery",
+      "lane": "gates",
+      "col": 4,
+      "type": "backend",
+      "label": "delivery 两条",
+      "sublabel": "④",
+      "tag": "宣布交付",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/delivery.ts",
+          "line": 78,
+          "label": "delivery 求值点"
+        }
+      ]
+    },
+    {
+      "id": "gates_runtime",
+      "lane": "gates",
+      "col": 5,
+      "type": "messagebus",
+      "label": "runtime 一条",
+      "sublabel": "⑤ 全程",
+      "tag": "不否决",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/tools/shared/entities.ts",
+          "line": 1904,
+          "label": "runtime 求值点"
+        }
+      ]
+    },
+    {
+      "id": "verdict3",
+      "lane": "verdict",
+      "col": 3,
+      "type": "messagebus",
+      "label": "三态裁决",
+      "sublabel": "ok/blocked",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/gates/registry.ts",
+          "line": 1,
+          "end_line": 30,
+          "label": "GateVerdict"
+        }
+      ]
+    },
+    {
+      "id": "merge",
+      "lane": "verdict",
+      "col": 4,
+      "type": "database",
+      "label": "合并规则",
+      "sublabel": "unmeasured 优先",
+      "width": 118,
+      "sources": [
+        {
+          "path": "src/gates/registry.ts",
+          "line": 1,
+          "end_line": 30,
+          "label": "合并语义"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "admit-contract",
+      "from": "gates_admit",
+      "to": "gates_contract",
+      "label": "够格 ⇒ 建契约",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "contract-dispatch",
+      "from": "gates_contract",
+      "to": "gates_dispatch",
+      "label": "合法 ⇒ 派发前",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "dispatch-completion",
+      "from": "gates_dispatch",
+      "to": "gates_completion",
+      "label": "开工 ⇒ 汇报完成",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "completion-delivery",
+      "from": "gates_completion",
+      "to": "gates_delivery",
+      "label": "收口 ⇒ 交付",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "delivery-runtime",
+      "from": "gates_delivery",
+      "to": "gates_runtime",
+      "label": "交付后仍全程探活",
+      "variant": "dashed",
+      "role": "main"
+    },
+    {
+      "id": "captain-admit",
+      "from": "captain",
+      "to": "gates_admit",
+      "label": "主会话：聊完产出计划",
+      "variant": "security",
+      "role": "main"
+    },
+    {
+      "id": "evaluate-contract",
+      "from": "evaluate",
+      "to": "gates_contract",
+      "label": "registry.evaluate('contract')",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "create-dispatch",
+      "from": "create_task",
+      "to": "gates_dispatch",
+      "label": "evaluate('dispatch')",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "member-completion",
+      "from": "member",
+      "to": "gates_completion",
+      "label": "evaluate('completion')",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "runtime-outcome",
+      "from": "gates_runtime",
+      "to": "outcome",
+      "label": "只记录，不拒绝",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "completion-verdict",
+      "from": "gates_completion",
+      "to": "verdict3",
+      "label": "三态裁决",
+      "variant": "emphasis",
+      "role": "branch"
+    },
+    {
+      "id": "verdict-merge",
+      "from": "verdict3",
+      "to": "merge",
+      "label": "合并规则",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "merge-outcome",
+      "from": "merge",
+      "to": "outcome",
+      "label": "唯一出口",
+      "variant": "emphasis",
+      "role": "branch"
+    },
+    {
+      "id": "delivery-outcome",
+      "from": "gates_delivery",
+      "to": "outcome",
+      "label": "可交付？",
+      "variant": "default",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "★ admission 的三条判据：写了，但没接线",
+      "items": [
+        "src/gates/admission/ 三个文件都在盘上：absorb.ts · checkpoint.ts · convene.ts",
+        "src/gates/index.ts 的 ALL_GATES 里一条都没有 ⇒ registry.list().admission = []",
+        "全仓没有 evaluate('admission', …) 的生产调用点（只有夹具里调）",
+        "⇒ 那个位置永远 registered=0 ⇒ 恒返回 ok ⇒ 三条判据一次都不会跑"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "插入点是什么：六个位置，不是六条判据",
+      "items": [
+        "registry.ts 的 INSERTION_POINTS —— 位置是流程形状，判据挂在位置上",
+        "编排层只调 registry.evaluate(point, ctx)，不知道任何判据的名字或语义",
+        "加一个位置属于上游；换一条判据只改 gates/index.ts 里的一行 import"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "每个位置挂了什么（已接线的 11 条）",
+      "items": [
+        "contract ②：build-artifact-scope · verify-command",
+        "dispatch ②：changed-paths · worktree",
+        "completion ④：verify-rerun · r5 · mutation · backtest（便宜的先跑）",
+        "delivery ②：coverage · convergence ｜ runtime ①：liveness"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "为什么「空位置」与「全跳过」不许同形",
+      "items": [
+        "registered === 0 ⇒ ok（这里本来就没有判据，是正常情形）",
+        "skippedAll ⇒ ok:false + 显式说明（这一步没被检查）",
+        "一个空的 blocked: 是没有对象的指控 —— 记录里必须能分出三态"
+      ]
+    }
+  ]
+}

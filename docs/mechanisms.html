@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentTeams 改造地图</title>
+<style>
+  :root { --fg:#16181d; --dim:#6b7280; --line:#e5e7eb; --bg:#fbfbfc; --card:#fff;
+          --acc:#2563eb; --ok:#15803d; --part:#b45309; --prose:#b91c1c; --unwired:#7c3aed; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e8eaed; --dim:#9aa0a6; --line:#33373d;
+          --bg:#131417; --card:#1a1c20; --acc:#7aa2ff; --ok:#4ade80; --part:#fbbf24;
+          --prose:#f87171; --unwired:#c4b5fd; } }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2.5rem 2rem 7rem; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,"PingFang SC","Helvetica Neue",sans-serif; }
+  h1 { font-size:1.7rem; margin:0 0 .35rem }
+  h2 { font-size:1.2rem; margin:3.2rem 0 .5rem; padding-bottom:.45rem; border-bottom:2px solid var(--line) }
+  h3 { font-size:1rem; margin:1.6rem 0 .6rem }
+  .lede { color:var(--dim); margin:0 0 2rem; max-width:60rem }
+  .sub { color:var(--dim); font-size:.9rem; margin:.3rem 0 1rem; max-width:62rem }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:.9rem; margin:1.8rem 0 }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.1rem }
+  .stat b { display:block; font-size:1.9rem; line-height:1.1; font-variant-numeric:tabular-nums }
+  .stat span { color:var(--dim); font-size:.85rem }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:1rem 1.15rem; margin:.7rem 0 }
+  .card.unwired { border-left:4px solid var(--unwired) }
+  .rowhead { display:flex; gap:.55rem; align-items:baseline; flex-wrap:wrap }
+  .id { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.86rem; color:var(--dim) }
+  .pill { font-size:.72rem; padding:.14rem .55rem; border-radius:999px; border:1px solid var(--line); color:var(--dim); white-space:nowrap }
+  .pill.ok { color:var(--ok); border-color:var(--ok) }
+  .pill.part { color:var(--part); border-color:var(--part) }
+  .pill.prose { color:var(--prose); border-color:var(--prose) }
+  .pill.unwired { color:var(--unwired); border-color:var(--unwired) }
+  .pill.captain { color:var(--acc); border-color:var(--acc) }
+  .desc { margin:.5rem 0 0; font-size:.93rem; color:var(--fg) }
+  .why { color:var(--dim); font-size:.85rem; margin-top:.4rem }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85em;
+         background:rgba(127,127,127,.13); padding:.06rem .32rem; border-radius:4px }
+  .chain { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:1rem 0 1.6rem }
+  .step { border:1px solid var(--line); border-radius:9px; padding:.5rem .8rem; background:var(--card); font-size:.87rem }
+  .step b { display:block; font-size:.95rem }
+  .step i { font-style:normal; color:var(--dim); font-size:.78rem }
+  .step.empty { border-style:dashed; color:var(--dim) }
+  .arrow { color:var(--dim) }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); gap:1rem }
+  table { border-collapse:collapse; width:100%; font-size:.9rem; margin:.5rem 0 }
+  th,td { text-align:left; padding:.5rem .6rem; border-bottom:1px solid var(--line); vertical-align:top }
+  th { color:var(--dim); font-weight:600; font-size:.82rem }
+  .warn { border:1px solid var(--part); border-radius:12px; padding:1rem 1.15rem; margin:1.6rem 0; background:var(--card) }
+  .warn h3 { margin-top:0 }
+  .toc { display:flex; gap:1.2rem; flex-wrap:wrap; font-size:.9rem; margin:1.4rem 0 0 }
+  .toc a { color:var(--acc); text-decoration:none }
+  .toc a:hover { text-decoration:underline }
+  footer { margin-top:4rem; color:var(--dim); font-size:.85rem; border-top:1px solid var(--line); padding-top:1rem }
+</style></head><body>
+
+<h1>AgentTeams 改造地图</h1>
+<p class="lede">
+  这张页回答一件事：<b>我们对上游插件到底改了什么、每一条落在哪、有几条真的会开火。</b><br>
+  ★ 它不是手写的清单 —— 它由 <code>scripts/mechanisms-html.mjs</code> 从<b>编译产物</b>生成，
+  判据读注册表、工具读 <code>tool-names</code>、prompt 规则直接调用产品函数。
+  <b>改了代码重跑一次，这张页就跟着变；"忘了更新文档"因此不可能发生。</b>
+</p>
+
+<div class="toc">
+  <a href="#shape">① 整体形状</a>
+  <a href="#gates">② 机械判据（13 条）</a>
+  <a href="#gap">③ ★ 写了但没接线</a>
+  <a href="#prose">④ ★ prompt 里的机制</a>
+  <a href="#tools">⑤ 工具面</a>
+  <a href="#how">⑥ 怎么重跑</a>
+</div>
+
+<div class="stats">
+  <div class="stat"><b>14</b><span>已接线判据</span></div>
+  <div class="stat"><b style="color:var(--unwired)">3</b><span>写了但没接线</span></div>
+  <div class="stat"><b>16</b><span>工具（12 captain-only）</span></div>
+  <div class="stat"><b>10</b><span>prompt 规则</span></div>
+  <div class="stat"><b style="color:var(--ok)">5</b><span>规则有机械判据</span></div>
+  <div class="stat"><b style="color:var(--part)">2</b><span>部分覆盖</span></div>
+  <div class="stat"><b style="color:var(--prose)">3</b><span>仅 prompt 一句话</span></div>
+</div>
+
+<h2 id="shape">① 整体形状：机制挂在流程的六个位置上</h2>
+<p class="sub">
+  ★ 这是本项目与上游最大的结构差异：<b>判据不写在编排层里，而是挂在"流程位置"上</b>。
+  位置是流程的形状（换实现不影响接线），判据是实现（可以一条一条换）。
+  编排层只调 <code>registry.evaluate(point, ctx)</code> —— 它不知道任何判据的名字。
+</p>
+<div class="chain">
+<div class="step empty"><b>准入 <span class="pill">0 条</span></b><i>成团【之前】</i><br><i>这份需求够不够格进场</i></div>
+<span class="arrow">→</span><div class="step"><b>契约 <span class="pill">3 条</span></b><i>建任务 / 改契约</i><br><i>这份契约合不合法、可不可判</i></div>
+<span class="arrow">→</span><div class="step"><b>派发 <span class="pill">3 条</span></b><i>成员开工前</i><br><i>这次派发做得对不对、该不该派</i></div>
+<span class="arrow">→</span><div class="step"><b>收口 <span class="pill">4 条</span></b><i>成员汇报完成</i><br><i>这一步的产出经不经得起重跑</i></div>
+<span class="arrow">→</span><div class="step"><b>交付 <span class="pill">2 条</span></b><i>宣布交付那一刻</i><br><i>整件事齐不齐、人收没收敛</i></div>
+<span class="arrow">→</span><div class="step"><b>运行中 <span class="pill">2 条</span></b><i>全程</i><br><i>过程健不健康（只告警，不拦任务）</i></div>
+</div>
+
+<h2 id="gates">② 机械判据：会真的开火的那 14 条</h2>
+<p class="sub">
+  每条判据都必须三态裁决（<code>ok</code> / <code>blocked</code> / <code>unmeasured</code>），
+  并自带三臂夹具（伪造臂 / 未测量臂 / 对照臂）。
+  <code>requires</code> 那一列是<b>它的输入面</b> —— ★ 而"判据接进来了"与"它的输入接上了"是两件事，
+  本项目为此踩过五次，所以它单列一列。
+</p>
+
+<h3>契约 <span class="id">contract</span> · 3 条</h3>
+<div class="card">
+  <div class="rowhead"><span class="id">contract.build-artifact-scope</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">inScope 声明了 src/ 下会改动的文件、却没有声明对应的 lib/ 构建产物 ⇒ 提示（本仓库强制 lib/ 与 src/ 同步，成员 build 后必然产生 undeclared 路径）</p>
+  <div class="why">输入面：<code>task</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">contract.verify-command</span>
+    <span class="pill">2 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">契约里声明的 verify 命令必须可判（既能为做对的工作变绿、也能为做错的工作变红）：空命令、写死的真/假、以及拿 -x 去比&quot;命令输出&quot;（如 grep -qx N &lt;(wc -l …)，前导空格让整行匹配永远不成立）都会在【建任务那一刻】被说清楚</p>
+  <div class="why">输入面：<code>task</code> <code>execVerifyCommand</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">contract.task-atomicity</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">★ 它判的是【契约声明面的形状】，不是「原子性」本身 —— 三条可机械读出的信号：verify 的条数与覆盖面、inScope 是否跨了概念上独立的目录组、objective 是否列了多个并列交付。★ 判定信号是【inScope 里有没有&quot;没被更具体声明覆盖的目录前缀&quot;】（归一化之后的集合覆盖，`src/` 与 `src` 是同一个键）—— 那是一个**语法层面**的结构读数：它**不读盘**，所以它判不了&quot;这个目录是不是新建的&quot;。★ 而&quot;形状看起来不原子&quot;只是&quot;失败可能不可归因&quot;的一个【征兆】，不是它的判据（t43 已用&quot;只差一个尾斜杠的同一件工作&quot;证伪过那个更强的声称）。判不了时报 unmeasured（绝不当成原子）。★ 本判据【不接生产】（t38：接线会让没有 verify 的任务全部建不出来）</p>
+  <div class="why">输入面：<code>task</code></div>
+</div>
+<h3>派发 <span class="id">dispatch</span> · 3 条</h3>
+<div class="card">
+  <div class="rowhead"><span class="id">dispatch.changed-paths</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">把成员自报的 changedPaths 与它会话里观察到的真实写入比对；虚报或隐瞒即拒绝（防止伪造改动清单）</p>
+  <div class="why">输入面：<code>observedChangedPaths</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">dispatch.worktree</span>
+    <span class="pill">2 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">核对声明的工作是否真的落在隔离 worktree 里、且没落到主检出；读不到 worktree 即&quot;未测量&quot;（防止隔离退化成提示）</p>
+  <div class="why">输入面：<code>worktreePath</code> <code>arrival</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">dispatch.plan-reviewed</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">★ 派发前：这份计划**审过了吗**？—— 带 `reviewed` 且五问无 fail/unmeasured ⇒ 放行；不带 ⇒ 拦住（★ 而&quot;不带&quot;是正常状态，不是错误：它是&quot;这条路没走自动生成&quot;）；带了而形状坏 ⇒ 读不出它审了什么 ⇒ unmeasured（★ 绝不并进通过）。</p>
+  <div class="why">输入面：<code>task.reviewed</code></div>
+</div>
+<h3>收口 <span class="id">completion</span> · 4 条</h3>
+<div class="card">
+  <div class="rowhead"><span class="id">completion.verify-rerun</span>
+    <span class="pill">5 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">重跑任务声明的 verify 命令，与成员自报的 exitCode 比对；不一致即拒绝（防止伪造 passed）</p>
+  <div class="why">输入面：<code>execVerifyCommand</code> <code>task</code> <code>task.verify</code> <code>wantsCompleted</code> <code>taskNotTerminal</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">completion.r5</span>
+    <span class="pill">7 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">把新测试在【父版本】（worktree 的 base）上跑一遍：它必须先红；再到修复版本上必须绿。父版本拿不到 ⇒ unmeasured，不是 ok</p>
+  <div class="why">输入面：<code>runTestOnRevision</code> <code>scanDirs</code> <code>parentRevision</code> <code>update.newTestFiles</code> <code>task.kind</code> <code>wantsCompleted</code> <code>taskNotTerminal</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">completion.mutation</span>
+    <span class="pill">8 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">对【改动行范围】注入 L1/L2/L3 变异体并重跑杀手套件：变异体存活即拒绝（防止装饰性测试）；套件够不到被变异文件 ⇒ unmeasured</p>
+  <div class="why">输入面：<code>readFile</code> <code>runTest</code> <code>writeFile</code> <code>changedLines</code> <code>killerSuites</code> <code>task.kind</code> <code>wantsCompleted</code> <code>taskNotTerminal</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">completion.backtest</span>
+    <span class="pill">7 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">按依赖图选测并跑全量，证明改动没把别处改坏；基准不绿或选测来源不明即拒绝/未测量（不能归因时绝不放行）</p>
+  <div class="why">输入面：<code>baseline</code> <code>coverage</code> <code>coverage.source</code> <code>coverage.knownTests</code> <code>coverage.selected</code> <code>execBacktestCommand</code> <code>changedPaths</code></div>
+</div>
+<h3>交付 <span class="id">delivery</span> · 2 条</h3>
+<div class="card">
+  <div class="rowhead"><span class="id">delivery.coverage</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">用户目标的每个条目都必须有任务声称覆盖它；有目标无人认领 ⇒ 交付时拒绝（其余任务全绿会让&quot;没人做的目标&quot;看起来像都完成了）</p>
+  <div class="why">输入面：<code>team</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">delivery.convergence</span>
+    <span class="pill">1 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">交付时每个成员都必须处在收敛态；working / unknown / 空白回复都不是收敛 ⇒ 拒绝（idle ≠ converged，空回复不是收敛）</p>
+  <div class="why">输入面：<code>team</code></div>
+</div>
+<h3>运行中 <span class="id">runtime</span> · 2 条</h3>
+<div class="card">
+  <div class="rowhead"><span class="id">runtime.liveness</span>
+    <span class="pill">2 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">周期性探活：两次探活之间最后活动时刻没变 ⇒ 告警「卡死了」；还在活动 ⇒ 只报「还在跑，已 N 分钟」。永不因为等太久而说话（它是探活，不是硬超时），也不拒绝任务（契约 §5）</p>
+  <div class="why">输入面：<code>event</code> <code>waits</code></div>
+</div>
+<div class="card">
+  <div class="rowhead"><span class="id">runtime.stall</span>
+    <span class="pill">2 个输入</span>
+    <span class="pill">按 kind 适用</span>
+    
+  </div>
+  <p class="desc">★ 它判的是【这个任务是不是停下来了】—— 依据是任务记录上**已经被数出来**的事实：同一个 (task, gate) 被拒的次数 ≥ N，或任务在 in_progress 上超过了 N 轮。★ 它**不读成员的自报**（一个卡住的成员恰恰最不可能如实说&quot;我卡住了&quot;）。★ 它【记录，不拒绝】：runtime 位置的裁决不得阻止流程。★ 而&quot;说不出&quot;（任务面整个没接上）是**第三态**，绝不当成&quot;没人停住&quot;。</p>
+  <div class="why">输入面：<code>event</code> <code>team</code></div>
+</div>
+
+<h2 id="gap">③ ★ 写了但没接线：3 条</h2>
+<div class="warn">
+  <h3>这一格是这张页最该被看见的部分</h3>
+  <p class="sub" style="margin-bottom:.6rem">
+    下面这些判据<b>源码在盘上、夹具也有</b>，但没有进装配清单 <code>ALL_GATES</code> ⇒
+    注册表里读不到它 ⇒ <b>一次都不会被求值</b>。
+  </p>
+  <p class="sub" style="margin-bottom:.6rem">
+    本项目把它记作「<b>写了但没接线</b>」，而它已经复发过多次
+    （<code>contract.task-atomicity</code>、<code>dispatch.plan-reviewed</code> 都曾是这一格）。
+    源码注释里原话：<i>「这与 admission 那三条是同一个病：写了但没接线。」</i>
+  </p>
+  <p class="sub" style="margin-bottom:0">
+    ★ 而它正是"机制变多了、但不知道哪些在起作用"的<b>最具体来源</b> ——
+    一个不存在于装配清单的判据，与一个根本没写的判据，在运行读数上完全同形。
+  </p>
+</div>
+<div class="card unwired">
+  <div class="rowhead"><span class="id">admission.absorb</span><span class="pill unwired">未接线</span><span class="pill">admission</span></div>
+  <div class="why">文件：<code>src/gates/admission/absorb.ts</code></div>
+</div>
+<div class="card unwired">
+  <div class="rowhead"><span class="id">admission.checkpoint</span><span class="pill unwired">未接线</span><span class="pill">admission</span></div>
+  <div class="why">文件：<code>src/gates/admission/checkpoint.ts</code></div>
+</div>
+<div class="card unwired">
+  <div class="rowhead"><span class="id">admission.convene</span><span class="pill unwired">未接线</span><span class="pill">admission</span></div>
+  <div class="why">文件：<code>src/gates/admission/convene.ts</code></div>
+</div>
+
+<h2 id="prose">④ ★ prompt 里的机制：哪一条只是"一句话"</h2>
+<p class="sub">
+  用户的判断是对的：这个插件的 captain protocol 是 <b>10 条纯 prompt 规则</b>，
+  它们注入系统提示词，而<b>有一部分没有任何机械判据在背后</b>。
+  下面把每一条规则与判据层做对照 ——
+  ★ 而"没匹配上"<b>不等于</b>"没有机械判据"：有的规则天生无法机械判（那是三态里的 <code>prose-only</code>，不是"漏了"）。
+  <br>匹配用的是关键词启发式，所以每一条都印出<b>它是靠哪个词匹配上的</b>，供复核。
+</p>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 1</span>
+      <span class="pill part">部分覆盖</span>
+      <span class="pill">命中 1 条判据</span>
+    </div>
+    <p class="desc">Inspect current team state when needed, using agent_teams_status. Continue existing work without duplicating its roster/tasks. Create only when no current team exists, with the user&#39;s goal as description and approval=&quot;required&quot;; automatic approval requires an explicit request to run immediately. Staged plans never spawn or schedule work.</p>
+    <div class="why">对应判据：<code>dispatch.plan-reviewed</code><span style="opacity:.7">（经「plan」）</span></div>
+    <div class="why">备注：建队/计划：admission 位置本应管这一段</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 2</span>
+      <span class="pill prose">仅 prompt 一句话</span>
+      
+    </div>
+    <p class="desc">Add each needed role once; members inherit your model route unless another is requested/needed. A requested profile goes to create({profile}); it supplies its roster. Seed profiles also supply tasks; captain-planning profiles require your DAG. Do not duplicate either.</p>
+    
+    <div class="why">备注：成员与 profile：装配层校验，无独立判据</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 3</span>
+      <span class="pill ok">有机械判据</span>
+      <span class="pill">命中 4 条判据</span>
+    </div>
+    <p class="desc">Build the complete smallest useful DAG while staged. For an ordinary research/audit plan, pass the roster and dependency graph together in create({plan:{members,tasks}}) to avoid repeated setup rounds. Every task needs a subject; pass kind and assignee explicitly when the plan specifies them. Titles, descriptions and member roles do not set these fields. Dependencies represent prerequisites. Give every required contr …</p>
+    <div class="why">对应判据：<code>contract.build-artifact-scope</code><span style="opacity:.7">（经「contract」）</span> <code>contract.verify-command</code><span style="opacity:.7">（经「contract」）</span> <code>contract.task-atomicity</code><span style="opacity:.7">（经「contract」）</span> <code>dispatch.plan-reviewed</code><span style="opacity:.7">（经「plan」）</span></div>
+    <div class="why">备注：计划形状 ↔ contract 位置</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 4</span>
+      <span class="pill part">部分覆盖</span>
+      <span class="pill">命中 1 条判据</span>
+    </div>
+    <p class="desc">Respect Web approve/return/discard control messages. On return, ask what to change before editing; after the answer, use one atomic agent_teams_edit_plan batch (edit downstream references before removals), summarize and await review again. Never inspect or edit .agent-teams state files or plugin source code to revise plans. Discard does not authorize a replacement.</p>
+    <div class="why">对应判据：<code>dispatch.plan-reviewed</code><span style="opacity:.7">（经「plan」）</span></div>
+    <div class="why">备注：计划审查 ↔ dispatch.plan-reviewed</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 5</span>
+      <span class="pill prose">仅 prompt 一句话</span>
+      
+    </div>
+    <p class="desc">The scheduler dispatches ready tasks after approval. Delegate; do not duplicate slow work or send messages merely to start a stage. Handle reports/user work, then yield when waiting is all that remains: reports wake you automatically. Use status after a delivery or user request, never busy-poll or wait for unassigned members.</p>
+    
+    <div class="why">备注：调度纪律：无判据（是 captain 的行为规范）</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 6</span>
+      <span class="pill ok">有机械判据</span>
+      <span class="pill">命中 3 条判据</span>
+    </div>
+    <p class="desc">Tasks carry attempt_id capabilities. Use the current attempt_id; stale means ownership changed. Pause members only on explicit request; later guidance via send_message continues that same attempt. Retry, transfer or take over through reassign_task first; it revokes the old attempt and waits for quiescence. Prefer a member. Captain implementation/review takeover requires a user request. Every takeover is one ready tas …</p>
+    <div class="why">对应判据：<code>dispatch.changed-paths</code><span style="opacity:.7">（经「changed」）</span> <code>dispatch.worktree</code><span style="opacity:.7">（经「worktree」）</span> <code>completion.r5</code><span style="opacity:.7">（经「worktree」）</span></div>
+    <div class="why">备注：派发 ↔ dispatch.worktree / changed-paths</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 7</span>
+      <span class="pill ok">有机械判据</span>
+      <span class="pill">命中 4 条判据</span>
+    </div>
+    <p class="desc">In a running team, correct never-started pending tasks with edit_plan update_task; preserve dependency and ownership contracts instead of cancelling and recreating the graph. A captain can cancel a never-started pending task directly. Active attempts still require reassign_task. Quality kinds (requirements, implementation, verification, review, repair, integration) require objective + acceptance; implementation/repai …</p>
+    <div class="why">对应判据：<code>contract.build-artifact-scope</code><span style="opacity:.7">（经「artifact」）</span> <code>contract.verify-command</code><span style="opacity:.7">（经「verify」）</span> <code>contract.task-atomicity</code><span style="opacity:.7">（经「verify」）</span> <code>completion.verify-rerun</code><span style="opacity:.7">（经「verify」）</span></div>
+    <div class="why">备注：契约形状 ↔ contract 位置三条</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 8</span>
+      <span class="pill ok">有机械判据</span>
+      <span class="pill">命中 6 条判据</span>
+    </div>
+    <p class="desc">When full quality mode is requested: requirements → implementation → verification → review → integration. Plan the entire DAG while staged, including implementation before requirements finishes and integration depending on review round 1. Failed review automatically adds repair + next review and rewires pending downstream gates. Do not recreate this loop, omit integration or depend on a failed task. Review acceptance …</p>
+    <div class="why">对应判据：<code>contract.verify-command</code><span style="opacity:.7">（经「verify」）</span> <code>contract.task-atomicity</code><span style="opacity:.7">（经「verify」）</span> <code>completion.verify-rerun</code><span style="opacity:.7">（经「verify」）</span> <code>completion.r5</code><span style="opacity:.7">（经「r5」）</span> <code>completion.mutation</code><span style="opacity:.7">（经「mutation」）</span> <code>completion.backtest</code><span style="opacity:.7">（经「backtest」）</span></div>
+    <div class="why">备注：质量闭环 ↔ completion 位置四条</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 9</span>
+      <span class="pill prose">仅 prompt 一句话</span>
+      
+    </div>
+    <p class="desc">Halted means the user stopped work (including the captain turn). Resume only on a later explicit user request with a reason, via agent_teams_resume or create_task({resume:true,resumeReason}); creating tasks alone never resumes. Escalated means the review loop hit its limit, not a halt. Deployment requires explicit user confirmation.</p>
+    
+    <div class="why">备注：halt/resume 语义：有工具行为，无独立判据</div>
+  </div>
+<div class="card">
+    <div class="rowhead">
+      <span class="id">规则 10</span>
+      <span class="pill ok">有机械判据</span>
+      <span class="pill">命中 2 条判据</span>
+    </div>
+    <p class="desc">Wait for all required tasks to be terminal and members idle/ready, present results, then delete/archive unless the user wants to continue. Never discard unfinished work without authorization.</p>
+    <div class="why">对应判据：<code>delivery.coverage</code><span style="opacity:.7">（经「coverage」）</span> <code>delivery.convergence</code><span style="opacity:.7">（经「convergence」）</span></div>
+    <div class="why">备注：交付 ↔ delivery 位置两条</div>
+  </div>
+
+<h2 id="tools">⑤ 工具面：模型看得见的动作</h2>
+<p class="sub">
+  <b>captain-only</b> 的那一列由 <code>TEAM_TOOL_NAMES</code> 减去 <code>MEMBER_TOOL_NAMES</code> 算出 ——
+  与运行时的 <code>deny</code> 列表<b>同一个来源</b>，所以这张表不会与真实可见性分叉。
+</p>
+<table>
+  <thead><tr><th>工具</th><th>谁能调</th><th>说明</th></tr></thead>
+  <tbody>
+  <tr><td><code>agent_teams_create</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_approve</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_edit_plan</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_add_member</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_remove_member</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_create_task</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_reassign_task</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_claim_task</code></td><td>成员 + captain</td><td class="id">成员本位的动作</td></tr>
+<tr><td><code>agent_teams_update_task</code></td><td>成员 + captain</td><td class="id">成员本位的动作</td></tr>
+<tr><td><code>agent_teams_amend_task</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_declare_delivery</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_send_message</code></td><td>成员 + captain</td><td class="id">成员本位的动作</td></tr>
+<tr><td><code>agent_teams_status</code></td><td>成员 + captain</td><td class="id">成员本位的动作</td></tr>
+<tr><td><code>agent_teams_resume</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_delete</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+<tr><td><code>agent_teams_restart</code></td><td><span class="pill captain">captain-only</span></td><td class="id">队长专有</td></tr>
+  </tbody>
+</table>
+
+<h2 id="how">⑥ 怎么重跑这张页</h2>
+<p class="sub">
+  ★ 它读的是 <b>lib/</b>（编译产物），因为那才是进程实际加载的东西。
+  改了 <code>src/</code> 之后要先 build。
+</p>
+<pre style="background:var(--card);border:1px solid var(--line);border-radius:10px;padding:1rem;overflow:auto"><code>cd ~/Desktop/agent-teams-dev
+pnpm build                        # 先让 lib/ 与 src/ 同步
+node scripts/mechanisms-html.mjs  # 重新生成 docs/mechanisms.html</code></pre>
+<p class="sub">
+  生成的判据数、工具数、规则数全部来自运行时求值 ——
+  <b>某个机制没在装配清单里，它就会出现在第 ③ 节，而不是被悄悄算进"已有机制"。</b>
+</p>
+
+<footer>
+  生成于 2026/10/14 13:56:14 ·
+  真值来源：<code>lib/gates/index.js</code>（注册表）、<code>lib/tool-names.js</code>、
+  <code>lib/index.js</code>（<code>usageSectionText()</code>）·
+  生成器：<code>scripts/mechanisms-html.mjs</code>
+</footer>
+</body></html>

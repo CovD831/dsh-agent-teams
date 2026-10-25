@@ -137,6 +137,77 @@ const NEW_POSITION_GATES = [
    *   登记问的是"它装在哪个位置、会不会被求值"，而"裁决算不算数"是调用方的事。
    */
   { binding: 'runtimeLiveness', id: 'runtime.liveness', point: 'runtime' },
+  /**
+   * ★ t6（C4）：runtime 位置的**第二条**判据 —— 机械停滞哨兵。
+   *   登记问的是"它装在哪个位置、会不会被求值"；而它比 liveness 强一层：
+   *   返回类型排除了 `blockers`，所以它**在类型上就拒绝不了**（契约 §5）。
+   */
+  { binding: 'runtimeStall', id: 'runtime.stall', point: 'runtime' },
+  /**
+   * ── ★★★ t4（接线）：contract 位置的第三条 ───────────────────────────────────────
+   *
+   * 它此前【已在盘上、夹具也有，而一次都不会跑】—— `ALL_GATES` 里没有它
+   * ⇒ `registry.list().contract` 里读不到它 ⇒ 往那里挂的判据永远不会被求值。
+   * ★ 这与 `admission` 那三条是**同一个病**：「写了但没接线」。
+   *
+   * ★ 而它【一定会误报】（见该判据文件头），所以它自己写明要先进观察集：
+   *   ★★ 而"进观察集"的落点**不是装配点**，是那个**已经存在**的环境变量入口
+   *     （`AGENT_TEAMS_OBSERVE_GATES`）—— 臂 3e 钉住"装配点里没有第三句话"，
+   *     臂 3h 钉住"走 env 时它的裁决进 `observed.*` 而不是 `blockers`"。
+   *   ⇒ 而**登记表**这一行与观察无关：登记问的是"它装在哪个位置、会不会被求值"。
+   */
+  { binding: 'contractTaskAtomicity', id: 'contract.task-atomicity', point: 'contract' },
+  /**
+   * ── ★★★ t10（接线）：dispatch 位置的第三条 ──────────────────────────────────────
+   *
+   * 它是**用户已定的路由规则**在判据层上的落点：「带 `reviewed` 放行；不带必须先审一遍」。
+   * ★ 而它补上的正是 `docs/PLAN-REVIEW.md` §8 里那条**在此之前没有人读**的准入条件
+   *   （① 值得做 ② **审查通过（带 `reviewed`）** ③ 分档是【小档】）。
+   * ★ 与 `contractTaskAtomicity` 同一个病：**本体在盘上（t8）、而一次都不会跑**。
+   */
+  { binding: 'dispatchPlanReviewed', id: 'dispatch.plan-reviewed', point: 'dispatch' },
+  /**
+   * ── ★★★ t85（接线）：`admission` 位置的三条 —— 本表里**最后一次**收口 ────────────
+   *
+   * ★ 上面 `contractTaskAtomicity` 那段的注释**逐字**把它们指认出来了：
+   *   「★ 这与 `admission` 那三条是**同一个病**：「写了但没接线」。」
+   *   ⇒ 本行就是把那句话执行掉。
+   *
+   * ★ **改前它防的是什么**：这张表 + 臂 3 的 `known` 列表一起防的是
+   *   「**有人绕过 `gates/index.ts` 的清单注册判据**」（多了 ⇒ 编排层会读到
+   *   一份不是这份清单的东西）与「**有人把判据摘掉**」（少了 ⇒ 臂 2 会红）。
+   *   ★ 而 `admission` 那三条**一直不在这张表里** —— 因为**它们本来就没接线**：
+   *     那三条的 `binding` 在 `index.ts` 里**根本不存在**，所以"登记"它们
+   *     在那时是**登记一个不存在的东西**（那正是本表不给"未接的槽位"留位的原因，
+   *     见下面 `wiringState()` 的用法）。
+   *
+   * ★ **为什么现在要改**：`t85` 在 `index.ts` 里落下了这三个 `binding`
+   *   （`admissionAbsorb` / `admissionCheckpoint` / `admissionConvene`）⇒
+   *   它们现在**可以被登记**了，而**不登记就会被臂 3 判为"绕过清单"**。
+   *   ⇒ 于是这三行**不是可选的美化**，而是"接线"这件事在本表上的**另一半**。
+   *
+   * ★ `point` 三个都是 `'admission'`（见各自文件 `export const point`）。
+   * ✅ 反向半边 A：把这三条从 `ALL_GATES` 拿掉 ⇒ `wiringState().isImported()`
+   *   变假 ⇒ `newPositionGateIds()` 少三条 ⇒ **臂 2 的期望值对不上** ⇒ 立刻红。
+   */
+  { binding: 'admissionAbsorb', id: 'admission.absorb', point: 'admission' },
+  { binding: 'admissionCheckpoint', id: 'admission.checkpoint', point: 'admission' },
+  { binding: 'admissionConvene', id: 'admission.convene', point: 'admission' },
+  /**
+   * ── 2026-10-20 ——— runtime 位置的**第三条** ────────────────────────────────────
+   *
+   * `runtime.shape-execution`：声明了 `shape: 'dispatch'` 的队，成员**真的**在派
+   * 临时 worker 吗。它补的是上一轮形态验证记下的缺口（`docs/SHAPE-VERIFICATION-PROBE-1.md`
+   * §4 逐字）：「`shape` 是一条声明，而"声明有没有被执行"今天没有读数。」
+   *
+   * ★ 登记的理由与上面几条**逐字相同**：这一行不是美化，而是"接线"在本表上的另一半
+   *   —— 不登记就会被臂 3 判为"绕过装配清单"。★ 而那条判定**是对的**：
+   *   它正是"判据装了但没接线"的机械读数。
+   *
+   * ✅ 反向半边：把它从 `ALL_GATES` 拿掉 ⇒ 臂 2 的期望值对不上 ⇒ 立刻红
+   *   （`scripts/gate-shape-execution.test.mjs` 的臂 5 钉的是同一件事的另一半）。
+   */
+  { binding: 'runtimeShapeExecution', id: 'runtime.shape-execution', point: 'runtime' },
 ]
 
 /** 登记表里某条判据挂在哪。 */
@@ -179,6 +250,16 @@ const ASSEMBLY_PLACES = [
    * 落之前它们**不在**这份表里 —— 于是"少了"与"表里没有"仍然不同形。
    */
   { task: 'T10', path: './contract/build-artifact-scope.ts', binding: 'buildArtifactScope', id: 'contract.build-artifact-scope', point: 'contract' },
+  /**
+   * ── ★★ t86：第七个位置 `collection` 的四条 ─────────────────────────────────
+   *
+   * ★ 加它们【不是放宽】—— 是让这份清单与本仓真实的装配状态重新一致。
+   *   在加进来之前，臂 2 会判它们「**绕过装配清单**」—— 而那正是它该做的。
+   */
+  { task: 'T186', path: './collection/dedupe.ts', binding: 'collectionDedupe', id: 'collection.dedupe', point: 'collection' },
+  { task: 'T187', path: './collection/cooldown.ts', binding: 'collectionCooldown', id: 'collection.cooldown', point: 'collection' },
+  { task: 'T188', path: './collection/attributable.ts', binding: 'collectionAttributable', id: 'collection.attributable', point: 'collection' },
+  { task: 'T189', path: './collection/immunity.ts', binding: 'collectionImmunity', id: 'collection.immunity', point: 'collection' },
 ]
 
 /** 一个最小的、合法的判据模块（对照臂用）。 */
@@ -425,12 +506,49 @@ test('臂 2 ★ 未测量臂：已接的槽位形状对、未接的槽位确实�
       )
     }
   }
+  /**
+   * ── ★★★ t10：`dispatch` 那一行此前写的是 `1 + countFromPlaces('dispatch')` —— 而它【早就错了】──
+   *
+   * MEASURED（t10 接线时暴露）：`dispatch` 位置的**基线是两条**
+   * （`dispatch.changed-paths` + `dispatch.worktree`），而 `completion` 的基线是**一条**
+   * （`completion.verify-rerun` —— 另外三条是槽位接进来的）。
+   *
+   * ⇒ 那句 `1 + …` 对 `completion` 成立，而对 `dispatch` **从来就不成立** ——
+   *   它过去之所以绿，是因为**两个数字恰好相等**（`2 === 1 + 1`）。
+   *   ★ 而 t10 接线后 `countFromPlaces('dispatch')` 变成 2 ⇒ `2 + 1 = 3` 而实际是 3…
+   *     等等：**实际的失败是 3 ≠ 1 + 1 = 2** ⇒ 那一行**当场红**。
+   *
+   * ★★ 一般形式：**`1 +` 那个字面量把"基线有几条"写死在了算式里**，
+   *   于是它只在"基线恰好一条"的位置上成立。⇒ 改成**显式地说出基线是哪几条**。
+   */
+  const BASELINE_AT = {
+    completion: ['completion.verify-rerun'],
+    dispatch: ['dispatch.changed-paths', 'dispatch.worktree'],
+  }
+  for (const [point, baseline] of Object.entries(BASELINE_AT)) {
+    const listed = registry.list()[point].map((entry) => entry.id)
+    for (const baselineId of baseline) {
+      assert.ok(
+        listed.includes(baselineId),
+        `★ ${point} 的基线判据 \`${baselineId}\` 不见了 —— 它是这个位置的既有成员，接线不许动它`,
+      )
+    }
+  }
   assert.equal(
     registry.count('completion'),
-    1 + countFromPlaces('completion'),
-    '★ completion 的条数必须等于"既有 verify-rerun + 已接槽位"，多一条少一条都要说得出为什么',
+    BASELINE_AT.completion.length + countFromPlaces('completion'),
+    '★ completion 的条数必须等于"基线判据 + 已接槽位"，多一条少一条都要说得出为什么',
   )
-  assert.equal(registry.count('dispatch'), 1 + countFromPlaces('dispatch'))
+  /**
+   * ★ 而 `dispatch` 这一条**必须显式写基线条数**（它不再能用一个 `1 +` 的巧合表达）——
+   *   而它同时是"t10 接线真的生效了"的读数：基线 2 + 已接槽位。
+   */
+  assert.equal(
+    registry.count('dispatch'),
+    BASELINE_AT.dispatch.length + countFromPlaces('dispatch'),
+    `★ dispatch 的条数必须等于"基线 ${BASELINE_AT.dispatch.length} 条 + 已接槽位"：`
+    + '★ 而这一行此前写的是 `1 + …`（把基线写死成一条）⇒ t10 接线时当场暴露',
+  )
 })
 
 /**
@@ -743,7 +861,19 @@ test('臂 3f ★ 集成臂：runtime 上"观察模式"与"不拒绝流程"是双
 
   const notApplicable = await registry.evaluate('runtime', { event: notAProbeEvent })
   assert.equal(notApplicable.evaluated, 0, `★ 不适用的事件（${notAProbeEvent}）⇒ 这一轮没有判据被求值`)
-  assert.equal(notApplicable.registered, 1, '★ 而不适用 ≠ 位置为空：判据仍然注册着')
+  /**
+   * ★ t6：`runtime` 位置现在有**三条**判据（liveness + stall + 2026-10-20 的
+   *   `shape-execution`）。
+   *   ★ 本行断言的是**「不适用 ≠ 位置为空」**这条性质，而不是那个具体数字 ——
+   *     所以它随位置变满是正常的；
+   *   该断言与断言值的两半分别是「注册数 > 0」（性质）与「= 本位置的条数」（当时快照），
+   *     后者只与位置相关、与断言无关。
+   *
+   * ★★ 而那个"当时快照"每次加判据都要跟着改 —— 这不是夹具的毛病，是它**刻意**的：
+   *   一个只写 `> 0` 的断言会让"有人把 payload 一大半判据摘掉"永远读不出来。
+   *   ⇒ 每次加判据时同步这个数，就是"我知道自己往这个位置加了什么"的机械确认。
+   */
+  assert.equal(notApplicable.registered, 3, '★ 而不适用 ≠ 位置为空：判据仍然注册着（runtime 现在三条：liveness + stall + shape-execution）')
   assert.deepEqual(notApplicable.blockers, [], '★ "没跑"不许在任何字段上读成"发现问题"')
 
   /** ② 不在观察 ⇒ 告警进 `blockers`。 */
@@ -932,8 +1062,72 @@ test('臂 4 ★ 集成臂：六位置 × 每条判据都必须声明 requires �
   )
   assert.deepEqual(
     census,
-    { admission: 0, contract: 2, dispatch: 2, completion: 4, delivery: 2, runtime: 1 },
-    '★ 六位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
+    /**
+     * ★ t4（接线）：`contract` 由 **2 → 3** —— 加的是 `contract.task-atomicity`。
+     *   ★ 而这条快照的**存在意义**正是"分布变了必须有人说得出为什么"：
+     *     那第三条此前**已在盘上而一次都不会跑**（`ALL_GATES` 里没有它），
+     *     所以这里的 2 曾经是"盘上有三条、注册表只有两条"的读数。
+     */
+    /**
+     * ★ t10（接线）：`dispatch` 由 **2 → 3** —— 加的是 `dispatch.plan-reviewed`。
+     *   ★ 与 t4 的 `contract: 2 → 3` 同一条纪律：这条快照的存在意义就是
+     *     "分布变了必须有人说得出为什么"。
+     */
+    /**
+     * ★ t6：`runtime: 1 → 2` —— 新增 `runtime.stall`（C4 的机械停滞哨兵）。
+     *   ★ 本行断言的实质是**「在这个分布上，每条判据都声明了输入面」** ——
+     *     而那条实质在新分布上**仍然成立**（否则下面那一段会红）。
+     *   ⇒ 这个数字是**位置快照**，随接线变；性质不随。
+     */
+    /**
+     * ── ★★★ t85（接线）：`admission` 由 **0 → 3** ─────────────────────────────────
+     *
+     * ★ **改前它防的是什么**：这一行的实质（上面几条注释逐字）是
+     *   **「在这个分布上，每条判据都声明了输入面」** —— 而那个数字本身是
+     *   **位置快照**，随接线变；性质不随。
+     *   ★ 具体到 `admission: 0`：它钉住的是"`t5` 只加位置、一条判据都没加"
+     *     —— 而那是一个**当下快照**（`gate-admission-point` 的报文同样写明了）。
+     *
+     * ★ **为什么现在要改**：`t85` 把 `admission` 位置上那三条（absorb /
+     *   checkpoint / convene）接进了 `ALL_GATES` ⇒ **`0 → 3` 是接线的定义**，
+     *   不是分布漂移。★ 而 `index.ts` 顶部两段注释**逐字预告过这一步**
+     *   （「t6/t7/t8 会往里挂判据」）。
+     *
+     * ★★ **这不是放宽 —— 是同一句话在新分布上重新成立**：
+     *   下面那一段仍然要求"每条判据都声明了 `requires`"，
+     *   而那三条**各自都声明了**（实测：三条的 `requires` 都非空）。
+     *   ⇒ 若它们没声明，本条**照样会红** —— 所以改用 3 之后它**没有变弱**。
+     *
+     * ★ 三个数一起改（0 → 3），且**只改 admission 这一格**：
+     *   其余五个位置一格未动（`contract: 3` / `dispatch: 3` / `completion: 4` /
+     *   `delivery: 2` / `runtime: 2`）⇒ 证明这次接线**没有波及别处**。
+     * ✅ 若日后有人把这三条从 `ALL_GATES` 拿掉，本行会**立刻**变红
+     *   （`0 !== 3`）—— 这就是反向半边 A 赖以成立的那一格。
+     */
+    /**
+     * ── ★★ t86：`collection` 位置上线（`0 → 4`）──────────────────────────────
+     *
+     * ★ **只加 `collection` 这一格**，其余六个一字未动
+     *   （`admission: 3` / `contract: 3` / `dispatch: 3` / `completion: 4` /
+     *     `delivery: 2` / `runtime: 2`）⇒ 证明加位置**没有波及别处**。
+     *
+     * ★★ **这不是放宽**：下面那一段仍要求每条判据声明 `requires`，
+     *   而那四条**各自都声明了** ⇒ 若没声明，本条照样红。
+     * ✅ 反向半边：把那四条从 `ALL_GATES` 拿掉 ⇒ `0 !== 4` ⇒ 立刻红。
+     */
+    /**
+     * ── ★★ 2026-10-20：`runtime` 位置 2 → 3（`runtime.shape-execution` 上线）──
+     *
+     * ★ **只改 `runtime` 这一格**，其余六个一字未动
+     *   （`admission: 3` / `contract: 3` / `dispatch: 3` / `completion: 4` /
+     *     `delivery: 2` / `collection: 4`）⇒ 证明这次加判据没有波及别处。
+     *
+     * ★★ **这不是放宽**：下面那一段仍要求每条判据声明 `requires`，
+     *   而新那条**声明了**（`['event', 'team']`）⇒ 若没声明，本条照样红。
+     * ✅ 反向半边：把它从 `ALL_GATES` 拿掉 ⇒ `3 !== 2` ⇒ 立刻红。
+     */
+    { admission: 3, contract: 3, dispatch: 3, completion: 4, delivery: 2, runtime: 3, collection: 4 },
+    '★ 七位置的判据分布变了 —— 变动本身不是错，但"每条都声明了输入面"这句话必须在新分布上仍然成立',
   )
 })
 
@@ -1459,3 +1653,216 @@ test('臂 4d ★ 集成臂：装配层交出的声明面就是注册表读到的
   )
   assert.ok(fromList.length > 0, '★ 集合相等在空集合上恒真 —— 注册表必须真的有判据')
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3h（t4 接线）：新判据的**观察落点** = 环境变量，不是装配点 ─────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── ★★★ 本臂与臂 3e 是一对，而它们钉的是【两件不同的事】─────────────────────────
+ *
+ *   臂 3e  钉「装配点里**没有** `registry.observe(...)`」 —— 因为写在那里
+ *          （按 `src/gates/index.ts` 138-153 行那段实测过的理由）**观察期等于没有**
+ *   臂 3h  钉「而它**仍然能被观察**」 —— 走那个**已经存在**的入口，且**实测**它真的开火
+ *
+ * ★ 缺了本臂，3e 就成了一条"要求一件做不到的事"的规则（臂 3g 对 runtime 说过同一句话）。
+ *   而缺了 3e，本臂就会被读成"可以在装配点写 observe"。
+ *
+ * ★★ 本臂的对象是 `contract.task-atomicity` —— 它【一定会误报】，所以它自己写明要先进观察集。
+ *   ⇒ 而"进观察集"的落点由 captain 裁定为：**环境变量**（不是装配点，也不是新的注册表机制）。
+ */
+test('臂 3h ★★★ 接线臂：`contract.task-atomicity` 走环境变量时，裁决进 `observed.*` 而不是 `blockers`', async () => {
+  /**
+   * ★ 口径：**新建一个注册表实例**并显式给 `observeFromEnv`，而不是动进程环境变量。
+   *   理由与注册表自己的注释一致（`observeFromEnv` 参数存在正是为了让夹具不必碰全局状态）：
+   *   动 `process.env` 会让同一次运行里的两次求值用两套门禁，而那是最难归因的一类缺陷。
+   */
+  const module = await import('../lib/gates/contract/task-atomicity.js')
+  const build = (observeFromEnv) => {
+    const r = createGateRegistry(observeFromEnv === undefined ? {} : { observeFromEnv })
+    r.register(asRegistration(module))
+    return r
+  }
+
+  /**
+   * ★ 一份**能让这条判据适用**的 ctx：它声明了 `task`。
+   *   ★ 而"适用"是前置：一条被 `appliesTo` 跳过的判据**不开火**，
+   *     而"没开火"与"开火了但被放过"在读数上**不同形**（本队那条纪律）。
+   */
+  const context = {
+    task: {
+      id: 't4-probe', kind: 'implementation', objective: 'probe',
+      /**
+       * ★★ 让它**真的开火**的唯一条件（实测读源码得出的，不是猜）：
+       *   本判据的设计判据是 `inScope` 里有**目录条目**（以 `/` 结尾）——
+       *   那是"结构改动"，而结构改动的失败原因是**开放的**。
+       *
+       *   MEASURED（我第一版造错了 ctx）：我用的是 `['src/a.ts','docs/b.md']`
+       *   （两个文件、无目录条目）⇒ 判据**正确地**返回 `ok: true`（它不拦这类）
+       *   ⇒ 而我那句"观察中的裁决进 observed.blockers"就成了恒真的断言。
+       *   ★ 又一次"**先看清这一格测的是哪一态，再造它的输入**"。
+       */
+      inScope: ['src/gates/', 'src/tools/shared/'],
+      acceptance: ['a'],
+      verify: ['node --test scripts/a.test.mjs'],
+    },
+  }
+
+  const notObserving = await build(undefined).evaluate('contract', context)
+  const observing = await build('contract.task-atomicity').evaluate('contract', context)
+
+  /**
+   * ★★ 前置：这一轮它**真的跑了** —— 否则下面"进 observed 而不是 blockers"是恒真的
+   *   （一个没跑的判据，两个字段都是空的，而那与"放过了"同形）。
+   */
+  assert.equal(
+    notObserving.evaluated, 1,
+    '★ 前置：这份 ctx 上 `contract.task-atomicity` 必须**真的被求值**（不是 skipped）—— '
+    + '否则"没开火"与"开火了但被放过"同形，本臂什么都没测到',
+  )
+
+  /**
+   * ★★★ 本臂的核心：**同一份 ctx、同一条判据**，在观察中时
+   *     ① 裁决**不阻止流程**（`ok` 仍为 true）
+   *     ② 而它**被记录下来**（`observed.blockers` 非空）
+   *     ③ 且**不并进 `blockers`**（并进去就等于它进了裁决，而观察模式的定义就是"不进裁决"）
+   */
+  assert.equal(
+    observing.ok, true,
+    '★★★ 观察中的判据**不得拒绝流程** —— 这正是观察模式的定义，也是这条判据"一定会误报"的自保',
+  )
+  assert.deepEqual(
+    observing.blockers, [],
+    '★ 被放过的裁决**不许**并进 `blockers` —— 并进去就等于它进了裁决，而观察模式就是"不进裁决"',
+  )
+  assert.ok(
+    (observing.observed?.blockers?.length ?? 0) > 0,
+    '★★★ 而它**必须被记录**（`observed.blockers` 非空）—— 丢掉它，观察期就变成"什么都看不见"，'
+    + '那时没人能从日志里决定"这条判据该不该放出来"。★ 定向突变：从 env 名单移除它 ⇒ 本断言红',
+  )
+  assert.equal(
+    observing.observedBlockers > 0, true,
+    '★ 且"开火了但被放过"必须**可计数**（不是只能靠翻 `ran[]` 数组）',
+  )
+  assert.equal(
+    observing.ran[0]?.observed, true,
+    '★ `ran[]` 里那条条目要带 `observed` 标记 —— "开火了但被放过"与"没跑"在那里必须不同形',
+  )
+
+  /**
+   * ★ 对照：不在观察中 ⇒ 同一份 ctx 上它**照常有否决权**（缺它就无法区分
+   *   "观察期生效了"与"这条判据根本不会拒"）。
+   */
+  assert.equal(
+    notObserving.ok, false,
+    '★ 对照臂：不在观察中时，它**仍然开火**（这份 ctx 是按它的设计判据造的）—— '
+    + '缺这一条，本臂就无法区分"观察期生效"与"这条判据不会拒"',
+  )
+  assert.ok(
+    notObserving.blockers.length > 0,
+    '★ 对照：不在观察中 ⇒ 它的话进 `blockers`（两态的形状必须可分辨）',
+  )
+
+  /** ★ 而两个入口放过的必须是**同一条发现**（原文逐字相同）—— 与臂 3g 对 runtime 同一条纪律。 */
+  const viaRuntime = build(undefined)
+  viaRuntime.observe('contract.task-atomicity', { reason: 't4: observe one round before it gets a say' })
+  const observedViaCall = await viaRuntime.evaluate('contract', context)
+  assert.equal(
+    observedViaCall.observed.blockers[0], observing.observed.blockers[0],
+    '★ 环境变量与运行时调用放过的是**同一条发现**（原文逐字相同）—— 否则两个入口会分叉',
+  )
+  viaRuntime.unobserve('contract.task-atomicity')
+  assert.equal(
+    (await viaRuntime.evaluate('contract', context)).ok, false,
+    '★ `unobserve` 之后必须**立刻恢复否决权**（而这也证明前面那次"放行"是观察带来的，不是判据温和）',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3i（t4 接线）：装配点**只加了一行**，且没有重排/替换别人的行 ────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂钉的是"一人一行"这条装配点约定的**机械形式** ────────────────────────────
+ *
+ * 约定原话（`src/gates/index.ts` 顶部）：「**不要**动别人的行，也不要重排 ——
+ * 一条判据一个 import，冲突面就是那一行」。
+ *
+ * ★ 而"没动别人的行"这句话，只有**集合比对**才是证据：
+ *   · 条数对不上 ⇒ 有人加了/删了不止一行；
+ *   · 差集不是恰好那一条新接线 ⇒ 有人**替换**了某条（而替换在日志里与"新增"同形）。
+ *
+ * ★ 名单来自【装配点源码】而不是手抄：手抄的那份会在别人接线时过期。
+ */
+test('臂 3i ★★ 接线臂：`ALL_GATES` 只**增**不**改** —— 基线一条不丢、相对顺序不变', () => {
+  const state = wiringState()
+  const listBody = state.source.match(/const ALL_GATES = \[([\s\S]*?)\] as const/)?.[1]
+  assert.notEqual(listBody, undefined, '★ 装配锚点失效：夹具必须跟着看清新形状，而不是静默变成恒真断言')
+  const listed = [...listBody.matchAll(/^\s{2}([A-Za-z_][\w]*),$/gm)].map((match) => match[1])
+
+  /**
+   * ── ★★★ 本臂在 t10 上【改了口径】，而理由必须写在这里 ──────────────────────────
+   *
+   * 它在 t4 时断言的是「差集**就是** `contractTaskAtomicity`」—— 那是**当时**的正确形状
+   * （那一次接线只加了一条）。而 t10 接线又加了一条 ⇒ 一条把"恰好是那一条"写死的臂
+   * 会在**第二次合法接线**时变红，而红的原因与"接线坏了"毫无关系。
+   *
+   * ★★ 那正是本队记账过的形态：**把"当前恰好如此"写成不变量**（棘轮）。
+   *   ⇒ 改成钉**性质**而不是钉**某一次的数量**：
+   *
+   *     ① 每一个**基线**绑定名都还在（有人删了/替换了 ⇒ 红）
+   *     ② 基线那 11 条的**相对顺序**不变（有人重排了 ⇒ 红）
+   *     ③ `ALL_GATES` 里**没有**本文件不认识的绑定名（新接线要在 `NEW_POSITION_GATES` 登记）
+   *
+   * ★ 而"新加了几条"**不作断言** —— 那是一个会随接线次数增长的量，钉死它会按设计变红。
+   *   它由每条接线**自己的臂**去钉（见臂 4 的分布快照）。
+   */
+  const BASELINE = [
+    'verifyRerun', 'changedPaths', 'worktree', 'r5', 'mutation', 'backtest',
+    'buildArtifactScope', 'contractVerifyCommand', 'deliveryCoverage',
+    'deliveryConvergence', 'runtimeLiveness',
+  ]
+  const missing = BASELINE.filter((binding) => !listed.includes(binding))
+  assert.deepEqual(
+    missing, [],
+    `★★ 接线时动了别人的行：这些基线绑定名在 \`ALL_GATES\` 里不见了 ${JSON.stringify(missing)} —— `
+    + '约定是"一人一行，不要重排、不要替换"。★ 而"替换"与"新增"在日志里同形，'
+    + '所以这里用**集合比对**而不是条数',
+  )
+
+  /** ★ 顺序：基线那 11 条之间的相对顺序不许变（新增的可以插在任何合法位置）。 */
+  const present = listed.filter((binding) => BASELINE.includes(binding))
+  assert.deepEqual(
+    present, BASELINE,
+    '★★ 基线那 11 条的**相对顺序**变了 —— 而 `ALL_GATES` 的书写顺序 = 求值顺序（契约 §3），'
+    + '重排会让 blocker 的排列改变，而那是别人依赖的读数',
+  )
+
+  /**
+   * ★★ 而**每条接线都必须自己出现在清单里** —— 这是"接线真的做了"的机械形式，
+   *   而它由**一份接线台账**表达（而不是由"差集恰好是某一条"表达）。
+   *   ★ 新接线的人往这里加一行；漏加 ⇒ `NEW_POSITION_GATES` 那条登记臂会红
+   *     （本文件不认识的绑定名被当成"绕过约定"）。
+   */
+  const WIRED_BY_THIS_PIPELINE = ['contractTaskAtomicity', 'dispatchPlanReviewed']
+  const notWired = WIRED_BY_THIS_PIPELINE.filter((binding) => !listed.includes(binding))
+  assert.deepEqual(
+    notWired, [],
+    `★★ 这些接线【不在】\`ALL_GATES\` 里：${JSON.stringify(notWired)} —— `
+    + '而"本体在盘上、夹具也有、而一次都不会跑"正是本流水线反复要消灭的那个缺口。'
+    + '★ 定向突变：从 ALL_GATES 删掉任一行 ⇒ 本断言红',
+  )
+
+  /**
+   * ★ 反向半边（防恒真）：`ALL_GATES` 必须真的有内容，且台账里的名字必须**真的被 import 过**
+   *   —— 否则"它在清单里"可以靠一个拼错的名字满足。
+   */
+  assert.ok(listed.length >= BASELINE.length, `★ ALL_GATES 只有 ${listed.length} 条，少于基线 ${BASELINE.length} 条`)
+  for (const binding of WIRED_BY_THIS_PIPELINE) {
+    assert.equal(
+      state.isImported(binding), true,
+      `★ \`${binding}\` 在清单里，而【没有对应的 import 行】—— 那会让"接上了"与"名字打错了"同形`,
+    )
+  }
+})
+

@@ -48,6 +48,26 @@ export function register(ctx: Context, scheduler: any, config: ToolsConfig): voi
           if (resumed.status === 'resumed') {
             fresh.halted = false
             fresh.haltedAt = undefined
+            /**
+             * ── ★★★ 2026-10-20：把**计划审查环的显式归零**真的写回盘 ──────────────────
+             *
+             * MEASURED（本仓实测，一个真实的死锁）：此前这里只写 `halted` / `haltedAt`，
+             * 而 `resumeTeamState` 算出来的 `planReviewRounds: 0` / `planReviewEscalated: false`
+             * **只存在于它的返回值里** —— 一个字节都没落盘。
+             * ⇒ 于是 `approve` 那条闸（读盘上的 `rounds`）照样拒，而错误信息指着
+             * `agent_teams_resume` 说"这是唯一出路" —— **那条出路在生产上不存在**。
+             *
+             * ★★ 为什么用 `resumed.clearedPlanReview` 而不是自己比 `fresh.planReviewRounds`：
+             *   "只有超轮才归零"这条规则住在 `resumeTeamState` 里；在这里再比一次
+             *   就是第二份真相，而两份真相会漂移。⇒ 让产生归零的那一方说出来。
+             *
+             * ★ 三态如实保留：没有归零（普通 halt/resume）⇒ 这两格一个字都不动
+             *   （与"归零"不同形 —— 一次与计划无关的 halt 不该抹掉"改过几轮"）。
+             */
+            if (resumed.clearedPlanReview === true && resumed.team !== undefined) {
+              fresh.planReviewRounds = resumed.team.planReviewRounds
+              fresh.planReviewEscalated = resumed.team.planReviewEscalated
+            }
             await writeTeam(stateRoot, fresh)
             appendTeamEvent(ctx, captainSessionOf(ctx, fresh.captainSessionId, captain.session), 'agent-teams/team-resumed', {
               teamId: fresh.id,

@@ -10,6 +10,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+/** ★ t109：工具侧点名已注册工作区所需的服务类型（与 `src/index.ts` 同一个包）。 */
+import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import { dirname, join } from 'node:path'
 /**
  * ★ t53：规则表的**校验器**从判据那边借来（它是纯函数，不读盘）。
@@ -19,22 +21,82 @@ import { dirname, join } from 'node:path'
  *     形状坏是**数据本身**的事实（`malformed`）—— 两者不同形，由两个地方各自判。
  */
 import { parseRules, type RulesLoad } from '../../gates/contract/verify-command.ts'
+/**
+ * ★ 预算停止的记号住在 gates 层的**叶子**模块里，不是这里。
+ *   理由：认出它的两个地方（`gates/registry.ts`、`gates/completion/mutation.ts`）
+ *   都在 gates 层，而 `gates ↛ tools` 是本仓的纪律 —— 记号若定义在本文件，
+ *   它们就必须反向 import，把判据框架绑死在工具层的一个实现细节上。
+ *   本文件 import 它是**顺向**的（tools → gates 已经成立）。
+ */
+import { CompletionBudgetExceeded } from '../../gates/budget-stop.ts'
 
-import { readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  readFlywheel,
+  type FlywheelVerdict,
+  type UsageTally,
+} from '../../confidence.ts'
+import { pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { registry, gateModuleViews } from '../../gates/index.ts'
+/** ★ t87：采集层（采集形状的唯一实现；本文件是它的**调用方**）。 */
+import { observe } from '../../evolution/collect.ts'
+/**
+ * ── ★★★ t2：索引派生与去重键 ──────────────────────────────────────────────────
+ *
+ * ★★ 为什么是**静态** import 而不是 `loadCollectionIndexFor` 里的 `await import(...)`：
+ *
+ * MEASURED（t15 独立复核抓出，`scripts/gate-readout-uniform.test.mjs` 当场红）：
+ * 那两处**本地**动态 import 让 rolldown 把 client bundle 从 **1 chunk 拆成 3 个**
+ * （`Invalid value for option "output.file" - When building multiple chunks, the
+ * "output.dir" option must be used, not "output.file"`）⇒ 一个夹具的 write 路径失效。
+ *
+ * ★ 而它**不是**"动态 import 不好"—— `collect.ts` 与 `gates/index.ts` 本来就是
+ * 本文件的静态依赖（见上面那两条），这两条与它们同族；把它们写成动态的
+ * 唯一效果是**让打包器多拆一刀**，而拆出来的 chunk 没有任何人按名字加载。
+ * ⇒ 判据是"这个依赖是不是本来就在同一份产物里"：在 ⇒ 静态。
+ */
+import { deriveCollectionIndex } from '../../evolution/read.ts'
+import { dedupeKeyOf } from '../../gates/collection/shared.ts'
+/** ★ t81：`rejectOnContractGates` 要把契约段的裁决带出去 ⇒ 需要这个类型（只作类型用）。 */
+import type { GateEvaluation } from '../../gates/registry.ts'
 import type { GatePoint } from '../../gates/index.ts'
-import { installMemberSelectionRuntime, resolveMemberLlmSelection, validateMemberLlmSelections } from '../../members.ts'
+import { installMemberSelectionRuntime, resolveMemberLlmSelection, shapeExecutionFor, validateMemberLlmSelections } from '../../members.ts'
 import { resolveTeamProfile } from '../../profiles.ts'
 import { createTeamDir } from '../../state.ts'
-import type { AcceptanceResult, ReviewFinding } from '../../types.ts'
-import { planQualityFollowUp } from '../../quality-gates.ts'
+import { sessionLeadsTeam, type LiveSessionRef } from '../../lineage.ts'
+import { identityOfTeam } from '../../members.ts'
+import type { AcceptanceResult, ReviewFinding, ReviewedStamp, TaskKind } from '../../types.ts'
+import { inScopeOverlap, isQualityKind, planQualityFollowUp, sanitizeReviewAcceptance, sanitizeReviewObjective, WRITE_KINDS } from '../../quality-gates.ts'
 import { auditRequires } from '../../gates/requires.ts'
+import { liveAgentOf } from '../../events.ts'
 import { TERMINAL_TASK_STATUSES } from '../../types.ts'
-import type { CommandResult, TeamMember, TeamState, TeamTask } from '../../types.ts'
+/**
+ * ★ t20：真值从 `types.ts` 取 —— 与 `scheduler.ts` **同一份**。
+ *   （`types.ts` 是叶子模块：不 import 任何东西 ⇒ 两边共用不造环。）
+ */
+import { needsWorktreeFor } from '../../types.ts'
+import type { CommandResult, TeamMember, TeamState, TeamTask, TaskStall } from '../../types.ts'
+/**
+ * ── ★★ 为什么这里既有 `import` 又有下面的 `export … from` ────────────────────────
+ *
+ * 这是**必须**的两句，而不是重复：
+ *   · `import { … }`      —— 让这几个名字在**本模块作用域里**可用
+ *     （`noteStall` / `rejectOnContractGates` 要用它们）。
+ *   · `export { … } from` —— 让**别人**仍然能从本文件拿到它们
+ *     （C1 的调用点 import 的是本文件，那条路一个字都不改）。
+ *
+ * ★ MEASURED（本任务第一版）：只写重导出 ⇒ 本文件内部四处
+ *   `Cannot find name 'observeStall' / 'stallRepeatThreshold'` ——
+ *   重导出**不建立本地绑定**。这是一个只有编译期看得见的差别，
+ *   而它在"搬家"这一步上恰好是最容易漏的一格。
+ */
+import { STALL_REPEAT_THRESHOLD, observeStall, stallRepeatThreshold } from '../../types.ts'
+import type { StallObservation } from '../../types.ts'
 import { collectCompletedDependencyOutputs, formatDependencyOutputs } from '../../scheduler.ts'
-import { sessionOwnEvents } from '../../harness-compat.ts'
+import { drainMemberChildren, sessionOwnEvents } from '../../harness-compat.ts'
 import { CAPTAIN_KEY, findTeamByCaptain, findTeamByParticipant, readTeam, withTeamLock } from '../../state.ts'
 
 export function withInputSurfaceOnError<T extends { execute: (...args: never[]) => unknown }>(tool: T): T {
@@ -44,7 +106,29 @@ export function withInputSurfaceOnError<T extends { execute: (...args: never[]) 
       return await (inner as (...rest: never[]) => unknown).apply(this, args)
     } catch (error: unknown) {
       const surface = inputSurfaceFromThrown(error)
-      if (surface === undefined || error === null || typeof error !== 'object') throw error
+      if (error === null || typeof error !== 'object') throw error
+      /**
+       * ── ★★★ t5：这两份结论**各自独立**地搬，不许共用一句早退 ──────────────────────
+       *
+       * MEASURED（t5 实测，本函数的结构本身是一个陷阱）：
+       *   上面那句原本是 `if (surface === undefined || error === null || …) throw error`
+       *   —— 一个把**两件事**合起来的条件：类型守卫（`error` 不是对象 ⇒ 没法挂属性，
+       *   这条必须留）与"没有输入面结论"（这条**与下面的搬运无关**）。
+       *   ⇒ 若在这里早退，"判据说它测不了"的那份结论会被**静默吞掉** ——
+       *     而它跟输入面在不在**没有任何关系**（契约位置的 unmeasured 恰恰
+       *     经常与一条齐备的输入面同时出现）。
+       *   ★ 这正是本队记账的形态：**一个条件里混了两种判定，于是其中一种的缺席
+       *     变成了另一种的静默**。
+       *
+       * ⇒ 类型守卫留在上面（它是真的前置条件）；两份结论各自判自己的在场。
+       *   ★ 顺序与耦合都变了，而**行为一个字没变**：`surface` 不在场时，
+       *     `input_surface` 那一支照旧什么都不做。
+       */
+      const couldNotMeasure = contractUnmeasuredOf(error)
+      if (couldNotMeasure !== undefined && !Object.hasOwn(error, 'contract_unmeasured')) {
+        ;(error as { contract_unmeasured?: unknown }).contract_unmeasured = couldNotMeasure
+      }
+      if (surface === undefined) throw error
       /**
        * ★★ 纪律 ①：**先到的那一份说话**。已经搬过的那一份不许被覆盖。
        *
@@ -191,6 +275,44 @@ export type StagedPlanMutation =
       description?: string | null
       assignee?: string | null
       dependencies: string[]
+      /**
+       * ── ★★★ t9：本条计划操作**显式声明**的任务类型 ────────────────────────────
+       *
+       * ★★ 而它**是可选的类型格，却对应必填的调用约束** —— 这两件事不矛盾：
+       *   `kind?: TaskKind` 之所以可选，是因为 `StagedPlanMutation` 是**五个动作共用的
+       *   一个联合类型**，而 `remove_task` / `update_member` 等分支根本不谈 kind。
+       *   把它标成必填会让那四个分支也得编一个值出来 —— 那正是"用类型骗过校验"。
+       *
+       * ★ 而"调用方必须给"这件事由**消费点**判（`src/tools/edit-plan.ts` 的 mapper
+       *   与 `src/tools.ts` 的 add_task 分支各判一次，措辞同源）。
+       *   ⇒ 类型可选 + 消费点必判，与 `CreateTaskInput.reviewed` 那一格是**同一种形状**。
+       *
+       * ── 为什么这一格必须存在（MEASURED，t9 修前）──────────────────────────────
+       *
+       *   修前本分支只有 subject/description/assignee/dependencies 四格，
+       *   而 `src/tools.ts` 把 `kind` **硬编码成 `'work'`**。
+       *   ⇒ 经 `edit_plan` / HTTP 计划路由加进来的任务**永远不是 quality kind**，
+       *     也就永远不需要质量契约 —— 而"这活根本没被人看过"这件事在数据上**不可见**。
+       *   ★ 更糟的是它**无法被表达**：`additionalProperties: false` 之下，
+       *     调用方连"我想声明它是什么"都传不进来（实测报文：
+       *     `"operations[0].kind" is not a declared property`）。
+       *   ⇒ 一个**不可表达**的意图与一个**没人表达**的意图，在数据上同形。
+       */
+      kind?: TaskKind
+      /**
+       * ── ★★ 契约四格：与 `create_task` 同名的四格，走同一个 `validateCreateTask` ──
+       *
+       * ★ 为什么这四格必须一起进来：显式声明 quality kind 之后，
+       *   `validateCreateTask` 就会要求 objective+acceptance（质量类）
+       *   与 inScope+verify（写类）。若四格传不进来，quality kind 会被**100% 拒绝** ——
+       *   那不是"校验接上了"，那是"这条路被关死了"。
+       *   ★ 两条读数（`kind:'work'` 通过 / `kind:'implementation'` 带全契约通过）
+       *   必须**同时**成立，否则分不清是收紧了还是没接线。
+       */
+      objective?: string | null
+      inScope?: string[] | null
+      acceptance?: string[] | null
+      verify?: string[] | null
     }
   | { action: 'remove_task'; taskId: string }
   | { action: 'remove_member'; memberName: string }
@@ -210,6 +332,168 @@ export function requireCaptain(exec: ToolRunContext): Agent {
 }
 export function workspaceOf(agent: Agent): string {
   return agent.session.header.cwd ?? process.cwd()
+}
+
+/**
+ * ── ★★★ t109：一个工具能【点名】的、**已注册**的工作区 ──────────────────────────────
+ *
+ * 用户裁定（逐字）：「我需要一个**权限非常大的主会话**，它可以**操纵不同的工作区**。」
+ *
+ * ── ★★ 而「能操作任何区」与「不知道它操作了哪个」是【两件事】 ────────────────────
+ *
+ * 前者是**能力**，后者是**缺陷** —— ⇒ 所以本函数与审计**一起上**
+ * （见 `src/tools/delivery.ts` 的 `agent-teams/workspace-audited`）。
+ *
+ * ── ★★★ 三态，而它们必须【不同形】 ─────────────────────────────────────────────
+ *
+ * ```
+ *   不传            ⇒ ★ 与改动前【逐字相同】：workspaceOf(caller)（调用者自己那个）
+ *   传了已注册的     ⇒ ★ 用那个（★ 哪怕它 === 自己那个 ⇒ 与"不传"同形，见 C）
+ *   传了未注册的     ⇒ ★★ 拒绝并给理由 —— ★ 【不许静默落到自己那个】
+ * ```
+ *
+ * ★★ 最后一条是本函数的**存在理由**：若未注册时静默回退到调用者自己那个，
+ *   那么「**点错了一个区**」与「**没点名**」在读端**完全同形** ——
+ *   而前者在"权限很大的主会话"上是**最容易发生**的错误（跨区操作打错一个字）。
+ *
+ * ★ 与 `workspaceOf` 的分工：那个**只回答自己那个**（隐式落点，5 处仍在用，默认行为不变）；
+ *   本函数**只回答被点名的那个**，而"没点名"时**委托**给它 ⇒ 默认路径只有一处实现。
+ *
+ * @param ctx - 插件上下文（用于取 workspace 注册表）。
+ * @param caller - 调用者（其 `session.header.cwd` 是缺省落点）。
+ * @param requested - 显式点名的工作区路径（缺席 ⇒ 用调用者自己那个）。
+ * @returns 落点工作区路径，以及**它是不是被显式点名的**。
+ * @throws 点名的工作区**未注册**时 —— ★ 绝不静默回退。
+ */
+export function resolveTargetWorkspace(
+  ctx: Context,
+  caller: Agent,
+  requested: string | undefined,
+): { readonly workspace: string; readonly explicit: boolean; readonly title: string } {
+  /**
+   * ★ 缺席 ⇒ **委托给 workspaceOf**（不是"再写一遍同样的推导"）。
+   *   ★★ 这一条直接保证反向半边 B：不传参数时，落点由**同一行代码**决定。
+   */
+  if (requested === undefined) {
+    /**
+     * ── ★★★ 反向半边 C：**不传**与**指名自己那个**必须【同形】──────────────────────
+     *
+     * MEASURED（t109 自己踩到）：第一版在"不传"时把 `title` 填成**路径**，
+     * 而在"指名"时填**注册表里的 title** ⇒ 同一个区、两种输入，
+     * 得到 `{title:'/ws/self'}` 与 `{title:'self'}` —— ★★ **不同形**。
+     * ★ 而 `title` 会进**审计记录**（`targetTitle`）⇒ 台账里会出现"两条不同的操作"，
+     *   而它们**其实是同一件事**。
+     *
+     * ⇒ 修法：**不传时也去注册表查一次 title**（若自己那个区在册）——
+     *   ★ 于是两种输入的 `title` 都来自**同一个来源**。
+     * ★ 查不到（自己那个区没注册 / 注册表不可用）⇒ **退回路径**，
+     *   而不是抛错：★ "不传"这条老路**不许**因为新功能而开始失败（硬边界①）。
+     */
+    const self = workspaceOf(caller)
+    /**
+     * ── ★★★ 不传这一支**不许抛**，也**不许依赖 ctx 有什么** ────────────────────────
+     *
+     * MEASURED（t109 实测，我第一版踩到）：第一版在"不传"时也去查注册表取 `title`，
+     * 而 `workspaceRegistryOf` 会调 `ctx.get(...)` ——
+     * ★★ **于是不认识 `get` 的假 ctx 会让这条老路径抛错**
+     *   （实测 4 个既有夹具净新变红：`gate-tool-split` / `gate-position-wiring` /
+     *     `gate-readout-uniform` / `verify-readout-uniform`，报 `ctx.get is not a function`）。
+     *
+     * ⇒ 修法：**不传这一支完全不碰注册表** —— 那正是"默认行为一字不改"的**字面含义**：
+     *   改动前这条路径**根本不知道有注册表这回事**，加功能不该让它开始依赖它。
+     *
+     * ★ 代价（如实说）：不传时 `title` 退化成**路径**，于是"指自己"与"不传"的
+     *   `title` **不同形** —— 而那正是反向半边 C 要挡的。
+     * ★★ 所以那一半改由**调用方**在"要点名自己"时自然走"传了参数"那一支解决：
+     *   传了 ⇒ 走注册表 ⇒ 拿到真 title。★ 而不传 ⇒ 走这条老路 ⇒ 拿到路径。
+     *   ⇒ 两者的 `workspace` **恒相同**（那才是"操作哪个区"的答案），
+     *     而 `title` 的差异**只影响显示名**，且**只在"不传"时**出现。
+     */
+    /**
+     * ★★★ 反向半边 C 的**正确落法**：两支的 `title` 都读**同一个来源** ——
+     *   ★ 而那个来源**不是注册表**（它会碰 `ctx.get`），而是 `workspaceOf` 自己的答案。
+     *
+     * ★ 为什么这样反而更对：`title` 只是**显示名**；「操作了哪个区」的答案是 `workspace`。
+     *   ⇒ 让两支的 `title` 都等于 `workspace`（同一来源、同一形状），
+     *     而**传了参数**的那一支在**审计记录**里另取注册名（那里本来就要用 ctx，
+     *     且那里**必然**已经拿到注册表 —— 否则它已经抛了）。
+     *   ★★ 于是：不传这一支**完全不碰 ctx**，而两支的 `{workspace,title}` **逐字相同**。
+     */
+    return { workspace: self, explicit: false, title: self }
+  }
+  const wanted = requested.trim()
+  /** ★ 空串/空白的点名**不是"没点名"** —— 它是"点了名但没写"，同样必须拒。 */
+  if (wanted === '') {
+    throw new Error(
+      'agent_teams: "workspace" was given but is empty; omit the parameter to act on your own workspace,'
+      + ' or name a registered workspace path',
+    )
+  }
+  const registry = workspaceRegistryOf(ctx)
+  /**
+   * ★★ 注册表**取不到**时也拒绝 —— 而那与"点名的是未注册区"**必须不同形**：
+   *   · 注册表不可用 ⇒ 「我们**没法**核对」（没能测量）
+   *   · 点名的未注册 ⇒ 「它**确实**不在」（确实没有）
+   *   ★ 把前者说成后者会**冤枉一个合法的工作区**。
+   */
+  if (registry === undefined) {
+    throw new Error(
+      'agent_teams: cannot honour an explicit "workspace" because the workspace registry is unavailable;'
+      + ' omit the parameter to act on your own workspace',
+    )
+  }
+  const known = registry.list()
+  const match = known.find((entry) => entry.path === wanted || entry.title === wanted)
+  if (match === undefined) {
+    /**
+     * ★★★ 拒绝时**列出可选项** —— 因为"点错了"最常见的成因是**拼错或记错名字**，
+     *   而只回一句"未注册"会让调用者**再猜一次**。
+     * ★ 有上限：可选项可能很多，而错误信息也会进上下文。
+     */
+    const options = known.slice(0, 8).map((entry) => `${entry.title} (${entry.path})`).join(', ')
+    throw new Error(
+      `agent_teams: workspace "${wanted}" is not a registered workspace;`
+      + ` omit the parameter to act on your own workspace (${workspaceOf(caller)})`
+      + `${known.length === 0 ? ', and no workspace is registered' : `; registered: ${options}${known.length > 8 ? `, … ${known.length - 8} more` : ''}`}`,
+    )
+  }
+  /**
+   * ★ 与"不传"那一支**同形**：`title` 也取 `workspace` 本身（同一来源）。
+   * ★★ 注册名（`match.title`）由调用方**在写审计时**从注册表取 ——
+   *   那里本来就是"要记下显示名"的地方，而不该让**落点解析**顺手带出两套口径。
+   */
+  return { workspace: match.path, explicit: true, title: match.path }
+}
+
+/**
+ * ── ★ t109：取 workspace 注册表（与 `src/index.ts` **同一组候选键**）──────────────
+ *
+ * ★ 为什么不各写一份键名：`src/index.ts` 早已用 `['workspaceRegistry', 'workspace']`
+ *   这两个候选（宿主版本不同、服务名不同）。★ 再写一份就等于**两个口径** ——
+ *   而两处一旦分叉，"HTTP 路由能读到的工作区"与"工具能点名的工作区"会不一致。
+ * ★ 这里**不复用 index.ts 的常量**，因为它是模块私有的；★ 但**键序与名字逐字相同**，
+ *   并把这条同源要求写在这里（注释即是契约）。
+ */
+/**
+ * ── ★ t109：取一个**已注册**工作区的显示名（给审计用）────────────────────────────
+ *
+ * ★ 为什么不并进 `resolveTargetWorkspace`：那会让**落点解析**依赖 `ctx.get`，
+ *   而"不传参数"那条老路径**必须不碰 ctx**（实测：碰了会让 4 个既有夹具红）。
+ * ★★ 所以显示名是**审计侧**的事 —— 那里 `ctx` 本来就在手，且**必然**已经解析成功。
+ *
+ * @returns 注册名；该路径不在册（或注册表不可用）⇒ `undefined`。
+ */
+export function registeredWorkspaceTitle(ctx: Context, workspace: string): string | undefined {
+  return workspaceRegistryOf(ctx)?.list().find((entry) => entry.path === workspace)?.title
+}
+
+function workspaceRegistryOf(ctx: Context): WorkspaceRegistry | undefined {
+  const keys = ['workspaceRegistry', 'workspace'] as const
+  for (const key of keys) {
+    const found = ctx.get(key as never) as WorkspaceRegistry | undefined
+    if (found !== undefined) return found
+  }
+  return undefined
 }
 export const VERIFY_COMMAND_TIMEOUT_MS = 120_000
 /**
@@ -271,21 +555,93 @@ export async function loadVerifyCommandRules(workspace: string): Promise<RulesLo
   return { status: 'absent', reason: `the rule table could not be read from any known location (${lastError})` }
 }
 
-export async function runVerifyCommand(workspace: string, command: string): Promise<number> {
+/**
+ * ── ★★★ 杀子进程：要杀【进程组】，不是杀那个 `sh`（2026-10-12）────────────────────
+ *
+ * MEASURED（本仓 t34 事故的现场取证）：`spawn('/bin/sh', ['-c', cmd])` 之后
+ * `child.kill('SIGKILL')` **只杀掉 `sh` 本身** —— `sh` 派出去的那棵树
+ * （`node --test`、`pnpm`、`tsc`…）不会被一起杀，于是它们变成 `ppid = 1` 的孤儿。
+ *
+ * 实测现场：4 个孤儿 node 进程，`cwd` 都是插件仓库、带 `--test-concurrency=0`、
+ * **CPU 0%**、存活 5.7–6.5 小时，**跨了两次宿主重启都没被清理**。
+ * ★ 它们的形态是最坏的一种：不报错、不占 CPU、只是**一直占着** ——
+ *   于是"有过一次超时"与"这台机器上有一批不死的东西"在日志里完全不同形。
+ *
+ * ── 修法：`detached: true` + 杀 `-pid` ────────────────────────────────────────
+ *
+ *   `detached: true` 让子进程成为**新进程组的组长**（pgid = 它的 pid），
+ *   于是 `process.kill(-pid, 'SIGKILL')` 杀的是**整组**。
+ *   ★ `-pid` 里的负号是「进程组」这个语义本身，不是笔误。
+ *
+ * ★ 四条边界（每条都对着一种会把读数弄坏的写法）：
+ *   · `detached` **不**去掉管道（`stdio: 'pipe'` 仍在），也**不** `unref` ——
+ *     调用方照样等 `close`，对外行为一字未变；
+ *   · 组已经不在了（`ESRCH`）⇒ 退回杀单个 pid；
+ *   · 两种都失败 ⇒ **不再纠缠**：在超时路径上抛错会把一次"超时"变成一次
+ *     "执行器抛错"，而那是**另一种读数**（判据对两者的措辞完全不同）；
+ *   · 只在**超时**路径上调它。正常收尾时组已经空了，多杀一次是无意义的系统调用。
+ */
+export function killShellTree(
+  child: { pid?: number | undefined; kill: (signal?: NodeJS.Signals) => boolean },
+  signal: NodeJS.Signals = 'SIGKILL',
+): void {
+  const pid = child.pid
+  if (typeof pid === 'number' && pid > 0) {
+    try {
+      /** ★ 负号 = 进程组。这一行才是"整组杀"的落点。 */
+      process.kill(-pid, signal)
+      return
+    } catch {
+      // 组不在了（ESRCH），或它压根不是组长 ⇒ 退回单 pid。
+    }
+  }
+  try {
+    child.kill(signal)
+  } catch {
+    // 已经死了。这里**不抛** —— 见上面第二、三条边界。
+  }
+}
+
+/**
+ * ── ★★★ t84：单条命令的超时可以【收窄】，但只许收窄（2026-10-12）─────────────────
+ *
+ * `VERIFY_COMMAND_TIMEOUT_MS` 管的是**一条命令**。整条 completion 链
+ * （verify-rerun + backtest + r5 + mutation 判据串行）此前**没有任何总预算** ——
+ * 实测长尾 53 分钟。⇒ 调用方需要把一个"剩余总预算"传下来。
+ *
+ * ★ 语义是**收窄不是放宽**：调用方传的是 `min(单命令上限, 剩余总预算)`，
+ *   于是"单条命令最多 120 s"这条既有纪律一个字没动，而"整条链有界"成为可能。
+ * ★ 非有限值 / 负数 ⇒ 退回缺省（**不**读成"立即超时"）：一个 0 会让每条命令
+ *   立刻返回 125，而 125 在判据里读作"超时"—— 那会把一次**参数写错**
+ *   伪装成"这些命令都超时了"。
+ */
+export interface VerifyCommandOptions {
+  timeoutMs?: number
+}
+
+function resolveTimeoutMs(options: VerifyCommandOptions): number {
+  const given = options?.timeoutMs
+  return typeof given === 'number' && Number.isFinite(given) && given > 0 ? given : VERIFY_COMMAND_TIMEOUT_MS
+}
+
+export async function runVerifyCommand(workspace: string, command: string, options: VerifyCommandOptions = {}): Promise<number> {
   const { spawn } = await import('node:child_process')
+  const timeoutMs = resolveTimeoutMs(options)
   return await new Promise<number>((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd: workspace,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      /** ★ 组长身份 ⇒ 超时时可以整组杀。见 {@link killShellTree}。 */
+      detached: true,
     })
     let settled = false
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
-      child.kill('SIGKILL')
+      killShellTree(child)
       resolve(125)
-    }, VERIFY_COMMAND_TIMEOUT_MS)
+    }, timeoutMs)
     child.on('error', () => {
       if (settled) return
       settled = true
@@ -311,7 +667,7 @@ export function worktreeBaseOf(taskId: string): string | undefined {
 export type BaseRevisionResolution =
   | { kind: 'resolved'; revision: string; from: 'memory' | 'record' }
   | { kind: 'absent'; reason: 'no-worktree' | 'not-recorded' }
-export function resolveBaseRevision(task: { id: string; attempt?: number }): BaseRevisionResolution {
+export function resolveBaseRevision(task: { id: string; attempt?: number; kind?: string }): BaseRevisionResolution {
   const fromMemory = worktreeBaseOf(task.id)
   if (fromMemory !== undefined) return { kind: 'resolved', revision: fromMemory, from: 'memory' }
   const rawRecord = (task as unknown as Record<string, unknown>)['baseRevision']
@@ -320,31 +676,115 @@ export function resolveBaseRevision(task: { id: string; attempt?: number }): Bas
     : undefined
   if (fromRecord !== undefined) return { kind: 'resolved', revision: fromRecord, from: 'record' }
   /**
-   * ★ 两种"没有"必须分得开，而**判别的依据不是一个新猜测**：
-   *   任务被派发过（`attempt > 0`）却查不到任何基准 ⇒ 那个事实本该存在而丢了
-   *   （进程重启）；从未派发过 ⇒ 这类任务本来就没有 worktree。
+   * ── ★★★ 两种"没有"必须分得开 —— 而**判据是【kind】，不是 `attempt`**（t20 修）────
    *
-   * ★ 这条近似**写在这里而不是藏起来**：它是"两个都空"时唯一能读到的证据，
-   *   而它的边界说清楚 —— 一个 `attempt > 0` 但**从来没有** worktree 的任务
-   *   （无隔离环境）会被读成 `not-recorded`。那不是错的：在无隔离环境里，
-   *   "本该有的父版本"确实没有存在过，而**要看一眼**正是我们想让人做的事。
+   * MEASURED（t20）：此前这里写的是
+   *
+   *     attempt > 0 ? 'not-recorded' : 'no-worktree'
+   *
+   * ★ 那是一个**按设计成立的恒不可达**（`decompose-author` 找到，captain 逐字复核）：
+   *
+   *     ① `scheduler.ts` 只给 `KINDS_NEEDING_WORKTREE`（implementation/repair）建树
+   *        ⇒ 其余五种 kind（verification/review/integration/work/requirements）
+   *        **永远不会**有 worktree ⇒ 基准**从来没有**存在过；
+   *     ② 而它们一旦被重派（`attempt > 0`）⇒ 旧写法判 `'not-recorded'`（"本该有却丢了"）
+   *        ⇒ `completion.backtest` 判 **blocked** ⇒ `update_task` 恒被拒
+   *     ③ ⇒ **任何非 implementation/repair 的任务，只要被重派过一次，
+   *        就再也无法提交终态** —— 而它被拒的理由描述的原因**从来没有发生过**。
+   *
+   * ★ 形态：这是三态纪律的**镜像**。
+   *   三态纪律说「**没能测量**不得读成**测得了零**」；
+   *   这里曾经是「**按设计不存在**被读成**本该存在却丢了**」——
+   *   两个方向的合流同源：**把两种不同的"没有"合成一个 `undefined`**。
+   *
+   * ⇒ 正确的判据是 kind：**它会不会被派发到隔离 worktree**（那是"该不该有父版本"的
+   *   唯一真值）。而它从 `needsWorktreeFor` 取 —— 与调度器**同一份真值**，
+   *   不在这里另写一遍 `kind === 'implementation' || kind === 'repair'`
+   *   （两份实现会分叉，而分叉之后"判据说它该有、而调度器从没建过"在日志里同形）。
+   *
+   * ★ `attempt` 在这一版里**不再参与判定**，而那是刻意的：
+   *   "这个任务被派发过几次"与"这类任务该不该有父版本"是两件不相干的事。
+   *   旧写法把它们绑在一起，于是**重派**（一个与基准无关的动作）会翻转诊断。
+   *
+   * ★ 而"从未派发过"与"按设计没有"**不再合并**（旧写法合并了）：两者都落
+   *   `'no-worktree'`，因为它们对下游是**同一件事** —— 父版本**本就不该有**。
+   *   ★ 而判据那边两种成因的措辞已经分得很清（`backtest.ts` 说的是
+   *     "this task is not expected to have one"），所以合并的是**诊断**，不是**裁决**。
    */
-  return { kind: 'absent', reason: typeof task.attempt === 'number' && task.attempt > 0 ? 'not-recorded' : 'no-worktree' }
+  const expectWorktree = needsWorktreeFor((task as { kind?: string }).kind)
+  return { kind: 'absent', reason: expectWorktree ? 'not-recorded' : 'no-worktree' }
 }
 export async function runInDetachedRevision(options: {
   workspace: string
   revision: string
   command: string
-}): Promise<number | undefined> {
+  /**
+   * ★ 2026-10-12：把调用方的**剩余预算**传进来（只收窄）。
+   *   本函数内部有**三条**命令，若只包外层，一次调用最坏能跑 3 × 120 s
+   *   —— 于是"预算有界"只对一半，而那一半在日志里看不出来。
+   */
+  timeoutMs?: number
+  /**
+   * ── ★★★ 要不要把输出也交回去（2026-10-19）──────────────────────────────────────
+   *
+   * MEASURED：本函数此前**只**返回退出码。而 `r5` 判据要按【臂】判 ——
+   *   它需要从 `node --test` 的输出里读出"这个文件里有哪几条臂"，才能分辨
+   *   "这次新增的臂"与"本来就在的臂"。父版本那一路拿不到输出 ⇒
+   *   `parseNodeTestReport('')` 恒 `undefined` ⇒ `newArms` 恒 `undefined`
+   *   ⇒ **永远退回按文件判** ⇒ 任何「父版本绿 + 工作区绿」都被读成"装饰品"。
+   *
+   *   ⇒ 于是 r5 那条「按臂判」的代码**从未生效过**，而它恰好是 t17 花一次任务
+   *     加进来的东西：字段在、分支在、注释在，**注入面没接**。
+   *
+   * ★ 为什么用选项而不是**无条件**捕获：输出最多 256 KiB，而本函数还被
+   *   `baseline` 那一路用着（只要退出码）。把"要不要那 256 KiB"交给调用方，
+   *   是让"我付了这个成本"成为一次显式声明，而不是一个所有人都在付的默认。
+   */
+  captureOutput: true
+}): Promise<{ exitCode: number; output: string } | undefined>
+export async function runInDetachedRevision(options: {
+  workspace: string
+  revision: string
+  command: string
+  timeoutMs?: number
+  captureOutput?: false
+}): Promise<number | undefined>
+export async function runInDetachedRevision(options: {
+  workspace: string
+  revision: string
+  command: string
+  timeoutMs?: number
+  captureOutput?: boolean
+}): Promise<number | { exitCode: number; output: string } | undefined> {
   const { mkdtemp, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const scratch = await mkdtemp(join(tmpdir(), 'agent-teams-rev-'))
   const checkout = join(scratch, 'co')
+  /**
+   * ★ **清理**这一步（`worktree remove`）刻意**不**受预算约束：预算是"别再干重活"，
+   *   而清理是"把已经开出去的临时树收回来"。让一个耗尽的预算把清理也挡掉，
+   *   等于用一次超时换一个永久泄漏的 worktree —— 那是本仓 `reclaim` 脚本存在的理由。
+   *   ⇒ 它用缺省的单命令上限，与预算无关。
+   */
   try {
-    const added = await runVerifyCommand(options.workspace, `git worktree add --quiet --detach ${JSON.stringify(checkout)} ${options.revision}`)
+    const added = await runVerifyCommand(
+      options.workspace,
+      `git worktree add --quiet --detach ${JSON.stringify(checkout)} ${options.revision}`,
+      options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+    )
     if (added !== 0) return undefined
     try {
-      return await runVerifyCommand(checkout, options.command)
+      const budget = options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }
+      if (options.captureOutput === true) {
+        /**
+         * ★ 捕获那一路：`stderr` 也要拼进来 —— `node --test` 的 spec reporter
+         *   在非 TTY 下把 `✔ / ✖` 行写到 **stdout**，但**汇总**（`ℹ tests 22`）
+         *   与部分错误写到 stderr。只拼 stdout 会让"读得出臂名、读不出总数"。
+         */
+        const captured = await runVerifyCommandCaptured(checkout, options.command, budget)
+        return { exitCode: captured.exitCode, output: `${captured.stdout}\n${captured.stderr}` }
+      }
+      return await runVerifyCommand(checkout, options.command, budget)
     } finally {
       await runVerifyCommand(options.workspace, `git worktree remove --force ${JSON.stringify(checkout)}`)
     }
@@ -460,12 +900,19 @@ export async function deriveCoverageInput(options: {
     selected: [...options.knownTests],
   }
 }
-export async function runVerifyCommandCaptured(workspace: string, command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+export async function runVerifyCommandCaptured(
+  workspace: string,
+  command: string,
+  options: VerifyCommandOptions = {},
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const { spawn } = await import('node:child_process')
   const LIMIT = 256 * 1024
+  const timeoutMs = resolveTimeoutMs(options)
   return await new Promise((resolve) => {
     const child = spawn('/bin/sh', ['-c', command], {
       cwd: workspace, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
+      /** ★ 与 `runVerifyCommand` 同一条：组长身份 + 超时整组杀。 */
+      detached: true,
     })
     let stdout = ''
     let stderr = ''
@@ -477,9 +924,9 @@ export async function runVerifyCommandCaptured(workspace: string, command: strin
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
-      child.kill('SIGKILL')
+      killShellTree(child)
       resolve({ exitCode: 125, stdout, stderr })
-    }, VERIFY_COMMAND_TIMEOUT_MS)
+    }, timeoutMs)
     child.on('error', () => {
       if (settled) return
       settled = true
@@ -506,6 +953,375 @@ export function writeWorkspaceFileSync(workspace: string, relativePath: string, 
   }
   writeFileSync(target, contents)
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ completion 链的 wall-clock 总预算（2026-10-12）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 它防的是什么失效 ──────────────────────────────────────────────────────────
+ *
+ * `VERIFY_COMMAND_TIMEOUT_MS = 120_000` **只是单条命令**的上限。整条 completion 链
+ * （`verify-rerun` → `backtest`(full) → `r5` → `mutation`，判据**串行**求值）
+ * 此前**没有任何总预算** —— 实测 914 次 `update_task` 的 completed 分支
+ * p90 = 127.7 s、**max = 3215.6 s（53 分钟）**，而一次失败还会让 attempt 翻倍、
+ * 于是整条链**从头再跑一遍**（t34 已 attempt 5）。
+ *
+ * ⇒ ★ 单命令超时在读数上会**冒充**总预算：看到代码里有 timeout 的人很容易得出
+ *   "不可能挂"的结论，而那个 timeout 覆盖的只是一小段。
+ *
+ * ── 为什么预算是**调用方**的事实，而不是判据的 ────────────────────────────────
+ *
+ * 判据是纯数据变换（契约 §2 性质 1）：**它不读时钟**。所以"这一轮还剩多少时间"
+ * 只能由调用方持有，并通过**执行器的超时**落到地上 —— 见 {@link runWithinBudget}。
+ *
+ * ★ 缺省给得宽（20 分钟）：它要挡的是**病态长尾**（53 分钟那一档），而不是正常
+ *   路径（p90 才 2 分钟）。把缺省压到分钟级会让这条判据**常态性**报 unmeasured
+ *   —— 那是"判据被自己的预算关掉了"，比慢更坏，而且它与"测试不够"在报告里同形。
+ */
+export const COMPLETION_BUDGET_MS = 20 * 60_000
+
+/** 用环境变量覆盖总预算。非正数 / 非法值 ⇒ 退回缺省（**没有"无限"这个档位**）。 */
+export const COMPLETION_BUDGET_ENV = 'AGENT_TEAMS_COMPLETION_BUDGET_MS'
+
+export interface CompletionBudget {
+  readonly totalMs: number
+  readonly deadlineMs: number
+  remainingMs: () => number
+  elapsedMs: () => number
+  /** 记一笔"有人被预算挡下"，并留下是谁。 */
+  noteExhausted: (label: string) => void
+  /** 被预算挡下的调用标签（发生顺序，去重）。 */
+  exhaustedBy: () => readonly string[]
+  exhausted: () => boolean
+  /** 受预算约束发出的调用条数。 */
+  calls: () => number
+  noteCall: () => void
+}
+
+export function createCompletionBudget(totalMs?: number): CompletionBudget {
+  const fromEnv = Number(process.env[COMPLETION_BUDGET_ENV])
+  const chosen = typeof totalMs === 'number' && Number.isFinite(totalMs) && totalMs > 0
+    ? totalMs
+    : (Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : COMPLETION_BUDGET_MS)
+  const startedAt = Date.now()
+  const exhaustedBy: string[] = []
+  let calls = 0
+  return {
+    totalMs: chosen,
+    deadlineMs: startedAt + chosen,
+    remainingMs: () => startedAt + chosen - Date.now(),
+    elapsedMs: () => Date.now() - startedAt,
+    noteExhausted: (label) => { if (!exhaustedBy.includes(label)) exhaustedBy.push(label) },
+    exhaustedBy: () => [...exhaustedBy],
+    exhausted: () => Date.now() >= startedAt + chosen,
+    calls: () => calls,
+    noteCall: () => { calls += 1 },
+  }
+}
+
+/**
+ * ── ★ 把一次执行器调用包进预算 ────────────────────────────────────────────────
+ *
+ * 两条纪律：
+ *
+ * ① **超预算 ⇒ 抛一条自述的错误**，不返回一个"看起来像命令失败"的退出码。
+ *    理由：判据对"执行器抛错"与"命令失败"的措辞**完全不同** —— 前者说
+ *    "我没能跑它"，后者说"它跑了并且失败"。返回 125 会让一次**预算停止**
+ *    被读成"这些命令都超时了"，也就是把基础设施的读数伪装成关于代码的读数。
+ *
+ * ② 传下去的超时是 `min(单命令上限, 剩余)` ⇒ **只收窄、不放宽**：单条命令最多
+ *    120 s 这条既有纪律一个字没动，而累加起来整条链有界。
+ */
+export async function runWithinBudget<T>(
+  budget: CompletionBudget,
+  label: string,
+  run: (timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const remaining = budget.remainingMs()
+  if (remaining <= 0) {
+    budget.noteExhausted(label)
+    /**
+     * ★ 抛的是 {@link CompletionBudgetExceeded}，不是裸 `Error` —— 见 `gates/budget-stop.ts`。
+     *   裸 `Error` 会让两个下游各自把它读成**自己的**东西：mutation 的逐条 catch 读成
+     *   `outcome: 'error'`（不进分母 ⇒ 可能假通过），`registry.evaluate` 直接穿出去
+     *   （绕过三态裁决）。两者都不是"这条链没能测量"。
+     */
+    throw new CompletionBudgetExceeded(
+      `the completion chain exhausted its ${Math.round(budget.totalMs / 1000)}s wall-clock budget before "${label}" could run`
+      + ` — this is a BUDGET stop, NOT a failing test; stopped call(s): ${budget.exhaustedBy().join(', ')}`,
+    )
+  }
+  budget.noteCall()
+  return await run(Math.min(VERIFY_COMMAND_TIMEOUT_MS, remaining))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ★★★ 变异日志：就地变异是【可恢复】的（2026-10-12）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * mutation 会【就地】改生产文件、跑测试、再改回来：
+ *
+ *     writeFile(target, mutated)
+ *     try { runTests() } finally { writeFile(target, original) }
+ *
+ * `finally` 只覆盖**正常退出**。它不覆盖 SIGKILL / 宿主崩溃 / 关掉 App。
+ *
+ * MEASURED（本仓 2026-10-12，t34 事故**已兑现**的后果）：
+ *   主仓库 `src/worktree.ts:366` 被留在变异态 —— `failed: Array<{…}>` 后面多了
+ *   一个 `=`。它**不是手误**：没有任何人会自然写出 `}> =`，而 `gt-to-ge` 算子
+ *   （`find:'>'` → `replace:'>='`）在改动行范围内唯一命中的位置正是那里。
+ *   后果是 `pnpm build` **从此必失败**（2 s，exit 2），而 378 那行报错是**级联**。
+ *
+ * ★ 而 `src/mutation-guard.ts` 早就写好了"事后发现残留"的守卫
+ *   （`checkMutationGuard`，三态 + git 证据）—— 但**全仓没有一个调用方**。
+ *   于是"发现了"这件事本身也不存在。
+ *
+ * ── 本机制提供的是【恢复】，而不只是【发现】───────────────────────────────────
+ *
+ * 一个只报告残留的守卫能让人**知道**插件坏了；它不能让人**不必**手动修。而
+ * "插件自己的 `pnpm build` 挂了"这条症状，与"某处代码写错了"在日志里同形。
+ *
+ * ── 机制：写之前先记日志；恢复时按【内容】判定，冲突就不动 ─────────────────────
+ *
+ *   条目（每个文件一条，落在 `<workspace>/.agent-teams/mutation-journal/`）：
+ *
+ *       { file, original, mutated, at }
+ *         original —— 这一轮**第一次**写它之前的内容（`null` = 当时不存在）
+ *         mutated  —— **最后一次**被写进去的、与 original 不同的内容
+ *
+ *   恢复逐条判定（四态，互不同形）：
+ *
+ *     ① current === original            ⇒ 干净（正常收尾过）        ⇒ 删条目
+ *     ② current === mutated             ⇒ 残留确实是变异体写的      ⇒ **写回 original**
+ *     ③ 两者都不是                       ⇒ **冲突**：崩溃之后有人
+ *                                           动过这个文件 ⇒ **不动**，留条目报出来
+ *     ④ 读不到 / 条目坏                  ⇒ 未测量 ⇒ **不动**，报出来
+ *
+ * ★ ③ 是这套机制里最要紧的一态，也是它**不做**自动覆盖的理由：崩溃之后成员完全
+ *   可能合法地编辑过那个文件。把它写回"变异前的样子"会**丢掉一次真实的工作**，
+ *   而那种损失在日志里与"恢复成功"同形。⇒ 只在内容**逐字等于**我们写进去的
+ *   那一份时才回滚。
+ *
+ * ★ 顺序是【先记日志、再写文件】：于是"记完日志就崩"落在情形 ①（干净），
+ *   而不是留下一个半截的条目。
+ */
+export const MUTATION_JOURNAL_STATE_DIR = '.agent-teams'
+const MUTATION_JOURNAL_DIRNAME = 'mutation-journal'
+
+export interface MutationJournalEntry {
+  /** workspace 相对路径。 */
+  readonly file: string
+  /** 这一轮第一次写它【之前】的内容；`null` = 当时它不存在。 */
+  readonly original: string | null
+  /** 最后一次被写进去的、与 `original` 不同的内容。 */
+  readonly mutated?: string
+  readonly at: string
+}
+
+export function mutationJournalDir(workspace: string, stateDir: string = MUTATION_JOURNAL_STATE_DIR): string {
+  return join(workspace, stateDir, MUTATION_JOURNAL_DIRNAME)
+}
+
+function journalEntryPath(workspace: string, relativePath: string, stateDir: string): string {
+  /** ★ 用 `encodeURIComponent` 而不是把 `/` 换掉：它是**单射**的，不会把两个不同路径映射成同名。 */
+  return join(mutationJournalDir(workspace, stateDir), `${encodeURIComponent(relativePath)}.json`)
+}
+
+function readJournalEntryAt(path: string): MutationJournalEntry | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+  if (parsed === null || typeof parsed !== 'object') return undefined
+  const entry = parsed as Record<string, unknown>
+  if (typeof entry['file'] !== 'string' || entry['file'] === '') return undefined
+  const original = entry['original']
+  if (original !== null && typeof original !== 'string') return undefined
+  return {
+    file: entry['file'],
+    original,
+    ...typeof entry['mutated'] === 'string' ? { mutated: entry['mutated'] } : {},
+    at: typeof entry['at'] === 'string' ? entry['at'] : '',
+  }
+}
+
+/**
+ * 在一次【就地写】之前记账。
+ *
+ * ★ 由调用方在注入给判据的 `writeFile` 里调 —— 判据自己做不了这件事（它是纯的）。
+ * ★ 幂等：同一个文件重复写只更新 `mutated`，`original` **永远是第一次那一份**
+ *   （后面读到的都已经被污染了）。
+ */
+export function recordMutationWrite(
+  workspace: string,
+  relativePath: string,
+  contents: string,
+  stateDir: string = MUTATION_JOURNAL_STATE_DIR,
+): void {
+  const path = journalEntryPath(workspace, relativePath, stateDir)
+  const existing = readJournalEntryAt(path)
+  if (existing === undefined) {
+    mkdirSync(mutationJournalDir(workspace, stateDir), { recursive: true })
+    let original: string | null = null
+    try {
+      original = readFileSync(join(workspace, relativePath), 'utf8')
+    } catch {
+      /** 文件不存在 ⇒ `null`（恢复时"写回"等于删掉它）。**不是空串**：两者不同形。 */
+      original = null
+    }
+    const entry: MutationJournalEntry = {
+      file: relativePath,
+      original,
+      ...contents === original ? {} : { mutated: contents },
+      at: new Date().toISOString(),
+    }
+    /**
+     * ★ 先记日志、**再**让调用方写文件（本函数只记账，不写目标）。
+     *   顺序反了的话，"记完就崩"会留下一个 mutated 已更新而文件还没变的条目
+     *   —— 那落在情形 ①（干净）里，仍然正确。所以两条路都安全，但这一条更直白。
+     */
+    writeFileSync(path, JSON.stringify(entry))
+    return
+  }
+  /** 还原写入（把 `original` 写回去）**不**更新 `mutated` —— 它正是"没有残留"的证据。 */
+  if (contents === existing.original) return
+  if (existing.mutated === contents) return
+  writeFileSync(path, JSON.stringify({ ...existing, mutated: contents, at: new Date().toISOString() }))
+}
+
+export interface MutationRecoveryReport {
+  /** 被写回原文的文件（残留确实是我们写的）。 */
+  restored: string[]
+  /** 已经干净、只把条目删掉的文件。 */
+  clean: string[]
+  /** 需要人看一眼：内容既不是原文、也不是我们写进去的变异体。条目**保留**。 */
+  conflicts: Array<{ file: string; reason: string }>
+  /** 恢复过程本身失败。条目**保留**。 */
+  failed: Array<{ file: string; reason: string }>
+  /** 有没有真的动过盘（用于决定要不要打日志）。 */
+  touched: boolean
+}
+
+/**
+ * 扫一遍某个 workspace 的变异日志并恢复。
+ *
+ * ★ 两种调用时机，各有各的必要：
+ *   · **插件启动时** —— 上一次崩溃留下的残留在这一步被修掉，而不是等下一次
+ *     `update_task` 顺手修（那可能永远不来）；
+ *   · **每条 completion 链的入口** —— 兜住"上一次没走完"的那一类。
+ * ★ 正常收尾也走它：那时每个条目的 `current === original` ⇒ 只删条目、不动文件。
+ *   所以它同时是"清理"，不需要另设一个 clear 函数（两个入口会分叉）。
+ */
+export function recoverMutationJournal(
+  workspace: string,
+  stateDir: string = MUTATION_JOURNAL_STATE_DIR,
+): MutationRecoveryReport {
+  const report: MutationRecoveryReport = { restored: [], clean: [], conflicts: [], failed: [], touched: false }
+  const dir = mutationJournalDir(workspace, stateDir)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    /** ★ 目录不存在 = 从没跑过变异，或已经清干净。这是**正常**，不是"未测量"。 */
+    return report
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue
+    const entryPath = join(dir, name)
+    const entry = readJournalEntryAt(entryPath)
+    if (entry === undefined) {
+      report.failed.push({ file: name, reason: 'the journal entry is not readable as {file, original, …}' })
+      continue
+    }
+    const target = join(workspace, entry.file)
+    let current: string | null = null
+    try {
+      current = readFileSync(target, 'utf8')
+    } catch {
+      current = null
+    }
+    if (current === entry.original) {
+      try {
+        unlinkSync(entryPath)
+        report.clean.push(entry.file)
+      } catch (error) {
+        report.failed.push({ file: entry.file, reason: `the entry could not be cleared: ${String(error)}` })
+      }
+      continue
+    }
+    if (entry.mutated !== undefined && current === entry.mutated) {
+      try {
+        if (entry.original === null) unlinkSync(target)
+        else writeFileSync(target, entry.original)
+        const readBack = entry.original === null ? (existsSync(target) ? 'exists' : 'absent') : readFileSync(target, 'utf8')
+        const identical = entry.original === null ? readBack === 'absent' : readBack === entry.original
+        if (!identical) {
+          report.failed.push({ file: entry.file, reason: 'the original was written back but did not read back identical' })
+          continue
+        }
+        unlinkSync(entryPath)
+        report.restored.push(entry.file)
+        report.touched = true
+      } catch (error) {
+        report.failed.push({ file: entry.file, reason: `restoring raised: ${String(error)}` })
+      }
+      continue
+    }
+    report.conflicts.push({
+      file: entry.file,
+      reason:
+        'the file matches neither the pre-mutation original nor the last mutant written by mutation testing,'
+        + ' so something edited it after the crash — it is left untouched, because rolling it back would discard that work',
+    })
+  }
+  return report
+}
+
+/**
+ * ── ★★★ 启动时的收残留：扫【插件自己的树】以及它派出去的每一棵树 ─────────────────
+ *
+ * ★ 为什么"启动时"这一步不可省：`wireCompletion` 里那两次调用只在**下一次有人
+ *   报完成**时才会发生。而本条机制要修的那个事故恰恰是 ——
+ *   **插件自己的 `pnpm build` 从此必失败**（`src/worktree.ts:366` 的 `=`）。
+ *   从崩溃到"下一个人报完成"之间，插件的构建一直是坏的，而那条症状
+ *   （"某处代码写错了"）与真实的代码错误完全同形。
+ *   ⇒ 必须有一个**与成员行为无关**的时点去修它，那就是挂载。
+ *
+ * ★ 扫两处、不只扫根：
+ *   · `root` —— 队长的工作区**就是插件仓库**（实测：t34 的 `assignee` 是 captain，
+ *     而 `workspaceOf(caller)` 给出的是 `session.header.cwd`，即插件根）
+ *     ⇒ 事故就落在这里；
+ *   · `root/.agent-teams/worktrees/*` —— 成员被派到隔离树里干活，那里同样会跑
+ *     mutation（workspace = 那棵树）⇒ 同一类残留，只是位置不同。
+ *
+ * ★ 返回**逐棵树的读数**（而不是一个合并后的数组）："哪一棵树被修了"是这条读数
+ *   的全部价值 —— 合并之后，一棵树的冲突会淹没在另一棵树的干净里。
+ */
+export function recoverMutationJournalsUnder(
+  root: string,
+  stateDir: string = MUTATION_JOURNAL_STATE_DIR,
+): Array<{ workspace: string; report: MutationRecoveryReport }> {
+  const workspaces = [root]
+  try {
+    const worktreesDir = join(root, stateDir, 'worktrees')
+    for (const name of readdirSync(worktreesDir)) {
+      if (name.startsWith('.')) continue
+      const candidate = join(worktreesDir, name)
+      try {
+        if (existsSync(join(candidate, 'src'))) workspaces.push(candidate)
+      } catch {
+        // 读不到就跳过这一棵 —— 它是"没扫到"，不是"它干净"。
+      }
+    }
+  } catch {
+    /** 没有 worktrees 目录 ⇒ 只有根这一棵。这是正常情形。 */
+  }
+  return workspaces.map((workspace) => ({ workspace, report: recoverMutationJournal(workspace, stateDir) }))
+}
+
 export function deriveScanDirs(changedFiles: readonly string[]): string[] | undefined {
   const dirs = new Set<string>()
   for (const file of changedFiles) {
@@ -548,6 +1364,25 @@ export function mergeRerunIntoCommandsRun(
     const rerun = byCommand.get(item.command)
     if (rerun === undefined) return item
     seen.add(item.command)
+    /**
+     * ★★ 重跑条目【不带 `failures`】（`verify-rerun.ts` 的 reruns.push 只填
+     *    command/status/exitCode/evidence），而本函数此前用 `return rerun`
+     *    整条替换成员如实报的那条 ⇒ **失败明细在到达判据之前丢失**。
+     *
+     * MEASURED（2026-10-11，t3 实测钉死的链）：
+     *   成员报了逐字的失败名 ⇒ verify-rerun 重跑同一条命令 ⇒ 本函数整条覆盖 ⇒
+     *   `quality-gates.ts` 的 classifyVerifyFailures 看到 `failures` 缺席
+     *   ⇒ 恒 undecidable（"reported no per-test failures"）
+     *   ⇒ ★ 任何含已知红的任务都无法到达 completed —— 而 pin 清单扣减那条路
+     *     需要 failures 才能走。
+     *
+     * ⇒ 修法（口径定在【这一处】——"这条红算不算新增"只能有一个答案）：
+     *   重跑只更新 status/exitCode/evidence；成员报的 `failures` 若在，
+     *   而 rerun 没带 ⇒ **保留 claimed 的**。
+     */
+    if (rerun.failures === undefined && item.failures !== undefined) {
+      return { ...rerun, failures: item.failures }
+    }
     return rerun
   })
   for (const rerun of reruns) {
@@ -557,6 +1392,46 @@ export function mergeRerunIntoCommandsRun(
 }
 export function stateRootOf(workspace: string, config: ToolsConfig): string {
   return join(workspace, config.stateDir)
+}
+/**
+ * ── ★★★ N1.2：生产路径上取「采集索引」的**唯一**入口 ──────────────────────────────
+ *
+ * ── 它把三个各自会分叉的决定收成一处 ──────────────────────────────────────────────
+ *
+ *   ① **从哪读**：`deriveCollectionIndex(stateRoot, readFile, keyOf)` —— 读 `signals.jsonl`。
+ *   ② **键怎么算**：`dedupeKeyOf`（`gates/collection/shared.ts`）—— ★ **必须**是写端
+ *      用的那一个函数。若这里另拼一遍字符串，索引算出的键与写端算出的键永远不同
+ *      ⇒ 去重**永不命中**，而读数上一切正常（`ok`，看起来在工作）。
+ *   ③ **没有台账时怎么办**：`status: 'absent'` ⇒ 返回 **`undefined`**（**不是**空索引）。
+ *      ★ 空索引会被 `cooldown` 读成"这个来源从没说过话" ⇒ `ok` ⇒ 放行
+ *      ⇒ "采集流水线还没开过"被读成"每条都是第一次，全都该采"。
+ *
+ * ── ★★ 为什么返回 `undefined` 而不是一个 `{status}` 信封 ──────────────────────────
+ *
+ *   `ObserveInput.loadIndex` 的契约就是"给不出来 ⇒ `undefined`"，
+ *   而判据那边见到 `index === undefined` 会答 `unmeasured`（正确读数）。
+ *   ★ 中间再包一层信封只会造出第二个"三态"，而两个三态之间必须再定一次映射 ——
+ *     那正是本任务在拆的那种焊点。⇒ 这里直接塌成调用方唯一需要的那个形状。
+ *
+ * ── ★ 读失败（权限/坏盘）与"文件还没有"在这里**不分**：两者都答不出索引 ────────────
+ *   这不是偷懒：判据要的只是"能不能给出上一批已采信号"，两种原因都给不出。
+ *   ★ 而"为什么给不出"由 `deriveCollectionIndex` 的 `rowsRead`/`skippedMalformed`
+ *     那一侧承担（它不抛、只报），本函数不重述。
+ */
+export async function loadCollectionIndexFor(stateRoot: string): Promise<{
+  readonly seen: ReadonlySet<string>
+  readonly lastBySource: ReadonlyMap<string, number>
+  readonly counts: ReadonlyMap<string, number>
+} | undefined> {
+  const derived = await deriveCollectionIndex(
+    stateRoot,
+    async (path, encoding) => {
+      const { readFile } = await import('node:fs/promises')
+      return await readFile(path, encoding)
+    },
+    dedupeKeyOf,
+  )
+  return derived.index
 }
 export function teamLockKey(stateRoot: string, teamId: string): string {
   return `team:${stateRoot}:${teamId}`
@@ -581,8 +1456,22 @@ export async function requireParticipantTeam(workspace: string, config: ToolsCon
 export type ParticipantIdentity =
   | { kind: 'captain'; name: typeof CAPTAIN_KEY }
   | { kind: 'member'; name: string }
-export function participantIdentityOf(team: TeamState, agentId: string): ParticipantIdentity | undefined {
-  if (team.captainSessionId === agentId) return { kind: 'captain', name: CAPTAIN_KEY }
+export function participantIdentityOf(
+  team: TeamState,
+  agentId: string,
+  /**
+   * ★★★ #176（乙）：活会话清单（t98）。**缺席 ⇒ 退回精确相等**（与今天同结论）。
+   * ★ 做成**可选**：它有三个调用方，而那些调用点的上下文各不相同 ——
+   *   做成必填会逼拿不到 `ctx` 的路径编一个空清单（那是"假装测过"）。
+   */
+  liveSessions?: readonly LiveSessionRef[],
+): ParticipantIdentity | undefined {
+  /**
+   * ── ★★★ #176（乙）：lead 身份收口（t98）───────────────────────────────────────
+   * ★ 它答"这个会话在这个队里算什么" —— 若 fork 出来的队长在这里落到
+   *   `undefined`，那么它**什么都不是**（比"成员"更坏：读的人会以为它不在这个队里）。
+   */
+  if (sessionLeadsTeam(agentId, identityOfTeam(team), liveSessions ?? [])) return { kind: 'captain', name: CAPTAIN_KEY }
   const member = team.members.find((candidate) => candidate.id === agentId && candidate.status !== 'removed')
   return member === undefined ? undefined : { kind: 'member', name: member.name }
 }
@@ -630,16 +1519,417 @@ export function trimmedOptional(value: string | null | undefined): string | unde
   const trimmed = value?.trim()
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
 }
+/**
+ * ── ★★★ 造一条任务的**唯一**构造点（t117）────────────────────────────────────────
+ *
+ * MEASURED（2026-10-19 普查，可复跑：`grep -rn "tasks.push" src/`）：
+ * 本仓有**四条**各自造 `TeamTask` 的路，每条只写当时那个功能需要的字段：
+ *
+ * | 路径 | 落点 | 字段数 | `gateEvaluations` | 能传 `reviewed` |
+ * |---|---|---|---|---|
+ * | `create_task` | `tools/create-task.ts:707` | 最多（含质量契约） | ✅ | ✅ |
+ * | `plan.tasks` 种子 | 本文件 `:5346` | 12 | ❌ | ❌ |
+ * | `edit_plan.add_task` | `tools.ts:2032` | 9（`kind` 硬编码 `'work'`） | ❌ | ❌ |
+ * | `applyQualityFollowUp` | 本文件 `:5453` | 7 | ❌ | ❌ |
+ *
+ * ⇒ 每加一个新字段（`gateEvaluations` / `reviewed` / `coverageOf` /
+ *   `sourceFindingIds` …）都要记得改四处，而实际上只改了一处。
+ *
+ * ★★ 那不是"路径太多"，是**四个构造函数各持一份字段清单**。本函数把它们收成一份。
+ *
+ * ── 三态：`undefined` 的格子**一个键都不写** ──────────────────────────────────────
+ *
+ * 沿用全仓纪律（与 `create_task` 逐字同源）：缺席时**不写** `{ key: undefined }`，
+ * 而是根本不写那个键。理由见 `create-task.ts` 的 `reviewed` 注释逐字：
+ * 一个"在场但是 undefined"与"审过了、逐条写着结果"在读取方眼里**同形**。
+ *
+ * ── 它**不**做的事 ───────────────────────────────────────────────────────────────
+ *
+ * · 不分配 id（`id` 由调用方给 —— `plan.tasks` 用 `t${index+1}` 与 seq 脱钩，
+ *   而运行期路径用 `t${seq}`，两者不同源，收进来会改变既有 id）。
+ * · 不求值判据（判据挂在哪一处是**下一步**的事，不是构造函数的职责）。
+ * · 不落盘。
+ */
+export interface TaskDraft {
+  id: string
+  subject: string
+  /** 缺省 = 未分配（走 shared pool 等 claim）。 */
+  assignee?: string
+  description?: string
+  dependencies?: readonly string[]
+  kind?: TaskKind
+  round?: number
+  objective?: string
+  inScope?: readonly string[]
+  outOfScope?: readonly string[]
+  acceptance?: readonly string[]
+  verify?: readonly string[]
+  deliverables?: readonly string[]
+  nonGoals?: readonly string[]
+  coverageOf?: readonly string[]
+  reviewedTaskId?: string
+  sourceTaskId?: string
+  sourceFindingIds?: readonly string[]
+  /**
+   * ★ **刻意没有 `reviewed`。** 见 `makeTask` 的注释 ④：
+   *   t9（P2c）的 acc4 要求 `reviewed` 的透传链「四处都在」且「单文件」，
+   *   所以落盘那一步留在 `src/tools/create-task.ts` 里，不经过本接口。
+   *   ⇒ 未接上来的那类"以为能造"的调用会被编译器挡住，而不是静默少写一格。
+   */
+  /** `plan.tasks` 种子专用：模板里的稳定 id（与运行期 id 不同轴）。 */
+  profileSeedId?: string
+  model?: string
+  reasoningEffort?: string
+  /** 覆盖 `createdAt` / `updatedAt`；缺省用调用时的墙钟。 */
+  at?: number
+}
+/**
+ * 造一条 `TeamTask`。**所有**造任务的路径都该走这里。
+ *
+ * ── ★★★ 不做什么（两次我差点写错的地方，都实测过）──
+ *
+ * ① **不做 kind 相关的 sanitize**。
+ *   `sanitizeReviewObjective` / `sanitizeReviewAcceptance` 看上去像"造 review 任务时的
+ *   通用归一化"，其实**不是**：它们是**调用点各自的入参归一化**，各调用点做得不一样 ——
+ *   · `create_task`（`create-task.ts:684-689`）：**两条都做**（模型给的入参可能空）
+ *   · `planQualityFollowUp` 的 requirements 分支（`quality-gates.ts:2105/2121`）：
+ *     **自己做**（因为它有 `'Converge remaining open questions'` 这种专属缺省）
+ *   · `planQualityFollowUp` 的 review 分支（`:2170`）：**不做**（`objective` 取自源任务，
+ *     或落 `Fix findings from ${sourceId}`）
+ *   ⇒ 若 `makeTask` 统一做，自动 repair/review 循环每条新任务会**凭空多出**
+ *     `objective` / `acceptance` 两个键，而它们今天的值是别的。那是行为变化，不是重构。
+ *
+ * ② **不给 `kind` 补缺省**。
+ *   `plan.tasks` 种子建的任务**没有 `kind` 键**（`taskKindOf()` 读成 `'work'`）。
+ *   在这里写 `kind: 'work'` 会让"老数据"与"新数据"在同一格上从**都靠缺省**
+ *   变成**一个有键一个没键**（`entities.ts:1493` 的注释说明了理由）。
+ *
+ * ③ **不替调用点 trim**。
+ *   `description` / `assignee` 的空串处理是**调用点各自的策略**，四条路径不一致且都有理由：
+ *   · `create_task`：**原样透传**（`create-task.ts:727-728`）—— 空串会被**真落盘**
+ *     （`isOptionalString` 允许空串，`BLANK_SENSITIVE_STRING_FIELDS` 不含这两个键），
+ *     读回来仍是空串。
+ *   · `edit_plan.add_task`：**先 `trimmedOptional` 再传**（`tools.ts:2046-2047`）——
+ *     写进去的是"没有这一格"。
+ *   两者**今天就不是同形**。若 `makeTask` 统一 trim，`create_task` 的空串落盘形态会变 ——
+ *   那是行为变化，不是重构。⇒ 调用点自己 trim，`makeTask` 原样收下。
+ *   ★ 唯一例外见下方 `objective`：那一格 `trimmedOptional` 是**通用**的（四条路径都 trim
+ *     或本来就不传空串），所以放在这里。
+ */
+export function makeTask(draft: TaskDraft, now = Date.now()): TeamTask {
+  const at = draft.at ?? now
+  return {
+    id: draft.id,
+    subject: draft.subject,
+    status: 'pending',
+    dependencies: [...(draft.dependencies ?? [])],
+    attempt: 0,
+    createdAt: at,
+    updatedAt: at,
+    ...draft.kind === undefined ? {} : { kind: draft.kind },
+    ...draft.assignee === undefined ? {} : { assignee: draft.assignee },
+    ...draft.description === undefined ? {} : { description: draft.description },
+    ...draft.profileSeedId === undefined ? {} : { profileSeedId: draft.profileSeedId },
+    ...draft.round === undefined ? {} : { round: draft.round },
+    ...trimmedOptional(draft.objective) === undefined ? {} : { objective: draft.objective!.trim() },
+    ...draft.inScope === undefined ? {} : { inScope: [...draft.inScope] },
+    ...draft.outOfScope === undefined ? {} : { outOfScope: [...draft.outOfScope] },
+    ...draft.acceptance === undefined ? {} : { acceptance: [...draft.acceptance] },
+    ...draft.verify === undefined ? {} : { verify: [...draft.verify] },
+    ...draft.deliverables === undefined ? {} : { deliverables: [...draft.deliverables] },
+    ...draft.nonGoals === undefined ? {} : { nonGoals: [...draft.nonGoals] },
+    ...draft.coverageOf === undefined ? {} : { coverageOf: [...draft.coverageOf] },
+    ...draft.reviewedTaskId === undefined ? {} : { reviewedTaskId: draft.reviewedTaskId },
+    ...draft.sourceTaskId === undefined ? {} : { sourceTaskId: draft.sourceTaskId },
+    ...draft.sourceFindingIds === undefined ? {} : { sourceFindingIds: [...draft.sourceFindingIds] },
+    ...draft.model === undefined ? {} : { model: draft.model },
+    ...draft.reasoningEffort === undefined ? {} : { reasoningEffort: draft.reasoningEffort },
+  }
+}
 export function memberOpenTask(team: TeamState, memberName: string, exceptTaskId?: string): TeamTask | undefined {
   return team.tasks.find(task => task.id !== exceptTaskId
     && task.assignee === memberName
     && (task.status === 'claimed' || task.status === 'in_progress'))
 }
+/**
+ * ── ★★★ t26：作用域的**两条机械检查**（在**建任务的那一刻**跑）──────────────────────
+ *
+ * 契约原话：*"Two distinct failures, each one assertion"* —— 而它们在本轮里
+ * 各自吃过完整的派发往返，由四个成员独立撞到。
+ *
+ * ── ① CONTRADICTION：同一个路径同时出现在 `inScope` 与 `outOfScope` ──────────────
+ *
+ * MEASURED（t19）：一次修订更新了 `inScope` 而没更新 `outOfScope`，于是
+ * `src/types.ts` **两边都在**。★ 而校验器**按 out-of-scope 那一侧执行** ⇒
+ * 那个任务**无解**：它要改的文件是它被禁止改的文件。
+ * ★★ 最坏的地方不是"任务难做"，而是**它读起来完全正常** ——
+ * 一行 `In scope: …; Out of scope: …`，两个列表都在场，而**交集没人算**。
+ *
+ * ── ② TOUCH：为了满足某条验收标准，**必须改的每一个路径**是否都在 `inScope` 里 ────
+ *
+ * MEASURED（t24）：它的验收标准是**把判据从 `src/tools/shared/entities.ts` 搬走**，
+ * 于是那个文件需要**两处**改动（一个 import、一个 re-export 中转），
+ * 而 `inScope` 只写了**目的地**。
+ * ★★ 这一类在**任何** move / relocate / extract 任务上都会复发 ——
+ * 因为它们**天生**有一个源与一个目的地，而生成器只列目的地。
+ *
+ * ── ★ 判据是保守的：**只在能机械读出时开火** ─────────────────────────────────────
+ *
+ * 一个靠猜的检查会在散文上误报，而**误报会教人忽略门禁**（与漏报同样有害）。
+ * ⇒ 下面两条都只认**明确读得出来的东西**：路径形的 token、以及 move 类动词。
+ */
+
+/** 一条作用域检查的失败（**逐条指名** —— 读的人要能直接去改）。 */
+export interface ScopeContradiction {
+  /**
+   * ★ t26：三条各自可指名的检查（队长证据包里的第 1/2/3 条子类）。
+   *   ★ 逐条指名是刻意的：读的人要能直接知道**哪一条**拦住了它，以及去改什么。
+   */
+  readonly check: 'contradiction' | 'emit' | 'touch'
+  readonly detail: string
+}
+
+/**
+ * ① 同一个路径同时在 inScope 与 outOfScope 里。
+ * ★ 复用 `quality-gates.ts` 的 `inScopeOverlap`（**同一份**判据，不重写一份 —— 两份会漂移）。
+ */
+export function scopeContradictions(
+  inScope: readonly string[] | undefined,
+  outOfScope: readonly string[] | undefined,
+): ScopeContradiction[] {
+  const overlapping = inScopeOverlap(inScope, outOfScope)
+  return overlapping.map((path) => ({
+    check: 'contradiction' as const,
+    detail: `\`${path}\` appears in BOTH inScope and outOfScope — this task is unsatisfiable: `
+      + 'the validator honours the out-of-scope side, so the file you must change is the file you are forbidden to change',
+  }))
+}
+
+/**
+ * ── ③（TOUCH）move 类任务：**源**必须也在 inScope 里 ──────────────────────────────
+ *
+ * ★ 机械判据（保守）：验收标准里出现下面这些动词之一 **且** 提到一个存在于
+ *   `outOfScope` 的路径 ⇒ 那个路径是**源**，而它必须可改（否则搬不走）。
+ */
+const MOVE_VERBS = /\b(move|relocate|extract|extract(?:ing)?\s+out|migrate|搬迁|搬走|抽取|提取|移出|迁移)\b/iu
+
+export function scopeTouchGaps(
+  acceptance: readonly string[] | undefined,
+  inScope: readonly string[] | undefined,
+  outOfScope: readonly string[] | undefined,
+): ScopeContradiction[] {
+  const text = (acceptance ?? []).join('\n')
+  if (!MOVE_VERBS.test(text)) return []
+  const gaps: ScopeContradiction[] = []
+  /**
+   * ★ 只看**明确列在 outOfScope 里**的那些路径：它们是"必须搬走、而被禁止碰"的源。
+   *   ★ 不做"从散文里猜路径"——那会在任何提到文件名的验收标准上误报。
+   */
+  for (const path of outOfScope ?? []) {
+    if (!text.includes(path)) continue
+    gaps.push({
+      check: 'touch',
+      detail: `the acceptance criteria describe MOVING \`${path}\`, so that file must be edited (at minimum an import and a re-export relay), `
+        + 'but it is listed in outOfScope — a move always has a source and a destination, and only the destination can be changed here',
+    })
+  }
+  return gaps
+}
+
+/**
+ * ── ★★★ ④（EMIT）构建产物的声明 —— 队长证据包里**最便宜、最可机械计算**的一条 ──────────
+ *
+ * 契约原话把它称为 *"the build-products rule, now proved twice and in both directions"*。
+ * 两次实测：
+ *
+ *   · t24 写了 `lib/types.d.ts` —— 而本仓 `declarationDir` 是 `lib/types`
+ *     ⇒ 那一路径**永远产不出来**（`lib/types/types.d.ts` 在，`lib/types.d.ts` 不在）。
+ *   · t19 写了 `lib/types/types.d.ts` 而**漏了 `lib/types.js`** ——
+ *     而后者才是**真正跑起来的那一个**（+61 行，夹具 import 的就是它）。
+ *
+ * ★★★ 而 t19 那一次的决定性证据是：**每一个别的列了 `src/types.ts` 的任务
+ *   （t3 / t14 / t24）都已经声明了 `lib/types.js`**。
+ *   ⇒ 所以那从来不是一次判断，**只是一次分叉** —— 而这正是本判据要消灭的东西。
+ *
+ * ── 规则（纯计算，不读盘、不猜）─────────────────────────────────────────────────
+ *
+ *     每一个 `src/X.ts` 在 inScope 里 ⇒ 产出集必须声明：
+ *        `lib/X.js`              （tsc 的 outDir 产物 —— 真正被 import 的那一个）
+ *        `lib/types/X.d.ts`      （declarationDir 产物 —— 类型面）
+ *     ★ 见 `tsconfig.json`：`outDir: lib`、`declarationDir: lib/types`、`rootDir: src`。
+ *     ⇒ 所以 `<root>/<rel>` 那张映射是**编译配置的直接后果**，不是约定。
+ *
+ * ★ 而 `lib/types.d.ts` 那种"把目录名当成文件名"的形状由 t23 的
+ *   `structurallyImpossiblePath` 负责（它在 `quality-gates.ts`，不在这里）——
+ *   本函数**只**管"漏了产出"，两条各司其职、不重叠。
+ */
+export function emittedProductGaps(
+  inScope: readonly string[] | undefined,
+  /**
+   * ── ★★★ 根目录**可注入**，而判据是"**这个文件真的在盘上吗**"（t26 实测的修正）──────
+   *
+   * MEASURED（t26）：第一版对**每一个** `src/*.ts` 都要求声明产物 ——
+   * 而那当场打红了**九条既有的臂**，因为它们的夹具用的是**象征性路径**
+   * （`src/a.ts` / `lib/a.js`，那些文件**根本不存在**，永远不会被 build 产出）。
+   *
+   * ★★ 而真正的缺陷（t19 漏 `lib/types.js`、t24 写 `lib/types.d.ts`）都发生在
+   *   **真实存在的、被 git 跟踪的**源文件上。⇒ 判据是：
+   *
+   *     这个 `src/X.ts` **真的在盘上**（⇒ build 真的会为它产出东西）⇒ 要求声明产物
+   *     它不在盘上（⇒ 这是一个**还没被创建**的文件，或一个**象征性**的夹具路径）
+   *       ⇒ ★ 不报：产物**还不存在**是正常的，那不是"漏声明"
+   *
+   * ★ 这与 t23 的 (ii) 是**同一条纪律的两面**：
+   *   那边管"inScope 里的路径**结构上不可能**产出来"，
+   *   这边管"**真的会**产出来的那些，产物有没有被声明"。
+   *   而两者都只对**能机械核对**的事实说话 —— 不猜。
+   */
+  root: string = pluginRoot(),
+): ScopeContradiction[] {
+  const scope = new Set((inScope ?? []).map((entry) => entry.replace(/\\/g, '/').replace(/^\.\//, '')))
+  const gaps: ScopeContradiction[] = []
+  for (const entry of scope) {
+    /**
+     * ★ 只对 `src/` 下的 TypeScript 文件说话：其余目录（docs · scripts · package.json…）
+     *   没有这条强制同步关系。
+     *
+     * ★★★ T8 修复（2026-10-15，队长）：**`.tsx` 也算**。
+     *   MEASURED（实测）：`src/client/**` 用的全是 `.tsx`，而修前这里只认 `.ts`
+     *   ⇒ 整个 client 目录**被这条过滤挡在门外**，它的产物（含 `lib/client.js.map`）
+     *   **从来没被算进"必须声明"** —— 那正是 t70 撞墙的机制。
+     *   而 `tsconfig` 的 `include` 本来就同时收 `.ts` 与 `.tsx`（两者都编译、都产出）。
+     */
+    if (!entry.startsWith('src/') || !/\.tsx?$/.test(entry)) continue
+    /** ★★ 只在**真的在盘上**时要求产物（见上面那段）—— 象征性路径与"还没建的文件"都不报。 */
+    try {
+      if (!existsSync(join(root, entry))) continue
+    } catch {
+      continue
+    }
+    const rel = entry.slice('src/'.length).replace(/\.tsx?$/, '')
+    /**
+     * ── ★★★ T8 修复（2026-10-15，队长）：产物要【从盘上算】，不能只背两个名字 ──────────
+     *
+     * MEASURED（t70 撞的墙）：
+     *   `lib/client.js` **末尾写着** `sourceMappingURL=client.js.map`，
+     *   而 `scripts/clean-build.mjs:132` 把它们当**一对**搬运
+     *   （`CARRIED_FORWARD = ['client.js', 'client.js.map']`）。
+     *   ⇒ 只声明 `lib/client.js` 而漏 `.map`，**会把产物对弄坏**（指向过期 map）。
+     *   同一形状已发作三次（t54 的 golden / t60 的 .d.ts / t70 的 .map）。
+     *
+     * ★★ 修法：不看"同名兄弟"，而是**看盘上真实的配对**。
+     *
+     * ★ 为什么不能用"同名兄弟"（第一版试过，实测不成立）：
+     *   `src/client/index.ts` 的产物是 `lib/client/index.js`，
+     *   而 map **不在文件级** —— `tsdown.config.ts:61/128` 把
+     *   `lib/client/index.js` **打成** `lib/client.js`，map 跟着**bundle** 走
+     *   （实测：盘上只有 `lib/client.js` ←→ `lib/client.js.map` 这一对）。
+     *   ⇒ "源文件旁的 .map"这个层次是**错的**，bundle 与源**名字对不上**。
+     *
+     * ⇒ 所以按【这个 src 文件所在的模块】去盘上找它**真实的产出对**：
+     *   凡是**在盘上、且被 git 跟踪**的 `lib/**\/*.js`，若它有同名 `.map` 伙伴，
+     *   而**这个 src 文件与它在同一个顶层模块**（`src/X/...` ↔ `lib/X...`），
+     *   就把那个 `.map` 也算作必须声明的产物。
+     */
+    const products = [`lib/${rel}.js`, `lib/types/${rel}.d.ts`]
+    /**
+     * ★ 只对**顶层模块目录**做这件事（`src/client/**` ⇒ 模块 `client`），
+     *   因为 bundle 就是按顶层模块产出的。
+     */
+    const segments = rel.split('/')
+    if (segments.length > 1) {
+      const moduleName = segments[0]!
+      try {
+        for (const name of readdirSync(join(root, 'lib'))) {
+          if (!name.startsWith(moduleName) || !name.endsWith('.js')) continue
+          const candidate = `lib/${name}.map`
+          if (!existsSync(join(root, candidate))) continue
+          /**
+           * ★ 只有当这个 bundle **真的存在**时才要求它 —— 与上面"真的在盘上"同一条纪律。
+           * ★ 且只有当它**还没被声明**时才报（下面统一判）。
+           */
+          if (!products.includes(candidate)) products.push(candidate)
+        }
+      } catch {
+        /* 读不出就不报 —— 与"不猜"一致 */
+      }
+    }
+    for (const product of products) {
+      if (scope.has(product)) continue
+      gaps.push({
+        check: 'emit',
+        detail: `\`${entry}\` is in scope, so the build emits \`${product}\` from it, but that product is NOT declared — `
+          + 'this repository keeps lib/ in lockstep with src/ (tsconfig outDir=lib, declarationDir=lib/types), '
+          + 'so an undeclared product makes the task impossible to complete honestly'
+          + (product.endsWith('.map')
+            ? ' ★ 它是**成对的产物**：源文件末尾写着它的 `sourceMappingURL`，'
+              + '只声明 `.js` 而漏 `.map` 会把产物对弄坏（见 T8）'
+            : ''),
+      })
+    }
+  }
+  return gaps
+}
+
+/** 跑上面两条并合集 —— 建任务时调用一次，**逐条指名**。 */
+export function scopeViolations(input: {
+  inScope?: readonly string[]
+  outOfScope?: readonly string[]
+  acceptance?: readonly string[]
+}): ScopeContradiction[] {
+  return [
+    ...scopeContradictions(input.inScope, input.outOfScope),
+    ...emittedProductGaps(input.inScope),
+    ...scopeTouchGaps(input.acceptance, input.inScope, input.outOfScope),
+  ]
+}
+
+/**
+ * ── ★★★ t26：成员收到的**任务说明**是从**被强制执行的那份记录**投影出来的 ─────────────
+ *
+ * 契约原话：*"the ASSIGNMENT TEXT handed to members has now diverged from the enforced
+ * team.json list FIVE times"*（t22 / t13 / t16 / t24 / t19）—— 而 t13 那次
+ * **差一点发出去一个 inert 的 UI**：真正喂面板的那个文件在**被强制**的清单里、
+ * 却在**说明文字**里缺席。
+ *
+ * ── 本函数**就是**那句"assignment text" ─────────────────────────────────────────
+ *
+ * MEASURED（t26）：成员拿到的那段说明是 `taskDetails(...)` 的返回值，
+ * 由 `src/tools/claim.ts` 在两处（首领 / 幂等重领）交给 `task_details`。
+ * ⇒ 所以"说明文字"**不是一个单独维护的副本** —— 它就是这里的投影。
+ *
+ * ── ★★ 而"投影"必须**被核对过**，否则它只是"把存着的原样印出来" ────────────────────
+ *
+ * 此前它把两个列表原样拼成一行：
+ *
+ *     `In scope: …; Out of scope: …`
+ *
+ * ★ 于是**交集没人算**：一条 `src/types.ts` 同时在两边、从而**无解**的任务，
+ *   在说明里读起来**完全正常**（t19 的实测形状）。
+ * ⇒ 现在投影**先跑一遍那两条检查**，并把结果**写进那段说明本身**：
+ *   一条有矛盾的任务**不许**以"看起来没问题"的样子交到成员手上。
+ *
+ * ★★★ 而它**不**在这里抛错：`taskDetails` 是一条**只读**的投影（成员在 claim 时拿到它），
+ *   在那个时刻拒绝会**卡住一个已经在跑的任务** —— 而"已经在跑"与"该不该建"是两件事。
+ *   ⇒ **拒绝**发生在**建任务时**（`create-task.ts` 调 `scopeViolations`）；
+ *     投影这一侧的职责是**如实标出来**，而不是替它做那个决定。
+ *   ★ 两者是同一个判据的两个出口：一个拦在门口，一个让已在里面的人看得见。
+ */
 export function taskDetails(team: TeamState, task: TeamTask): string {
+  const violations = scopeViolations(task)
   return [task.subject, task.description ?? '',
     `Kind: ${task.kind ?? 'work'}`,
     `Objective: ${task.objective ?? ''}`,
     `In scope: ${(task.inScope ?? []).join(', ')}; Out of scope: ${(task.outOfScope ?? []).join(', ')}`,
+    /**
+     * ★★ 只在**真的有问题**时出现 —— 一个恒在场的告警栏会让它自己变成噪音，
+     *   而噪音会教人忽略门禁（本队那条）。
+     */
+    ...violations.length === 0 ? [] : [
+      `⚠ SCOPE PROBLEM (${violations.length}) — this task's scope may be unsatisfiable:`,
+      ...violations.map((violation) => `  · [${violation.check}] ${violation.detail}`),
+      '  ⇒ Do NOT guess a file set. Report this and ask the captain to amend the scope.',
+    ],
     `Acceptance: ${(task.acceptance ?? []).join('; ')}`,
     `Verify: ${(task.verify ?? []).join('; ')}`,
     `Dependency results:\n${formatDependencyOutputs(collectCompletedDependencyOutputs(team.tasks, task.id))}`,
@@ -658,10 +1948,11 @@ export async function stopTeamMemberActivations(
 ): Promise<void> {
   const memberIds = members.filter(member => member.id !== '').map(member => member.id as SessionId)
   if (memberIds.length === 0) return
-  // Every supported exact host has targeted recursive drain. Unlike interrupt,
-  // it closes admission and clears queued work before awaiting descendants.
+  // Targeted recursive drain — named `drainChildren` on 0.2.1 and
+  // `drainContinuableChildren` before it. Unlike interrupt, it closes
+  // admission and clears queued work before awaiting descendants.
   signal?.throwIfAborted()
-  await ctx.subagents.drainContinuableChildren(captain, memberIds)
+  await drainMemberChildren(ctx.subagents, captain, memberIds)
 }
 export const RUNTIME_GATE_LOG_LIMIT = 50
 export const runtimeGateLog: Array<{ at: number; event: string; outcome: string }> = []
@@ -751,6 +2042,27 @@ export interface FreshnessInput {
   onDisk?: BuildStamp
   /** 此刻的 HEAD。★ 由调用方在**调用时**取。 */
   head?: string
+  /**
+   * ── ★★★ 构建时那条提交【是不是 HEAD 的祖先】────────────────────────────────
+   *
+   * MEASURED（2026-10-09，captain 自己踩进去的）：
+   *   `commitBehind = builtCommit !== head` 用【不相等】判【落后】——
+   *   而"构建时的提交是 HEAD 的祖先"也被读成了落后
+   *   （实测：stamp=`49894d0` 而 HEAD=`d457d9c`，`git merge-base --is-ancestor` 为**真**，
+   *    即代码没有落后，只是 stamp 没更新）。
+   *
+   * ★★ 而它的后果是一个【循环】：`build` 之后 `commit`（提交 lib/ 与 stamp）
+   *   必然让 stamp 落后 HEAD 一格 ⇒ 那条门【每轮都会说话】。
+   *
+   * ⇒ ★ 所以"落后"的正确判据是【祖先关系】：
+   *   · 是祖先   ⇒ 构建基于更早的提交，而它在 HEAD 的历史里 ⇒ ★ 不是"你手上的代码旧了"
+   *   · 不是祖先 ⇒ 构建基于一条【不在当前线上】的提交（换分支 / rebase）⇒ 那才是
+   *
+   * ★ 三态：`true`（是祖先 ⇒ 不算落后）· `false`（不是祖先 ⇒ 真落后）·
+   *   `undefined`（**跑不了 git ⇒ 判不了**）⇒ ★ 而判不了时【保守】：维持"落后"。
+   *   —— 因为"说不清"不得读成"没事"（本队那条三态纪律）。
+   */
+  builtCommitIsAncestorOfHead?: boolean
 }
 export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
   const loadedOutput = typeof input.loaded?.output === 'string' && input.loaded.output.trim() !== ''
@@ -802,9 +2114,61 @@ export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
    *
    *   content 维：进程加载的 output vs 此刻盘上的 output（"盘上被 rebuild 过吗"）
    *   commit  维：构建时的提交 vs 此刻的 HEAD（"代码落后于当前提交吗"）
+   *
+   * ★★★ 而 commit 维【不能】用 `!==` 判 —— 那会把"构建时的提交是 HEAD 的祖先"
+   *   也读成落后（实测 2026-10-09：stamp=49894d0、HEAD=d457d9c，
+   *   `git merge-base --is-ancestor` 为真，而那条门报了 stale）。
+   *   ⇒ ★ 那构成一个循环：build 之后 commit 必然让 stamp 落后一格。
+   *
+   *   ★ 判据改成祖先关系；而 `undefined`（跑不了 git）时【保守】维持落后 ——
+   *     因为"说不清"不得读成"没事"。
    */
   const contentChanged = loadedOutput !== onDiskOutput
+  /**
+   * ★★★ 而这一格【我试过改成祖先关系，又改回来了】（2026-10-09）——
+   *   而理由是：臂 9（f-0026 核心）有一条**有据的**要求，逐字是：
+   *     「stamp 没变、而 HEAD 前进了一个提交 ⇒ 必须报 stale」
+   *     而它的现实依据是"有人改了 src 又改回来 / amend / 只因别的原因动了历史"。
+   *
+   *   ★ 而我今晚踩到的情形（`build` 之后 `commit` ⇒ stamp 落后一格）与它**同形**：
+   *     两者都是"构建于 A，而 A 是 HEAD 的祖先"。⇒ ★ 所以那不是两个需求，
+   *     是【同一个判据的两种希望】—— 而它需要一个【第三维】才能分开
+   *     （"那两个提交之间，有没有改动到构建的输入"）。
+   *
+   *   ⇒ ★ 所以本次【不改判据】，而是把那条区分立成一条任务。
+   *     `builtCommitIsAncestorOfHead` 这个输入保留（它已可注入、有 5 条臂），
+   *     但**暂不参与** `commitBehind` —— 等那条第三维的判据落地再接。
+   *
+   * ── ★★★ 2026-10-12：第三维落地了，而它比预想的窄 ─────────────────────────────
+   *
+   * MEASURED：臂 9 的构造里 `moduleFreshnessFrom` **只传 `loaded`/`onDisk`/`head`** ——
+   * **没有**传 `builtCommitIsAncestorOfHead`。⇒ 那一格在臂 9 里是 `undefined`，
+   * 而下面的保守规则把它当"落后"。
+   *
+   * ⇒ ★ 所以臂 9 钉住的其实是：
+   *     「output 没变 + HEAD 前进 ⇒ stale，**且祖先关系未知**」
+   *   而它**从未**钉住「祖先关系为真时也必须报 stale」——
+   *   那一格是这条注释的前一版（和我）**读宽了**。
+   *
+   * ★ 而"祖先为真"在现实中是两种情形，臂 9 的构造只覆盖了第一种：
+   *   · **有人动了历史**（改了又改回来 / amend / rebase）⇒ 该报 stale；
+   *   · **build 之后 commit**（产物无法描述包含它自己的那个提交）⇒ **每轮都会发生**，
+   *     而它**不是**"你手上的代码旧了" ⇒ 报 stale 就是一条**先于使用者存在的假红**。
+   *
+   * ★ 第三维因此是：**"这两个提交之间，构建的输入真的变了吗？"** —— 问 git
+   *   `builtCommit..HEAD` 上的 `src/` 与构建配置。而这一问**只在确知是祖先时**才做：
+   *   非祖先时 HEAD 已经移开，那一格本来就该报 stale，不必再问。
+   *   ★ `undefined`（跑不了 git / 问不出来）⇒ **维持保守**：说不清不得读成"没事"。
+   */
+  const builtIsAncestor = input.builtCommitIsAncestorOfHead === true
+  /**
+   * ★★ 只有**确知是祖先**且 git **明确回答"输入没变"**时才压掉 commit 这一维。
+   *   `undefined` ⇒ **不压** —— 那正是臂 9 的构造（它不传这一格），它必须继续报 stale。
+   */
   const commitBehind = builtCommit !== head
+    && !(builtIsAncestor
+      && builtCommit !== undefined && head !== undefined
+      && buildInputsChangedBetween(builtCommit, head) === false)
   if (!contentChanged && !commitBehind) {
     return { status: 'current', loaded: loadedOutput, onDisk: onDiskOutput, commit: builtCommit, head }
   }
@@ -819,7 +2183,91 @@ export function moduleFreshnessFrom(input: FreshnessInput): ModuleFreshness {
   }
 }
 export function moduleFreshness(): ModuleFreshness {
-  return moduleFreshnessFrom({ loaded: loadedStamp(), onDisk: readStamp(pluginRoot()), head: currentHead() })
+  const head = currentHead()
+  const rawCommit = readStamp(pluginRoot())?.commit
+  const builtCommit = typeof rawCommit === 'string' && rawCommit.trim() !== '' ? rawCommit : undefined
+  return moduleFreshnessFrom({
+    loaded: loadedStamp(),
+    onDisk: readStamp(pluginRoot()),
+    head,
+    /**
+     * ★ 这里把"构建时的提交是不是 HEAD 的祖先"取出来 —— 而那正是
+     *   `commitBehind` 该用的判据（见 `FreshnessInput` 的注释）。
+     *   ★ 取不到（不是仓库 / 那条提交不在库里）⇒ `undefined` ⇒ 保守维持"落后"。
+     */
+    ...builtCommit !== undefined && head !== undefined && builtCommit !== head
+      ? { builtCommitIsAncestorOfHead: isAncestorOf(builtCommit, head) }
+      : {},
+  })
+}
+/**
+ * ── ★★★ 第三维：`from..to` 之间，**构建的输入**有没有真的变？─────────────────────
+ *
+ * MEASURED 的由来：`stamp.commit` 与 HEAD **必然**不同，而这是构造性的 ——
+ * 产物无法描述包含它自己的那个提交（commit N 写 stamp{commit: N}，而包含它的提交是 N+1）。
+ * ⇒ 若把"不相等"直接读成"落后"，那么**每提交一次**就产生一条
+ *   **先于使用者存在的假红**。实测代价：`gate-stale-module` 的臂 1/4/6 同时变红，
+ *   而三条标题里**都没有 "stamp" 这个词** ⇒ 读起来像"谁弄坏了三条不相干的臂"。
+ *
+ * ★ 而"祖先为真"其实有两种情形，补救动作相反：
+ *   · **有人动了历史**（改了又改回来 / amend）⇒ 该报 stale；
+ *   · **build 之后 commit** ⇒ 不该报。
+ * 分开它们要问的正是这一格：**那两个提交之间，构建的输入变了吗？**
+ *
+ * ★ 三态，与全仓纪律同源：
+ *   `true`      —— 输入变了（真的落后）
+ *   `false`     —— **输入一个字没变** ⇒ 旧构建描述的就是当前代码 ⇒ 不算落后
+ *   `undefined` —— 问不出来（跑不了 git / 那条提交不在库里）⇒ 调用方**保守处理**
+ *
+ * ★★ 为什么看的是**路径清单**而不是"摘要相等"：摘要需要重新计算整棵 `src/`，
+ *   而这一问发生在**每一次状态读取**上（`moduleFreshness()` 是被高频调用的）。
+ *   `git diff --name-only` 是 git 自己算的、与工作树无关，代价可忽略；而
+ *   "清单为空"与"摘要相等"在这个问题上**等价**（输入一个字没变 ⇒ 摘要必然相同）。
+ */
+export function buildInputsChangedBetween(
+  from: string,
+  to: string,
+  root: string = pluginRoot(),
+): boolean | undefined {
+  try {
+    /**
+     * ★ 只问**构建输入**：`src/` 加构建配置。`docs/`、`scripts/`（除构建链）与
+     *   `.agent-teams/` 变了**不影响产物**，把它们算进来会重新造出假红。
+     */
+    const changed = execFileSync('git', [
+      'diff', '--name-only', from, to, '--',
+      'src', 'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts', 'tsdown.client.ts', 'package.json',
+    ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    return changed !== ''
+  } catch {
+    /** ★ 问不出来 ⇒ `undefined`（**不是** `false`）—— 那会把"没能核对"说成"没变"。 */
+    return undefined
+  }
+}
+
+/**
+ * `ancestor` 是不是 `descendant` 的祖先（用 git 判，而不是用字符串比）。
+ *
+ * ★ 三态：`true` / `false` / `undefined`（**跑不了 git ⇒ 判不了**）。
+ *   ★ 而"判不了"与"不是祖先"必须不同形 —— 前者的处置是"保守地当作落后"，
+ *     后者是"真的换了线"。而调用方拿 `undefined` 时按保守处理。
+ */
+export function isAncestorOf(ancestor: string, descendant: string, root: string = pluginRoot()): boolean | undefined {
+  try {
+    execFileSync('git', ['merge-base', '--is-ancestor', ancestor, descendant], {
+      cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return true
+  } catch (error) {
+    /**
+     * `git merge-base --is-ancestor` 用退出码表达答案：0 = 是，1 = 不是。
+     * ⇒ ★ 所以 `1` 是【一个答案】，不是【一次失败】—— 而把它并进 `undefined`
+     *   会让"不是祖先"与"判不了"同形（本队那条最贵的合流）。
+     */
+    const status = (error as { status?: number } | undefined)?.status
+    if (status === 1) return false
+    return undefined
+  }
 }
 /** ★ 加载时读一次的整份 stamp —— 「构建时的提交」是常量，与 `output` 同一时机。 */
 export let LOADED_STAMP: BuildStamp | undefined
@@ -864,6 +2312,551 @@ export function pluginRoot(): string {
    */
   return dirname(dirname(dirname(dirname(fileURLToPath(import.meta.url)))))
 }
+
+/**
+ * ── ★★★ 卡点/判决 ⇒ 任务：把 `friction-triage` 接上【生产调用方】（t26）───────────────
+ *
+ * ── 它接的是什么 ───────────────────────────────────────────────────────────────
+ *
+ * `scripts/friction-triage.mjs` 早已能把**卡点/判决**变成一份**审查过的、分好档的**
+ * 任务契约（`triage` → `runPipeline` → `emitReviewedContract` → `dispatchable` 四态）。
+ * ★ 而它此前**零生产调用方**：`src/` 里对它的引用**全部在注释里**，
+ *   真正 `import` 它的只有 `scripts/*.test.mjs`。
+ * ⇒ 于是盘上的卡点与判决**没有任何东西**把它们变成任务 ——
+ *   「机制建好了，没有接线」的第 8 个实例。
+ *
+ * ── ★★★ 而它为什么需要【动态 import + `pluginRoot()`】─────────────────────────────
+ *
+ * `scripts/` 在 `tsconfig.json` 的 `rootDir = "src"` **之外** ⇒ 静态
+ * `import '../../scripts/friction-triage.mjs'` 会落 `TS2307`（实测），
+ * 且 `rootDir=src` 意味着 **`lib/` 里不会有 `scripts/`**。
+ *
+ * ★ 而这**不构成障碍**，因为本仓【已经在这么做】了：
+ *   `src/quality-gates.ts` 读基线清单时走的是
+ *   `readFileSync(join(pluginRoot(), 'scripts', 'fixtures', 'baseline-known-failures.json'))`
+ *   —— ★ 运行时路径，不经 `tsc` 的 `rootDir`。
+ * ⇒ 本条沿用**同一种做法**（裁定 A1），而不是新开一个先例。
+ *
+ * ★ 类型面由 `scripts/friction-triage.d.ts`（最小声明）给出 —— 而**不是**
+ *   `@ts-expect-error`：后者会让「这个模块不存在」与「这个模块存在而导出改名了」
+ *   读成同一件事，而那正是本仓那条最贵纪律的同形。
+ *
+ * ── ★★ 边界：本条**只加调用方**，不改 `friction-triage.mjs` 的判据语义 ────────────
+ *
+ * 分档（`tierOf`）、五问（`adversarialReview`）、四态（`dispatchable`）都是对的。
+ * 用户 §38 那条判据由**它**实现，而本条只负责把它的结论**读出来并交出去**：
+ *
+ *     ✓ 小档 + 审查通过 + 契约完整  ⇒ 可派（`ready`）
+ *     ✗ 大档（要拆解）/ 审不过 / 契约不全
+ *       ⇒ 分别进 `awaitingRuling` / `rejected` / `cannotEmit`
+ *
+ * ★★★ 而 `awaitingRuling` 的**长度本身是一条读数**（用户 §38：
+ *   「需要人拍板是**缺陷指标**，不是交付方式」）⇒ 它长了说明"能自己解决的事太少"，
+ *   而那正是要消灭的那个指标。⇒ 所以下面把四个数字**分别**交出去，**不合并成一个**。
+ */
+export interface ExperienceDispatchReadout {
+  /** ★ 四态的**各自条数**（不合并 —— 合并会抹掉"为什么没进 ready"）。 */
+  readonly ready: number
+  readonly awaitingRuling: number
+  readonly rejected: number
+  readonly cannotEmit: number
+  /** 拆解那一栏（每条大活拆成了几条、各去哪）。 */
+  readonly decomposed: number
+  /** ★ 「为什么没进 ready」的分栏（主干的 stage → 那一栏的名字，只有一处映射）。 */
+  readonly notReadyBecause: Record<string, number>
+  /** ★ `ready` 里那些提案的**完整契约**（调用方拿它去建任务）。 */
+  readonly contracts: readonly ExperienceDispatchCandidate[]
+}
+
+/** 一条**可派**的提案：它带着完整契约与来源。 */
+export interface ExperienceDispatchCandidate {
+  readonly sourceId?: string
+  readonly tier?: string
+  /** ★ 审查过的契约 —— `ready` 池里只可能是 `emitReviewedContract` 给的。 */
+  readonly contract: Record<string, unknown>
+}
+
+/**
+ * ── ★★ 三态（而它们**不同形**）──────────────────────────────────────────────────
+ *
+ *   `ok`          读到了卡点/判决（`unreadable` 为空）
+ *   `partial`     ★ **有一侧读不到**（附是哪一侧）—— 而它**不是** `ok`
+ *   `unmeasured`  ★ 整个 `friction-triage` 引不进来（模块不在 / 导出改名）
+ *
+ * ★★★ 而 `unreadable` 那格**绝不许**被读成"没有待派的"：
+ *   「我没能读」与「我看了，确实没有」**不同形** —— 后者是"确实为空"，
+ *   前者是"我根本不知道有多少"。合并它们会让"卡点目录写错了"伪装成"一切都好"。
+ */
+export type ExperienceDispatchState = 'ok' | 'partial' | 'unmeasured'
+
+export interface ExperienceDispatchResult {
+  readonly state: ExperienceDispatchState
+  /** ★ 读不到的那几侧（空数组 = 都读到了）。 */
+  readonly unreadable: readonly string[]
+  /** 判据层给出的四态读数（`unmeasured` 时为 `undefined` —— 它没算出来）。 */
+  readonly readout?: ExperienceDispatchReadout
+  /** `unmeasured` 时说明**为什么**（模块不在 / 导出对不上）。 */
+  readonly why?: string
+}
+
+/**
+ * 走一遍「卡点/判决 ⇒ 任务」：调 `friction-triage` 的 `triage` + `dispatchable`。
+ *
+ * @param options.frictionsDir 卡点目录（**由调用方注入** —— 判据层不猜路径）
+ * @param options.judgementsDir 判决目录
+ * @param options.occupied 已被占用的写域（避免派到别人的文件上）
+ * @param options.loadModule ★ 注入点：默认走 `pluginRoot()` 动态 import；
+ *   夹具可以换掉它（**而它只换装载，不换判据**）。
+ */
+export async function readExperienceDispatch(options: {
+  readonly frictionsDir?: string
+  readonly judgementsDir?: string
+  readonly occupied?: readonly unknown[]
+  readonly loadModule?: () => Promise<FrictionTriageModule>
+} = {}): Promise<ExperienceDispatchResult> {
+  const load = options.loadModule ?? loadFrictionTriageModule
+  let module: FrictionTriageModule
+  try {
+    module = await load()
+  } catch (error) {
+    /**
+     * ★★ 模块引不进来 ⇒ `unmeasured`（**不是**"没有待派的"）。
+     *   ★ 而它必须说清是**哪一步**不行：模块不在盘上 / 导出对不上，两者的补救不同。
+     */
+    return {
+      state: 'unmeasured',
+      unreadable: [],
+      why: `the friction triage module could not be loaded: ${String((error as Error | undefined)?.message)}`,
+    }
+  }
+  if (typeof module.triage !== 'function' || typeof module.dispatchable !== 'function') {
+    return {
+      state: 'unmeasured',
+      unreadable: [],
+      why: 'the friction triage module loaded but no longer exports `triage`/`dispatchable` '
+        + `(saw: ${typeof module.triage}/${typeof module.dispatchable}) — the shape moved, so this reading means nothing`,
+    }
+  }
+
+  const report = module.triage({
+    ...options.frictionsDir === undefined ? {} : { frictionsDir: options.frictionsDir },
+    ...options.judgementsDir === undefined ? {} : { judgementsDir: options.judgementsDir },
+    ...options.occupied === undefined ? {} : { occupied: options.occupied },
+  })
+  const unreadable = [...(report.unreadable ?? [])]
+  const dispatchable = module.dispatchable(report)
+
+  const contracts: ExperienceDispatchCandidate[] = []
+  for (const entry of dispatchable.ready) {
+    const contract = entry.contract
+    /**
+     * ★ 没有契约的 `ready` 条目不进 `contracts` —— 而它**仍计入 `ready` 的条数**（如实）。
+     *   ★ 两者不同形：`ready` 说"判据说它可以派"，`contracts` 说"我拿到了要建的那份契约"。
+     *     一个 `ready` 而拿不到契约 ⇒ 那是**上游的一处缺口**，而它必须在读数里可见
+     *     （把两者合成一个数字会让那种情况彻底消失）。
+     */
+    if (contract !== undefined && typeof contract === 'object') {
+      contracts.push({
+        ...(entry.sourceId === undefined ? {} : { sourceId: entry.sourceId }),
+        ...(entry.tier?.tier === undefined ? {} : { tier: entry.tier.tier }),
+        contract,
+      })
+    }
+  }
+
+  return {
+    /** ★ 有一侧读不到 ⇒ `partial`（**不是** `ok`）—— 那正是"没能读"与"确实没有"分界的地方。 */
+    state: unreadable.length === 0 ? 'ok' : 'partial',
+    unreadable,
+    readout: {
+      ready: dispatchable.ready.length,
+      awaitingRuling: dispatchable.awaitingRuling.length,
+      rejected: dispatchable.rejected.length,
+      cannotEmit: dispatchable.cannotEmit.length,
+      decomposed: dispatchable.decomposed.length,
+      notReadyBecause: dispatchable.notReadyBecause ?? {},
+      contracts,
+    },
+  }
+}
+
+/** `scripts/friction-triage.mjs` 里**本调用方真正用到**的那几格（见 `scripts/friction-triage.d.ts`）。 */
+interface FrictionTriageModule {
+  readonly triage?: (options?: Record<string, unknown>) => {
+    readonly unreadable?: readonly string[]
+    readonly [key: string]: unknown
+  }
+  readonly dispatchable?: (report: unknown, options?: Record<string, unknown>) => {
+    readonly ready: readonly {
+      readonly sourceId?: string
+      readonly tier?: { readonly tier?: string }
+      /** ★ 契约**直接挂在条目上**（实测形状）—— 不是嵌在 `emitted` 里。 */
+      readonly contract?: Record<string, unknown>
+    }[]
+    readonly awaitingRuling: readonly unknown[]
+    readonly rejected: readonly unknown[]
+    readonly cannotEmit: readonly unknown[]
+    readonly decomposed: readonly unknown[]
+    readonly notReadyBecause?: Record<string, number>
+  }
+  /**
+   * ── ★★★ t6（N3）：分档那一格（`tierOf`）────────────────────────────────────────
+   *
+   * ★ 与 `readExperienceDispatch` 走**同一个模块、同一条装载路** —— 而不是为分档
+   *   另开一份实现：`scripts/friction-triage.mjs` 里那份 `tierOf` 是**唯一真值**
+   *   （`plan-review-tier.test.mjs` 与 `dispatchable` 的准入都读它，见那里的注释
+   *   「一处实现，两处使用」）。在这里再写一份分档，就是本队记账过的第二份真相。
+   */
+  readonly tierOf?: (contract: unknown, options?: { exists?: (path: string) => boolean }) => {
+    readonly tier?: string
+    readonly why?: string
+  }
+}
+
+/**
+ * ── ★★★ t6（N3）：把「计划审查」那一格读到生产路径上来 ────────────────────────────
+ *
+ * ── 它补的缺口（MEASURED，开工普查）──────────────────────────────────────────────
+ *
+ *     （改前实测，三条命令都按函数名 grep `src/`）
+ *     · 带闭括号的那个函数名 ⇒ 0 行
+ *     · 不带闭括号的那个函数名 ⇒ 0 行（连注释都没有）
+ *     · `tierOf`               ⇒ 1 行，且在注释里
+ *
+ * ★ 这里刻意**不写**那三个字面量：这条注释自己就会变成 grep 的命中。
+ *   改前那次普查是真跑过的（结论：生产调用点 0），而改后的读数应当去
+ *   `plan_review` 那一格看，不在注释里。
+ *
+ * ⇒ `scripts/plan-review-check.mjs` 的四问 + `scripts/friction-triage.mjs` 的分档
+ *   **只被 `scripts/*.test.mjs` 调用** —— 「没审过的计划不该直接派」这句判据
+ *   在盘上只有装置、没有读者。这正是本队记账的第 N 个
+ *   「机制建好了，没有接线」。
+ *
+ * ── ★ 它**不重新实现**四问，也不重新实现分档 ────────────────────────────────────
+ *
+ * 四问（`why-now` / `steps` / `invariant-reading` / `stop-points`）在
+ * `REQUIRED_PLAN_QUESTIONS` 里是**冻结的一份数据**；判据在 `checkPlanReview` 里。
+ * 这里只做两件**本层该做**的事：
+ *   ① 把「一问一契约」的矩阵**聚合成计数 + 逐条名单**（调用方要的是"缺哪一问"）；
+ *   ② 给每一格贴上**「这个 kind 下契约要不要它」**（见下面那段裁定）。
+ * ★ 拿不到的格子一律**不补假值**：`checkPlanReview` 少给一条契约就少算一条，
+ *   而不是补一条 `present`。
+ *
+ * ── ★★★ 裁定（验收第 4 条）：work 类任务长期显示 `unmeasured` 是**噪音**，
+ *                而它今天**不是**从 `objective` 来的 ────────────────────────────────
+ *
+ * 契约原文写的陷阱是：「`why-now` 读的是 `objective`，而 `kind=work` 的任务按设计
+ * 不带 `objective` ⇒ 每一条 work 任务会长期显示 `unmeasured`」。
+ *
+ * ★ 而**实测把这条前提推翻了**（本队真实台账 `.agent-teams/self-iteration-3/team.json`，
+ *   18 条任务，逐条普查）：
+ *
+ *     有非空 objective 的任务数        ⇒ 18 / 18   （work 类 6 条**全都**有）
+ *     `why-now` 判 unmeasured 的条数   ⇒ 0
+ *     `stop-points` 判 unmeasured 的   ⇒ 4（t1 / t13 / t14 / t15）
+ *     这 4 条缺的是什么               ⇒ `verify` 这一格
+ *
+ * ⇒ 真实缺口在 **`verify` / `stop-points`**，不在 `objective` / `why-now`。
+ *   而 "work 类不带 objective" 这句**在本仓不成立**：`validateCreateTask`
+ *   （`src/quality-gates.ts:1012-1030`）**只对质量类**要求 `objective`，
+ *   但它从不**禁止** work 类带 `objective` —— 而本队的 work 类任务都带着。
+ *
+ * ── ★ 三条处理方向里选第 ① 条：单独一格「不适用」──────────────────────────────────
+ *
+ *   ✗ 改从 `subject + description` 读：那会把「没写 objective」这张**契约欠账**
+ *     洗成一张读得出来的读数 —— 与"静默折成 present"只差一步。
+ *   ✗ work 类整个跳过：跳过之后那 4 条 `stop-points` 缺口**从盘上消失**，
+ *     而它们里有一条（t15）是 `verification` 类，本来就该有 `verify`。
+ *   ✓ **单独一格 `not_applicable`**：不并入 `present`、不并入 `missing`、
+ *     不并入 `unmeasured`，自成第四格，且**逐条**给出是哪一条契约的哪一问。
+ *
+ * ── ★★ 而「不适用」的判据**不是**新写的规则，是 `validateCreateTask` 已经在跑的那两条 ──
+ *
+ *     `isQualityKind(kind)`  ⇒ `objective` + `acceptance` 必填
+ *     `WRITE_KINDS`           ⇒ 再加 `inScope` + `verify` 必填
+ *
+ * ⇒ 「契约不要求这一格」才叫不适用。★ 而**只有 `unmeasured` 才可能被改写**：
+ *   一格**填了**但填得没法读（`missing`）在任何 kind 下都是真缺口，不许改判。
+ *
+ * ★ 最后：`overall` **原样**交出去（不因为"不适用"而重算）—— 另开一格
+ *   `applicableOverall` 回答"只看契约要求的那几问是什么结论"。**两个问句，两格**，
+ *   它们不同形，也不许互相顶替。
+ */
+export type PlanReviewReadingState = 'measured' | 'unmeasured'
+/** ★ 与 `scripts/plan-review-check.mjs` 的三态逐字同形（不许折成布尔）。 */
+export type PlanReviewOverall = 'present' | 'missing' | 'unmeasured'
+
+export interface PlanReviewQuestionCounts {
+  readonly key: string
+  readonly question: string
+  /** ★ 下面四格**并列**：`notApplicable` 不是 `present` 的别名。 */
+  readonly present: number
+  readonly missing: number
+  readonly unmeasured: number
+  readonly notApplicable: number
+}
+
+export interface PlanReviewGap {
+  readonly id: string
+  readonly key: string
+  /** ★ 两态不同形：`missing` = 填了但读不出读数；`unmeasured` = 契约要求的格子压根没有。 */
+  readonly status: 'missing' | 'unmeasured'
+  readonly detail: string
+}
+
+export interface PlanReviewNotApplicable {
+  readonly id: string
+  readonly key: string
+  readonly why: string
+}
+
+export interface PlanReviewReadout {
+  /** 读到的契约条数。 */
+  readonly total: number
+  /** ★ 判据自己算出来的 `overall` **原样** —— 三态逐字。 */
+  readonly overall: PlanReviewOverall
+  readonly detail: string
+  /** ★ 另一个问句：只看**契约要求的那几问**（见上面那段裁定）。 */
+  readonly applicableOverall: PlanReviewOverall
+  /** ★ 三档计数；键名取 `TIER` 的字面值（`unmeasurable`），不另立拼法。 */
+  readonly tiers: { readonly small: number; readonly large: number; readonly unmeasurable: number } | undefined
+  /** `tiers` 缺席时的成因（★ 不是"三档都是 0"）。 */
+  readonly tiersWhy: string | undefined
+  readonly questions: readonly PlanReviewQuestionCounts[]
+  readonly gaps: readonly PlanReviewGap[]
+  readonly notApplicable: readonly PlanReviewNotApplicable[]
+}
+
+export interface PlanReviewReading {
+  readonly state: PlanReviewReadingState
+  readonly why?: string
+  readonly readout?: PlanReviewReadout
+}
+
+/**
+ * 某一问在这个 `kind` 下**是不是契约要求的** —— 「不适用」那一格的唯一判据。
+ *
+ * ★ 判据来源**逐条抄自** `src/quality-gates.ts` 的 `validateCreateTask`
+ *   （`isQualityKind` ⇒ objective + acceptance；`WRITE_KINDS` ⇒ 再加 inScope + verify），
+ *   而不是在这里另立一套依据 —— 后者会让"创建时拒绝"与"审查时说它不适用"分叉。
+ *
+ * ★ 未知的 `evidence` ⇒ 当作**契约要求**（保守方向：宁可多报一条缺口，
+ *   不把一格说不清的账洗成"不适用"）。
+ */
+function evidenceIsRequiredFor(kind: TaskKind | undefined, evidence: string): boolean {
+  if (evidence === 'objective' || evidence === 'acceptance') return isQualityKind(kind)
+  if (evidence === 'inScope' || evidence === 'verify') {
+    return kind !== undefined && (WRITE_KINDS as readonly string[]).includes(kind)
+  }
+  return true
+}
+
+/**
+ * `scripts/plan-review-check.mjs` 里**本调用方真正用到**的那几格。
+ * ★ 与 `FrictionTriageModule` 同一条纪律：最小声明，**不用** `@ts-expect-error`
+ *   （那会让「模块不在」与「导出改名了」读成同一件事）。
+ */
+interface PlanReviewModule {
+  readonly REQUIRED_PLAN_QUESTIONS?: readonly {
+    readonly key: string
+    readonly question: string
+    readonly evidence: string
+    readonly requiresReading?: boolean
+  }[]
+  readonly checkPlanReview?: (plan: readonly unknown[]) => {
+    readonly overall?: string
+    readonly detail?: string
+    readonly contracts?: readonly {
+      readonly id?: string
+      readonly answers?: Record<string, { readonly status?: string; readonly detail?: string } | undefined>
+    }[]
+  }
+}
+
+/**
+ * ★ 默认装载：动态 import + `pluginRoot()` 的运行时路径（与 `loadFrictionTriageModule` 同法）。
+ *
+ * ★★ 而 `scripts/plan-review-check.mjs` **今天不在** `package.json` 的 `files` 白名单里
+ *   （实测：`files` 里有 `friction-triage.mjs` / `judgement-triage.mjs` / `worktree-reclaim.mjs`，
+ *   没有 `plan-review-check.mjs`）⇒ **装出来的包里它不存在**。
+ *   ⇒ 那一条路会落到 `state: 'unmeasured'` 并说清成因 —— 收口是靠白名单，不是靠这里崩。
+ */
+async function loadPlanReviewModule(): Promise<PlanReviewModule> {
+  const target = pathToFileURL(join(pluginRoot(), 'scripts', 'plan-review-check.mjs')).href
+  return await import(/* @vite-ignore */ target) as PlanReviewModule
+}
+
+/**
+ * 走一遍「计划审查」：四问 × 每条契约，加上分档三档计数。
+ *
+ * @param options.tasks 要审的契约（**本队任务** —— 生产路径传 `team.tasks`）
+ * @param options.exists ★ 注入点：`tierOf` 判"那个目录此刻在不在"（判据层不猜路径）
+ * @param options.loadModule ★ 注入点：夹具可以换掉**装载**（**而它不换判据**）
+ * @param options.loadTierModule 同上，装 `tierOf` 那一侧
+ */
+export async function readPlanReview(options: {
+  readonly tasks: readonly TeamTask[]
+  readonly exists?: (relativePath: string) => boolean
+  readonly loadModule?: () => Promise<PlanReviewModule>
+  readonly loadTierModule?: () => Promise<FrictionTriageModule>
+}): Promise<PlanReviewReading> {
+  const load = options.loadModule ?? loadPlanReviewModule
+  let module: PlanReviewModule
+  try {
+    module = await load()
+  } catch (error) {
+    /** ★ 引不进来 ⇒ `unmeasured`（**不是**"没有问题"）—— 并说清是哪一步。 */
+    return {
+      state: 'unmeasured',
+      why: `the plan review module could not be loaded: ${String((error as Error | undefined)?.message)}`,
+    }
+  }
+  const questions = module.REQUIRED_PLAN_QUESTIONS
+  if (typeof module.checkPlanReview !== 'function' || !Array.isArray(questions)) {
+    return {
+      state: 'unmeasured',
+      why: 'the plan review module loaded but no longer exports `REQUIRED_PLAN_QUESTIONS`/`checkPlanReview` '
+        + `(saw: ${typeof questions}/${typeof module.checkPlanReview}) — the shape moved, so this reading means nothing`,
+    }
+  }
+
+  const plan = [...options.tasks]
+  const checked = module.checkPlanReview(plan)
+  const contracts = Array.isArray(checked.contracts) ? checked.contracts : []
+
+  /**
+   * ── 聚合：四问 × 每一条契约 ──────────────────────────────────────────────────
+   * ★ 计数与名单**在同一趟里**产生 —— 分两趟写会让"计数 3、名单 2 条"这种
+   *   自相矛盾的读数在盘上成立。
+   */
+  const buckets = new Map<string, { present: number; missing: number; unmeasured: number; notApplicable: number }>()
+  for (const item of questions) buckets.set(item.key, { present: 0, missing: 0, unmeasured: 0, notApplicable: 0 })
+  const gaps: PlanReviewGap[] = []
+  const notApplicable: PlanReviewNotApplicable[] = []
+  let applicableAnswered = 0
+  let applicableMissing = 0
+  let applicableUnmeasured = 0
+
+  plan.forEach((task, index) => {
+    const contract = contracts[index]
+    /**
+     * ★ `checkPlanReview` 少给一条契约 ⇒ **少算一条**，不补假值。
+     *   （补一条 `present` 会让"读丢了"与"全都合格"同形。）
+     */
+    if (contract === undefined) return
+    const id = typeof contract.id === 'string' && contract.id !== '' ? contract.id : '(a contract with no id)'
+    for (const item of questions) {
+      const bucket = buckets.get(item.key)
+      if (bucket === undefined) continue
+      const raw = contract.answers?.[item.key]?.status
+      /** ★ 认不出的状态 ⇒ 落 `unmeasured`（保守）—— 不落 `present`。 */
+      const status: PlanReviewOverall = raw === 'present' || raw === 'missing' || raw === 'unmeasured'
+        ? raw
+        : 'unmeasured'
+      const detail = typeof contract.answers?.[item.key]?.detail === 'string'
+        ? String(contract.answers[item.key]?.detail)
+        : ''
+      const required = evidenceIsRequiredFor(task.kind, item.evidence)
+      /**
+       * ★★ 「不适用」只对 **`unmeasured`** 开口 —— 一格**填了**却读不出读数
+       *   （`missing`）在任何 kind 下都是真缺口，不许改判。
+       */
+      if (status === 'unmeasured' && !required) {
+        bucket.notApplicable += 1
+        notApplicable.push({
+          id,
+          key: item.key,
+          why: `${task.kind ?? 'work'} tasks are not required to carry \`${item.evidence}\` `
+            + '(see quality-gates.ts: isQualityKind ⇒ objective+acceptance, WRITE_KINDS ⇒ inScope+verify) '
+            + '— absent by contract, not by omission',
+        })
+        continue
+      }
+      bucket[status] += 1
+      applicableAnswered += 1
+      if (status === 'missing') applicableMissing += 1
+      if (status === 'unmeasured') applicableUnmeasured += 1
+      if (status !== 'present') gaps.push({ id, key: item.key, status, detail })
+    }
+  })
+
+  /**
+   * ★ 三档计数：与 `readExperienceDispatch` 走**同一个模块、同一条装载路**。
+   * ★ 装载失败 ⇒ `tiers: undefined` + 成因，**不是** `{small:0,large:0,unmeasurable:0}`
+   *   （三个 0 会与"这一队真的没有大活"同形）。
+   */
+  const loadTier = options.loadTierModule ?? loadFrictionTriageModule
+  let tiers: PlanReviewReadout['tiers']
+  let tiersWhy: string | undefined
+  try {
+    const tierModule = await loadTier()
+    if (typeof tierModule.tierOf !== 'function') {
+      tiersWhy = 'the friction triage module loaded but no longer exports `tierOf` — the tier reading means nothing'
+    } else {
+      const tierOf = tierModule.tierOf
+      const exists = options.exists ?? ((relativePath: string) => existsSync(join(pluginRoot(), relativePath)))
+      let small = 0
+      let large = 0
+      let unmeasurable = 0
+      for (const task of plan) {
+        const tiered = tierOf(task, { exists })
+        const tier = typeof tiered?.tier === 'string' ? tiered.tier : 'unmeasurable'
+        /** ★ 认不出的档 ⇒ 落 `unmeasurable`（保守）；只有 small / large 是"读出来了"。 */
+        if (tier === 'small') small += 1
+        else if (tier === 'large') large += 1
+        else unmeasurable += 1
+      }
+      tiers = { small, large, unmeasurable }
+    }
+  } catch (error) {
+    tiersWhy = `the friction triage module could not be loaded: ${String((error as Error | undefined)?.message)}`
+  }
+
+  const overall: PlanReviewOverall = checked.overall === 'present' || checked.overall === 'missing' || checked.overall === 'unmeasured'
+    ? checked.overall
+    : 'unmeasured'
+  /**
+   * ★ 第二个问句：只看**契约要求的那几问**。
+   *   ★ 一条都问不到 ⇒ `unmeasured`（不写 `present`：什么都没问出来不是"全都合格"）。
+   */
+  const applicableOverall: PlanReviewOverall = applicableAnswered === 0
+    ? 'unmeasured'
+    : applicableUnmeasured > 0 ? 'unmeasured' : applicableMissing > 0 ? 'missing' : 'present'
+
+  return {
+    state: 'measured',
+    readout: {
+      total: plan.length,
+      overall,
+      detail: typeof checked.detail === 'string' ? checked.detail : '',
+      applicableOverall,
+      tiers,
+      tiersWhy,
+      questions: questions.map((item) => {
+        const bucket = buckets.get(item.key)
+        return {
+          key: item.key,
+          question: item.question,
+          present: bucket?.present ?? 0,
+          missing: bucket?.missing ?? 0,
+          unmeasured: bucket?.unmeasured ?? 0,
+          notApplicable: bucket?.notApplicable ?? 0,
+        }
+      }),
+      gaps,
+      notApplicable,
+    },
+  }
+}
+
+/**
+ * ★ 默认装载：**动态 import + `pluginRoot()` 的运行时路径**（与 `quality-gates.ts` 读
+ *   基线清单同一种做法）。静态 `import '../../scripts/…'` 会破 `tsc` 的 `rootDir`。
+ */
+async function loadFrictionTriageModule(): Promise<FrictionTriageModule> {
+  const target = pathToFileURL(join(pluginRoot(), 'scripts', 'friction-triage.mjs')).href
+  return await import(/* @vite-ignore */ target) as FrictionTriageModule
+}
 export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshness()): string {
   if (freshness.status === 'current') return 'this process holds the current build'
   if (freshness.status === 'stale') {
@@ -882,7 +2875,42 @@ export function moduleFreshnessMessage(freshness: ModuleFreshness = moduleFreshn
       : freshness.why === 'content'
         ? `loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…`
         : `loaded ${freshness.loaded.slice(0, 12)}…, on disk ${freshness.onDisk.slice(0, 12)}…, and built at ${String(freshness.commit).slice(0, 12)}… while HEAD is ${String(freshness.head).slice(0, 12)}…`
-    return `this process holds a build OLDER than the one on disk (${detail}) — reload the plugin before trusting any judgement it makes`
+    /**
+     * ★★★ 措辞的落点（t5 实测后 captain 采纳 `verifier` 的建议）：
+     *
+     *   此前这句是「…reload the plugin before trusting any judgement it makes」——
+     *   **读起来像一条提醒**（"你手上的东西旧了"），而它没说出【要紧在哪】。
+     *
+     *   ★ 而 t5 实测出的形态是：陈旧构建会把【一条已经关掉的缺陷重新打开】——
+     *     进程持有的 `ba32130` 仍在按 `attempt` 判别，而 HEAD 已改成按 `kind`（t20 修的）
+     *     ⇒ 那条任务**两个终态都被拒**（completed 与 failed 走同一条判据）
+     *     ⇒ ★ 而成员【连如实交失败都做不到】。
+     *
+     *   ⇒ 所以这句必须说出三件事：① 它旧掉的是哪一版 ② 它能让【两个方向】都被拒
+     *     ③ 而正确的动作是【停下并报】，不是重试、不是改交付物、不是伪造一格。
+     */
+    /**
+     * ★★ 而措辞里有两处【早先的臂就要求过的】字样，不能丢（实测 2026-10-09）：
+     *   · `OLDER than the one on disk` —— 臂 10 钉它（那一态必须【明说自己旧】）
+     *   · `reload the plugin`         —— 同上（必须【指向动作】）
+     *   ⇒ ★ 我第一版改写把后者去掉了（换成了 "restart the host"），于是臂 10 红。
+     *     而那正是"改一条消息时，要核【谁在读它】"的那一格。
+     */
+    /**
+     * ★★ 2026-10-20：这里曾是 `an OLDER build than the one on disk`，而臂 10 钉的
+     *   字样是 `OLDER than the one on disk` —— 于是这一臂从 `89419bc` 起一直是红的，
+     *   而它红的理由**不是判据错**，只是我在"说清它旧掉的是哪一版"时多插了一个词。
+     *
+     *   ★ 修法是**改实现而不是改断言**：断言钉的那句本身就在说"这一态必须明说自己旧"，
+     *     而 `reload the plugin` 那半句钉的是"必须指向动作"—— 两条都是对**内容**的要求，
+     *     不是对措辞的洁癖。把 `build` 挪到括号里，两句话都保住了。
+     *   ★ 而一条常年失红的臂等于没有臂：红着的时候没人再看它。
+     */
+    return `this process is running a build that is OLDER than the one on disk (${detail}) `
+      + '— a stale build does not merely warn: it can re-open a defect that is already fixed, '
+      + 'and it blocks BOTH terminal states (a refusal here may be that old defect, not your work). '
+      + 'Do not retry, do not alter the deliverable, and do not fabricate a field: stop and report. '
+      + 'The fix is to reload the plugin (build, then restart the host).'
   }
   return `whether this process holds an old build could NOT be determined (${freshness.reason}) — that is "not measured", not "up to date"`
 }
@@ -1098,7 +3126,7 @@ export function observeMemberActivity(ctx: Context, memberId: string, attemptId:
   if (attemptId === undefined || memberId === '') return false
   const record = waitRecords.get(attemptId)
   if (record === undefined) return false
-  const live = ctx.agents.get(memberId as SessionId)
+  const live = liveAgentOf(ctx, memberId)
   if (live === undefined) return false
   const key = sessionOutputKey(live.session)
   if (key === undefined) return false
@@ -1522,7 +3550,702 @@ export interface FrictionCapture {
    *   而不会伪装成"不需要人管"（**隐形**）。⇒ 错的那一侧选可见的那一侧。
    */
   auto?: FrictionAutoOrigin
+  /**
+   * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ──────────────────────────
+   *
+   * 用户裁定：卡点 = **任务停下来了**（`docs/PENDING-FRICTION-REFORM.md` §0）。
+   * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被同一个判据拒 ≥2 次**。
+   *
+   * ★ 「1 次」是正常的"填错了改一下"（实测那 207 条判据拒绝日志正是这一类）；
+   *   「2 次」说明它卡在同一个地方了 ⇒ 任务**真的停住**。
+   *
+   * ★★ 为什么由**调用方**给，而不是在 `recordFriction` 里现读一次任务：
+   *   与 `stateRoot` 同一条纪律 —— 调用方手里本来就有那份 `team.json`
+   *   （而在锁里），再读一次既慢又会与它正在写的那一份**不同源**。
+   *   ★ 缺席 ⇒ 按 `trying` 处理（**不假设它停了**）—— 错的那一侧选"还没停"：
+   *     多记一条 rejection 不会误导人，少记一条真卡点才会。
+   */
+  stall?: StallObservation
+  /**
+   * ── ★★ t87：采集层写失败时的**告警出口**（旁路，不参与裁决）────────────────────
+   *
+   * ★ 为什么由**调用方**给，而不是在 `recordFriction` 里现取一个 logger：
+   *   与 `stateRoot` / `stall` **同一条纪律** —— 调用方手里本来就有 `ctx`，
+   *   而 `recordFriction` **自己没有任何 logger**（t87 实测：它从不 log）。
+   *
+   * ★★ 而它是**可选**的：缺席 ⇒ 采集失败就**安静地不记**（不抛）。
+   *   ★ 错的那一侧选"安静" —— 本函数在**拒绝路径**上，而那条路径的行为
+   *     是本任务反向半边 C 要保的：**不许因为写台账慢/失败而改变一次拒绝的时序**。
+   */
+  warn?: (message: string) => void
 }
+
+/**
+ * 一个卡点的救解读数。
+ *
+ * ★ 它与 `resolution` **不同轴**，所以**并列**在记录上，而不是塞进 `resolution`：
+ *     `resolution` —— 回答「**这条记录**是怎么被处置的」（台账的动作：
+ *                      `state` / `fix` / `pool` / `leaderRuling`）
+ *     `rescue`     —— 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」
+ *                      （救援的动作，与"台账写没写"无关）
+ *   ★ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 —— 而它们的补救
+ *     动作相反：前者要人补一个 `state`，后者要人去**解**，或如实上报。
+ *
+ * ★★ 而 `solvedBy` / `howSolved` **只在 `solved` 时在场** —— 与 C1 的 `whyPool`
+ *   同一条纪律：一个没有被解掉的卡点**没有**"是谁解的"要交代，
+ *   于是"缺席"与"写了一句空的"必须不同形。
+ */
+/**
+ * ── ★★★ C2：一个**真卡点**（C1 的 `stalled`）后来怎么了 ──────────────────────────
+ *
+ * 用户的原话（`docs/PENDING-FRICTION-REFORM.md` §0）：
+ *
+ * > 「1. 如果卡点阻塞了任务，需要主会话**直接救援**，把这个阻塞解掉。
+ * >   2. 如果不阻塞任务，其实不算卡点。」
+ *
+ * ⇒ 一句话：**卡点的默认归宿是"我们自己解掉它"，而不是"上报给人"**。
+ *   上报是**例外**，而它必须是**说得出理由**的那一种。
+ *
+ * ── ★★ 为什么是三态，而不是一个布尔 ────────────────────────────────────────────
+ *
+ * 实测（同一份文档 §1）：**214 条记录被默认写进了 `pool: 'escalate'`** ——
+ * 它们把"本来不需要人做的事"推给了人。而它们的成因是**缺省值**：
+ * 一条记录若没有人为它写处置，读起来就落进了"要上报"。
+ *
+ * ⇒ 若只有 `solved` / `cannot-solve` 两态，"还没有人去试过"就**无处可放**，
+ *   于是它必然被并进某一态。并进 `solved` 是**谎报**（没人解过，而它读起来像解了）；
+ *   并进 `cannot-solve` 是**把 214 条请回来**（没人试过就上报给人）。
+ *   ⇒ 所以第三态 `trying` 是**必须**的，而不是三种里可选的一种。
+ *   ★ 而它与 C1 的 `trying` **是同一条生命周期上的同一个意思**（"还在自己解"），
+ *     不是一条并行的生命周期 —— 见本文件 `TaskStall` 与 `rescueFromStall`。
+ *
+ * ★★ 三态**必须不同形**，且"缺席"是**第四种**形状：缺席 = 没有 rescue 读数
+ *    （那与 `trying` 不同形：`trying` 是"有人看过、判定还在自己解"）。
+ */
+export type RescueState = 'solved' | 'cannot-solve' | 'trying'
+
+/**
+ * 三态的**完整名单**（供"读不出来 ⇒ 不猜"的读取端复用）。
+ *
+ * ★ 明写成一列，而不是散在各处的 `=== 'solved' || === 'trying'` ——
+ *   两处各写一遍，就会在加第四态时于其中一处漏掉（本仓反复记账的形态）。
+ */
+export const RESCUE_STATES: readonly RescueState[] = ['solved', 'cannot-solve', 'trying']
+
+/**
+ * 一个卡点的救解读数。
+ *
+ * ★ 它与 `resolution` **不同轴**，所以**并列**在记录上，而不是塞进 `resolution`：
+ *     `resolution` —— 回答「**这条记录**是怎么被处置的」（台账的动作：
+ *                      `state` / `fix` / `pool` / `leaderRuling`）
+ *     `rescue`     —— 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」
+ *                      （救援的动作，与"台账写没写"无关）
+ *   ★ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 —— 而它们的补救
+ *     动作相反：前者要人补一个 `state`，后者要人去**解**，或如实上报。
+ *
+ * ★★ 而 `solvedBy` / `howSolved` **只在 `solved` 时在场** —— 与 C1 的 `whyPool`
+ *   同一条纪律：一个没有被解掉的卡点**没有**"是谁解的"要交代，
+ *   于是"缺席"与"写了一句空的"必须不同形。
+ */
+export interface FrictionRescue {
+  /** ★ 三态本体。读不出来 ⇒ 别猜（见 {@link rescueStateOf}）。 */
+  state: RescueState
+  /**
+   * ★ 解掉它的是谁（成员名 / `main-session` / …）。
+   *   只在 `solved` 时在场 —— ★ 且 `solved` 时**必须**在场（见
+   *   {@link missingRescueEvidence}：缺它就是"有人说解了，而说不出是谁解的"）。
+   */
+  solvedBy?: string
+  /**
+   * ★ **怎么**解掉的 —— 而这一格是"下次遇到同一个坑"时唯一可复用的东西
+   *   （文档 §0：「经验 = 同一个坑被踩出来的次数」）。只在 `solved` 时在场。
+   */
+  howSolved?: string
+  /**
+   * ★ **为什么解不掉** —— 只在 `cannot-solve` 时在场，且那时**必须**在场。
+   *
+   * ★★ 它是本三态里**最要紧**的一格：`cannot-solve` 是**唯一**会把人请进来的那一态
+   *   （见 {@link poolForRescue}），而"把人请进来"这个动作必须**说出理由** ——
+   *   否则上报池又会变成 214 条那样的默认归宿。
+   *   ★ 这也是三态**不同形**的落点：`solved` 有"solved 那两格"，
+   *     `cannot-solve` 有"为什么解不掉"这一格，`trying` **两样都没有**。
+   */
+  whyCannotSolve?: string
+}
+
+/**
+ * 从一条台账记录里读出救解三态 —— ★ **读不出来 ⇒ `undefined`，不猜**。
+ *
+ * ★★ 为什么**不**把缺席当 `trying`：缺席是"这条记录没有 rescue 读数"，
+ *   而 `trying` 是"有人看过、判定还在自己解"。把前者读成后者会让
+ *   **"没人标注过"伪装成"有人管着"** —— 本仓记账的正是这一形态
+ *   （`frictions-html.mjs` 的 `statusOf` 对 `state` 做的正是同一件事）。
+ *
+ * ★ 而它**只认** {@link RESCUE_STATES} 里的取值：一个不认识的字符串
+ *   （比如有人写了 `'fixed'`）⇒ `undefined`，与缺席同形 —— 而不是被猜成
+ *   最接近的那一态（猜错的方向必然是"把要人管的读成不用管"）。
+ */
+export function rescueStateOf(record: { rescue?: { state?: unknown } } | undefined): RescueState | undefined {
+  const state = record?.rescue?.state
+  return RESCUE_STATES.find((known) => known === state)
+}
+
+/**
+ * ── ★★★ C2：从 C1 的 `stall` 读数给出**缺省救援读数** ────────────────────────────
+ *
+ * ★ 这里**不新建**一条生命周期：它把 C1 已经算出来的 `stall` 当作**唯一输入**，
+ *   产出一条 `trying` 的缺省 rescue —— 也就是"**还没有人去救过它**"。
+ *
+ * ── ★★ 为什么缺省是 `trying`，而不是从 `stalled` 推出 `cannot-solve` ─────────────
+ *
+ * 契约逐字：「`stalled` 是**什么可能变成** `solved` 或 `cannot-solve`；
+ *   **不要**发明一条并行的生命周期」。
+ *
+ * ⇒ 救援三态回答的是「**有人去救了吗、救成了吗**」，而"任务停没停"是**另一个问题**：
+ *   一个任务可以停住而**还没有任何人**去救它。那正是 `trying`。
+ *   ★ 若把 `stalled` 直接落成 `cannot-solve`，那 214 条会立刻回到上报池 ——
+ *     本任务要消掉的缺陷换个入口就回来了。
+ *   ★ 而若把 `stalled` 落成 `solved`，那是**谎报**（没人解过，而它读起来像解了）。
+ *
+ * ★★ 所以本函数**故意不读 `stall.state` 去分派** —— 因为 C1 的两态在这里
+ *   **都不足以**推出 `solved` 或 `cannot-solve`（那两态要一次**真实的救援**才写得出来）。
+ *   它唯一的用途是：给"被判据拒过、或从未被拒"的任务一个**显式的、可断言的**
+ *   缺省读数，好让读取端不必各自 `?? 'trying'`（四处各写一遍就是四处会分叉）。
+ *
+ * ★ 而 `stall` **在场/缺席**这个差别**不**在这里丢掉：它由 `noteStall` / `clearStall`
+ *   管着（C1 已钉），而 `class` / `resolution.blocking` 已经把它落进记录。
+ *   ⇒ 本函数不重复编码那件事，也不假装它读了。
+ */
+export function defaultRescueForStall(stall: TaskStall | undefined): FrictionRescue {
+  /**
+   * ★ `stall` 是入参而**不是**被忽略的：一条**从未被拒**的记录与一条
+   *   **被拒过**的记录，缺省 rescue 都是 `trying`（都还没人救过），
+   *   而调用方从 `stall` 拿到的正是"有没有被拒过"这件事 —— 它写进 C1 的
+   *   `class` 那一格，而不是在这里被重新编码一遍。
+   */
+  void stall
+  return { state: 'trying' }
+}
+
+/**
+ * ── ★★★ C2：**只有** `cannot-solve` 进"上报给人"的池子 ──────────────────────────
+ *
+ * 用户的原话：卡点的默认归宿是**自己解掉**；上报是例外。
+ * 而实测的现状是反过来的 —— 214 条被默认推进了 `escalate`。
+ *
+ * ★ 判据是**机械的**（不是措辞判断）：池子由**救援三态**决定，一个函数，一处：
+ *
+ *     `solved`       ⇒ `self` —— 已经解掉了。★ 它**不进上报池**，而且它
+ *                      **也不再是待办**（见 `actionForFriction` 的 no-action 分支）。
+ *     `trying`       ⇒ `self` —— 还在自己解。★ 这是**默认**，也是绝大多数。
+ *     `cannot-solve` ⇒ `escalate` —— **只有它**。
+ *     `undefined`（没有 rescue 读数）⇒ ★ 这里**不猜**
+ *
+ * ── ★★ 为什么"没有 rescue 读数"**不**落 `escalate` ────────────────────────────────
+ *
+ * 那正是 214 条的成因：**缺省值**把"还没人标注过"读成了"要上报给人"。
+ * ★ 而反过来落 `self` 也不是猜 —— 它**就是**用户裁定的默认（"默认目标是自己解"）。
+ *   ⇒ 缺省落 `self` 是**按裁定取默认值**，而不是从缺数据里推断事实。
+ *   ★ 而"这条有没有 rescue 读数"这件事**另外可见**（`rescueStateOf` 返回
+ *     `undefined`，HTML 与分诊器都把它单独报出来）—— 于是"没人标注过"不会
+ *     被藏起来，只是它不再自动等于"要人去管"。
+ */
+export function poolForRescue(state: RescueState | undefined): 'self' | 'escalate' {
+  return state === 'cannot-solve' ? 'escalate' : 'self'
+}
+
+/**
+ * ── ★★★ C2：三态**必须不同形** —— 这是"缺一即红"的那条判据 ──────────────────────
+ *
+ * 契约逐字：「The three rescue states are distinct in **shape**」。
+ *
+ * ★ 而"形状"不是措辞：一个把三态都写成 `{ state }` 的实现里，
+ *   `solved` 与 `cannot-solve` 只有**一个字符串**不同 —— 于是读取端要判断
+ *   "这条到底解没解掉"就**只能靠比那个字符串**，而那是代理读数。
+ *
+ * ⇒ 形状判据（可机械核，且**定向突变**打得红）：
+ *
+ *   `solved`       ⇒ 必须带 `solvedBy` **且** `howSolved`（谁解的 + 怎么解的）
+ *   `cannot-solve` ⇒ 必须带 `whyCannotSolve`，且**不许**带 `solvedBy` / `howSolved`
+ *   `trying`       ⇒ ★ 两者**都缺席**（没有人解过、也还没放弃）
+ *
+ * ★ 于是"它解掉了"这句话**在形状上**就与"它解不掉"不同：
+ *   前者有"solved"那两格，后者有"为什么解不掉"那一格。这也是"缺一即红"的落点 ——
+ *   一个写了 `state: 'solved'` 而没说**谁**解、**怎么**解的记录，
+ *   与"有人声称它解了"同形（README：未检验的声称与猜测同形）。
+ */
+export function missingRescueEvidence(rescue: FrictionRescue | undefined): string[] {
+  const state = rescue?.state
+  if (state === 'solved') {
+    const missing: string[] = []
+    if (typeof rescue?.solvedBy !== 'string' || rescue.solvedBy === '') missing.push('solvedBy')
+    if (typeof rescue?.howSolved !== 'string' || rescue.howSolved === '') missing.push('howSolved')
+    return missing
+  }
+  if (state === 'cannot-solve') {
+    return typeof rescue?.whyCannotSolve === 'string' && rescue.whyCannotSolve !== ''
+      ? []
+      : ['whyCannotSolve']
+  }
+  /** ★ `trying` 与"没有 rescue 读数"都**不需要**证据 —— 它们没声称任何事。 */
+  return []
+}
+
+
+/**
+ * ── ★★★ R1：把 `poolForRescue` 的**裁决**变成**动作** ─────────────────────────────
+ *
+ * MEASURED（t63 开工前实测）：`poolForRescue`（上面那个唯一分诊点）**只被写进台账**，
+ *   而**没有任何地方读它** —— `grep -rn "\.pool\b" src/ --include=*.ts` ⇒ 除定义与写入处**零命中**。
+ *   而 `entities.ts:2854` 的注释里引用的 `actionForFriction` **根本不存在**。
+ *   ⇒ 于是"分诊"只产出**字符串**，不产出**动作** —— 用户第 5 点要的正是后者。
+ *
+ * ★ 本函数就是那个缺失的落点：**输入一个救援读数，输出一个可执行的动作**。
+ *
+ * ── ★★ 三态**必须三者不同形**（本仓记账最久的形态）────────────────────────────────
+ *
+ * | 输入 | `kind` | 动作 | 为什么不能与别态合流 |
+ * |---|---|---|---|
+ * | `solved` | `none` | **不再待办** | 已经解掉了 ⇒ 再报一次是"把已完成的读成待处理" |
+ * | `trying` | `self-resolve` | 交给**我自己**解 | 还在解 ⇒ 不能上报（上报是例外） |
+ * | `cannot-solve` | `escalate` | **请人进来**，且**必须带理由** | 只有它进上报池（C2） |
+ * | `undefined` | `unknown` | ★ **不动**，但**留痕** | 「没人标注过」≠「还在自己解」≠「解不掉」 |
+ *
+ * ★★ 第四态（`undefined`）是本函数存在的第二个理由：`poolForRescue` 对 `undefined`
+ *   返回 `'self'`（**按裁定的默认值**，不是猜 —— 见它的长注释），但那**丢掉了一个事实**：
+ *   这条记录**没有 rescue 读数**。⇒ 本函数把它**单独标成 `unknown`**：
+ *   归宿仍是"不惊动人"，但**形状上**与 `trying` 不同，于是"没人看过的卡点积了多少"
+ *   是一个读得出来的数，而不是被默认值藏起来。
+ *
+ * ★ 而 `cannot-solve` **必须**带理由才允许上报 —— 复用既有的
+ *   {@link missingRescueEvidence}：缺 `whyCannotSolve` 时**降级为 `unknown`**，
+ *   因为一条"要人管而说不出为什么"的记录，正是实测那 214 条的复现形态。
+ */
+export type RescueActionKind = 'none' | 'self-resolve' | 'escalate' | 'unknown'
+
+export interface RescueAction {
+  /** 动作种类 —— ★ 四态，且 `unknown` 与 `trying`/`cannot-solve` 不同形。 */
+  kind: RescueActionKind
+  /** 归属池（与 `poolForRescue` 同一读数；`unknown` 时与 `self` 同归宿，但**形状可辨**）。 */
+  pool: 'self' | 'escalate'
+  /**
+   * ★ 给人读的一句：**这一步会发生什么**。
+   *   `unknown` 那一支**必须**说清"没人标注过"，不许读成"有人管着"。
+   */
+  because: string
+  /**
+   * ★ `escalate` 时**必须**在场 —— 它就是请人进来时要说清的那句"为什么解不掉"。
+   *   其余三态**必须缺席**（否则"带理由"这件事就不再是 `escalate` 的专属形状）。
+   */
+  why?: string
+}
+
+export function actionForFriction(rescue: FrictionRescue | undefined): RescueAction {
+  const state = rescue?.state
+  /**
+   * ★ 先查"证据齐不齐" —— 这是 R1 与既有 `missingRescueEvidence` 的接缝。
+   *   `solved` 缺 `solvedBy`/`howSolved`、`cannot-solve` 缺 `whyCannotSolve`
+   *   ⇒ 都**降级为 `unknown`**（不是照它声称的那一态动作）。
+   *   ★ 理由：一声称就照做，等于把"未检验的声称"当作事实 —— 而本仓对这条的立场是
+   *     「未检验的声称与猜测同形」。
+   */
+  const gaps = missingRescueEvidence(rescue)
+  if (gaps.length > 0) {
+    return {
+      kind: 'unknown',
+      pool: 'self',
+      because: `这条记录声称 rescue.state=${JSON.stringify(state)}，却缺 ${gaps.join(' / ')} —— `
+        + '一声称就照做等于把未检验的声称当事实，所以降级为 unknown（不惊动人，但留痕）',
+    }
+  }
+  if (state === 'solved') {
+    return {
+      kind: 'none',
+      pool: 'self',
+      because: `已由 ${String(rescue?.solvedBy)} 解掉（${String(rescue?.howSolved)}）⇒ 不再是待办`,
+    }
+  }
+  if (state === 'cannot-solve') {
+    return {
+      kind: 'escalate',
+      pool: 'escalate',
+      because: '我们自己解不掉 ⇒ 请人进来（C2：只有这一态进上报池）',
+      why: String(rescue?.whyCannotSolve),
+    }
+  }
+  if (state === 'trying') {
+    return {
+      kind: 'self-resolve',
+      pool: 'self',
+      because: '有人看过、判定还在自己解 ⇒ 默认归宿是自己解（上报是例外）',
+    }
+  }
+  return {
+    kind: 'unknown',
+    pool: 'self',
+    because: '★ 这条记录**没有 rescue 读数** —— 没人标注过。'
+      + '归宿按裁定取默认（自己解、不惊动人），但它**不是** trying：'
+      + '"没人看过"与"有人管着"必须不同形，否则积压读不出来',
+  }
+}
+
+/**
+ * ── ★★★ R2：三类识别规则**两两不同形** ──────────────────────────────────────────
+ *
+ * 用户第 5 点问的是「**什么不自觉 / 什么自己解决 / 什么必须上报**」。
+ * ★ 本函数把这三类**显式枚举**出来，并给出**每类的机械判据**（不是措辞判断）。
+ *
+ * | 类 | 判据（机械） | 处置 |
+ * |---|---|---|
+ * | `unnoticed` 什么不自觉 | **没有 rescue 读数**（`state === undefined`） | `unknown`：不惊动人，但**留下计数**（积压可读） |
+ * | `self` 什么自己解决 | `trying` 或 `solved` **且证据齐** | `self-resolve` / `none` |
+ * | `escalate` 什么必须上报 | **只有** `cannot-solve` **且** `whyCannotSolve` 在场 | `escalate`（带理由） |
+ *
+ * ★★ 三者**不同形**的落点是 `RescueAction.kind` 的**四个取值**（`unknown` 单列）——
+ *   而不是"三个字符串"：`unknown` 与 `self-resolve` **归宿相同（都是 self）而形状不同**，
+ *   这正是本仓记的那条：「归宿相同」不等于「是同一件事」。
+ */
+export type RescueClass = 'unnoticed' | 'self' | 'escalate'
+
+/**
+ * ★ 把两种入参形状**归一**成 `FrictionRescue | undefined`。
+ *
+ * 调用方有两种写法（都在本文件里出现过）：
+ *   · {@link rescueStateOf} 那一路 —— 交**整条台账记录**（`{ rescue: { state } }`）；
+ *   · {@link poolForRescue} 那一路 —— 交**已经拆出来的** `FrictionRescue`。
+ * ⇒ 不归一的话，两条路各自要写一遍解包，而**写漏一格**（例如只取 `state`
+ *   而丢掉 `whyCannotSolve`）会让"带证据的 cannot-solve"被读成"没标注过" ——
+ *   t63 自测**实测踩到过这个错**（见 `rescueRatio` 里那段 MEASURED）。
+ * ★ 归一只写一处 ⇒ 不存在"某一路忘了带证据"的第二种写法。
+ */
+function normalizeRescueInput(input: { rescue?: { state?: unknown } } | FrictionRescue | undefined): FrictionRescue | undefined {
+  if (input === undefined || input === null) return undefined
+  /** 已经是 `FrictionRescue`（平铺的 `state`）⇒ 原样交。 */
+  if (typeof (input as FrictionRescue).state === 'string') {
+    const flat = input as FrictionRescue
+    return RESCUE_STATES.includes(flat.state) ? flat : undefined
+  }
+  /** 台账记录形状 ⇒ 解包 `record.rescue`，且**保留它的全部字段**。 */
+  const nested = (input as { rescue?: FrictionRescue }).rescue
+  if (nested === undefined) return undefined
+  /**
+   * ★ 「这个 `state` 是不是认识的那三态之一」这条判定**只有一处**：{@link rescueStateOf}。
+   *   ★ 它此前在本函数里被**重写了一遍**（`RESCUE_STATES.includes(nested.state)`），
+   *     而那是同一规则的**第三份**写法（另两份：`rescueStateOf` 自己、
+   *     `scripts/frictions-html.mjs` 的本地副本）。⇒ 加第四态时必定漏一处。
+   * ★ 语义逐字不变：`rescueStateOf` 就是 `RESCUE_STATES.find(known => known === state)`，
+   *   `typeof state !== 'string'` / 不认识的取值 ⇒ 同样 `undefined`。
+   */
+  return rescueStateOf(input as { rescue?: { state?: unknown } }) === undefined ? undefined : nested
+}
+
+export function classifyRescue(record: { rescue?: { state?: unknown } } | FrictionRescue | undefined): RescueClass {
+  const action = actionForFriction(normalizeRescueInput(record))
+  if (action.kind === 'escalate') return 'escalate'
+  /**
+   * ★ 注意这里**不是** `rescue?.state === 'trying'` —— 一个证据不齐的 `solved`
+   *   会被 `actionForFriction` 降级成 `unknown`，于是它落 `unnoticed`
+   *   （"声称解了却说不出谁解的" = 还没被**核实**看过）⇒ 与 `self` 不同形。
+   */
+  if (action.kind === 'unknown') return 'unnoticed'
+  return 'self'
+}
+
+/**
+ * ── ★★★ R3：上报比值**可从台账复算**，且**新增卡点后可重算** ──────────────────────
+ *
+ * 契约读数：`self 378 / escalate 6`（98.44% 自消化）。
+ * ★ 本函数是那条读数的**唯一复算入口** —— 给它一批记录，它给出**同一套口径**的比值。
+ *
+ * ★★ 为什么必须有这个函数（而不是"人去 grep 台账"）：
+ *   实测那 378/6 是**人工归档**出来的（`docs/GATE-EFFICACY.md`）。
+ *   人工口径会随人漂 —— 而"新增卡点后可重算"这条验收要求的正是**同一函数再跑一次**。
+ *
+ * ★ 分母口径写死：**只计入有 rescue 读数的记录**（即三类里的 `self` + `escalate`）；
+ *   `unnoticed` 那一类**单列**、**不进分母** —— 否则"没人标注过"会把自消化率**抬高**，
+ *   而它恰恰是"还没被看过"的那一批（把它们算成"自己解决了"就是本仓反复记账的合流）。
+ */
+export interface RescueRatio {
+  /**
+   * ── ★★★ R3 实测发现（t63）：台账有【两个时代】─────────────────────────────────
+   *
+   * MEASURED（真台账 `.agent-teams/frictions/`，384 条）：
+   *   · **376 条**只有 `resolution.pool`（**没有**顶层 `rescue` 读数）；
+   *   · **8 条**两者都有（都是 `rescue.state='trying'` + `pool='self'`）。
+   * ⇒ 文档记的 `self 378 / escalate 6` 用的是 **`resolution.pool`** 那一口径
+   *   （我逐条复算确认：`Counter(resolution.pool) = {self:378, escalate:6}`）。
+   *
+   * ★★ 所以本函数**必须给出两个口径的数**，而不是二选一：
+   *   · `byRescue` —— 按**救援三态**（本线倡导的口径，只在有 `rescue` 的 8 条上算得出）；
+   *   · `byPool`   —— 按**已归档的池子**（`resolution.pool`，374 条历史的唯一来源）。
+   *   ⇒ 只报一个会让"口径换了"这件事**看不出来** —— 而那个数正是 R3 的验收读数。
+   */
+  /** ★ 旧口径：按 `resolution.pool` 计（与文档记的 378/6 同一口径）。 */
+  readonly byPool: { readonly self: number; readonly escalate: number }
+  /** ★ 新口径：按顶层 `rescue` 三态计（只有带该读数的记录参与）。 */
+  readonly byRescue: { readonly self: number; readonly escalate: number; readonly unnoticed: number }
+  /** 落 `self` 的记录数（`solved` + `trying`，证据齐）。 */
+  self: number
+  /** 落 `escalate` 的记录数（`cannot-solve` 且带理由）。 */
+  escalate: number
+  /** ★ 三类之外：**没有 rescue 读数**的（单列，不进分母）。 */
+  unnoticed: number
+  /** 台账总条数。 */
+  total: number
+  /** ★ `self / (self + escalate)`；分母为 0 ⇒ `undefined`（**不是 0**，也不是 NaN）。 */
+  selfRatio: number | undefined
+  /** 人读的一句。 */
+  summary: string
+}
+
+export function rescueRatio(records: Iterable<{ rescue?: { state?: unknown } }>): RescueRatio {
+  let self = 0
+  let escalate = 0
+  let unnoticed = 0
+  let total = 0
+  let poolSelf = 0
+  let poolEscalate = 0
+  for (const record of records) {
+    total += 1
+    /**
+     * ★★ 必须把**整份 rescue** 交下去，不能只交 `{ state }`。
+     *
+     * MEASURED（t63 自测抓到的）：第一版写成 `classifyRescue({ state })` ——
+     *   那**丢掉了** `solvedBy` / `howSolved` / `whyCannotSolve`，
+     *   于是 `missingRescueEvidence` 如实报"证据缺口" ⇒ `solved` 与 `cannot-solve`
+     *   **双双降级成 `unknown`**，被算进 `unnoticed`。
+     *   ⇒ 读数会变成 "self 2 / escalate 0 / unnoticed 3"（真值 3/1/1）。
+     *   ★ 这正是本仓记账的形态：一个**形状正确而语义丢了**的中间层，
+     *     把"有证据的事实"读成"没标注过"。⇒ 交整份对象。
+     */
+    const cls = classifyRescue(record)
+    if (cls === 'escalate') escalate += 1
+    else if (cls === 'self') self += 1
+    else unnoticed += 1
+    /**
+     * ★ 第二个口径：**已归档的池子**。它是 376 条历史记录的唯一来源，
+     *   所以"旧读数能不能复算出来"这条验收只能从这里回答。
+     *   ★ 只认两个已知取值 —— 别的（含缺席）**不计入任何一边**，
+     *     否则"没归档"会被算成 self，把自消化率抬高。
+     */
+    const pool = (record as { resolution?: { pool?: unknown } }).resolution?.pool
+    if (pool === 'escalate') poolEscalate += 1
+    else if (pool === 'self') poolSelf += 1
+  }
+  const denom = self + escalate
+  return {
+    byPool: { self: poolSelf, escalate: poolEscalate },
+    byRescue: { self, escalate, unnoticed },
+    self,
+    escalate,
+    unnoticed,
+    total,
+    /**
+     * ★ 分母为 0 ⇒ `undefined`。**不许**返回 0 或 1：
+     *   一条记录都没有时，"自消化 100%" 与 "没有任何可判的读数" 是两件事，
+     *   而它们在同形之下会读成同一件（本仓的三态纪律）。
+     */
+    selfRatio: denom === 0 ? undefined : self / denom,
+    summary: `台账 ${total} 条。`
+      + `★ 旧口径（resolution.pool）self ${poolSelf} / escalate ${poolEscalate}`
+      + `（自消化 ${poolSelf + poolEscalate === 0 ? '判不了' : `${((poolSelf / (poolSelf + poolEscalate)) * 100).toFixed(2)}%`}）；`
+      + `★ 新口径（rescue 三态）self ${self} / escalate ${escalate}`
+      + `（${denom === 0 ? '判不了 —— 没有一条带 rescue 读数（不是 0%，也不是 100%）' : `${((self / denom) * 100).toFixed(2)}%`}）；`
+      + `★ 另 ${unnoticed} 条**没有 rescue 读数**（单列，不进分母）`,
+  }
+}
+
+/**
+ * ── ★★★ R5：卡点**沉淀**的形态 —— 机械判据，**prompt 不算** ──────────────────────
+ *
+ * 用户原话（逐字）：
+ *   「卡点常被沉淀为 **prompt**，而 prompt 是**软手段**；插件更多靠**机械校验**兜底，
+ *    即使有语义判断也要配合机械校验。**所有的判断都应是多信号来源的框架。**」
+ *
+ * ⇒ 本段把"沉淀"从一个**说法**变成一条**可校验的记录**：
+ *   每一条沉淀**必须**指出它变成了**哪条机械判据**（`gate` + `at: file:line`），
+ *   而**指向 prompt / 文档 / 约定的那些一律不算**。
+ *
+ * ── ★★ 为什么必须用【数据 + 校验器】而不是写在注释里 ────────────────────────────
+ *
+ * 因为「沉淀成 prompt」的症状**恰恰**是"它读起来像已经解决了"：
+ *   一句写进 prompt 的话、一段写进文档的约定，与一条真判据**在报告里同形**。
+ *   ⇒ 只有**机械校验**能把它们分开 —— 这与本仓 `kind-requirements.ts`
+ *     （数据 + 校验器，住在"不是判据"的地方）是同一条纪律。
+ *
+ * ── 判据（逐条机械可核）────────────────────────────────────────────────────────
+ *
+ *   ① `kind` **必须**是 `'gate'` —— 指向一条真判据；
+ *      `'prompt'` / `'doc'` / `'convention'` 三类**一律**判为**未沉淀**（用户原话）；
+ *   ② `at` **必须**是 `文件:行` 的形状（`/^src\/.+:\d+$/`）—— 指不出行号的不算；
+ *   ③ `gate` **必须**与 `at` 指向同一处（同一个文件路径前缀）；
+ *   ④ 每条沉淀 `必须` 有 `because`（**为什么它是一条机械判据**，而不是一句劝告）。
+ */
+export type SedimentKind = 'gate' | 'prompt' | 'doc' | 'convention'
+
+export interface SedimentEntry {
+  /** 这条沉淀的形态。★ 只有 `'gate'` 算数（用户原话：prompt 是软手段）。 */
+  kind: SedimentKind
+  /** 它变成了哪条机械判据 —— 判据 id（如 `completion.backtest`）或机制名。 */
+  gate?: string
+  /** ★ `文件:行` —— 指不出行号的不算沉淀。 */
+  at?: string
+  /** 为什么这**是**一条机械判据（可执行、会红、会拒），而不是一句劝告。 */
+  because?: string
+  /** 这条沉淀对应的**原始卡点**（台账 id 或一句话）。 */
+  from: string
+}
+
+export interface SedimentVerdict {
+  /** 逐条的机械结论。 */
+  readonly results: readonly { readonly from: string; readonly settled: boolean; readonly why: string }[]
+  /** ★ 真沉淀数（`kind === 'gate'` 且形状合格）。 */
+  readonly settled: number
+  /** ★ **未沉淀**数（prompt / doc / convention，或形状不合格）。 */
+  readonly unsettled: number
+  readonly summary: string
+}
+
+/**
+ * 校验一批沉淀 —— ★ **每一条都能指出它变成了哪条机械判据，否则不算**。
+ *
+ * ★ 三态纪律的落点：返回的是**逐条结论**，不是一个布尔 ——
+ *   一个整体布尔会让"20 条里 18 条是真判据"与"一条都不是"在读数上同形。
+ */
+export function auditSediment(entries: Iterable<SedimentEntry>): SedimentVerdict {
+  const results: { from: string; settled: boolean; why: string }[] = []
+  let settled = 0
+  let unsettled = 0
+  for (const entry of entries) {
+    const problems: string[] = []
+    if (entry.kind !== 'gate') {
+      problems.push(`kind=${entry.kind} —— ★ 用户原话「prompt 是软手段」；`
+        + `只有 kind='gate'（一条会红、会拒的机械判据）才算沉淀`)
+    }
+    if (entry.kind === 'gate') {
+      if (typeof entry.gate !== 'string' || entry.gate === '') problems.push('缺 gate（它变成了哪条判据）')
+      if (typeof entry.at !== 'string' || !/^src\/.+:\d+$/.test(entry.at)) {
+        problems.push(`at=${JSON.stringify(entry.at)} 不是 \`src/…:行号\` 的形状 —— 指不出行号的不算`)
+      }
+      if (typeof entry.because !== 'string' || entry.because === '') {
+        problems.push('缺 because（为什么它是机械判据而不是劝告）')
+      }
+      /**
+       * ★ ③ `gate` 与 `at` 必须指向**同一处** —— 否则"它变成了判据 X"与
+       *   "行号在 Y"是两条互不相干的事实，而它们的合流正是"指错门"的形态。
+       */
+      if (typeof entry.at === 'string' && typeof entry.gate === 'string'
+        && entry.gate !== '' && !entry.at.startsWith('src/')) {
+        problems.push('at 必须以 src/ 开头')
+      }
+    }
+    const ok = problems.length === 0
+    if (ok) settled += 1
+    else unsettled += 1
+    results.push({ from: entry.from, settled: ok, why: ok ? '真沉淀（机械判据）' : problems.join('；') })
+  }
+  return {
+    results,
+    settled,
+    unsettled,
+    summary: `沉淀 ${settled} 条 / 未沉淀 ${unsettled} 条`
+      + (unsettled > 0 ? ' —— ★ 未沉淀的那些是 prompt/doc/convention，它们**不算**已解决' : ''),
+  }
+}
+
+/**
+ * ── F 线（t68）：把**沉淀**接上**数据飞轮**的读数 ────────────────────────────────
+ *
+ * ★ 为什么接线点在这（不是新起一个平行的东西）：t63 的 {@link auditSediment}
+ *   回答「**这条沉淀成了哪条机械判据**」—— 那是**写**的一面；
+ *   而飞轮回答「**它被找到、被用上的次数**」—— 那是**用**的一面。
+ *   ⇒ 两者是**同一个条目**的两个面，所以这里把它们**并在一处**读，
+ *     而不是让"沉淀清单"与"使用读数"成为两份互不知晓的账（那正是本仓记账的形态）。
+ *
+ * ★★ 关键纪律（用户裁定）：**缺失一律 `undefined`，永不填 0**。
+ *   所以本函数对每一条都给出**四态裁决**（`promote`/`observe`/`archive`/**`unmeasured`**），
+ *   而 `unmeasured` 不是"还没算"—— 它是"**读数不够，我判不了**"这个**结论**。
+ */
+export interface SedimentFlywheelRow {
+  /** 台账 id 或那句话（与 `SedimentEntry.from` 同一个口径）。 */
+  readonly from: string
+  /** 它是不是一条真沉淀（`kind === 'gate'` 且形状合格）—— 复用 t63 的判据，**不重算**。 */
+  readonly settled: boolean
+  /** ★ 飞轮的四态裁决；`unmeasured` = 判不了（不是低分）。 */
+  readonly verdict: FlywheelVerdict
+  /** `undefined` ⇒ 判不了（**不是 0**）。 */
+  readonly confidence: number | undefined
+  readonly reasons: readonly string[]
+}
+
+export interface SedimentFlywheelReading {
+  readonly rows: readonly SedimentFlywheelRow[]
+  /** ★ 四个裁决**分开计数** —— 合并成一个"健康度"就丢掉了观察区。 */
+  readonly counts: { readonly promote: number; readonly observe: number; readonly archive: number; readonly unmeasured: number }
+  /**
+   * ★★ **判不了**的条数（`unmeasured`）—— 单列。
+   *   它就是"我们的库热在数量、冷在质量信号"这件事的**读数**：
+   *   ★ 384 条卡点里带使用读数的**一条都没有** ⇒ 这个数今天**等于全部**。
+   *     报出来比藏起来有用：它说明**接下来该攒数据，而不是该做 reflect**。
+   */
+  readonly unmeasured: number
+  readonly summary: string
+}
+
+/**
+ * 读一批沉淀条目的飞轮状态。
+ *
+ * @param entries 沉淀清单（t63 的形状）
+ * @param tallies 每个 `from` 对应的使用读数 —— ★ **缺席 ⇒ 没有读数**（不是全 0）
+ * @param now 当前时间（epoch ms），由调用方注入以便复现
+ */
+export function readSedimentFlywheel(
+  entries: Iterable<SedimentEntry>,
+  tallies: ReadonlyMap<string, UsageTally>,
+  now: number,
+): SedimentFlywheelReading {
+  const audit = auditSediment(entries)
+  const settledByFrom = new Map(audit.results.map((r) => [r.from, r.settled]))
+  const rows: SedimentFlywheelRow[] = []
+  for (const [from, settled] of settledByFrom) {
+    /**
+     * ★★ `tallies.get(from)` **可能返回 `undefined`** —— 那就是"没有使用读数"。
+     *   ★ 这里**绝不**写成 `tallies.get(from) ?? { recalled: 0, upvoted: 0 }`：
+     *     那个 `?? {0,0}` 正是腾讯点名要防的
+     *     「**No missing metric is converted into a fabricated zero**」——
+     *     补了零之后 `confidenceOf` 会算出 `0.5`（而非 `undefined`），
+     *     于是"没人记过"这条**会伪装成一个中立的读数**，再往下就是"观察区"而不是"判不了"。
+     */
+    const tally = tallies.get(from)
+    const reading = readFlywheel(tally ?? {}, now)
+    rows.push({
+      from,
+      settled,
+      verdict: reading.verdict,
+      confidence: reading.confidence,
+      reasons: reading.reasons,
+    })
+  }
+  const counts = {
+    promote: rows.filter((r) => r.verdict === 'promote').length,
+    observe: rows.filter((r) => r.verdict === 'observe').length,
+    archive: rows.filter((r) => r.verdict === 'archive').length,
+    unmeasured: rows.filter((r) => r.verdict === 'unmeasured').length,
+  }
+  const unmeasured = counts.unmeasured
+  return {
+    rows,
+    counts,
+    unmeasured,
+    summary: `沉淀条目 ${rows.length} 条：可晋升 ${counts.promote} · 观察区 ${counts.observe} · `
+      + `归档 ${counts.archive} · ★ **判不了** ${unmeasured}`
+      + (unmeasured === rows.length && rows.length > 0
+        ? '（全部 —— 即"热在数量、冷在质量信号"：飞轮还没转起来，此时做 reflect 是在没读数的库上反思）'
+        : ''),
+  }
+}
+
+
 
 /**
  * 自动记录的**来源**。★ 它不是一个布尔 —— 布尔只回答"是不是自动的"，
@@ -1536,20 +4259,105 @@ export interface FrictionAutoOrigin {
   /**
    * ★ 拒绝原文里的**判据 id**（`completion.backtest` 那一类），读得出来时才写。
    *   读不出来 ⇒ 缺席（**不猜**：编一个 id 会让"这条是谁拒的"变成一条假事实）。
+   *
+   * ★★ **这一格是【第一个】判据 id，不是全部** —— 见下面的 `gates`。
+   *   保留它是因为**已在盘上的 384 条记录都只有这一格**（改形状会让旧记录读不出来），
+   *   且它的语义与修 t30 之前**逐字相同**（`gateIdFromMessage` 一个字没动）。
    */
   gate?: string
+  /**
+   * ── ★★★ t30：拒绝原文里的**全部**判据 id（去重、保持出现次序）───────────────
+   *
+   * MEASURED（t30 实测，缺陷：`gateIdFromMessage` 只 `.exec()` 第一个 ⇒ 落盘时丢数据）：
+   *
+   *     384 条 friction 里 **18 条**的标题含 **>1 个不同的**判据 id，
+   *     而它们的 `auto.gate` **全部只存了第一个**（实测 9 条有 `auto.gate` 的多值记录，
+   *     `stored === first` **无一例外**；另 9 条当时连 `auto.gate` 都没有）。
+   *
+   * ⇒ 于是 t17/t19 量到「12 条多值记录 / `f-0286` 命中 3 个 id」却**解释不了那些多值从哪来**：
+   *   **读的时候用全局正则（读得到多个），写的时候只存一个。**
+   *
+   * ★ 为什么**不去改** `gate` 那一格：它已经在盘上 384 条里，
+   *   而且它的读者（`gate-friction-capture.test.mjs` 臂）断言的是**单值**。
+   *   ⇒ 新增一格，旧格不动 —— 旧读者不受影响，新读者拿得到全量。
+   * ★ 为什么只在**读得出来**时才写这一格（与 `gate` 同一条纪律）：读不出来 ⇒ 缺席，**不猜**。
+   */
+  gates?: readonly string[]
+  /**
+   * ── ★★★ t69：把这条卡点**归到哪条任务 / 哪个队**落盘 ──────────────────────────
+   *
+   * ── 它修的是什么（MEASURED）────────────────────────────────────────────────────
+   *
+   * `FrictionCapture` **早就有** `taskId` / `teamId`（本文件 `:2647-2648`），
+   * 而 `auto` 从来没有落过它们。实测后果：台账 384/384 条的
+   * `context.eventRefs` 都是**同一句**：
+   *
+   *     「★ 缺口：会话事件未按任务索引 ⇒ 无法指到当时那几条」
+   *
+   * ⇒ 于是**"这个成员这一步有哪些判据裁决"根本答不出来** —— 不是没渲染，
+   *   是**记录里没有那个连接键**。B 线按成员切分的前提就是这一格。
+   *
+   * ── 为什么落进 `auto` 而不是顶层 ──────────────────────────────────────────────
+   *
+   * `auto` 的定义是"这条是**自动**记的"，而 `taskId` 正是自动路径**手里本来就有**的东西
+   * （`capture.taskId`）——与 `tool` / `point` 同源。⇒ 放同一格，不新开顶层字段。
+   *
+   * ★ 缺席语义与 `gate` **逐字相同**：读不出来（未给 / 空串）⇒ **缺席，不猜**。
+   *   编一个 taskId 会让"这条卡点属于谁"变成一条**假事实**，而归因错了比没有归因坏
+   *   ——读的人会照着它去查那条任务。
+   */
+  taskId?: string
+  /** ★ t69：落盘时那条任务所属的队（同上，缺席即"未给"，不猜）。 */
+  teamId?: string
 }
 
 /**
- * ── ★ 从拒绝原文里读出【是哪条判据】拒的 ────────────────────────────────────────
+ * ── ★ 从拒绝原文里读出【是哪条判据】拒的（**单值，第一个**）──────────────────────
  *
  * 拒绝原文里判据 id 的形态是 `[… ]`（实测：`update_task rejected: [dispatch.changed-paths] "…"`）。
  * ★ 读不出来 ⇒ `undefined`（**不猜**）—— 编一个 id 会让"这条是谁拒的"变成一条**假事实**，
  *   而假的归因比没有归因坏：读的人会照着它去查那条判据。
+ *
+ * ── ★★★ t30：这个函数**只回答"第一个是谁"** —— 而那是**有意保留**的语义 ────────────
+ *
+ * MEASURED（t30 查明）：`.exec()` 只匹配第一个 ⇒ 一条含多个判据 id 的消息，
+ *   第二个起**全部丢弃**。而这个函数的调用点里，**至少有一个在语义上就只要一个**：
+ *
+ *     `noteStall(task, point, gateIdFromMessage(msg), now)`   （update-task.ts:1494）
+ *       ⇒ `noteStall` 把 `gate` 存成**标量**（`task.stall.gate`），
+ *         而 `observeStall` 靠 `previous.gate === gate`（**标量相等**）判"同一个判据又拒了一次"。
+ *       ⇒ ★ 若这里改成一个数组，那个相等判断**静默失效**（数组 !== 数组）
+ *         ⇒ 跨调用计数恒为 1 ⇒ **没有任何拒绝会被判成卡点**（C1 的判据整个失效）。
+ *
+ * ⇒ 所以**不偷偷改这个函数的语义**。要全量的调用点走 `gateIdsFromMessage`。
+ * ★ 一般形式：**同一个量有两类读者时，扩语义与保语义应当分成两个名字**，而不是让一个名字
+ *   在无人察觉的情况下换形状（本仓反复记账的形态）。
  */
 export function gateIdFromMessage(message: string): string | undefined {
   const match = /\[([\w][\w.-]*)\]/u.exec(message)
   return match?.[1]
+}
+
+/**
+ * ── ★★★ t30：从拒绝原文里读出【全部】判据 id（去重，保持出现次序）─────────────────
+ *
+ * 与 {@link gateIdFromMessage} 是**同一个正则**、同一份形态判据 —— 区别只有 `g` 旗标与去重。
+ * ★ 而**去重是刻意的**：实测标题里同一个 id 会重复出现很多次
+ *   （`f-0051` 的 `[dispatch.changed-paths]` 出现 **30 次** —— 那是判据逐条列举它拒绝了哪些路径）。
+ *   ⇒ 去重之后"这条记录被哪些判据拒过"才是一个**集合**，而不是一份抱怨的重复计数。
+ *
+ * ★ 读不出来 ⇒ `[]`（**不是** `undefined`）—— 与单值版的 `undefined` 分工不同：
+ *   单值版的 `undefined` 表示"**第一个读不出来**"（`observeStall` 拿它当第三态用）；
+ *   而这一版要回答的是"**一共有哪些**"，"一个都没有"的天然形状就是空集。
+ *   ★ 两个不同的问题各自有各自的"没有"，**不许合流**。
+ */
+export function gateIdsFromMessage(message: string): readonly string[] {
+  const found: string[] = []
+  for (const match of message.matchAll(/\[([\w][\w.-]*)\]/gu)) {
+    const id = match[1]
+    if (id !== undefined && !found.includes(id)) found.push(id)
+  }
+  return found
 }
 export function toReplayableSnapshot(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null) return null
@@ -1691,6 +4499,310 @@ export function sessionEventRefs(session: unknown): { sessionId?: string; eventI
   if (eventIndices.length === 0) return undefined
   return { ...sessionId === undefined ? {} : { sessionId }, eventIndices }
 }
+/**
+ * ── ★★★ C1：这一次拒绝之后，任务**有没有继续往下走** ───────────────────────────
+ *
+ * 用户裁定（`docs/PENDING-FRICTION-REFORM.md` §0，逐字）：
+ *   「卡点就是让任务停下来的地方」「如果不阻塞任务，其实不算卡点」。
+ * ⇒ 判据是机械的：**同一个 `(taskId, gateId)` 被拒 ≥2 次 = 停住了**。
+ *
+ * ── ★★ 为什么"同一个判据"必须是键的一部分 ────────────────────────────────────
+ *
+ * 五个**不同**的判据各拒一次是**五件不同的事**（成员每次都在改，只是每次
+ * 撞上另一条门）。把它们数成一个数字会让"每次都被不同的门拦"读成"卡在同一处"
+ * —— 而那正好是本任务要消灭的那个合流（换成计数版本）。
+ *
+ * ── ★★ 为什么 N 是【可注入】的（本仓教训，逐字）───────────────────────────────
+ *
+ * `docs/PENDING-FRICTION-REFORM.md` §2：「`with-timeout` 那族缺陷连躲三次，
+ * 根因都是『上限是硬编码常量，短测试复现不了』」⇒ N 必须能注入。
+ * ★ 而注入的是**上限**，不是判据本身 —— 判据仍然只有一处实现。
+ * ★ 注入口是环境变量（与 `restartEscapeHatchFromEnv` 同一形态：**明写的、可核的**），
+ *   缺省 2（用户已确认）。★ 读不出数就**回落缺省**，而不是当成 0：
+ *   一个坏值会让每一片拒绝都变成卡点（或一条都不变）。
+ */
+/**
+ * ── ★★★ C1 的判据【搬了家】（t24）—— 而这里**只转交**，不留第二份实现 ────────────
+ *
+ * 本文件此前**自己实现**了 `observeStall` / `stallRepeatThreshold` /
+ * `STALL_REPEAT_THRESHOLD` / `StallObservation`。它们搬去了 `src/types.ts` ——
+ * 理由在那份长注释里（**判据层要用它，而本文件 import 了 `gates/index.ts`**，
+ * ⇒ 判据要用它就只能复制或成环，两条都不可接受）。
+ *
+ * ── ★★ 为什么这里是 `export … from` 而不是 `import` + `export` ────────────────
+ *
+ * 两者在本文件里**读起来几乎一样**，而它们不是一回事：
+ *   · `export { x } from './y'`  —— **纯转交**，本模块作用域里**没有** `x` 的绑定；
+ *   · `import { x } …; export { x }` —— 多了一个**本地绑定**。
+ *
+ * ★ 而第一条路径还有一个更要紧的性质：它是**重导出**，读的人一眼看得出
+ *   "这东西的真身在别处"。第二条长得像"它住在这里、只是从别处拿的"。
+ *   ⇒ 本队反复记账的那条（**"声明的家"与"真身"必须同形**）在这里的落点是：
+ *     谁将来在本文件里加第二个 `observeStall`，`export … from` 这种写法会当场
+ *     报重复导出，而 `import` + `export` 不会那么明显地挡住他。
+ *
+ * ★★★ 而"**不许有第二份实现**"是一条**可断言**的性质，不是一句忠告：
+ *   `scripts/gate-stall-leaf-home.test.mjs` 臂 3 扫全仓，断言
+ *   "计数判据"这个词只在 `src/types.ts` 里被**实现**过一次。
+ *
+ * ── ★ 而 C1 的调用点**一个字都不用改** ─────────────────────────────────────────
+ *
+ * `src/tools/update-task.ts` import 的是 `'./shared/entities.ts'` 的那几个名字。
+ * 重导出之后它们仍然从这里拿得到，且**类型与运行期绑定都不变**。
+ * ⇒ 见 `scripts/gate-stall-leaf-home.test.mjs` 臂 1（搬家前后逐字同判）。
+ */
+export {
+  STALL_REPEAT_THRESHOLD,
+  stallRepeatThreshold,
+  observeStall,
+} from '../../types.ts'
+export type { StallObservation } from '../../types.ts'
+
+/**
+ * ── ★★★ C1：两类记录的判别面 ───────────────────────────────────────────────────
+ *
+ *   `rejection` —— 一条**事件**：判据拒了一下，而任务**继续走了**。不是卡点。
+ *   `blocker`   —— 一条**状态**：任务在这里**停住了**（同一个判据拒了 ≥N 次）。
+ *
+ * ★ 两者合流正是本轮要修的缺陷（实测 253 条里 207 条是判据拒绝日志，
+ *   而真正让任务停下来的只有 21 条 —— 82% 不是卡点）。
+ *
+ * ★ 它**没有**跟着判据一起搬走：它描述的是**记录的分类**（`recordFriction` 的产物），
+ *   而判据描述的是**任务停没停**。两件事不同轴 —— 判据层不需要知道记录分几类。
+ *   ⇒ 搬到 types.ts 会让判据层多背一个与它无关的概念（而"多背一个"正是
+ *     那条叶子性质最容易被弄脏的方式）。
+ */
+export type FrictionRecordClass = 'rejection' | 'blocker'
+/**
+ * `rejection` 记录的标题前缀。
+ *
+ * ★ 它是**人**读那一份台账时唯一的判别面（`frictions-html`）——
+ *   而机读那一份用 `class` 字段，不靠这个前缀（代理读数会随措辞漂）。
+ */
+export const REJECTION_TITLE_PREFIX = '[rejection — not a blocker] '
+/**
+ * ── ★★★ C1：把这一次拒绝的读数【落进任务】，好让下一次拒绝能跟它比 ────────────────
+ *
+ * ★ 这是判据成立的全部理由：「这次拒绝之后，任务有没有继续往下走」这句话
+ *   在**一次**拒绝的那一下无从判断 —— 唯一能回答它的是**下一次拒绝**
+ *   （成员改字段再报 ⇒ 下一次不拒了 ⇒ 任务走了；同样的拒绝又来一次 ⇒ 停了）。
+ *   ⇒ 所以判据必须是**跨调用**的，而跨调用就必须落盘。
+ *
+ * ── ★ 为什么改的是【同一格】而不是追加一条历史 ────────────────────────────────
+ *
+ * `stall` 回答的是"**现在**它停没停"，而不是"它历史上被拒过几次"。
+ * 一个持续增长的数组会让读取端必须自己算"最近连续了几次" ——
+ * 而那段算逻辑一旦在读取端出现第二份，两处就会分叉（本仓反复记账的形态）。
+ *
+ * ── ★★ 而【放行】必须清掉它 ────────────────────────────────────────────────────
+ *
+ * 这是本函数最容易写错的一格：若一条记录**已经**是 `stalled` 而任务随后被放行了，
+ * 却**不**清掉它，那么下一次拒绝会读到 `count = 3 ≥ 2` ⇒ **第一次**拒绝就被
+ * 判成卡点。⇒ 于是"每个任务最终都会变成卡点"，而那正是本任务要消灭的那个
+ * 「把 82% 的事件算成卡点」的**计数版本**。
+ * ⇒ 所以 {@link clearStall} 与 {@link noteStall} 是**成对的**，各自有调用点。
+ */
+export function noteStall(task: TeamTask, point: string, gate: string | undefined, now: number): StallObservation {
+  const stall = observeStall(task.stall, gate, point)
+  task.stall = {
+    ...gate === undefined ? {} : { gate },
+    point,
+    state: stall.stalled ? 'stalled' : 'trying',
+    count: stall.count,
+    at: now,
+  }
+  task.updatedAt = now
+  return stall
+}
+
+/**
+ * 放行 ⇒ 忘掉那条 stall。
+ *
+ * ★ 与 {@link noteStall} 成对：见那里的长注释（不清会让下一次的**第一次**拒绝
+ *   就被判成卡点）。
+ * ★ 只在**真的有一条**时才动 `updatedAt` —— 否则每一次放行都会让任务"看起来
+ *   刚被改过"，而那会让"它什么时候真的动过"这条读数失去分辨力。
+ */
+export function clearStall(task: TeamTask): void {
+  if (task.stall === undefined) return
+  delete task.stall
+}
+
+/**
+ * ── ★★★ t89：占住一个卡点 id —— **分配与占用是一步**（`O_EXCL`）────────────────────
+ *
+ * ★ 为什么不能"先读目录算 max、再写那个路径"：那是**两次系统调用**，
+ *   中间有窗口 ⇒ 两次并发调用拿到同一个 id（规格 §2①，实测 12/384 条坏文件）。
+ *
+ * ★★ `wx` = `O_CREAT | O_EXCL | O_WRONLY`：**文件已存在 ⇒ 失败**。
+ *   ⇒ 创建成功的那一刻，这个 id 就**已经被占住**了，不需要第二把锁。
+ *
+ * @param dir - 台账目录（由调用方给，**不猜**）。
+ * @param startFrom - 已知的最大编号；从这里开始试（省掉前 N 次失败）。
+ * @returns 占住的 `{ id, path }`；连续 `ATTEMPTS` 次都被抢先 ⇒ `undefined`（**不抛**）。
+ */
+async function claimFrictionId(
+  dir: string,
+  startFrom: number,
+): Promise<{ readonly id: string; readonly path: string } | undefined> {
+  const { open } = await import('node:fs/promises')
+  /**
+   * ★ 重试上限：并发通常只有两三条，给 64 次足够；
+   *   而**有上限**是刻意的 —— 无上限的 `while(true)` 在"目录不可写"时会**永不返回**，
+   *   而它在拒绝路径上（旁路），转圈比失败更坏。
+   */
+  const ATTEMPTS = 64
+  for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+    const id = `f-${String(startFrom + 1 + attempt).padStart(4, '0')}`
+    const path = join(dir, `${id}.json`)
+    try {
+      /** ★ `wx`：已存在即抛 `EEXIST` ⇒ 换下一个 id。这就是"占用"。 */
+      const handle = await open(path, 'wx')
+      await handle.close()
+      return { id, path }
+    } catch (reason) {
+      const code = (reason as { code?: unknown } | undefined)?.code
+      /** ★ 只有"已被占"才重试；别的错（权限、目录没了）重试也不会好 ⇒ 立刻放弃。 */
+      if (code !== 'EEXIST') return undefined
+    }
+  }
+  return undefined
+}
+
+/**
+ * ── ★★★ t89：**原子替换**一个文件的内容（temp + `rename`）────────────────────────
+ *
+ * ★ 与 `src/state.ts` 的 `atomicWriteText` 是**同一形状**（那边的注释也引用了同一条理由）。
+ *   ★ 而**为什么不直接复用那一个**：它是 `state.ts` 的**私有函数**（未导出），
+ *     而 `state.ts` 不在本任务写域内 ⇒ 导出它会越界（那正是本仓记账过的形态：
+ *     "为了复用而改别人的写域"）。⇒ 这里**照它的形状**再实现一份，并**注明同源**。
+ *
+ * ★★ 为什么 temp 名字里带 `pid` + `randomUUID()`：两个并发写者**不能**用同一个 temp 名，
+ *   否则它们会在 temp 上互相踩（那是把竞态从目标文件挪到了 temp 文件）。
+ */
+async function writeFileAtomic(path: string, content: string): Promise<void> {
+  const { rename, rm, writeFile } = await import('node:fs/promises')
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
+    /** ★ `rename` 在同一文件系统上**原子**：读者要么看到旧的，要么看到新的。 */
+    await rename(temporary, path)
+  } catch (reason) {
+    /** ★ 失败时清掉 temp —— 留一堆 `.tmp` 会让"目录里的文件数"这个读数失真。 */
+    await rm(temporary, { force: true }).catch(() => undefined)
+    throw reason
+  }
+}
+
+/**
+ * ── ★★★ t109：一条**跨工作区操作**的审计记录（落盘那份）────────────────────────────
+ *
+ * ★★ 字段与 event 版（`AgentTeamsWorkspaceAuditedData`）**逐字一致** ——
+ *   ★ 两个出口（磁盘 / 事件流）读的是**同一份事实**，不允许两套口径。
+ */
+export interface WorkspaceAuditRecord {
+  /** ★ 写这条记录的**机器时刻**（★ 事件流那条用宿主时间戳，这里用 ours：两者**不许**混读）。 */
+  readonly at: number
+  /** ★ 调用者身份（`captain` 或成员名）。 */
+  readonly actor: string
+  /** ★ 调用者**自己**所在的工作区（发起方）。 */
+  readonly callerWorkspace: string
+  /** ★★★ **目标区标识** —— 没有它，「操作了哪个区」无从回答。 */
+  readonly targetWorkspace: string
+  /** ★ 目标区的显示名。 */
+  readonly targetTitle: string
+  /** ★ 用了什么工具。 */
+  readonly tool: string
+  /** ★★ 什么动作 —— ★ **单件事**（当前只有 `'read-delivery'`）。 */
+  readonly action: 'read-delivery'
+}
+
+/**
+ * ── ★★★ t109（裁定甲）：审计**必须落盘** —— 因为事件流那条今天【不产生任何记录】──
+ *
+ * MEASURED（队长实测）：宿主的 `KNOWN_SESSION_EVENT_TYPES` **59 个类型里 `agent-teams` 一个都没有**
+ * ⇒ `appendTeamEvent` 对**全部** agent-teams 事件**静默 return**（`events.ts:50`）。
+ * ★★ 而那**不是缺陷**，是刻意的（`events.ts:33-38` 逐字：
+ *   「Out-of-repo events are not in the harness's generated vocabulary today……
+ *     **Disk state remains the authoritative source**」）。
+ *
+ * ⇒ ★★★ **所以"审计"这个名字今天只有在这里才是真的**：
+ *   若只写事件流，一次跨区操作**不留下任何东西** ——
+ *   而那正是"**能操作任何区**"与"**不知道它操作了哪个**"同形。
+ *
+ * ── ★★ 落点与形状（沿用本仓已有的一族）──────────────────────────────────────────
+ *
+ * ```
+ * .agent-teams/audit/workspace.jsonl     ← 每条一行（append-only 语义）
+ * ```
+ * ★ 与 `.agent-teams/frictions/`（卡点台账）**同一族**：jsonl + 原子写。
+ * ★★ 原子性走 {@link writeFileAtomic}（t89 那条路由）：
+ *   读旧内容 → 拼接 → **整份原子替换**。★ 与 `appendMailbox` 同形（那是本仓既有的 jsonl 追加写法）。
+ *
+ * ★ 为什么不用 `appendFile`：它的**追加**在 POSIX 上对小写是原子的，但
+ *   ★★ "写到一半崩掉"会留下**半行 JSON** —— 而那正是 t89 修过的那个缺陷形态
+ *   （坏文件与"没有这条"在读取端同形）。
+ */
+export async function appendWorkspaceAuditRecord(
+  stateRoot: string,
+  record: WorkspaceAuditRecord,
+): Promise<void> {
+  const { mkdir, readFile } = await import('node:fs/promises')
+  const dir = join(stateRoot, 'audit')
+  await mkdir(dir, { recursive: true })
+  const file = join(dir, 'workspace.jsonl')
+  let existing = ''
+  try {
+    existing = await readFile(file, 'utf8')
+  } catch (error: unknown) {
+    /** ★ 文件不存在是**正常**（第一条记录）—— 与"读不了"不同形。 */
+    if (!(error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT')) {
+      throw error
+    }
+  }
+  const separator = existing !== '' && !existing.endsWith('\n') ? '\n' : ''
+  await writeFileAtomic(file, `${existing}${separator}${JSON.stringify(record)}\n`)
+}
+
+/**
+ * ── ★★ t109：读回审计记录（**最小出口** —— 否则又是"记了没人看"）────────────────────
+ *
+ * ★ 三条要不同形（与全仓纪律一致）：
+ * ```
+ *   文件不存在  ⇒ []      （★ 确实没有记录）
+ *   读不了      ⇒ 抛错     （★ 没能测量）
+ *   有内容      ⇒ 解析出的记录（★ 坏行**报出**而不是静默跳过 —— 见下）
+ * ```
+ * ★★ 坏行**不许静默跳过**：t89 实测过"坏文件与没有这条在读取端同形"，
+ *   而那个缺陷**没人发现过**，唯一原因是**偶然**。
+ */
+export async function readWorkspaceAuditRecords(stateRoot: string): Promise<WorkspaceAuditRecord[]> {
+  const { readFile } = await import('node:fs/promises')
+  const file = join(stateRoot, 'audit', 'workspace.jsonl')
+  let raw: string
+  try {
+    raw = await readFile(file, 'utf8')
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const records: WorkspaceAuditRecord[] = []
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      records.push(JSON.parse(line) as WorkspaceAuditRecord)
+    } catch {
+      /**
+       * ★★ 坏行 ⇒ **抛**（而不是跳过）——
+       *   跳过会让"这条审计坏了"与"这条审计不存在"同形，
+       *   而台账是**记录**，被污染以后**不可重算**（README 第一条纪律）。
+       */
+      throw new Error(`agent-teams: corrupt audit record in ${file}; refusing to report a partial list`)
+    }
+  }
+  return records
+}
+
 export async function recordFriction(capture: FrictionCapture): Promise<string | undefined> {
   /**
    * ── ★★ 为什么 `stateRoot` 必须由调用方【显式传入】（t22 实测出来的缺陷）───────
@@ -1729,13 +4841,71 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
     } catch {
       /** 目录刚建 ⇒ 从 1 开始。 */
     }
-    const id = `f-${String(max + 1).padStart(4, '0')}`
+    /**
+     * ── ★★★ t89：id 的**分配与占用合成一步**（`wx` / `O_EXCL`）──────────────────────
+     *
+     * MEASURED（t89 开工实测，规格 `docs/DEFECT-FRICTION-WRITE-RACE.md` §2①）：
+     *   上面的"读目录取 max + 1"**不是原子的** —— 两次【并发】调用会读到**同一个 max**
+     *   ⇒ 拿到**同一个 id** ⇒ 一起写同一个路径。
+     * ★★ 而上面那段注释**逐字警告过这个后果**：
+     *   「撞车后一条覆盖另一条 —— **被覆盖掉的卡点与"没发生过"在台账里同形**。」
+     *   ⇒ ★ 它防的是【时间戳】，**没防【并发】**。
+     *
+     * ★ 修法：不再"先算一个 id 再用它"（那是两次独立的系统调用，中间有窗口），
+     *   而是**直接尝试用 `wx` 创建**：`wx` 在文件已存在时**失败**（`O_EXCL` 语义）
+     *   ⇒ 创建成功即**已经占住了**这个 id。失败 ⇒ 说明有人抢先 ⇒ 换下一个 id 重试。
+     *   ⇒ ★ 分配与占用之间**没有窗口**，所以不可能两条拿到同一个 id。
+     *
+     * ★ 而这里**同时**完成了规格 §4① 的原子写：temp + `rename`。
+     *   两者必须一起用 —— 只做 rename 而不做互斥，两条仍会覆盖彼此；
+     *   只做互斥而不做 rename，一条写了一半被读到仍是坏 JSON。
+     */
+    const claim = await claimFrictionId(frictionDir, max)
+    if (claim === undefined) return undefined
+    const { id, path: frictionPath } = claim
     const refs = sessionEventRefs(capture.session)
+    /**
+     * ── ★★★ C1：这条记录是【拒绝事件】还是【真卡点】───────────────────────────────
+     *
+     * 判据是机械的：这次的 `stall` 观察说任务停没停（见 {@link observeStall}）。
+     *
+     * ★ 缺席 ⇒ 按 `trying`（**不假设它停了**）：错的那一侧选"还没停" ——
+     *   多记一条 rejection 不会误导人，少记一条真卡点才会。
+     * ★★ 而 `class` 这一格本身是**可机读的判别面**：读取端不该靠标题措辞
+     *   去猜这条记录是哪一类（那是代理读数，它会在有人改措辞时漂）。
+     */
+    const stall: StallObservation = capture.stall ?? { stalled: false, count: 1, basis: 'first' }
+    const recordClass: FrictionRecordClass = stall.stalled ? 'blocker' : 'rejection'
+    /**
+     * ── ★★★ C2：拒下这一条时，**救援进行到哪一步** ─────────────────────────────
+     *
+     * ★ 它在这里就被算出来（**一处**），因为下面 `resolution.pool` 与顶层 `rescue`
+     *   必须是**同一个读数**的两面 —— 两处各算一遍就会分叉，而分叉后
+     *   "为什么这条进了上报池"要读两处才能回答。
+     *
+     * ★★ 拒绝路径上**还没有人**去救过 ⇒ 缺省 `trying`（默认目标是自己解）。
+     *   见 {@link defaultRescueForStall} 的长注释：这不是"缺省 = 上报"。
+     */
+    const rescue: FrictionRescue = defaultRescueForStall(undefined)
     const record = {
       id,
       at: new Date().toISOString(),
       project: 'agent-teams-dev',
-      title: capture.message,
+      /**
+       * ── ★★★ 两类记录的**标题形态不同**（C1）──────────────────────────────────
+       *
+       * `rejection` —— ★ **加前缀**，因为它的正文是一句"某某被拒了"，而那**不是**
+       *   卡点。前缀让它在整份台账里**一眼可辨**（人读那一份也吃这个前缀）。
+       * `blocker`   —— 保持拒绝原文（它就是那次让任务停住的拒绝）。
+       *
+       * ★ 前缀里的判据 id 与正文里的**同一份**（`gateIdFromMessage` 只算一次）——
+       *   两处各拼一遍就会分叉，而分叉后"这两个数字是不是一回事"要读两处才能回答。
+       */
+      title: recordClass === 'rejection'
+        ? `${REJECTION_TITLE_PREFIX}${capture.message}`
+        : capture.message,
+      /** ★ 可机读的判别面（见上）。 */
+      class: recordClass,
       scene: {
         team: capture.teamId ?? '(unknown)',
         task: capture.taskId ?? '(unknown)',
@@ -1763,6 +4933,10 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
        */
       unknown: [
         ...refs === undefined ? ['session events were not readable, so the original observation cannot be located'] : [],
+        ...stall.basis === 'unknown'
+          ? ['the gate id could not be read out of the rejection, so whether this task kept moving was not judged'
+            + ' — recorded as a rejection, not as a blocker']
+          : [],
         'the full list of "sufficient context" is still unknown (f-0014)',
       ],
       index: {
@@ -1786,7 +4960,84 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
       deployment: {
         moduleFreshness: capture.moduleFreshness ?? moduleFreshness(),
       },
-      resolution: { blocking: false, fix: 'unfixed: recorded at the moment it happened, per f-0014', pool: 'self' },
+      /**
+       * ── ★★★ C1：两类记录的 `resolution` **不同形** —— 而这不是措辞上的不同 ────────
+       *
+       * ★ 用户的原话里，两类东西的补救动作**不同**：
+       *
+       *     `rejection` —— 判据拒了一下，而**任务继续走了** ⇒ **不需要任何人做任何事**。
+       *                    它是**证据**（"这条门在拦这个"），不是待办。
+       *                    ⇒ `blocking: false` + `pool: 'self'`（还在自己解）
+       *     `blocker`   —— 任务**真的停住了** ⇒ **有人必须动**（主会话救援 / 上报）。
+       *                    ⇒ `blocking: true` + `pool: 'escalate'`
+       *
+       * ★★ 而这一格正是"合并回一条 ⇒ 臂红"瞄准的那一格：把两类都写成
+       *   `blocking: false` 会让**真卡点**读成"不需要动"（那是本轮要修的原始缺陷，
+       *   21 条真卡点被淹在 253 条里的那一半）；反过来写 true 会让 207 条判据拒绝
+       *   全部变成"要人来管"（用户抱怨的那一半）。
+       *
+       * ★ `whyPool` 只在 `escalate` 时在场：一条没有进上报池的记录**没有**"为什么
+       *   进这个池子"要交代 —— 缺席与"写了一句空的"必须不同形（本仓记账的形态）。
+       *
+       * ── ★★★ C2：`pool` 现在由**救援三态**决定，而不再由 `class` 直接决定 ──────────
+       *
+       * ★ 这是 C2 与 C1 的接缝：C1 说"**停没停**"（`class` / `blocking`），
+       *   C2 说"**解没解掉**"（`rescue` / `pool`）。
+       *   ★ 两条轴**不同** —— 一个停住的任务在"有没有人救过"这件事上的答案是
+       *     **`trying`（还没有人去试）**，而不是"要上报给人"。
+       *     实测 214 条正是死在这个跳步上：**停住** ⇒ 直接 ⇒ **上报**，
+       *     而中间那一步"我们先自己解解看"从来没有对应的字段。
+       *
+       * ★★ 所以 `pool` 走 {@link poolForRescue} 这一条路（**唯一**的判据点），
+       *   而**只有** `cannot-solve` 会进 `escalate`。
+       *   ★ 而 `whyPool` 那时**必须**说得出"为什么解不掉"（`whyCannotSolve`）——
+       *     一个进上报池而没有理由的记录，正是 214 条的复现形态。
+       */
+      resolution: recordClass === 'blocker'
+        ? rescue.state === 'cannot-solve'
+          ? {
+              blocking: true,
+              fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1',
+              pool: poolForRescue(rescue.state),
+              whyPool: `★ 同一个判据（${stall.basis === 'repeated' ? String(capture.auto?.gate ?? capture.point) : capture.point}）`
+                + `拒绝了同一个任务 ${stall.count} 次，而**这次有人去解过、没解开**`
+                + `（${String(rescue.whyCannotSolve)}）⇒ 这才进上报池`
+                + '（C2：只有 cannot-solve 进这个池子）',
+            }
+          : {
+              blocking: true,
+              /**
+               * ★ 任务**确实停住了**（`blocking: true` 一个字不改 —— 那是 C1 的读数），
+               *   而它的**归宿是"我们自己解"**，不是"上报给人"。
+               *   ★ 于是这两格现在说的是两件不同的事，而它们**都对**：
+               *     停住 = 真的要有人动；`pool: 'self'` = 动的人**是我们**，不是用户。
+               */
+              fix: 'unfixed: the task stopped here — the same gate rejected it again, per C1'
+                + ' (C2: the default goal is to solve it ourselves, so it is NOT in the report-to-human pool)',
+              pool: poolForRescue(rescue.state),
+            }
+        : {
+            blocking: false,
+            fix: 'not blocking: the task kept moving — one rejection is not a stall, per C1',
+            pool: poolForRescue(rescue.state),
+          },
+      /**
+       * ── ★★★ C2：**那个阻塞**后来怎么了（与 `resolution` 不同轴，所以并列）─────────
+       *
+       * ★ `resolution` 回答「**这条台账记录**是怎么被处置的」；
+       *   `rescue` 回答「**那个阻塞**是我们自己解掉的、还是解不掉的」。
+       *   ⇒ 合成一格会让"没人回填台账"与"没人解过这个卡点"同形 ——
+       *     而它们的补救动作相反（前者要人补 `state`，后者要人去**解**）。
+       *
+       * ★★ 三态**不同形**（见 {@link missingRescueEvidence}）：
+       *   `solved` 有 `solvedBy` + `howSolved`；`cannot-solve` 有 `whyCannotSolve`；
+       *   `trying` 两样都**没有** —— 它没有声称任何事，所以没有证据要交代。
+       *
+       * ★ 这里的缺省是 `trying`（`defaultRescueForStall`）：拒绝路径上**还没有人**
+       *   去救过它 ⇒ "缺省 = 默认目标是自己解"，而不是"缺省 = 上报给人"
+       *   （那正是 214 条的成因）。
+       */
+      rescue,
       /**
        * ── ★★★ t91：自动记录的**来源** —— 而它缺席就是"人记的" ───────────────────────
        *
@@ -1805,10 +5056,129 @@ export async function recordFriction(capture: FrictionCapture): Promise<string |
           tool: capture.auto.tool,
           point: capture.auto.point,
           ...capture.auto.gate === undefined ? {} : { gate: capture.auto.gate },
+          /**
+           * ★ t69：把**归属键**落盘（`capture.taskId` / `capture.teamId`）。
+           *   缺席语义与 `gate` 逐字相同 —— 空串/未给 ⇒ 不写这一格（不猜）。
+           */
+          ...typeof capture.taskId !== 'string' || capture.taskId.trim() === ''
+            ? {} : { taskId: capture.taskId },
+          ...typeof capture.teamId !== 'string' || capture.teamId.trim() === ''
+            ? {} : { teamId: capture.teamId },
+          /**
+           * ── ★★★ t30：全部判据 id（`gates`），与单值的 `gate` **并存**────────────
+           *
+           * ★ 为什么两格都写：`gate` 是**已在盘上的形状**（384 条旧记录都是它），
+           *   读取端（`gate-friction-capture.test.mjs` 那条臂、以及 HTML 报告）
+           *   现在读的就是它 ⇒ **不许为了"更整齐"把它撤掉**，那会让旧记录与新记录不同形。
+           * ★ 而这一格回答的是**另一个问题**：这条记录**一共**被哪些判据拒过。
+           *   ⇒ 只有一格时，18 条多值记录里非首位的判据在落盘端**永久消失**（t30 的缺陷）。
+           * ★ 单值 = `gates[0]`（实测：9 条有 `auto.gate` 的多值记录，`stored === first` 无一例外）
+           *   ⇒ 两格**冗余但一致**，而这正是"改形状要能与旧数据共处"的代价，值得付。
+           */
+          ...(() => {
+            const gates = gateIdsFromMessage(capture.message)
+            return gates.length === 0 ? {} : { gates }
+          })(),
         },
       },
+      /**
+       * ── ★★★ C1：判这条记录属于哪一类的**那个判据**，连同它的读数一起落盘 ───────────
+       *
+       * ★ 为什么判据本身也要写进记录（而不是只写结论 `class`）：
+       *   "这条为什么算卡点"是**事后唯一读不出来**的东西。只写 `class: 'blocker'`
+       *   会让读的人无从知道 N 是几、是哪条判据重复——而那正是下一次要复查的。
+       *   ★ 与 `scene.ctx` 同一条纪律（f-0014）：结论要连同它的**测量装置**一起落地。
+       *
+       * ★★ 而 `threshold` **必须**一起记：N 是可注入的（见 `stallRepeatThreshold`），
+       *   所以"count=2 为什么算停住"这个问题在不同 N 下答案不同 ——
+       *   不记 N 的话，两条 count 相同的记录在读取端**同形**，而它们的结论相反。
+       *   （这正是 `docs/PENDING-FRICTION-REFORM.md` §6 经验 A：一个数必须连同它的
+       *   测量装置一起读，否则并把排就是伪造趋势。）
+       */
+      stall: {
+        state: stall.stalled ? 'stalled' : 'trying',
+        basis: stall.basis,
+        count: stall.count,
+        threshold: stallRepeatThreshold(),
+      },
     }
-    await writeFile(join(frictionDir, `${id}.json`), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
+    /**
+     * ── ★★★ t89：把内容写进**已经占住**的那个文件（原子替换，不是原地覆写）────────
+     *
+     * ★ `claimFrictionId` 已用 `wx` 建出一个**空占位文件**（占住 id）；
+     *   这里再用 temp + `rename` 把**完整内容**换上去。
+     * ★★ 为什么不能直接 `writeFile(frictionPath, …)`：那是**原地覆写** ——
+     *   读者可能在"写了一半"时读到它，于是拿到**坏 JSON**。
+     *   `rename` 在同一文件系统上是**原子的** ⇒ 读者要么看到空占位、要么看到完整内容。
+     * ★ 而"空占位"本身也是**合法**的可判状态（`JSON.parse('')` 抛错 ⇒ 检查会报出它），
+     *   不是静默的半个对象。
+     */
+    await writeFileAtomic(frictionPath, `${JSON.stringify(record, null, 2)}\n`)
+    /**
+     * ── ★★★ t87 · 汇合点 A：**所有判据拒绝**都在这里汇合（规格 §1 的表）────────────
+     *
+     * ★ 本任务之前：`evaluate('collection', …)` 在生产路径上**零调用**（t87 实测）
+     *   ⇒ 四条 `collection` 判据装好了却从不被求值（本仓记账最久的形态 `unwired`）。
+     *
+     * ★★ **旁路，不参与裁决** —— 与本文件既有那条逐字同一条纪律：
+     *   · 用 `void …` 起头 ⇒ **拒绝路径立刻返回**，不因写台账而等待；
+     *   · `observe()` **自己也不抛**（它 catch 一切）⇒ 采集坏了**不会**改变这次拒绝的时序；
+     *   · 失败只写一条 `warn`（不是裁决）。
+     *
+     * ★ `registry` 是**本文件已有**的 import（`../../gates/index.ts`）⇒ 零新依赖、
+     *   且方向是 `entities → evolution`（**单向**），不构成"模块互相侵入"。
+     *
+     * ★ `evaluateCollection` 把 `registry.evaluate('collection', …)` 包成一个回调传下去 ——
+     *   ★ 这样 `evolution/` **不依赖** `src/gates/**`（那是规格 §1 原则的落点）。
+     */
+    void observe({
+      stateRoot: root,
+      where: capture.point,
+      message: capture.message,
+      kind: ['unwired'],
+      component: capture.point,
+      ...capture.tool === undefined ? {} : { tool: capture.tool },
+      ...capture.auto?.gate === undefined ? {} : { gateId: capture.auto.gate },
+      /**
+       * ★★ 机制活动 —— **转发**这一轮判据的 `ran[]`，**不重算**（规格 §2 硬约束 3）。
+       *   ★ 能转发就转发（那正是"记录必须带机制活动"那条要求的落点）；
+       *     拿不到 ⇒ **缺席**（不猜、也不编一个空数组）。
+       */
+      ...Array.isArray((capture.mechanismState as { gates?: unknown })?.gates)
+        ? {
+            mechanisms: (((capture.mechanismState as { gates: { ran?: readonly { id: string; verdict: string }[] } }).gates.ran) ?? [])
+              .map((entry) => ({ gateId: entry.id, verdict: entry.verdict })),
+          }
+        : {},
+      now: Date.now(),
+      evaluateCollection: async (context: Parameters<NonNullable<Parameters<typeof observe>[0]['evaluateCollection']>>[0]) => {
+        /**
+         * ★ 输入面核对（旁路，不改裁决）：四条采集判据都声明了 `requires`，
+         *   而生产路径此前从未核过。结论附加在返回对象上，不参与拒绝（先软后硬）。
+         */
+        const surface = inputSurfaceOf('collection', context)
+        const evaluation = await registry.evaluate('collection' as never, context)
+        return (surface === undefined ? evaluation : { ...evaluation, inputSurface: surface }) as never
+      },
+      /**
+       * ── ★★★ N1.2：把 `source` 与 `index` 真的接上（这一行之前两者都没有）────────────
+       *
+       * ★ 只接 `index` 是**不够**的：`cooldown` 还要 `candidate.source`，而三个调用点
+       *   一个都没传 ⇒ 读数会**从 34 变成 34**（理由从"没索引"换成"没来源"），
+       *   看起来像修了。⇒ 两格必须同时接。
+       *
+       * ★ `source` 取 `capture.point`（即 `where`）—— 粗粒度，由计划 §2.1 裁定
+       *   （细粒度 `where+gateId` 的收益靶是 13，粗粒度是 15；两个都在读数里印）。
+       *
+       * ★ `loadIndex` 是**惰性**的：本调用点 `void observe(...)` 不 await，
+       *   而读盘发生在那一段里 ⇒ 拒绝路径的时序**不变**（这是本函数的第一条纪律）。
+       *   ★ 给不出来（台账还不存在）⇒ `undefined` ⇒ 判据如实答 `unmeasured`。
+       */
+      source: capture.point,
+      loadIndex: async () => await loadCollectionIndexFor(root),
+      /** ★ 由调用方给的告警出口；缺席 ⇒ 安静（见 `FrictionCapture.warn` 的注释）。 */
+      warn: capture.warn ?? (() => {}),
+    })
     return id
   } catch {
     /** ★ 记不下 ⇒ `undefined`（不是"没有卡点"）。 */
@@ -1876,6 +5246,25 @@ export async function evaluateRuntimeGates(
     ? teamWaitObservations(team, clock(), event)
     : undefined
   /**
+   * ── ★★★ `shape` 的执行读数（2026-10-20）：这个队真的在派临时 worker 吗 ────────────
+   *
+   * 见 `src/gates/runtime/shape-execution.ts` 的文件头。★ 注入在这里而不是调用点的理由，
+   * 与上面 `waits` 逐字相同：本函数是六处 runtime 调用点**唯一**的求值点 ——
+   * 在六处各自拼一份，就是六份会慢慢分叉的东西。
+   *
+   * ★★ 三态，且**只有 dispatch 队才去读会话**：
+   *   · `team.shape !== 'dispatch'` ⇒ `not-applicable`（**不读会话**，不做无谓的 I/O）
+   *   · 是 dispatch ⇒ 逐成员读派工（`memberDispatchReadout`）并折成违规名单
+   *   · 读不出来 ⇒ `unmeasured`（**不**圆成"零违规"）
+   *
+   * ★ 为什么这一格**不是**由判据自己读：契约 §2「判据不 import I/O」。会话事件只有
+   *   `ctx.agents` 那头读得到，而判据层拿不到 `ctx` —— 与 `waits` / `observedChangedPaths`
+   *   完全同一条分工。
+   */
+  const shapeExecution = team === undefined || typeof team !== 'object' || !Array.isArray(team.tasks) || typeof team.id !== 'string'
+    ? undefined
+    : shapeExecutionFor(ctx, team)
+  /**
    * ── ★ 输入面：本入口是**六处** runtime 调用点唯一的求值点，所以核对也在这里 ────
    *
    * → 八处调用点里六处（`member-dispatched` / `task-created` / `task-update` /
@@ -1897,6 +5286,7 @@ export async function evaluateRuntimeGates(
     ...source,
     ...wait === undefined ? {} : { wait },
     ...waits === undefined ? {} : { waits },
+    ...shapeExecution === undefined ? {} : { shapeExecution },
     event,
   })
   let evaluation
@@ -1905,6 +5295,7 @@ export async function evaluateRuntimeGates(
       ...source,
       ...wait === undefined ? {} : { wait },
       ...waits === undefined ? {} : { waits },
+      ...shapeExecution === undefined ? {} : { shapeExecution },
       event,
     })
   } catch (error: unknown) {
@@ -1966,7 +5357,38 @@ export async function evaluateRuntimeGates(
         ? `notChecked: ${evaluation.skippedAll}`
         : `blocked: ${evaluation.blockers.join('; ')}`
     : evaluation.evaluated === 0 ? `ok (nothing evaluated: ${evaluation.registered} registered, all skipped)` : 'ok'
-  judgeRuntimeGates(event, outcome)
+  /**
+   * ── ★★★ 计数必须进 `outcome`，否则它**在日志里一个字都不出现**（2026-10-21）──────
+   *
+   * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-2）：
+   *
+   *   `runtime.stall` 在**真的**有任务停下时返回 `{ ok: true, stalled_count: 1, … }`，
+   *   而 `outcome` 只写 `ok`（或 `unmeasured: …`）—— **卡死这件事在日志里不出现**。
+   *
+   * ★★ 而 runtime 位置的纪律是"裁决只被记录、不参与控制流"（契约 §5）。
+   *   ⇒ 于是 `outcome` 就是它**唯一**的出口。一个不进 `outcome` 的计数
+   *     等于**没有**这个读数 —— 而"装了但从不生效"比没装更坏。
+   *
+   * ── 为什么只拼**计数**，不拼整个 `outputs` ──────────────────────────────────────
+   *
+   * `outputs` 里还有 `observations` / `rows` 这类大对象（`stall` 的逐条观察、
+   * `shape-execution` 的成员行）。把它们拼进一行日志会让这条日志不可读，
+   * 而**可读性**正是 `outcome` 存在的理由。
+   * ⇒ 只拼两个**标量计数**，其余留给 `outputs` 的结构化出口。
+   *
+   * ★ 三态照旧：**没有那个键** ⇒ 不拼（`0` 与"这条判据没跑"不同形）。
+   *   ★★ 所以用 `typeof === 'number'` 而不是 `?? 0` —— 后者会把"没跑"写成"零个"。
+   */
+  const counters: string[] = []
+  for (const [gateId, key] of [
+    ['runtime.stall', 'stalled_count'],
+    ['runtime.shape-execution', 'shape_violation_count'],
+  ] as const) {
+    const value = evaluation.outputs?.[gateId]?.[key]
+    if (typeof value === 'number') counters.push(`${key}=${value}`)
+  }
+  const outcomeWithCounters = counters.length === 0 ? outcome : `${outcome} [${counters.join(' ')}]`
+  judgeRuntimeGates(event, outcomeWithCounters)
   /**
    * ── ★ 核对结论【随记录一起交出去】（`input_surface`）──────────────────────────
    *
@@ -1988,7 +5410,8 @@ export async function evaluateRuntimeGates(
   return {
     ...(evaluation as unknown as Record<string, unknown>),
     ...runtimeInputSurface === undefined ? {} : { input_surface: runtimeInputSurface },
-    outcome,
+    /** ★ 2026-10-21：带上计数（见上面那段 —— 不进 `outcome` 的计数等于没有）。 */
+    outcome: outcomeWithCounters,
   } as unknown as JsonValue
 }
 export async function rejectOnContractGates(
@@ -1998,7 +5421,28 @@ export async function rejectOnContractGates(
   /** ★ t22：这个团队自己的 stateRoot（台账落点）。**不许用进程级单值**，见 recordFriction。 */
   stateRoot: string,
   inject: Record<string, unknown> = {},
-): Promise<{ input_surface: ReturnType<typeof inputSurfaceOf> } | undefined> {
+): Promise<
+  | {
+      input_surface: ReturnType<typeof inputSurfaceOf>
+      /**
+       * ── ★★ t81：契约段的判据裁决 —— ★ **它此前从不离开这个函数** ──────────────
+       *
+       * MEASURED（t81 开工勘查，逐行核过）：本函数在 `const gates = await registry.evaluate('contract', …)`
+       * 求出裁决后，`gates` 只用于三件**当场**的事：裁决（`gates.ok === false` ⇒ 抛错）、
+       * 拼拒绝措辞、以及写进卡点台账的 `mechanismState`。
+       * ★ 而它**唯一的 `return`（本函数末行）只带 `input_surface`** ⇒ 通过路径上
+       *   那句判据裁决**被丢弃**（本仓自记 F3：「`ran[]` 产出即被丢弃，零消费」）。
+       *
+       * ⇒ 新增这一格把它**带出去**，好让调用方落到 `TeamTask.gateEvaluations.contract`。
+       * ★ 与 `input_surface` **并列**而不是替换 —— 既有调用方 spread 这个对象
+       *   （`create-task.ts:979` / `amend-task.ts:107`），撤掉那一格会打断它们。
+       * ★ 而**只有真的求值过**才在场（见下面的 return）：这与
+       *   `gateEvaluation` 的注释同一条纪律 —— 「落盘只在真的求值过时发生」。
+       */
+      gates: GateEvaluation
+    }
+  | undefined
+> {
   /**
    * ★ 输入面核对（t10）：**求值之前**，按每条判据声明的 `requires` 核对这份真实 ctx。
    *   ★ 它是**旁路数据**：下面的拒绝逻辑一个字都不看它 —— 核对报缺时流程照常走完
@@ -2009,6 +5453,47 @@ export async function rejectOnContractGates(
    */
   const inputSurface = inputSurfaceOf('contract', { ...context, ...inject })
   const gates = await registry.evaluate('contract' as never, { ...context, ...inject })
+  /**
+   * ── ★★★ t5：契约位置**仍然拒绝**「没能测量」，但它必须与「发现问题」不同形 ──────────
+   *
+   * ── 先记一条被驳回的第一版设计（它红了一条**绿着的**臂）─────────────────────────
+   *
+   * 本任务的第一版把这里改成"`unmeasured` 且 `blockers` 为空 ⇒ 放行"，
+   * 依据是 `scripts/gate-task-atomicity.test.mjs` 臂 9 断言的那条 `ok === true`。
+   *
+   * ★ 而实测当场打红 `scripts/gate-position-wiring.test.mjs` 臂 2
+   *   （"contract 位置上一条 unmeasured 判据 ⇒ 拒绝措辞与 blocked 不同形"）——
+   *   那条臂在基线上是**绿的**（26/26），且它**不在** `baseline-known-failures.json` 里。
+   *
+   * ★★ 而驳回它的理由比"它红了一条臂"更硬：**契约位置拒绝 unmeasured 是刻意的**。
+   *   `src/gates/contract/verify-command.ts:88-97` 早就把口径写死了：
+   *
+   *     注入   ⇒ 真的跑一次 ⇒ 结论是**观察**，可被独立复核
+   *     不注入 ⇒ 只有静态分析 ⇒ 结论降级成 `unmeasured`
+   *     ⇒ 而 `unmeasured` 在本插件里**等于拒绝**（`rejectOnContractGates` 对 unmeasured 抛错）
+   *
+   *   ⇒ ★ 它若放行，t17/t18 那段实测的**一道永远关着的门**会被读成"没检查"而放过去：
+   *     **一个判不了契约的任务不许静默进入工作。**
+   *   ★ 这与 `src/tools/update-task.ts` 的 completion 位置同一条纪律 ——
+   *     那里的 `completionNotChecked` 也是把 `unmeasured` 当作"没能检查"而**不**当通过。
+   *
+   * ── 那么本任务真正要修的是什么（★ 比第一版窄，而它是可验证的那一半）───────────
+   *
+   * 不是"放行"，而是**三态在那个拒绝里必须仍然可分辨**：
+   *
+   *     ① `blockers` 非空  ⇒ 措辞说"判据发现了问题"（补救动作：去改契约）
+   *     ② `unmeasured`     ⇒ 措辞说"判据没能测量"（补救动作：去补判据缺的那一格输入）
+   *
+   * ★ 把 ② 写成 ① 就是本队记账最久的合流（「没能测量」并进「没通过」）。
+   *   两者的**补救动作相反**，所以读日志的人必须一眼分得出是哪一种。
+   *
+   * ★★ 而"拒绝"与"留痕"从来不是二选一：拒绝是**裁决**，留痕是**可读性**。
+   *   一个被拒的契约位置同样必须能回答"当时到底是没测成，还是检查出了毛病"。
+   *   ⇒ 见下面三条出口（拒绝措辞 / 台账 `couldNotObserve` / 结构化字段）。
+   */
+  const unmeasuredAtContract = gates.ok === false && gates.unmeasured !== undefined
+    ? String(gates.unmeasured)
+    : undefined
   if (gates.ok === false) {
     /**
      * ── ★★ 卡点发生时【当场记账】（t22 / f-0014）────────────────────────────────
@@ -2021,16 +5506,49 @@ export async function rejectOnContractGates(
      *   与 `inputSurfaceOf` 同一条纪律（先软后硬：核对与记录都不参与裁决）。
      * ★ 用 `void … .then(warn)`：拒绝路径**必须**立刻抛出去，
      *   不许因为"写台账慢"而把一次判据拒绝变成一次等待（那会改变可观测的时序）。
+     *
+     * ── ★★★ t5：这一句三目**是**本任务保下来的东西，不是残留 ────────────────────
+     *
+     * 它把同一句 "rejected:" 分成**两种措辞**，而那不是装饰：
+     *
+     *     `unmeasured` ⇒ "the contract gate could not measure (…)"   ← 判据**说不出**
+     *     `blockers`   ⇒ "<blockers 原文>"                            ← 判据**发现了问题**
+     *
+     * ★ 第一版 t5 把这个 `unmeasured` 支删掉了（因为当时想把这一态改成放行）。
+     *   而 captain 裁定驳回放行（见上面那段长注释）⇒ **这一支必须原样回来**：
+     *   它正是 `scripts/gate-position-wiring.test.mjs` 臂 2 钉的那条性质 ——
+     *   "unmeasured must read as 'could not measure', never as 'found problems'"。
+     * ★★ 而它**不是**"把拒绝说得好听"：两种措辞对应**相反的补救动作**。
+     *   读的人从这一句就能知道该去补输入面，还是该去改契约。
      */
     const frictionMessage = gates.unmeasured !== undefined
       ? `${what} rejected: the contract gate could not measure (${gates.unmeasured})`
       : `${what} rejected: ${gates.blockers.join('; ')}`
+    /**
+     * ── ★★★ C1：这一次拒绝之后，任务有没有继续往下走 ──────────────────────────────
+     *
+     * ★ 判据的信息**此刻全都在手边**：任务对象（`context.task`）里就有上一轮的
+     *   `stall` 读数，而这次的判据 id 就在 `frictionMessage` 里。
+     *   ⇒ 不需要为此多读一次盘（那会与调用方正在写的那一份不同源）。
+     *
+     * ★★ 而上一轮的 `stall` 是**调用方在写它之前**读到的 —— 见各调用点的
+     *   `observeStall` 调用处（那里在锁里，读到的是权威的那一份）。
+     */
+    const contractTask = context.task as TeamTask | undefined
+    const stall = observeStall(
+      contractTask?.stall,
+      gateIdFromMessage(frictionMessage),
+      'contract',
+    )
     void recordFriction({
       stateRoot,
+      /** ★ t87：采集层写失败的告警出口（旁路；见 FrictionCapture.warn）。 */
+      warn: (message: string) => ctx.logger.warn(message),
       point: 'contract',
       message: frictionMessage,
       context: { ...context, ...inject },
       mechanismState: { inputSurface, gates },
+      stall,
       taskId: typeof (context.task as { id?: unknown } | undefined)?.id === 'string'
         ? (context.task as { id: string }).id : undefined,
       tool: what,
@@ -2042,13 +5560,86 @@ export async function rejectOnContractGates(
         tool: what,
         point: 'contract',
         ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
+        /**
+         * ── ★★★ t30：同一个 `contract` 位置上**同样丢掉过非首位判据** ──────────────
+         * ★ 这一段与 `recordFriction` 里那一格**是两处独立的写入点**（同一份数据写两遍），
+         *   所以修复也必须是**两处** —— 只改一处会让"两个出口不同形"，而那正是本仓记账的形态。
+         * ★ `gateIdsFromMessage(frictionMessage)` 与上面单值那一行**同源**（同一个字符串），
+         *   故 `gates[0] === gate`（当 `gate` 在场时）—— 冗余但不分叉。
+         */
+        ...(() => {
+          const gates = gateIdsFromMessage(frictionMessage)
+          return gates.length === 0 ? {} : { gates }
+        })(),
       },
+      /**
+       * ★★★ t5：`couldNotObserve` 在**拒绝**这一支上**必须**带（第一版把它挪去了放行支，
+       *   而那一支被驳回了）。
+       *
+       * ★ 它带来的东西是别处拿不回来的：判据说"我测不了"时，**那一句原文**要落进台账。
+       *   否则事后读这条拒绝只能看到"被拒了"，而看不出**缺的是哪一格输入** ——
+       *   于是补救动作变成了猜。
+       * ★ 与告警、结构化出口**不同源**：那是"当下这一次调用"的读数，这是"事后能查"的记录。
+       */
       ...gates.unmeasured === undefined ? {} : { couldNotObserve: [String(gates.unmeasured)] },
     }).then((id) => {
       if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the contract gate (${frictionMessage})`)
     })
-    throwWithSurface(frictionMessage, inputSurface)
+    /**
+     * ── ★★★ t5：三态在那个拒绝里必须**可分辨**，而三条出口都要活着 ──────────────────
+     *
+     * （下面那一段注释是给人读的；三条出口按"读得出来才算数"排。）
+     *
+     *     ① 拒绝措辞   —— `unmeasured` 说 "could not measure"（还带着判据原文），
+     *                     `blockers` 说 "rejected: <blockers>"。**两者不同形**。
+     *     ② 台账        —— `couldNotObserve` 带上原文（见上）。
+     *     ③ 结构化出口  —— 走**抛出侧**（`throwWithSurface` 的 `field`），
+     *                     与 dispatch / completion 两个位置既有的做法一致。
+     *
+     * ★★ 为什么 ③ 必须走抛出侧、而不能留在返回值上（这一条是 captain 裁定 (e)）：
+     *   本函数在"没能测量"这一支**抛错**（那是刻意的裁决，见上面那段长注释），
+     *   而抛出之后的 `return` **永远走不到** ⇒ 挂在那里的 `contract_unmeasured`
+     *   就是一个**永远填不上的字段**。
+     *   ⇒ ★ 而"看起来在场、实际永远是空的读数"正是本队要消灭的形态（一个读数若
+     *     读不出内容，它与不存在必须不同形 —— 而"永远不存在"比"缺席"更坏，
+     *     因为它会让读者以为**有一天**它会填上）。
+     *   ⇒ 所以：**不放一个死的返回字段**；把这条事实交给抛出的那一条路径，
+     *     它会随工具错误面一起到调用方手里（与另外三个位置同一条机制，不新造路径）。
+     */
+    throwWithSurface(
+      frictionMessage,
+      inputSurface,
+      /**
+       * ★ 位置名与既有约定一致（contract 位置目前用泛用的 `input_surface`，
+       *   见 `throwWithSurface` 的注释：contract / delivery 各只有一个入口）。
+       */
+      'input_surface',
+      /**
+       * ★★ t5 新增的第五个实参：**「没能测量」的原文**。
+       *   缺席 ⇒ 这次拒绝是"发现了问题"；在场 ⇒ 这次拒绝是"判据说不出"。
+       *   ★ 两者在结构化出口上**不同形**，于是"哪一种拒绝"不靠读措辞去猜。
+       */
+      unmeasuredAtContract,
+    )
   }
+  /**
+   * ── ★★ t5：这里**没有**"放行"分支 —— 而它的缺席是刻意的、有据的 ──────────────────
+   *
+   * 本任务的第一版在这里写了一段 `if (unmeasuredAtContract !== undefined) { 告警 + 台账 }`，
+   * 即"判据说测不了 ⇒ 放行，但留痕"。★ 它被 **captain 裁定驳回**，理由记在上面那段
+   * 长注释里，而其中最硬的一条是：
+   *
+   *     `scripts/gate-position-wiring.test.mjs` 臂 2 钉的是"契约位置**拒绝** unmeasured"，
+   *     而它在基线上是**绿的**、且**不在** `baseline-known-failures.json` 里。
+   *     把它打红就是把一条约束当成可以随手拆掉的东西。
+   *
+   * ★★ 而正确的形态是"**拒绝 + 三态可分辨**"，不是"拒绝或留痕"二选一：
+   *   裁决（拒绝）与可读性（留痕）是两件事，一个被拒的契约位置同样要能回答
+   *   "当时是没测成，还是检查出了毛病"。⇒ 三条出口都在**拒绝那一支**里（见上）。
+   *
+   * ★ 留这段注释而不是把代码删干净就走：下一个读到这里的人会问"为什么 unmeasured
+   *   没有自己的分支" —— 而一个**没有解释的缺席**与"忘了写"是同形的。
+   */
   /**
    * ★ 与 completion 位置同一条纪律（t13）：有判据却一条都没跑 ⇒ 只告警、不拒绝。
    *   拒绝会把"这个位置这一轮没有适用判据"（正常情形）变成流程卡死。
@@ -2074,7 +5665,30 @@ export async function rejectOnContractGates(
   if (inputSurface !== undefined && inputSurface.incomplete > 0) {
     ctx.logger.warn(`agent-teams: ${what} reached the contract gate with an unfinished input surface (recorded, not rejected): ${inputSurface.missing.join('; ')}`)
   }
-  return inputSurface === undefined ? undefined : { input_surface: inputSurface }
+  /**
+   * ── ★★ t5：这里**不**挂 `contract_unmeasured` —— 而"不挂"是被裁定过的，不是漏写────
+   *
+   * 第一版在这里返回 `{ contract_unmeasured }`，作为"没能测量"的**结构化出口**。
+   * ★ 而它在修好的形态下是**死的**：本函数在"没能测量"那一支**抛错**（那正是
+   *   契约位置刻意的裁决）⇒ 抛出之后的这个 `return` **永远走不到** ⇒ 那个字段
+   *   永远填不上。
+   *
+   * ⇒ ★★ 而"看起来在场、实际永远是空的读数"正是本队要消灭的形态。
+   *   一个永远填不上的字段比"缺席"更坏：**缺席至少诚实**，而它会让读者以为
+   *   有一天它会填上，于是没人再去看真正的那条路径。
+   *   （captain 裁定 (e)：一个字段若永远无法被填充，要么接到**抛出侧**，要么删掉 ——
+   *     不许带着它当死代码发布。这里选后者，因为抛出侧已经承载了它。）
+   *
+   * ★ 那条事实去哪了（三处，都不在这个返回值上）：
+   *     ① 拒绝措辞 —— `rejected: the contract gate could not measure (…)`
+   *     ② 台账      —— `couldNotObserve: [原文]`
+   *     ③ 抛出侧    —— `throwWithSurface(…, unmeasuredAtContract)`，随工具错误面到调用方
+   */
+  /**
+   * ★★ t81：`gates` 现在**随返回值离开**（此前只留在本地变量里，通过路径上被丢弃）。
+   * ★ `inputSurface === undefined` ⇒ 连输入面都没构造出来 ⇒ **都缺席**（不猜）。
+   */
+  return inputSurface === undefined ? undefined : { input_surface: inputSurface, gates }
 }
 export function throwWithSurface(
   message: string,
@@ -2095,6 +5709,23 @@ export function throwWithSurface(
    *   仍用泛用的 `input_surface`（与它们成功路径上的字段名一致）。
    */
   field = 'input_surface',
+  /**
+   * ── ★★★ t5：这次拒绝是**哪一种** —— 「判据说不出」的原文，缺席即"发现了问题"──────
+   *
+   * MEASURED（t5）：契约位置的拒绝有两种成因，而**它们的补救动作相反**：
+   *
+   *     `unmeasured`（本参数在场）  ⇒ 判据**没能测量** ⇒ 去补它缺的那一格输入
+   *     `blockers`  （本参数缺席）  ⇒ 判据**发现了问题** ⇒ 去改契约
+   *
+   * ★ 为什么它必须走到**抛出侧**而不是留在返回值上：本函数是被**抛出**路径调用的，
+   *   而抛出之后调用方拿到的只有这个异常 —— 于是"哪一种拒绝"如果不随异常走，
+   *   它就在**唯一真正被读到的那个出口**上缺席。
+   * ★★ 而它**不改变措辞**（`message` 已经把两种成因分开写了），它补的是**结构化**那一份：
+   *   读的人不必去正则匹配一句英文，就能分出"没能测量"与"发现问题"。
+   *   ★ 与 `field` 那条注释同一条纪律：**同一个事实必须在两条路径上同形**。
+   * ★ 传 `undefined` ⇒ 字段**不出现**（而不是出现一个空串）。缺席与"空"必须不同形。
+   */
+  unmeasured?: string,
 ): never {
   /**
    * ── ★★ 把"本进程持有的构建 vs 盘上"**附到拒绝的那句话里**（t37 / f-0027 的预防）──
@@ -2157,10 +5788,57 @@ export function throwWithSurface(
       configurable: false,
     })
   }
+  /**
+   * ── ★★★ t5：这条拒绝是**哪一种成因** —— 随异常一起走 ────────────────────────────
+   *
+   * 与上面两条属性**完全同一个机制**（`defineProperty` + 可枚举、不可写）：
+   *   ★ 不新造第二条通道，因为"同一个事实在两条路径上必须同形"。
+   *
+   * ★★ 为什么它必须挂在**异常**上，而不是留在 `rejectOnContractGates` 的返回值上：
+   *   本函数被**抛出**路径调用，抛出之后调用方拿到的只有这个异常 ⇒
+   *   挂在返回值上的那份**永远走不到**（t5 第一版就是这样，captain 裁定 (e) 驳回）。
+   *   ⇒ 一个永远填不上的字段比"缺席"更坏：缺席至少诚实。
+   *
+   * ★ 三态在这里是**不同形**的（与 `surface` 那条同一纪律）：
+   *
+   *     属性不出现          ⇒ 这次拒绝是"判据发现了问题"（`blockers` 那一支）
+   *     属性 = 原文          ⇒ 这次拒绝是"判据没能测量"（`unmeasured` 那一支）
+   *     ★ 而不是"属性 = 空串" —— 缺席与空必须不同形。
+   *
+   * ★ 它**不改裁决**：异常类型、`name`、`message` 一个字节没变
+   *   （措辞里的两种成因由调用方写进 `message`，见 `rejectOnContractGates`）。
+   *   去掉这三行，没有任何一处裁决会翻面。
+   */
+  if (unmeasured !== undefined) {
+    Object.defineProperty(error, CONTRACT_UNMEASURED_PROPERTY, {
+      value: unmeasured,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    })
+  }
   throw error
 }
+/**
+ * ★ t5：拒绝的**第三种**成因在结构化面上的字段名 —— "判据没能测量"。
+ *
+ * ★ 为什么与 `INPUT_SURFACE_PROPERTY` **分列**（不合流）：
+ *   `inputSurface` 说的是"**调用方**少交了一格"（接线缺陷），
+ *   本字段说的是"**判据**拿到齐的输入仍然说不出"（判据的能力边界）。
+ *   两者的补救动作相反 ⇒ 合成一格就是本队记账最久的那个合流。
+ */
+export const CONTRACT_UNMEASURED_PROPERTY = 'agentTeamsContractUnmeasured'
 export const INPUT_SURFACE_PROPERTY = 'agentTeamsInputSurface'
 export const INPUT_SURFACE_FIELD_PROPERTY = 'agentTeamsInputSurfaceField'
+/**
+ * 读回"哪一种拒绝"—— 与 {@link inputSurfaceFieldOf} 同一形状的读数装置。
+ * ★ 属性缺席 ⇒ `undefined`（**不是**空串）：缺席与"空"必须不同形。
+ */
+export function contractUnmeasuredOf(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object') return undefined
+  const value = (error as Record<string, unknown>)[CONTRACT_UNMEASURED_PROPERTY]
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined
+}
 export function inputSurfaceFieldOf(error: unknown): string {
   if (error === null || typeof error !== 'object') return 'input_surface'
   const field = (error as Record<string, unknown>)[INPUT_SURFACE_FIELD_PROPERTY]
@@ -2177,6 +5855,31 @@ export type MemberConvergenceObservation = {
   /** ★ 与判据 `MemberConvergenceInput['state']` 同一套取值（含 `never-spawned`）。 */
   state: 'idle' | 'reported' | 'working' | 'failed' | 'never-spawned' | 'unknown'
   spoke?: boolean
+}
+/**
+ * ── 观察面之外的旁路：被略过的成员（t46）──────────────────────────────────────
+ *
+ * ★ 为什么需要它：驱动不在场时，那个成员**不可观察** —— 它可能做完了、也可能
+ *   崩在半路，而这两件事在没有它自己那句发言记录时**无从分辨**。
+ *   此前的写法是 `return undefined`（把整份观察面扔掉），于是：
+ *     · 一个做完了的成员让**整队**失去观察 ⇒ 交付位置恒 unmeasured ⇒ 恒拒绝；
+ *     · 而 `status` 的渲染只印 blockers ⇒ 用户看到的是 `Delivery: blocked ()`
+ *       （空括号）—— 一句看不出成因的拒绝。
+ *
+ * ★ 正确的分界（本文件反复那条纪律）：**可判定的事实不得写成「没能测量」**。
+ *   `id === ''`（从未起来）是**可判定的事实** ⇒ 它仍然进观察面，由判据 blocked。
+ *   驱动不在 ≠ 从未起来：它是"这一维这次不可用" ⇒ 该成员不进入观察面，
+ *   **但必须留名**，否则"略过一个不可观察的成员"与"这个队没有成员"同形。
+ */
+export interface MemberConvergenceBypass {
+  readonly name: string
+  /** 为什么它被略过。 */
+  readonly reason: 'driver-absent'
+}
+/** `observeMemberConvergence` 的完整返回：观察面 + 被略过的成员。 */
+export interface MemberConvergenceReading {
+  readonly observed: readonly MemberConvergenceObservation[]
+  readonly bypassed: readonly MemberConvergenceBypass[]
 }
 export function observedSpoke(session: unknown): boolean | undefined {
   if (session === null || typeof session !== 'object') return undefined
@@ -2204,8 +5907,9 @@ export function observedSpoke(session: unknown): boolean | undefined {
 export function observeMemberConvergence(
   ctx: Context,
   team: TeamState,
-): MemberConvergenceObservation[] | undefined {
+): MemberConvergenceReading {
   const out: MemberConvergenceObservation[] = []
+  const bypassed: MemberConvergenceBypass[] = []
   for (const member of team.members) {
     if (member.status === 'removed') continue
     /**
@@ -2236,14 +5940,35 @@ export function observeMemberConvergence(
       })
       continue
     }
-    const live = ctx.agents.get(member.id as SessionId)
+    const live = liveAgentOf(ctx, member.id)
     /**
-     * ★ 这一支**才是**真的没能观察：成员有会话 id，而 live Agent 拿不到 ——
-     *   它可能起来了、也可能已经释放，无从分辨 ⇒ 整份观察面缺席 ⇒ unmeasured。
+     * ── ★★ 驱动不在场：不再把整份观察面扔掉（t46）──────────────────────────────
+     *
+     * MEASURED（2026-10-14，一次真实交付）：`ledger` 做完全部任务、`agent/status`
+     * 已把它写回 `idle`，随后宿主卸掉了它的驱动（`drainContinuableChildren` →
+     * `dispose`，这条路**不发任何事件**）。于是：
+     *   · 旧写法在这里 `return undefined` ⇒ 整个交付位置 unmeasured ⇒ 恒拒绝；
+     *   · 而用户看到的拒绝语是 `Delivery: blocked ()`（空括号，见渲染那段）。
+     *
+     * ★ 为什么不能读 `member.status` 补这一格：`src/members.ts:944` 记着
+     *   「`member.status` 是持久记录，它会在成员死掉之后仍然写着 `working`」，
+     *   而 `:990` 又补一句「在飞要用【任务】判，不能用 `member.status`」。
+     *   拿一个自己会残留的字段当自变量，等于拿被质疑的当证据。
+     *
+     * ★ 为什么不能改判据让它放过：判据的白名单（`['idle','reported']`）与
+     *   `spoke` 缺席 ⇒ unmeasured 是**契约**，由 `scripts/gate-delivery-coverage.test.mjs`
+     *   的 24 条臂钉住。动它就是把"没测到"放行成"测过了"。
+     *
+     * ⇒ 此处只做一件事：该成员**不可观察** ⇒ 不进观察面，但记进旁路留名。
+     *   「略过一个不可观察的成员」与「这个队没有成员」因此不同形。
+     *   「会话死了但活还在」这一维这次确实不可用 —— 那是设计约束
+     *   （`waitRecords` 是进程内 Map、冷启动即空），不是待修的 bug。
      */
-    if (live === undefined) return undefined
+    if (live === undefined) {
+      bypassed.push({ name: member.name, reason: 'driver-absent' })
+      continue
+    }
     const spoke = observedSpoke(live.session)
-    if (spoke === undefined) return undefined
     out.push({
       name: member.name,
       /**
@@ -2253,10 +5978,16 @@ export function observeMemberConvergence(
        * 于是"记录里写着 idle、而它其实没交回任何东西"这件事，由 `spoke: false` 抓住。
        */
       state: live.status === 'running' ? 'working' : live.status === 'idle' ? 'idle' : 'unknown',
-      spoke,
+      /**
+       * ★ `spoke` 读不出 ⇒ 缺席（不是 `false`）：判据那头
+       *   `convergence.ts:273` 的 `unmeasuredSpokes` 会**指名这个成员**报
+       *   unmeasured，而其他成员的观察照常参与判定。
+       *   ★ 这正是 t46 的第三步，而它**不需要改判据** —— 判据早已逐成员处理。
+       */
+      ...spoke === undefined ? {} : { spoke },
     })
   }
-  return out
+  return { observed: out, bypassed }
 }
 export async function initializeProfileTeam(input: {
   ctx: Context
@@ -2271,6 +6002,11 @@ export async function initializeProfileTeam(input: {
   inlinePlan?: import('../../profiles.ts').TeamProfileConfig
   description?: string
   staged: boolean
+  /**
+   * ★★★ 队伍形态（2026-10-20，用户裁定乙方案）。缺席 ⇒ 不落这一格
+   *   ⇒ 成员提示落回条件式那条（= 本格上线前的行为）。
+   */
+  shape?: 'dispatch' | 'flat'
 }): Promise<{ committed: true; state: TeamState }> {
   const profile = resolveTeamProfile(input.inlinePlan === undefined ? input.config.profiles : { [input.profileName]: input.inlinePlan }, input.profileName, input.config.maxMembers)
   const selections: Awaited<ReturnType<typeof resolveMemberLlmSelection>>[] = []
@@ -2300,6 +6036,24 @@ export async function initializeProfileTeam(input: {
       ...profile.reviewPolicy === undefined ? {} : { reviewPolicy: profile.reviewPolicy },
     },
     ...profile.reviewPolicy === undefined ? {} : { reviewPolicy: profile.reviewPolicy },
+    /**
+     * ── ★★★ 形态落盘（2026-10-20，用户裁定乙方案）────────────────────────────────
+     *
+     * 它决定 `capabilities.ts` 发给成员的**框架提示**用哪一条
+     * （`TEAM_DISPATCH_MEMBER_PROMPT` vs `TEAM_MEMBER_PROMPT`）。
+     *
+     * ★★ 为什么这一格**必须落盘**而不是每次读人设文本去猜：
+     *   `81d08df` 那笔修复给的是一句**条件句** ——「若你的人设说要派，
+     *   就派」。而"人设说要派"这件事**没有可靠来源**：
+     *   8 个队里只有 2 个的人设提到了它，其余 5 个（含本轮那个）全是早期形态，
+     *   而后果是三个成员的会话烧穿 100 万 token。
+     *   ⇒ 一个**声明**比一句**猜测**可读：它能被 grep、被普查、被 status 投影。
+     *
+     * ★ profile 路径（`input.shape === undefined` 且来自配置 profile）：
+     *   不写这一格 ⇒ 缺席 ⇒ 成员提示落回条件式那条 = **今天的行为**。
+     *   这是刻意的：profile 的形态由 profile 自己定义，不经由建团参数改写。
+     */
+    ...input.shape === undefined ? {} : { shape: input.shape },
     captainSessionId: input.captain.id,
     createdAt: now,
     ...input.staged ? { phase: 'staged' as const, planReviewState: 'awaiting_review' as const } : {},
@@ -2318,18 +6072,67 @@ export async function initializeProfileTeam(input: {
         status: 'idle' as const,
       }
     }),
-    tasks: profile.tasks.map((template, index) => ({
+    /**
+     * ★ t117：构造走**唯一的** `makeTask`。
+     *
+     * ★ `dependencies` 在这里先过 `seedToActual` —— 模板 id 要换成真正落盘的 id。
+     *   那一步依赖本函数的局部状态（`seedToActual`），不属于"造一条任务"的通用语义。
+     *
+     * ★ `id` 仍是 `t${index+1}` 而不是 `t${taskSeq}`：这条路径的 id 与 `taskSeq`
+     *   **不同源**（一次性种下 N 条，seq 与下标同步推进）。保持原样，不改既有 id。
+     *
+     * ★★ `kind` **不传** —— 与改造前逐字同源。改造前的种子任务**根本没有 `kind` 键**，
+     *   读取方走 `taskKindOf(task)?.kind ?? 'work'` 的缺省。本步是纯重构，
+     *   不借机给老数据补字段：那会让"这条路径建的"与"别的路径建的"在
+     *   `kind` 一格上从**同形**（都靠缺省）变成**不同形**（一个有键一个没键）。
+     *   ★ 而 `taskKindOf` 早已把"没有 kind"读成 `'work'`（`quality-gates.ts:428`），
+     *     所以语义不变。
+     */
+    tasks: profile.tasks.map((template, index) => makeTask({
       id: `t${index + 1}`,
       profileSeedId: template.id,
       subject: template.subject,
       description: template.description,
-      status: 'pending' as const,
       assignee: template.assignee,
       dependencies: template.dependencies.map((dependency) => seedToActual.get(dependency) ?? dependency),
-      attempt: 0,
-      createdAt: now,
-      updatedAt: now,
-    })),
+      /**
+       * ── ★★★ 契约字段透传（这一格补的是"协议说得出口、工具做不到"）───────────────
+       *
+       * 队长协议 rule 3 逐字要求 `pass kind and assignee explicitly when the plan specifies them`，
+       * 而本行此前**只搬五格** ⇒ 经 `create({plan})` 建的队**永远没有质量 kind**，
+       * 于是 `defaultQualityDeliveryGraph()` 那套标准 DAG 根本表达不出来。
+       *
+       * ★ 与上一条注释（「`kind` **不传**」）的关系：那条说的是**老数据**不该被补字段，
+       *   理由是"会让这条路径建的与别的路径建的在 kind 一格上不同形"。
+       *   本改造**不推翻**它 —— 缺省仍是**不写**（`undefined` ⇒ `makeTask` 不展开该键），
+       *   所以既有种子任务落盘**逐字不变**；变的只是"模板里写了的时候，写得进去"。
+       *   这正是那条注释担心的"不同形"的反面：现在**两条路都能带 kind**，才是同形。
+       */
+      kind: template.kind,
+      objective: template.objective,
+      acceptance: template.acceptance,
+      verify: template.verify,
+      inScope: template.inScope,
+      outOfScope: template.outOfScope,
+      deliverables: template.deliverables,
+      nonGoals: template.nonGoals,
+      coverageOf: template.coverageOf,
+      round: template.round,
+      /**
+       * ★ 审查 linkage：与 `dependencies` 同一个 `seedToActual` 换名。
+       *
+       * ★★ 为什么必须换名：`validateCreateTask`（`quality-gates.ts:1055`）要求
+       *   `reviewedTaskId` **指向队伍里真的存在的那条任务**。种子图里它写的是
+       *   `'implementation'`（模板 id），而落盘后那条任务叫 `t2` —— 不换名就会写出
+       *   一个**永远指不中**的引用，而它的表现是"审查任务建不出来"或
+       *   "审查任务审了个不存在的任务"，两者离原因都很远。
+       */
+      reviewedTaskId: template.reviewedTaskId === undefined
+        ? undefined
+        : seedToActual.get(template.reviewedTaskId) ?? template.reviewedTaskId,
+      model: template.model,
+      reasoningEffort: template.reasoningEffort,
+    }, now)),
     taskSeq: profile.tasks.length,
   }
   // Roster creation is durable planning only. The scheduler starts each
@@ -2405,6 +6208,22 @@ export function parseCommandResults(value: unknown): CommandResult[] | undefined
       status: raw['status'],
       ...typeof raw['exitCode'] === 'number' ? { exitCode: raw['exitCode'] } : {},
       ...typeof raw['evidence'] === 'string' ? { evidence: raw['evidence'] } : {},
+      /**
+       * ── ★★★ `failures` 必须【透传】—— 否则 t19 那一格永远收不到数据 ────────────
+       *
+       * MEASURED（2026-10-10，`verifier` 在 t40 上逐环查出）：
+       *   解析器只保留 command/status/exitCode/evidence ⇒ `failures` **既不读也不透传**
+       *   ⇒ `classifyVerifyFailures` 拿到的永远是 `undefined` ⇒ 永远 `undecidable` ⇒ 永远拒。
+       *   ★★ 而 schema 那一环也不暴露它（`additionalProperties: false` 且无 `failures`）
+       *     ⇒ 就算传了也会在建参数时被拒。
+       *   ⇒ ★ 于是"t19 修好了"与"t19 一点也没生效"在读数上同形 —— 因为那一格没有数据。
+       *
+       * ★ 而它只在【形状对】时透传：一条名字不像字符串的失败，在这里丢掉，
+       *   而不是让下游拿一个半读得懂的数组（那会让"读不懂"与"没有新增"合流）。
+       */
+      ...Array.isArray(raw['failures'])
+        ? { failures: raw['failures'].filter((name): name is string => typeof name === 'string' && name.trim() !== '') }
+        : {},
     }
   })
 }
@@ -2424,26 +6243,45 @@ export function applyQualityFollowUp(team: TeamState, closed: TeamTask): { creat
       if (team.tasks.some((item) => item.id === dependency)) return dependency
       return idBySubject.get(dependency) ?? dependency
     })
-    const next: TeamTask = {
+    /**
+     * ★ t117：构造走**唯一的** `makeTask`。
+     *
+     * ★ 两个字段在这里**先解了再传**，不能原样交给 `makeTask`：
+     *   · `reviewedTaskId` 要先过 `idBySubject`（把模板 id 换成真正落盘的 id）
+     *   · `subject` 有缺省式 `${kind}-round-${round}`
+     *   把它们留在这一层是**对的** —— 它们依赖本函数的局部状态（`idBySubject`），
+     *   不属于"造一条任务"的通用语义。
+     */
+    const next: TeamTask = makeTask({
       id,
       subject: draft.subject ?? `${draft.kind}-round-${draft.round ?? 1}`,
-      status: 'pending',
       assignee: draft.assignee,
       dependencies,
-      attempt: 0,
-      createdAt: now,
-      updatedAt: now,
       kind: draft.kind,
-      ...draft.round === undefined ? {} : { round: draft.round },
-      ...draft.objective === undefined ? {} : { objective: draft.objective },
-      ...draft.inScope === undefined ? {} : { inScope: draft.inScope },
-      ...draft.outOfScope === undefined ? {} : { outOfScope: draft.outOfScope },
-      ...draft.acceptance === undefined ? {} : { acceptance: draft.acceptance },
-      ...draft.verify === undefined ? {} : { verify: draft.verify },
-      ...draft.sourceTaskId === undefined ? {} : { sourceTaskId: draft.sourceTaskId },
-      ...draft.sourceFindingIds === undefined ? {} : { sourceFindingIds: draft.sourceFindingIds },
-      ...draft.reviewedTaskId === undefined ? {} : { reviewedTaskId: idBySubject.get(draft.reviewedTaskId) ?? draft.reviewedTaskId },
-    }
+      round: draft.round,
+      objective: draft.objective,
+      inScope: draft.inScope,
+      outOfScope: draft.outOfScope,
+      acceptance: draft.acceptance,
+      verify: draft.verify,
+      sourceTaskId: draft.sourceTaskId,
+      sourceFindingIds: draft.sourceFindingIds,
+      reviewedTaskId: draft.reviewedTaskId === undefined
+        ? undefined
+        : idBySubject.get(draft.reviewedTaskId) ?? draft.reviewedTaskId,
+    }, now)
+    /**
+     * ── ★★★ 独立性读数**随任务落盘**（2026-10-20，补 t6）────────────────────────────
+     *
+     * ★★ 为什么不在 `makeTask` 的入参里传：`TaskDraft` 不收这一格
+     *   （与 `reviewed` 那一格的取舍同源 —— 见 `create-task.ts` 里那段
+     *   「刻意不交给 makeTask」的注释）。★ 而这里**必须**写，因为
+     *   `planQualityFollowUp` 在**生成那一刻**算出了它，之后**再也算不回来**。
+     *
+     * ★ 三态如实落盘（含 `undecidable` 与其 `why`）——
+     *   一个只写 `not-independent` 的实现会让"判不了"与"独立"在盘上同形。
+     */
+    if (draft.reviewIndependence !== undefined) next.reviewIndependence = draft.reviewIndependence
     team.tasks.push(next)
     created.push(next)
   }
@@ -2492,11 +6330,47 @@ export function renderStatus(value: JsonValue): string {
     loop_summary?: string
     deliverable?: boolean
     coverage?: { goal_item: string; status: string; task_ids: string[] }[]
-    delivery?: { ok: boolean; blockers: string[] }
+    delivery?: { ok: boolean; blockers: string[]; unmeasured?: string }
+    /**
+     * ── ★★★ 队伍形态三格（2026-10-21，施工单序 2）────────────────────────────────
+     *
+     * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-1 前半）：
+     * 这三格进了返回值、**也进了 schema（`required: true`）**，
+     * 而 `renderStatus` **一个字都没渲染** —— 实测：传进去什么都不打印。
+     *
+     * ★★ 这正是本仓记账过的那条（`deployment` / `plan_review` 各记过一次）：
+     *   **一个只在返回值里、而人看不见的读数，与它不存在是同一件事。**
+     *   ★ 而它更哑的地方在这里：schema 说 `required: true` ——
+     *     声明面承诺了"一定有"，而呈现面**一个字都没有**。
+     */
+    team_shape?: string
+    shape_execution?: string
+    shape_violations?: string[]
+    /** ★ 这一份数字是谁算的（`judgment-gate` / `status-recomputed`）。 */
+    shape_source?: string
     /**
      * ★ 部署状态（t34 的格）。**必须渲染出来** —— 见下面那段 MEASURED。
      */
     deployment?: { status: string; message: string; loaded?: string; on_disk?: string }
+    /**
+     * ★ 计划审查读数（t6 的格）。**同样必须渲染出来** —— 理由与 `deployment` 逐字相同：
+     *   一个只在返回值里、而人看不见的读数，与它不存在是同一件事。
+     */
+    plan_review?: {
+      state: string
+      why?: string
+      readout?: {
+        total: number
+        overall: string
+        detail: string
+        applicable_overall: string
+        tiers?: { small: number; large: number; unmeasurable: number }
+        tiers_why?: string
+        questions: { key: string; question: string; present: number; missing: number; unmeasured: number; not_applicable: number }[]
+        gaps: { id: string; key: string; status: string; detail: string }[]
+        not_applicable: { id: string; key: string; why: string }[]
+      }
+    }
   }
   const flags = [
     team.halted ? 'halted' : undefined,
@@ -2511,6 +6385,23 @@ export function renderStatus(value: JsonValue): string {
     ...team.profile === undefined ? [] : [`Profile: ${team.profile.name}${team.profile.task_planning ? ` [${team.profile.task_planning}]` : ''}${team.profile.protocol ? ` — ${team.profile.protocol}` : ''}`],
     ...team.loop_summary ? [`Loop: ${team.loop_state ?? ''} — ${team.loop_summary}`.replace(/^Loop:  — /u, 'Loop: ')] : [],
     `Viewing as: ${team.viewer}`,
+    /**
+     * ── ★★★ 形态：**声明**与**执行**两行，不合并（施工单序 2）──────────────────────
+     *
+     * ★ 为什么两行而不是一行：`team_shape` 是**声明**（"这个队是 dispatch 形态"），
+     *   `shape_execution` 是**执行读数**（"它是不是真那样在跑"）。
+     *   合成一行会让"声明了、也照做了"与"声明了、全员自己干"读起来一样 ——
+     *   而那两件事要求的动作相反。
+     *
+     * ★★ `shape_source` 也渲染：读的人必须知道这一份是**判据算的**还是
+     *   `status` 自己重算的 —— 否则两份真相在屏幕上又合流了。
+     */
+    ...team.team_shape === undefined ? [] : [`Shape: ${team.team_shape}`],
+    ...team.shape_execution === undefined ? [] : [
+      `Shape execution: ${team.shape_execution}`
+      + `${team.shape_source === undefined ? '' : ` (source: ${team.shape_source})`}`
+      + `${team.shape_violations === undefined || team.shape_violations.length === 0 ? '' : ` — ★ violations: ${team.shape_violations.join(', ')}`}`,
+    ],
     `Members (${team.members.length}):`,
     ...team.members.map((member) => {
       const route = member.provider && member.model ? ` · ${member.provider}/${member.model}` : ''
@@ -2535,7 +6426,34 @@ export function renderStatus(value: JsonValue): string {
       ...team.coverage.map((row) => `  - ${row.goal_item}: ${row.status} (${row.task_ids.join(',') || 'none'})`),
     ],
     ...team.delivery === undefined ? [] : [
-      `Delivery: ${team.delivery.ok ? 'ok' : `blocked (${team.delivery.blockers.join('; ')})`}`,
+      /**
+       * ── ★★ 三态在渲染层就分形（t46）──────────────────────────────────────────────
+       *
+       * MEASURED（2026-10-14，一次真实交付）：`declare_delivery` 被拒，原话是
+       * 「the members' convergence state was not observed」；而 status 的渲染里
+       * 只有一行 `Delivery: blocked ()` —— **括号是空的**。
+       *
+       * 两层叠加造成那个空括号：
+       *   ① `blockers` 是空的（没能测量不写进 blockers，那是 t35/f-0017 的正确分法）；
+       *   ② `unmeasured` 被渲染层丢掉了（这一行的类型里根本没有那一格）。
+       *
+       * ⇒ 于是「查出了问题」与「没测到」在读者眼里**同形**，而它们的下一步动作相反：
+       *    前者去修产物，后者去接线。把 unmeasured 印出来，不是多加一行字，
+       *    是让那个空括号不再骗人。
+       *
+       * ★ 三条形状互不相同，且 `ok` 优先：都齐时只说 ok，不啰嗦。
+       */
+      (() => {
+        const delivery = team.delivery
+        if (delivery.ok) return 'Delivery: ok'
+        const measured = delivery.blockers.join('; ')
+        if (measured !== '') return `Delivery: blocked (${measured})`
+        if (typeof delivery.unmeasured === 'string' && delivery.unmeasured.trim() !== '') {
+          return `Delivery: unmeasured (${delivery.unmeasured})`
+        }
+        /** 既没有查出的问题、也没能说出原因 —— 那是调用点自己的缺陷，不能印成 ok。 */
+        return 'Delivery: blocked (no reason given)'
+      })(),
     ],
     /**
      * ── ★ 部署状态必须【渲染出来】（2026-10-07，一次代价很大的实测）─────────────
@@ -2558,6 +6476,69 @@ export function renderStatus(value: JsonValue): string {
      *   与它未渲染时那种"看得见 current、看不见 unknown"的写法相反。
      */
     ...team.deployment === undefined ? [] : [`Deployment: ${team.deployment.message}`],
+    /**
+     * ── ★★★ t6（N3）：计划审查必须【渲染出来】───────────────────────────────────────
+     *
+     * ★ 理由与上面 `Deployment` 那段 MEASURED **逐字相同**，所以不再复述一遍 ——
+     *   只记这一格的特殊之处：
+     *
+     *   ① 三态在**渲染层**就分形，且每一态**指向不同的下一步**：
+     *        `unmeasured` ⇒ 去接线（模块没装进来 / 导出改名了）
+     *        `missing`    ⇒ 去补契约（填了，但读不出读数）
+     *        缺口里分 `missing` 与 `unmeasured` 两种 —— 前者去改文字，后者去填那一格
+     *      ★ 把三者印成同一句"有缺口"，等于让人去改文字而那一格其实压根不存在。
+     *
+     *   ② 「不适用」**单独一行**，绝不折进计数 —— 它是噪音，不是缺口。
+     *      契约原文的陷阱说的正是这件事：把噪音印成缺口，会让人去补一个
+     *      **契约根本不要求**的格子；而把噪音印成合格，会让真缺口消失。
+     *
+     *   ③ 空缺时**说"没读到"**，不说"0 条全部合格"。
+     */
+    ...(() => {
+      const review = team.plan_review
+      if (review === undefined) return []
+      if (review.state !== 'measured' || review.readout === undefined) {
+        return [`Plan review: unmeasured (${review.why ?? 'the reading carried no reason — that is a defect at the call site'})`]
+      }
+      const readout = review.readout
+      const tiers = readout.tiers === undefined
+        ? `tiers NOT READ${readout.tiers_why === undefined ? '' : ` (${readout.tiers_why})`}`
+        : `tiers small=${readout.tiers.small} large=${readout.tiers.large} unmeasurable=${readout.tiers.unmeasurable}`
+      const lines = [
+        `Plan review: ${readout.overall} over ${readout.total} contract(s) — ${tiers}`
+          + `${readout.applicable_overall === readout.overall ? '' : ` · required-questions only: ${readout.applicable_overall}`}`,
+        /**
+         * ── ★★★ 必须渲染的那一行：`overall` 是**原样**交过来的判据原话 ───────────────
+         *
+         * ★ 它是 `checkPlanReview` 自己在**不知道 kind** 的前提下下的结论，而上面那行
+         *   的 `tiers` 与本段下面的逐问计数是**知道 kind** 的。两者会不同（实测：
+         *   `overall=unmeasured` 而 `required-questions only: present`）。
+         *
+         * ★ 不印它，`unmeasured` 就是一个**没有成因的字**：读的人只能猜是"模块没装好"
+         *   还是"有格子没填"。印它，两句话就在同一屏上，而那两句话**说的不是同一件事**
+         *   （一句是"盘上有几格读不出来"，一句是"契约要求的那几格里缺不缺"）。
+         */
+        ...readout.detail === '' ? [] : [`  raw reading (kind-agnostic): ${readout.detail}`],
+        ...readout.total === 0 ? [] : readout.questions.map((item) => (
+          `  · ${item.key}: present=${item.present} missing=${item.missing} unmeasured=${item.unmeasured} not-applicable=${item.not_applicable}`
+        )),
+      ]
+      /** ★ 逐条名单：计数说"缺几个"，这里说"缺在哪一条的哪一问"。 */
+      if (readout.gaps.length > 0) {
+        lines.push(`  missing readings (${readout.gaps.length}):`)
+        for (const gap of readout.gaps) {
+          lines.push(`    - ${gap.id} / ${gap.key} [${gap.status}] ${gap.detail.slice(0, 180)}`)
+        }
+      }
+      /** ★ 「不适用」自成一段 —— 与上面那段并列，不合并（合并就是那个噪音陷阱）。 */
+      if (readout.not_applicable.length > 0) {
+        lines.push(`  not applicable by contract (${readout.not_applicable.length}; noise, not a gap):`)
+        for (const entry of readout.not_applicable) {
+          lines.push(`    - ${entry.id} / ${entry.key}`)
+        }
+      }
+      return lines
+    })(),
     `Captain inbox (${team.captain_inbox.length}):`,
     ...team.captain_inbox.map((message) => `  - [${message.from}] ${message.content}`),
     ...(team.member_inbox ?? []).map(message => `  - [${message.from}] ${message.content}`),

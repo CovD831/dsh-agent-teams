@@ -5,6 +5,37 @@
 > 是它的代价落在一个**无法支付**的地方：本队承重的那一格状态**没有入口**，
 > 而混代（新代码 + 旧状态）**静默**。
 
+> ## ★★★ 2026-10-09 加注：这条负结果的【适用范围】要收窄
+>
+> 本文证明的是「**用 `?query` 指纹换模块**」不可行 —— 而它是不可行的，
+> 理由本文自己也说了：**换的是「模块」，不是「模块图」**（§二）。
+>
+> **★ 而宿主早就带了一个不用 `?query` 的实现，并且它绕过了本文的每一条障碍。**
+> 见 **`docs/RESEARCH-RESTART-FREE.md`**（实测）：
+>
+> ```
+> 宿主自带的 @deepseek-ai/cordis-plugin-hmr（本机 Tauri 运行时里已安装）：
+>   ① 遍历 job.linked 拿到【整个模块图】   ← 解的正是本文 §二 那条
+>   ② 直接删 Node 内部 ESM loadCache + CJS require.cache  ← 不是加 query
+>   ③ 重 import 后替换注册表里的插件，失败可回滚
+>
+> ★ 而它在本机【曾经真的跑到过建 watcher 那一步】
+>   （日志里是 EMFILE（fd 耗尽），而不是 "requires --expose-internals"）。
+> ```
+>
+> **⇒ 所以本文的结论应当读成**：
+>
+> | 命题 | 现在 |
+> |---|---|
+> | 用 `import(path + '?query')` 换掉整个模块图 | **不可行**（本文证明，仍然成立） |
+> | 换掉本插件的模块代码而不重启 | **可行** —— 打开 `hmr` 那一行即可 |
+> | 换代码而保留本模块的私有 `let` 状态 | **本文那三条代价仍然在这里**（见 §八） |
+>
+> ★ 最后一行很重要：**HMR 也要 dispose + 重建插件**，所以 `requestedRestart`
+> 那类私有状态照样会丢。**换模块可行 ≠ 状态可以迁移** —— 两件事不要合流。
+> 这正是本文 §八 那节"已知边界"的用处：它不是"所以别做"，
+> 而是"做的时候要付这些钱"。
+
 复现：`node scripts/probe-module-reload.mjs`（人读）· `node scripts/probe-module-reload.mjs --json`（机器读）
 夹具：`node --test scripts/probe-module-reload.test.mjs`（14 臂）
 

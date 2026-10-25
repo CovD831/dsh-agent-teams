@@ -45,6 +45,7 @@
  *   臂 5（f-0003 回归） 执行器缺席时，普通任务的建立**不该**被 unmeasured 拒掉
  */
 
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -114,7 +115,7 @@ async function pluginFixture() {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -602,8 +603,7 @@ test('臂 5 ★ f-0003 回归：执行器缺席时，普通任务的建立不许
      *   "unmeasured 被读成拒绝"无关。第一次跑就是这样红的，我一度把它读成 f-0003 复发。
      * ★ 记一笔：**夹具造出的缺陷会伪装成产品缺陷** —— 两者的返回值都是"一句 error"。
      */
-    inScope: ['docs/PLAN.md'],
-  }))
+    inScope: ['docs/PLAN.md'], reviewed: reviewedStamp() }))
 
   console.log(`    ℹ create_task(kind=work) ⇒ threw=${created.threw}`
     + `${created.threw ? ` · ${created.message.slice(0, 110)}` : ` · task_id=${created.value?.task_id}`}`)
@@ -651,8 +651,7 @@ test('臂 5 ★ f-0003 回归：执行器缺席时，普通任务的建立不许
     acceptance: ['the contract gate actually judges the verify command'],
     inScope: ['docs/PLAN.md'],
     /** ★ 非空、恒定非零 ⇒ 判据的 [always-red] 静态分支必须开火。 */
-    verify: ['false'],
-  }))
+    verify: ['false'], reviewed: reviewedStamp() }))
   console.log(`    ℹ create_task(verify=['false']) ⇒ threw=${bad.threw}${bad.threw ? ` · ${bad.message.slice(0, 130)}` : ''}`)
 
   assert.equal(

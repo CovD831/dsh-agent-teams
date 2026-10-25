@@ -62,14 +62,13 @@ export declare const id = "contract.verify-command";
 export declare const point = "contract";
 export declare const description = "\u5951\u7EA6\u91CC\u58F0\u660E\u7684 verify \u547D\u4EE4\u5FC5\u987B\u53EF\u5224\uFF08\u65E2\u80FD\u4E3A\u505A\u5BF9\u7684\u5DE5\u4F5C\u53D8\u7EFF\u3001\u4E5F\u80FD\u4E3A\u505A\u9519\u7684\u5DE5\u4F5C\u53D8\u7EA2\uFF09\uFF1A\u7A7A\u547D\u4EE4\u3001\u5199\u6B7B\u7684\u771F/\u5047\u3001\u4EE5\u53CA\u62FF -x \u53BB\u6BD4\"\u547D\u4EE4\u8F93\u51FA\"\uFF08\u5982 grep -qx N <(wc -l \u2026)\uFF0C\u524D\u5BFC\u7A7A\u683C\u8BA9\u6574\u884C\u5339\u914D\u6C38\u8FDC\u4E0D\u6210\u7ACB\uFF09\u90FD\u4F1A\u5728\u3010\u5EFA\u4EFB\u52A1\u90A3\u4E00\u523B\u3011\u88AB\u8BF4\u6E05\u695A";
 /**
- * 这个 id 的另一半用途：**调用方可以按它决定要不要注入执行器**。
- *
- * ★ 为什么把一个判据的 id 导出在这里：`tools.ts` 的注入口径是"缺什么就不注入什么
- *   （而不是注入一个空值）"—— 见 tools.ts 的注入口径一节。要在 create_task /
- *   amend_task 上按需注入，调用方必须能问出"contract 位置有没有一条判据需要跑命令"，
- *   而**注册表不认识判据的名字与语义**（契约 §8），所以能回答这个问题的只有判据自己。
+ * ★ 曾经的 `VERIFY_COMMAND_GATE_ID` 导出已删（2026-10-15，孤岛普查 t33）。
+ *   它承诺"调用方可以按它决定要不要注入执行器"，但那条路由**从未实现**：
+ *   `src/tools.ts`（注释里说要用它的地方）自己都不引用它，
+ *   `create-task.ts` / `amend-task.ts` 两处**无条件注入**。
+ *   ⇒ 机制已被更简单的做法取代，留着一个"读起来像在管事"的导出比删掉更坏。
+ *   若日后恢复"按需注入"，重新导出即可 —— 它是三行能重写的东西。
  */
-export declare const VERIFY_COMMAND_GATE_ID = "contract.verify-command";
 /**
  * ── ★ 输入面声明（B 层，编译期）────────────────────────────────────────────────
  *
@@ -87,12 +86,31 @@ export declare const VERIFY_COMMAND_GATE_ID = "contract.verify-command";
  *     注入   ⇒ 真的跑一次 ⇒ 结论是**观察**（"这条命令退出 3"），可被独立复核
  *     不注入 ⇒ 只有静态分析 ⇒ 结论降级成 `unmeasured`（见 gate 里那段注释）
  *
- * ⇒ 而 `unmeasured` 在本插件里**等于拒绝**（`rejectOnContractGates` 对 unmeasured
+ * ⇒ 而 `unmeasured` 在本插件里**缺省等于拒绝**（`rejectOnContractGates` 对 unmeasured
  *   抛错）。这正是 t17/t18 实测过的形态：
  *
  *     contract 的两个调用点都没注入 ⇒ `contract.verify-command` 在生产路径上
  *     永远 `unmeasured` ⇒ **implementation / repair 这类必须验的契约连
  *     create_task 都过不去**（一道永远关着的门）。
+ *
+ * ── ★★★ t21 修订：上面那句「等于拒绝」现在**带一个条件**，而本判据的处置没变 ──────
+ *
+ * MEASURED（t21）：位置级合并此后会读判据在**每一条裁决**上声明的
+ * `unmeasuredDisposition`（见 `registry.ts` 里 `GateVerdict` 那段）：
+ *
+ *     `'refuse'`（**缺省**）⇒ 说不出 ⇒ 位置级拒。★ 与本文件上面那段口径**逐字相同**。
+ *     `'tolerate'`          ⇒ 说不出 ⇒ 不拒，但**留痕**（进 `observed.unmeasured`）。
+ *
+ * ★★ 而**本判据不接受 `'tolerate'`，也不该接受**：`execVerifyCommand` 缺席
+ *   恰恰就是 t17/t18 那条"一道永远关着的门" —— 契约要的那一格**该被接上**，
+ *   而"没接上"是**接线缺陷**，不是留白。⇒ 它继续走缺省 `refuse`。
+ *
+ * ★ 于是本文件那段论证**一个字都没有被推翻**，它只是不再**替别的判据**说话：
+ *   原来那句话的适用范围是"本插件里所有的 unmeasured"，
+ *   而 t21 之后它是"所有**声明了** `refuse` 的 unmeasured" —— 而缺省就是 `refuse`，
+ *   所以**每一扇以那句话为据的门都照旧关着**。
+ *   ⇒ 唯一被放过的是**主动声明**了"这一格对这类任务是正当留白"的那几条
+ *     （实测：`contract.task-atomicity` 在**非写类**任务上；它在写类上仍是 `refuse`）。
  *
  * ⇒ 所以这一格【必须】进 requires：它缺席不是"这条判据安静一点"，而是
  *   "这条判据说不出它唯一想说的事"。核对层报出它，与判据自己报 `unmeasured`

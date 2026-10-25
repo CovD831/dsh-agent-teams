@@ -45,13 +45,25 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { registry } from '../lib/gates/index.js'
+import { registry, INSERTION_POINTS } from '../lib/gates/index.js'
 import { createGateRegistry, ok, blocked, unmeasured } from '../lib/gates/registry.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-/** 六个位置目录 —— 判据文件的唯一组织方式（registry.ts 的 INSERTION_POINTS 是位置的真值）。 */
-const GATE_DIRS = ['admission', 'completion', 'contract', 'delivery', 'dispatch', 'runtime']
+/**
+ * 位置目录 —— ★ **从 `INSERTION_POINTS` 派生，不再手写一份**（t86 的 B2）。
+ *
+ * ── 为什么改（MEASURED，t86）──────────────────────────────────────────────────
+ *
+ * 原来这里是硬编码的六个目录名，而**它自己上面那行注释就写着**
+ * 「registry.ts 的 INSERTION_POINTS 是位置的真值」—— 却没从那里取。
+ * ⇒ t86 加第七个位置 `collection` 时，本夹具**按磁盘枚举认不出** `lib/gates/collection/`，
+ *   于是那四条判据在这个普查里**不存在**。
+ *
+ * ★★ 而那正是本仓记账最久的形态：**真值与副本分叉，而副本不报错。**
+ *   ⇒ 改为派生后，**下次加位置自动覆盖**，不需要记得改这里。
+ */
+const GATE_DIRS = [...INSERTION_POINTS]
 
 /**
  * ── ★★ 污染检查（照 admission-dev 在 t13 建的那一条）：可执行代码里不许留变异体 ──

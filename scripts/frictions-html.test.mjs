@@ -512,3 +512,191 @@ test('★★ 臂 24 — the frictions half is UNCHANGED (reverse half: adding ju
   rmSync(before, { recursive: true, force: true })
   rmSync(after, { recursive: true, force: true })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2（t8）：救援三态 —— ★ 只有 `cannot-solve` 进「需上报」池
+//
+//   契约逐字：「Only cannot-solve enters the escalate pool, and this is
+//   observable FROM WITHIN inScope -- scripts/frictions-html.mjs is the only
+//   consumer of resolution.pool, so it is in scope and its fixture asserts the
+//   pool membership」
+//
+// ★ 为什么这一段必须在这里、而且必须断言【池成员】而不只断言渲染文本：
+//   本文件是 `resolution.pool` 的**唯一**消费者（见 `poolOf`）。若不在这里钉住，
+//   「只有 cannot-solve 进上报池」这句话在**任何地方都不可观测** ——
+//   一个忠实实现了 C2 的成员跑完契约指定的命令，会拿到一次【绿】，
+//   而那次绿**从未碰过**这句话所描述的行为。
+//
+// ★★ 用【同一个假仓库、同一批条目】造三个队列，让"谁进了哪个池"成为可读的差集，
+//    而不是三次各自独立的断言 —— 后者在"三个池都为空"时也会全绿。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条带 C2 `rescue` 读数、且 `class` 用的是 C1 的词汇表的条目。 */
+function rescueEntry(state, extra = {}) {
+  return entry({
+    class: 'blocker',
+    rescue: state === 'solved'
+      ? { state, solvedBy: 'leader', howSolved: 'fixed the gate input' }
+      : state === 'cannot-solve'
+        ? { state, whyCannotSolve: 'needs a human ruling on the contract' }
+        : { state },
+    resolution: { pool: 'self', blocking: true, fix: 'unfixed at the moment it happened' },
+    ...extra,
+  })
+}
+
+/** 从生成的 HTML 里读出两个池子各自渲染了哪些标题 —— 池成员，不是池的大小。 */
+function poolMembership(html) {
+  const section = (id) => {
+    const start = html.indexOf(`<section id="${id}">`)
+    if (start === -1) return ''
+    const end = html.indexOf('</section>', start)
+    return end === -1 ? '' : html.slice(start, end)
+  }
+  /**
+   * ★ 取的是每条卡点的**标题**（`<h3>`）—— 于是断言的是【池成员】，不是计数。
+   *   数一个数会让"三个池都空"与"分派正确"在某些输入上同形；
+   *   指名到条目则不会（这是本队在别处记过的那条：集合比对才算证据）。
+   */
+  const titlesIn = (id) => [...section(id).matchAll(/<h3>([^<]*)<\/h3>/gu)].map((m) => m[1].trim())
+  return { escalate: titlesIn('pool-escalate'), self: titlesIn('pool-self') }
+}
+
+test('★★ C2 臂 1 — 三态各自落在【该落】的池子里，而这是池【成员】的差集（不是计数）', () => {
+  const root = fakeRepo({
+    entries: [
+      rescueEntry('solved', { id: 'f-0001', title: 'SOLVED-ONE' }),
+      rescueEntry('cannot-solve', { id: 'f-0002', title: 'CANNOT-ONE' }),
+      rescueEntry('trying', { id: 'f-0003', title: 'TRYING-ONE' }),
+    ],
+  })
+  const result = run(root)
+  assert.equal(result.code, 0, `generator must exit 0; stderr=${result.stderr}`)
+  const { escalate, self } = poolMembership(result.html)
+
+  assert.deepEqual(
+    escalate, ['CANNOT-ONE'],
+    '★★★ 上报池里必须【恰好】是 cannot-solve 那一条 —— '
+    + '多一条 = 214 条被缺省推进人的那个缺陷复现；少一条 = 该给人看的没给人看',
+  )
+  assert.deepEqual(
+    self, ['SOLVED-ONE', 'TRYING-ONE'],
+    '★ 而 `solved` 与 `trying` 都进「可自解」：默认目标就是自己解，'
+    + '"还没人救过"与"已经解掉了"是两件事，而它们都不该占用人',
+  )
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('★★★ C2 臂 2 — 定向突变：把池的判据改回【按 class / resolution.pool 定】⇒ 本段必须红', () => {
+  /**
+   * ── 为什么这条臂是"C2 存在"的唯一证据 ──────────────────────────────────────────
+   *
+   * C2 之前，池由 `class` 直接决定（真卡点 ⇒ escalate）。C2 之后，池改由 `rescue`
+   * 决定。⇒ 一个**没有实现 C2** 的版本，会把上面那三条**全部**推进上报池
+   * （它们 `class: 'blocker'`），而臂 1 会当场红。
+   * ★ 这里当场施加那个突变、当场跑、当场读回裁决 —— 而不是声称"它应该会红"
+   *   （`PENDING-FRICTION-REFORM.md` §6 经验 F：只有"事实建立了"可测）。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'pool-mutant-'))
+  try {
+    const artifact = readFileSync(GENERATOR, 'utf8')
+    const criterion = "if (rescue !== undefined) return { pool: rescue === 'cannot-solve' ? 'escalate' : 'self', via: 'rescue' }"
+    assert.ok(
+      artifact.includes(criterion),
+      '★ 突变臂前置：必须在产物里找到决定池的那一句（找不到就不能声称"施加了突变"）',
+    )
+    /**
+     * ── ★★★ 突变体必须复现【C2 之前的真实行为】，而不是随便改坏一行 ─────────────
+     *
+     * MEASURED（`git show HEAD:scripts/frictions-html.mjs`）：C2 之前这一格逐字是
+     *     `entries.filter((e) => e.resolution?.pool === 'escalate')`
+     *   —— 池**只**由记录里既有的 `resolution.pool` 决定，`rescue` 完全不参与。
+     *
+     * ★ 所以"合并回一条"的正确变异体是：**让 `rescue` 不参与判定**，退回到
+     *   只读 `resolution.pool`。⇒ 一条 `class: 'blocker'`、`rescue.state: 'trying'`
+     *   而 `resolution.pool: 'self'` 的记录仍然进 `self`…
+     *   ✗ 而这**测不出**任何东西：真卡点在 C2 之前写的就是 `pool: 'escalate'`。
+     *
+     * ⇒ 真正要分的两件事是：**池该由 `rescue` 定，还是由 `class` 定。**
+     *   变异体＝把 `rescue` 那一支整个去掉，让 `class: 'blocker'` 的记录**一律**上报
+     *   （那正是 214 条的成因：停住 ⇒ 直接 ⇒ 上报，中间"我们先自己解解看"那一格不存在）。
+     */
+    const mutated = artifact.replace(
+      criterion,
+      "if (e.class === 'blocker') return { pool: 'escalate', via: 'class' }\n"
+      + "  if (rescue !== undefined) return { pool: 'self', via: 'rescue' }",
+    )
+    const root = mkdtempSync(join(tmpdir(), 'pool-mutant-repo-'))
+    mkdirSync(join(root, 'scripts'), { recursive: true })
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    writeFileSync(join(root, 'scripts', 'frictions-html.mjs'), mutated)
+    const ledger = join(root, '.agent-teams', 'frictions')
+    mkdirSync(ledger, { recursive: true })
+    writeFileSync(
+      join(ledger, 'f-0003.json'),
+      JSON.stringify(rescueEntry('trying', { id: 'f-0003', title: 'TRYING-ONE' })),
+    )
+    /**
+     * ★ 对照：同一份输入在**未突变**的产物上不许进上报池 ——
+     *   否则本臂分不清"突变造成的差异"与"这一格本来就是那样"。
+     */
+    const cleanRoot = mkdtempSync(join(tmpdir(), 'pool-clean-repo-'))
+    mkdirSync(join(cleanRoot, 'scripts'), { recursive: true })
+    mkdirSync(join(cleanRoot, 'docs'), { recursive: true })
+    writeFileSync(join(cleanRoot, 'scripts', 'frictions-html.mjs'), artifact)
+    const cleanLedger = join(cleanRoot, '.agent-teams', 'frictions')
+    mkdirSync(cleanLedger, { recursive: true })
+    writeFileSync(
+      join(cleanLedger, 'f-0003.json'),
+      JSON.stringify(rescueEntry('trying', { id: 'f-0003', title: 'TRYING-ONE' })),
+    )
+    const cleanEscalate = poolMembership(run(cleanRoot).html ?? '').escalate
+    assert.deepEqual(
+      cleanEscalate, [],
+      '★ 突变臂前置：**未突变**的产物上，`trying` 的卡点不许进上报池'
+      + '（否则本臂的红与"池的判据"无关）。实测：' + JSON.stringify(cleanEscalate),
+    )
+    const mutatedRun = run(root)
+    const { escalate } = poolMembership(mutatedRun.html ?? '')
+    assert.ok(
+      escalate.includes('TRYING-ONE'),
+      '★★★ 突变生效的判据：`trying` 必须**进**上报池（那正是 C2 之前的行为）。'
+      + ` 若这里没进，说明突变没改到该改的地方 —— 那"臂没红"就说明不了任何事。实测池：${JSON.stringify(escalate)}`,
+    )
+    rmSync(root, { recursive: true, force: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('★★ C2 臂 3 — 没有 rescue 读数的【老记录】按它自己的 resolution.pool 读，且说出走的是哪条路', () => {
+  /**
+   * ── 这条是"三态不许合流"在读取端的形态 ────────────────────────────────────────
+   *
+   * 台账里 C2 之前写的记录**没有** `rescue`。它既不是 `trying`（"试过了、还在试"），
+   * 也不是"没有卡点"。★ 替它编一个状态 = 改写历史；把它并进 `trying` = 让
+   * "没人回填"与"有人在解"同形。
+   * ⇒ 唯一诚实的做法：**按记录里既有的 `resolution.pool` 读**，而把"走了哪条路"
+   *   渲染出来（不然读的人无法判断这一格可不可信）。
+   */
+  const root = fakeRepo({
+    entries: [
+      entry({ id: 'f-0001', title: 'OLD-ESCALATED', resolution: { pool: 'escalate', blocking: true, fix: 'x' } }),
+      entry({ id: 'f-0002', title: 'OLD-SELF', resolution: { pool: 'self', blocking: false, fix: 'y' } }),
+    ],
+  })
+  const result = run(root)
+  assert.equal(result.code, 0, `generator must exit 0; stderr=${result.stderr}`)
+  const { escalate, self } = poolMembership(result.html)
+  assert.deepEqual(
+    escalate, ['OLD-ESCALATED'],
+    '★ 老记录不许被 C2 重新归类 —— 它当时的判断是谁写的，就按谁写的读',
+  )
+  assert.deepEqual(self, ['OLD-SELF'], '★ 而缺省仍是 `self`（不是"进了上报池"）')
+  assert.match(
+    result.html, /resolution\.pool/u,
+    '★★ 而"这一格是按 `resolution.pool` 读的"必须**看得见** —— '
+    + '读不出来源的一格，与"读到了而且可信"同形',
+  )
+  rmSync(root, { recursive: true, force: true })
+})

@@ -407,8 +407,28 @@ test('★★★ 臂 8（真实读数臂）：对本仓的每一个 worktree 跑�
       : '')
     + '\n',
   )
-  /** ★ 而它必须真的读到了东西 —— 一个"0 个 worktree"的读数与"扫描器什么都没扫到"同形。 */
-  assert.ok(rows.length > 0, '★ 目录在就必须真的扫到 worktree')
+  /**
+   * ── ★ 三种状态必须分开（MEASURED 2026-10-10）─────────────────────────────────
+   *
+   * 原断言想防的是**"扫描器什么都没扫到"** —— 那与"合法地没有 worktree"同形。
+   * 这个意图是对的；而它缺了第三种状态：**目录在、里面是空的**。
+   *
+   * ★ 清理之后（46 棵全部回收）这正是常态，而它会让本臂红 ——
+   *   那个红与"扫描器坏了"同形（其实它刚刚正常读了 46 棵）。
+   *   ⇒ 区分判据是**目录在不在**：
+   *       · 目录不在     ⇒ 这个检出没有隔离能力（已由上面那个分支处理）
+   *       · 目录在、空   ⇒ ★ **合法地没有 worktree**（如实报出并跳过）
+   *       · 目录在、非空 ⇒ 必须真的扫到（原来的断言）
+   *   ⇒ 关键：**"空"不是"扫不到"** —— 前者是读数，后者是缺陷。
+   */
+  if (rows.length === 0 && existsSync(wtRoot)) {
+    // eslint-disable-next-line no-console
+    console.log('[基线读数] worktrees 目录在、但里面没有 worktree（已回收干净）⇒ 本臂跳过。')
+    // eslint-disable-next-line no-console
+    console.log('  ★ 这是合法状态，与"扫描器什么都没扫到"不同形。\n')
+    return
+  }
+  assert.ok(rows.length > 0, '★ 目录在且非空 ⇒ 必须真的扫到 worktree')
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -578,7 +598,7 @@ async function statusFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
@@ -631,7 +651,7 @@ async function staleWorktreeFixture() {
       getProvider() { return undefined }, list() { return [] },
       sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })

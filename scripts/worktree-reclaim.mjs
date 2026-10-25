@@ -31,6 +31,7 @@
  *   ⇒ ★★ 所以判据是**两个条件的合取**：
  *
  *         (a) 已提交的部分被吸收了：`--is-ancestor <wt HEAD> main`
+ *             　**或者**它的**内容**已经在主干上（按文件落盘 —— 见下）
  *         (b) 未提交的部分没有唯一的产物：**每一个脏的源码文件的内容，
  *             都能在历史里找到**（`git log --all --find-object=<blob>`）
  *
@@ -38,6 +39,28 @@
  *        `lib/` 是构建产物，每次 `pnpm build` 重生成，它脏不构成"唯一产物"。
  *        ★ 这个区分是实测逼出来的：不做它，`task-t16` 会因为
  *          `lib/git-artifact-stamp.json` 一个构建产物而被误判成"有唯一产物"。
+ *
+ * ── ★★★ 而 (a) 还有【另外半边】：`--is-ancestor` 也太【强】了（t9）──────────────
+ *
+ * MEASURED（2026-10-10，captain 在真实使用中量到）：
+ *
+ *   真实合流**不是 merge，是按文件落盘**：
+ *
+ *     成员在 worktree 里提交        ⇒ commit A
+ *     captain **按文件**落进 main  ⇒ commit B（内容相同、**对象不同**）
+ *     ⇒ A **永远不是** B 的祖先 ⇒ 判据**永远**答 keep
+ *
+ *   当天量到：4 棵产物**早已落在 main 上**的 worktree 全部答 keep，占 3.5G。
+ *
+ * ⇒ ★ 所以 (a) 被放宽成**两种形态**（`absorbed` 的 `how` 字段如实带出是哪一种）：
+ *
+ *     `'ancestor'` —— A 是 main 的祖先（真的并进去了）；
+ *     `'content'`  —— A 不是祖先，而它的**内容**已在主干上（按文件落盘）。
+ *     原语：`git patch-id --stable`（与父提交无关的内容规范化 id）。
+ *
+ * ★★ 而**安全那一半一个字没动**：`unique-work` 仍然在**两种形态之后**把树按住
+ *   （见 `src/worktree.ts` 里那个判定与夹具的臂 3）。
+ *   ★ 判据的实现**不在本文件里** —— 本文件只调用它（见下面那一节）。
  *
  * ── ★★ 两层 ────────────────────────────────────────────────────────────────────
  *
@@ -72,15 +95,44 @@
  *
  * ── ★ 三态不同形 ───────────────────────────────────────────────────────────────
  *
- *   `reclaimable` —— 已吸收（列出层与依据）
+ *   `reclaimable` —— 已吸收（列出层与依据；`how` 说清是**哪一种**吸收）
  *   `keep`        —— **不可清**，且说清是哪一种：产物未吸收（附差多少提交）/ 有唯一产物（附文件名）
  *   `undecidable` —— 判不了（不是 git 仓库 / 读不到 HEAD / 没在 worktrees 目录下）
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+/**
+ * ── ★★★ t25：判定这件事**只有一份真值**，而它是 `src/worktree.ts` 那一条 ─────────
+ *
+ * MEASURED（本任务的由来）：`judgeWorktreeReclaimable` 与 `describeReclaimability`
+ * 在 `src/worktree.ts` 里写好了、导出了，而**全仓零调用方**（`gate-producer-consumer`
+ * 的普查点名，captain 独立复跑）—— 本脚本自己**又实现了一遍**同样的问题。
+ *
+ * ⇒ ★★ 而它的后果真的发生了：`--apply` 删掉了 32 个 worktree，
+ *   而那份**权威实现从未被执行过一次**（它没被接线，也没被比对过）。
+ *   ★ 一条没接线、也没被比对过的判据，与一条不存在的判据，
+ *     在"删掉东西"这件事上**没有区别**。
+ *
+ * ── 为什么走 `../lib/`（与 `scripts/*.test.mjs` 一致）──────────────────────────
+ *   `lib/` 才是运行时/脚本真正加载的那一份编译产物（`docs/SOURCE-READING-CONVENTION.md`）。
+ *   ★ 而 `import` 的是**函数本身**（同一个引用），不是"再写一遍同样的判断" ——
+ *     本文件里**不留**那份实现的副本（契约逐字：不许把它改成脚本的私有副本，
+ *     那只是把重复换个位置，而"谁是真值"仍然只有一份）。
+ */
+import { judgeWorktreeReclaimable, describeReclaimability, resolveTrunkRef } from '../lib/worktree.js'
+/**
+ * ★★ 路径名也取**同一份真值**（建树 / 找树 / 这里扫描都用它）。
+ *   `worktreeDirName(teamId, taskId)` 是 `src/worktree.ts` 导出的确定性命名；
+ *   ★ 这里**绝不**自己拼 `task-<id>` —— 两处各拼一遍会在团队前缀那一位上分叉，
+ *     而分叉的表现是"扫不到树"，与"确实没有可清的"同形（本仓记账过的那条）。
+ *     ★ 而 `scripts/worktree-commit.test.mjs` 的臂 12 直接断言
+ *       `src/tools/update-task.ts` 里**不出现**那个字符串字面量。
+ */
+import { worktreeDirName } from '../lib/worktree.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -136,89 +188,88 @@ function git(cwd, args) {
 /**
  * 一个 worktree 的回收判定。
  *
+ * ── ★★★ t25：这个函数**不再自己判断** ─────────────────────────────────────────────
+ *
+ * 它现在只做三件**本脚本特有**的事，而"能不能回收"那件事**交给权威实现**：
+ *
+ *   ① 调 `judgeWorktreeReclaimable`（`src/worktree.ts:360`）—— **唯一的真值**；
+ *   ② 把它的三态**原样透传**（`reclaimable` / `keep` / `undecidable` 各自的字段一个不改）；
+ *   ③ 补上**本脚本才知道**的那几格：`worktree`（路径）、`layers`（依赖那一层）、
+ *      `bytes`（由上层填）、以及 `describeReclaimability` 给的人话。
+ *
+ * ── ★ 为什么 `layers` 不进权威实现 ──────────────────────────────────────────────
+ *   它是**删除策略**（"依赖那一层要不要也删"），不是"能不能删" ——
+ *   而"能不能删"才是那条判据回答的问题。把策略塞进判据会让两件事同形。
+ *
+ * ── ★★ 三态照旧**不同形**，且 `undecidable` 绝不当成 `reclaimable` ──────────────
+ *   权威实现已经保证三者字段互不共用（见 `WorktreeReclaimability`），
+ *   本函数**不再二次判断** —— 一次判断两处实现，正是本任务要消灭的东西。
+ *
  * @returns `{ status: 'reclaimable'|'keep'|'undecidable', ... }`
- *   ★ 三态**不同形**：可清的带 `layers`；不可清的带 `reason` 与它的证据；
- *     判不了的带 `why`。三者没有任何两个共用同一组字段。
  */
-export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits = DEFAULT_STALE_COMMITS, budget }) {
-  const head = git(worktree, ['rev-parse', 'HEAD'])
-  if (head === undefined) {
-    return { status: 'undecidable', worktree, why: 'HEAD could not be read (not a git checkout, or no commit yet)' }
-  }
-  const mainHead = git(repo, ['rev-parse', '--verify', '--quiet', `${mainRef}^{commit}`])
-  if (mainHead === undefined) {
-    return { status: 'undecidable', worktree, why: `the trunk ref "${mainRef}" could not be resolved in ${repo}` }
-  }
-
+export function judgeWorktree({ repo, worktree, mainRef, staleCommits = DEFAULT_STALE_COMMITS, budget }) {
   /**
-   * ★ (a) 已提交的部分是否被吸收。
-   *   `--is-ancestor` 退出 0 ⇒ 这个 worktree 的 HEAD 在主干的历史里。
-   */
-  const absorbed = (() => {
-    try {
-      execFileSync('git', ['merge-base', '--is-ancestor', head, mainHead], {
-        cwd: repo, stdio: ['ignore', 'pipe', 'pipe'],
-      })
-      return true
-    } catch {
-      return false
-    }
-  })()
-
-  /** 落后主干的提交数 —— 依赖那一层的门槛，也用作"差多少"的读数。 */
-  const behindText = git(repo, ['rev-list', '--count', `${head}..${mainHead}`])
-  const behind = behindText === undefined ? undefined : Number.parseInt(behindText, 10)
-
-  /**
-   * ★★ (b) 未提交的部分有没有【唯一的产物】。
+   * ── ★★★ W1：本函数**不再有** `mainRef = 'main'` 这条静默缺省 ────────────────────
    *
-   *   MEASURED：只看 (a) 会删掉 7 份唯一的源码（见文件头）。
-   *   ⇒ 逐个数每个脏的**源码**文件的内容是不是在历史里。
-   *   ★ `lib/` 不算：它是构建产物，每次 build 重生成。
+   *   旧写法逐字是 `mainRef = 'main'`。它与权威实现里的 `mainRef = 'main'` 是
+   *   **同一个缺陷的两份副本**，而本仓的集成**不在** `main` 上
+   *   （实测 `main` 落后集成分支 HEAD 209 个提交）⇒ 两条路径都在比错的引用。
+   *
+   *   ⇒ 现在：不给就交给 `resolveTrunkRef`（声明式来源），它答 `unresolved`
+   *     就**如实说判不了** —— 而**不**退回一个字面量。
+   *     ★ 这一层**必须**也删掉缺省，而不是只删 `src/` 那份：
+   *       生产接线经 `update-task.ts` 动态加载的正是**本文件**
+   *       （`loadWorktreeReclaimModule()`），脚本层留一个缺省等于缺陷还在。
    */
-  const dirty = (git(worktree, ['status', '--porcelain']) ?? '').split('\n').filter((line) => line.trim() !== '')
-  const dirtyPaths = dirty.map((line) => line.slice(3).trim().replace(/^"|"$/g, ''))
-  const sourceDirty = dirtyPaths.filter((path) => !path.startsWith('lib/') && !path.endsWith('git-artifact-stamp.json'))
-  const orphaned = []
-  for (const path of sourceDirty) {
-    const full = join(worktree, path)
-    if (!existsSync(full)) continue
-    const blob = git(worktree, ['hash-object', path])
-    if (blob === undefined) continue
-    /** ★ 内容在**任何**提交里出现过吗 —— 出现过 ⇒ 它不是唯一的那一份。 */
-    const found = git(repo, ['log', '--all', '--oneline', `--find-object=${blob}`])
-    if (found === undefined || found === '') orphaned.push(path)
+  const trunk = resolveTrunkRef(repo, mainRef)
+  if (trunk.status === 'unresolved') {
+    /**
+     * ★ 人话走**同一个函数**（`describeReclaimability`），不在这里另写一句 ——
+     *   否则"判不了"在两条路径上会有两种措辞，而其中一种可能被读成"可以删"。
+     *   （第一版就是 `reason: trunk.why`：那不是那句话，臂 T25-3 立刻变红。）
+     */
+    const undecided = { status: 'undecidable', why: trunk.why }
+    return { status: 'undecidable', worktree, why: trunk.why, reason: describeReclaimability(undecided) }
   }
+  /**
+   * ★ 权威裁决 —— **同一个函数引用**，不是"再写一遍同样的判断"。
+   *   传的是**解析出来的那个引用名**（不是另一个字面量）：权威会再核验一次它的 commit，
+   *   两次核验看着冗余，而它们问的是不同的事 —— 这里问"这个仓库认不认这个名字"，
+   *   权威问"拿到这个名字之后我到底比的是哪个 sha"。
+   */
+  const verdict = judgeWorktreeReclaimable({ repo, worktree, mainRef: trunk.ref })
 
-  /** ── 判定的顺序：先答"能不能清"，再答"清哪一层" ──────────────────────────────── */
-  if (!absorbed) {
-    return {
-      status: 'keep',
-      worktree,
-      reason: 'not-absorbed',
-      behind,
-      detail: `its HEAD (${head.slice(0, 12)}…) is not an ancestor of ${mainRef} `
-        + `(${mainHead.slice(0, 12)}…) — its committed work is not in the trunk yet`
-        + (behind === undefined ? '' : `, and it is ${behind} commit(s) behind it`),
-    }
+  /**
+   * ★ `undecidable` ⇒ **原样交出去**，且**不**补任何"可清"的字段。
+   *   它判不了 ≠ 它可以清（契约逐字钉住这一条）。
+   */
+  if (verdict.status === 'undecidable') {
+    /**
+     * ★ 这里**不**带 `trunk`：权威在它那一步答 `undecidable` 时也没有这一格
+     *   （没比成，自然没有"比的谁"）。三态的字段区分在这里保持一致。
+     */
+    return { status: 'undecidable', worktree, why: verdict.why, reason: describeReclaimability(verdict) }
   }
-  if (orphaned.length > 0) {
+  if (verdict.status === 'keep') {
     return {
       status: 'keep',
       worktree,
-      reason: 'unique-work',
-      orphaned,
-      behind,
-      detail: `${orphaned.length} uncommitted source file(s) exist ONLY here — their content appears in no commit `
-        + `(${orphaned.slice(0, 3).join(', ')}${orphaned.length > 3 ? ', …' : ''}); deleting this worktree would lose them`,
+      trunk: verdict.trunk,
+      reason: verdict.reason,
+      behind: verdict.behind,
+      detail: verdict.detail,
+      /** ★ 只有 `unique-work` 才有这一格（权威的两种 keep **不同形**，这里保持）。 */
+      ...verdict.orphaned === undefined ? {} : { orphaned: verdict.orphaned },
+      /** ★ 人读的那一句 —— 由 `describeReclaimability` 给（它是零消费的另一条）。 */
+      human: describeReclaimability(verdict),
     }
   }
 
   /**
-   * ★ 可清 —— 而**两层各自独立**：一个 worktree 可能依赖该清而整体该留
-   *   （例如它刚落后 25 个提交、而产物已吸收 → 两层都可清；
-   *    或它落后 3 个提交而产物已吸收 → 依赖还新，但整体可清）。
+   * ── 可清 —— 而**两层各自独立**：一个 worktree 可能依赖该清而整体该留 ────────────
+   *   （★ 这一格是**删除策略**，本脚本特有，所以它留在这里。）
    */
+  const behind = verdict.behind
   const layers = []
   const hasDeps = existsSync(join(worktree, 'node_modules'))
   if (hasDeps && behind !== undefined && behind >= staleCommits) {
@@ -229,9 +280,52 @@ export function judgeWorktree({ repo, worktree, mainRef = 'main', staleCommits =
   }
   layers.push({
     layer: 'worktree',
-    why: `HEAD (${head.slice(0, 12)}…) is an ancestor of ${mainRef}, and no uncommitted source file is unique to it`,
+    /**
+     * ★★★ 这一句是**措辞**，不是判断 —— 判断在权威实现里（见上面那一节）─────────────
+     *
+     * ★ 它此前逐字写死成 "HEAD is an ancestor of main"，而那在 t9 之后**会变成假话**：
+     *   按文件落盘的那一类树，其 HEAD **不是**主干的祖先（那正是原来的缺陷）。
+     *   ⇒ 于是那一行日志会对一棵"内容已落盘"的树宣称它"是祖先" ——
+     *     而读日志的人据此去 `git merge-base` 复核会得到相反的答案。
+     * ⇒ 所以它按权威给出的 `how` 分句说。
+     *   ★ 这些句子**没有**做任何判断：`how` 是权威传下来的字段，
+     *     本脚本只决定"怎么把它说成人话"。
+     *
+     * ── ★★★ t34：现在是**三**句，而它们必须**互不同形** ────────────────────────────
+     *
+     *   `'ancestor'` —— 真的并进去了  ⇒ 复核：`git merge-base --is-ancestor`
+     *   `'content'`  —— patch-id 命中（cherry-pick 那类）⇒ 复核：`git patch-id`
+     *   `'files'`    —— ★ 逐文件相同（**手工落盘**）⇒ 复核：`git rev-parse <ref>:<path>`
+     *   ★★ 若把 `'files'` 并进 `'content'` 那一句（本文件此前只有两句），
+     *     读日志的人会去查 patch-id —— 而**恰恰**是 patch-id 不命中的那一类
+     *     ⇒ 复核动作指向一个必然失败的查法，而那读起来像"日志在撒谎"。
+     */
+    why: verdict.how === 'ancestor'
+      ? `HEAD is an ancestor of ${trunk.ref}, and no uncommitted source file is unique to it`
+      : verdict.how === 'content'
+        ? `the commit's change is already on ${trunk.ref} with the same patch-id (cherry-picked), and no uncommitted source file is unique to it`
+        : verdict.how === 'files'
+          ? `every file the commit touched is byte-identical at ${trunk.ref}'s tip (landed by hand), and no uncommitted source file is unique to it`
+          /**
+           * ★★ 第四句：与上一句**必须不同形**，且要点明"主干顶端可能已经又动过"。
+           *   ⇒ 两者的**复核动作不同**：`'files'` 对主干顶端逐文件比；
+           *     `'contained'` 要在主干**历史**里找那份内容（`git log <tip> --find-object`）。
+           */
+          : `the content of every file the commit touched is contained in ${trunk.ref}'s history (merged in; the tip may have moved on), and no uncommitted source file is unique to it`,
   })
-  return { status: 'reclaimable', worktree, layers, behind, hasDeps }
+  return {
+    status: 'reclaimable',
+    worktree,
+    /** ★ 这一次拿谁比的（W1）—— `how` 那四句措辞念的就是它的 `ref`。 */
+    trunk: verdict.trunk,
+    layers,
+    behind,
+    hasDeps,
+    reason: verdict.reason,
+    /** ★ 权威给的那一格（`'ancestor'`｜`'content'`｜`'files'`）—— 原样透传，读的人据此复核。 */
+    how: verdict.how,
+    human: describeReclaimability(verdict),
+  }
 }
 
 /** 目录占用的近似字节数（`du -sk` 一位小数够用；读不到 ⇒ `undefined`）。 */
@@ -260,14 +354,206 @@ export function listWorktrees(repo) {
 }
 
 /**
+ * ── ★★★★★ 删一棵 worktree —— 而它必须**连 git 的台账一起清掉** ────────────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED）─────────────────────────────────────────────────
+ *
+ * 此前两处删除点（`planReclaim` 的 `wouldApply` 循环、`reclaimWorktreeAfterDelivery`
+ * 的默认 `remove`）都是裸的：
+ *
+ *     rmSync(path, { recursive: true, force: true })
+ *
+ * ★ 那一句**只删了目录**，而 git 的 worktree 台账里那条记录**还在**。
+ *   ⇒ 之后 `git worktree list` 里那条路径仍然出现，只是被标成 `prunable`。
+ *   ⇒ 后果不是"多余一行"：此后每一次 `git worktree list` / `git worktree add`
+ *     都要绕开一个**已经不存在**的路径，而 `prunable` 这个标记**不会自己消失**
+ *     （裸 `git worktree prune` 只清"最后活动在 24 小时以前"的那些 —— 见下）。
+ *   ⇒ 而它的最坏形态是**与"我删干净了"同形**：目录不在了，读数却说是"有棵树"。
+ *
+ * ── ★★★ 快路径：`git worktree remove --force` —— 一条命令做完两件事 ───────────────
+ *
+ * 它**既删目录、又清台账**（这两件事在 git 内部本来就是一次操作的两半）。
+ * ⇒ 目录还在时一律走它，而不是"先 rmSync 再 prune"：
+ *   后者把一个原子的动作拆成两步，中间那一瞬就正是"目录没了、台账还在"的形状。
+ *
+ * ── ★★★ 兜底：目录已经不在（或上面那条失败）⇒ `rmSync` + `prune --expire=now` ──────
+ *
+ * ★ 写 `--expire=now` 而**不是**裸 `prune`：本函数的语义是「我刚删的那条路径，
+ *   它的台账立即无效」。
+ *   `git worktree prune` 的默认过期期是 **24 小时**（`gc.worktreePruneExpire`），
+ *   而"24 小时"这条语义**与本次删除无关** —— 所以显式把窗口压到 0，
+ *   让"我删的这条立刻无效"成为**由参数保证**的事，而不是**依赖某个版本的默认值**。
+ *
+ * ── ★★ MEASURED（2026-10-10，本机 git 2.50.1 Apple Git-155）：在本机，
+ *    裸 `prune` **确实**会清掉一条**刚**变成幽灵的条目 ─────────────────────────────
+ *
+ *   实测（本目录下的一个临时仓库，用一个 < 1 秒年龄的幽灵）：
+ *
+ *     $ git worktree add --detach .agent-teams/worktrees/task-r2 main
+ *     $ rm -rf .agent-teams/worktrees/task-r2      # 目录没了、台账还在
+ *     $ git worktree prune -v
+ *     Removing worktrees/task-r2: gitdir file points to non-existent location
+ *
+ *   ⇒ ★★ 本任务书里那条"裸 prune 的 24 小时过期期会放过它"的说法，
+ *     **在本机这个 git 上不成立** —— 因为那条记录属于"gitdir file points to
+ *     non-existent location"这一类，git 对它**直接判死**，不看年龄。
+ *     （24 小时那一档管的是**另一类**：工作树目录还在、只是被判为 unused。）
+ *   ⇒ 所以这里**不能**写"裸 prune 会放过它"来为 `--expire=now` 辩护 ——
+ *     那是一句**与本机实测相反**的话，而它会让下一个人去信一条假机制。
+ *
+ * ★★ 那为什么**仍然**写 `--expire=now`？两条**真的**成立的理由：
+ *   ① 它把"立即失效"这件事变成**显式的**：本函数不依赖 git 的默认值、也不依赖
+ *      那条记录恰好被判进"直接判死"那一类 —— 换一个 git 版本、换一种幽灵形态
+ *      （例如目录还在、只是 gitdir 文件丢了），`--expire=now` 照样对；
+ *      而裸 `prune` 在那几种形态下的行为**要先测过才知道**。
+ *   ② 它把**窗口**表达出来：本函数刚删的那条路径，不许有任何"再看 24 小时"的余地。
+ *   ★ 也就是说：`--expire=now` 在这里是**把语义写进参数**，
+ *     而不是"因为裸 prune 会失败"—— 后者是假的。
+ *
+ * ── ★★★ 夹具（臂 B2）钉的是**这一格事实**，不是那句假话 ────────────────────────
+ *   臂 B 证明"幽灵被清掉了"；而臂 B2 把上面这段实测**写成可执行的**：
+ *   它当场比较裸 prune 与 `--expire=now` 的行为，而不是断言某一个特定结局 ——
+ *   ★ 这样它在任何 git 版本上都**只会因为事实变了而红**，不会因为措辞变了而假绿。
+ *
+ * ★★ 两个半边**都要**成立（本函数的契约）：
+ *   (a) 活的树  ⇒ 走快路径，目录与台账一起没；
+ *   (b) 已经是幽灵 ⇒ 目录早没了、台账还在 ⇒ 兜底那句 `prune --expire=now` 清掉它。
+ *   两者都会真的发生：(b) 正是"上一个版本用裸 `rmSync` 删过"的那些残留 ——
+ *   也就是说，这个函数要能清掉**它自己前身留下的**幽灵。
+ *
+ * ── ★ 失败必须【抛】 ────────────────────────────────────────────────────────────
+ *   绝不静默吞掉：调用方要靠这个异常留一条可读的痕迹
+ *   （见 `planReclaim` 里那一支把它记成 `undecidable` + `why`）。
+ *   ★ 一个静默失败的删除与"没删"同形，而盘上留下的那棵树没人会知道。
+ *
+ * ★ 为什么它导出：删除必须**只有一个出处**（`src/tools/update-task.ts` 通过动态
+ *   import 复用同一个函数）。两份实现分叉时，其中一份会把幽灵留下而没人发现。
+ */
+export function removeWorktree({ repo, worktree }) {
+  /**
+   * ★ 判"目录还在不在"用 `existsSync`：目录不在时 `git worktree remove` 会**失败**
+   *   （它要删的那个 checkout 不在盘上），而失败之后走兜底 ⇒ 结果一样。
+   *   显式先判一次只是让快慢两条路的**选择**可读，而不是靠异常兜圈子。
+   */
+  if (existsSync(worktree)) {
+    execFileSync('git', ['worktree', 'remove', '--force', worktree], {
+      cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    /**
+     * ★ 快路径**成功**也要再清一次台账吗？—— 不要，而且不许。
+     *   `git worktree remove` 成功就意味着那条台账已经没了；再 prune 一次是
+     *   一个**没有读数的多余动作**（它若恰好清掉了*别的*过期条目，
+     *   那件事会被记在本函数的账上 —— 一个函数只该动它被点名的那条路径）。
+     */
+    return
+  }
+  removeWorktreeFallback({ repo, worktree })
+}
+
+/**
+ * 兜底那一半（目录已经不在 / 快路径失败）：先删目录，再**立即**清台账。
+ * ★ 单独抽出来是为了让上面那个函数读起来就是"两条路"，而不是一堆嵌套 try。
+ */
+function removeWorktreeFallback({ repo, worktree }) {
+  rmSync(worktree, { recursive: true, force: true })
+  execFileSync('git', ['worktree', 'prune', '--expire=now'], {
+    cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+/**
  * ── 干跑 / 执行 ─────────────────────────────────────────────────────────────────
  *
  * ★ `apply: false`（默认）⇒ **绝不删除任何东西**，只报清单与预计回收。
  * ★ `apply: true` ⇒ 删之前**仍然打印清单**，让日志里能对上"预计"与"实际"。
  */
-export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes } = {}) {
-  const worktrees = listWorktrees(repo)
-  const judged = worktrees.map((worktree) => judgeWorktree({ repo, worktree, mainRef, staleCommits }))
+/**
+ * ── ★★★ 哪些 worktree 目录**属于一条还没结束的任务**（G8 的判据本体）──────────────
+ *
+ * @returns `undefined` ⇒ 调用方**没给** `tasks`（"我不知道任务状态"，不是"没有活任务"）；
+ *          否则返回一个谓词：给定 worktree 绝对路径，答它是不是**活任务**的树。
+ *
+ * ★★ `undefined` 与"返回一个恒假谓词"必须不同形：
+ *   前者是"没人问过"，后者是"问过了，没有一条是活的"。
+ *   把它们合成一个，会让"CLI 没接线"与"所有任务都做完了"在读数上同形 ——
+ *   而那正是本仓记了一路的那类合流。
+ *
+ * ★ 为什么按 `worktreeDirName` 反推而不是解析路径字符串：
+ *   命名规则只有一处真值（`src/worktree.ts:193`），自己拼一遍会在团队前缀那一位分叉
+ *   —— `scripts/worktree-reclaim.mjs:129-133` 的注释已经为同一个理由写过一次。
+ */
+function liveWorktreeIdsOf(repo, tasks) {
+  if (tasks === undefined) return undefined
+  const root = join(repo, '.agent-teams', 'worktrees')
+  const live = new Set()
+  for (const task of tasks ?? []) {
+    if (isTerminalTask(task)) continue
+    if (typeof task?.id !== 'string' || task.id === '') continue
+    const path = join(root, worktreeDirName(task.teamId, task.id))
+    live.add(path)
+  }
+  return (path) => live.has(path)
+}
+
+export function planReclaim({ repo = REPO_ROOT, mainRef, staleCommits = DEFAULT_STALE_COMMITS, apply = false, budgetBytes, tasks } = {}) {
+  /**
+   * ── ★★★ G8：一条**非终态**任务的树，连判都不判（2026-10-20 补）──────────────
+   *
+   * ── 缺陷（t15 独立复核实测）──────────────────────────────────────────────────
+   *
+   * `listWorktrees(repo)` 是**裸目录枚举** —— 它不知道"这棵树属于哪条任务、
+   * 那条任务做完了没有"。于是：
+   *
+   * ```
+   *   任务 in_progress ⇒ scanTerminalWorktrees: scanned=0（连判都不判）
+   *                    ⇒ planReclaim:          judge ⇒ reclaimable=1（会删）
+   * ```
+   *
+   * ⇒ **`pnpm reclaim:worktrees:apply` 会删掉一个成员正在写的目录。**
+   *
+   * ── 为什么判据本身不改 ────────────────────────────────────────────────────────
+   *
+   * `judgeWorktreeReclaimable` 回答的是「这棵树的产物**被吸收了吗**」，
+   * 而"这棵树**还有人用吗**"是**另一个问题**。对一棵刚建、HEAD 仍是上游祖先的树，
+   * `ancestor` 这个答案**是真的** —— 判据没错，错的是**调用路径**把两个问题
+   * 当成了一个。这与 `docs/DEFECT-VERIFY-RERUN-WRONG-CWD.md` 里的 A/B/本缺陷
+   * 是同一族的第三、四例：**判据算对了，但它读的输入不是你以为的那个。**
+   *
+   * ── 三态：给了 tasks / 没给 tasks ─────────────────────────────────────────────
+   *
+   *   给了 `tasks`   ⇒ 按 `scanTerminalWorktrees` 的**同一口径**过滤（非终态跳过）
+   *   没给 `tasks`   ⇒ **保持今天的行为**（裸目录枚举），但那是一条**明确的选择**：
+   *                    调用方要为自己的调用负责。★ 而 CLI 那条路**现在必须给** ——
+   *                    见下面的 `assertLiveTasksKnown`。
+   *
+   * ★ 为什么用"跳过"而不是"判成 keep"：跳过意味着它**不出现在任何清单里**，
+   *   而 keep 会出现在 `keep` 那一栏 —— 后者会让读的人以为"判据说它该留着"，
+   *   而真相是"没人问过它"。这与 `scanTerminalWorktrees:629` 的口径逐字一致。
+   */
+  const liveTaskIds = liveWorktreeIdsOf(repo, tasks)
+  const worktrees = listWorktrees(repo).filter((path) => liveTaskIds === undefined || !liveTaskIds(path))
+  /**
+   * ── ★★★ W1：整份计划**只解析一次**主干引用 ──────────────────────────────────────
+   *
+   *   ★ 为什么是"一次"而不是每棵树各解析一次：
+   *     ① 一份计划里的所有裁决必须拿**同一个**引用比，否则读数是拼出来的
+   *        （而"逐棵各解一次"在解析器会随 git 状态变的场合等于自欺）；
+   *     ② 解析结果**要交出去**（`trunk` 那一格）—— 一份说不出"拿谁比的"的计划，
+   *        正是本缺陷的形态：数字齐全、而比较对象是错的。
+   *
+   *   ★ 而 `unresolved` ⇒ **整份计划一个都不删**：没有主干就无从判定，
+   *     无从判定不等于可以清。它不靠"每棵树各自变 undecidable"来实现，
+   *     而是在这里就**明确**说出来（`applied: false` 且带 `why`）。
+   */
+  const trunk = resolveTrunkRef(repo, mainRef)
+  const judged = trunk.status === 'unresolved'
+    ? worktrees.map((worktree) => ({
+        status: 'undecidable',
+        worktree,
+        why: trunk.why,
+        reason: trunk.why,
+      }))
+    : worktrees.map((worktree) => judgeWorktree({ repo, worktree, mainRef: trunk.ref, staleCommits }))
   for (const entry of judged) {
     const bytes = directoryBytes(entry.worktree)
     if (bytes !== undefined) entry.bytes = bytes
@@ -286,13 +572,27 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
    *   ★ 而它只影响【是否真删】，不影响干跑的清单（清单永远如实报）。
    */
   const withinBudget = budgetBytes === undefined || projectedBytes >= budgetBytes
-  const wouldApply = apply && withinBudget
+  /**
+   * ★★ 三道**合取**，缺一不可：调用方要删 ∧ 预算够 ∧ **主干引用解析出来了**。
+   *   最后那道是 W1 加的：没有一个能核验的主干，`reclaimable` 本来就该是空集
+   *   （每棵树各自 `undecidable`），而这里**再显式门一次**是故意的 ——
+   *   免得将来有人只改了上面那半、把"没主干"重新读成"可以删"。
+   */
+  const wouldApply = apply && withinBudget && trunk.status === 'resolved'
 
   const removed = []
   if (wouldApply) {
     for (const entry of reclaimable) {
       try {
-        rmSync(entry.worktree, { recursive: true, force: true })
+        /**
+         * ★★★ 删除**只走 `removeWorktree`**（不是裸 `rmSync`）───────────────────────
+         *
+         * 定向突变：把这一句改回 `rmSync(entry.worktree, { recursive: true, force: true })`
+         *   ⇒ 目录没了、而 `git worktree list` 里那条路径仍在（标成 `prunable`）
+         *   ⇒ 夹具的臂 A 变红。★ 那个红**不是**洁癖：`prunable` 条目会让此后
+         *   每一次 `git worktree list` 都在报告一棵不存在的树。
+         */
+        removeWorktree({ repo, worktree: entry.worktree })
         removed.push(entry.worktree)
       } catch (error) {
         entry.status = 'undecidable'
@@ -303,21 +603,155 @@ export function planReclaim({ repo = REPO_ROOT, mainRef = 'main', staleCommits =
 
   return {
     scanned: worktrees.length,
+    /** ★ 这份计划**拿谁比的**（W1）。`unresolved` ⇒ 带 `why`，且一个都没删。 */
+    trunk,
     reclaimable,
     keep,
     undecidable,
     projectedBytes,
     removed,
+    /** ★ `unresolved` 时**绝不**报 `applied: true` —— 什么都没判定，就不许说删了。 */
     applied: wouldApply,
     withinBudget,
   }
 }
 
-/** 一行痕迹。★ 没有它，「清理过」与「没清理」在观测上同形。 */
+/**
+ * ── ★★★ 「终态」的定义**只有一份真值**：`src/types.ts` 的 `TERMINAL_TASK_STATUSES` ──
+ *
+ *     export const TERMINAL_TASK_STATUSES: readonly TaskStatus[] =
+ *       ['completed', 'failed', 'cancelled']
+ *
+ * ★ 为什么这里**镜像**而不是 import：`src/types.ts` 是 TypeScript，
+ *   而本文件是脚本层（`.mjs`，被 `scripts/*.test.mjs` 与本 CLI 直接跑）——
+ *   它没有编译步骤可依赖。⇒ 所以镜像，并把**来源与取值逐字写在这里**：
+ *     哪天那个数组改了，这里有一行可 diff 的对照，而不是一个漂移的猜测。
+ *   ★（生产那半边走的是**真正的 import** —— 见 `src/tools/update-task.ts`：
+ *     它 import 的就是 `../types.ts`。本镜像只服务于脚本层。）
+ *
+ * ── ★★ 不知道的状态 ⇒ 【拒答】，而不是猜 ────────────────────────────────────────
+ *   本函数返回的是 `boolean`，而它门住的是**删除**。
+ *   ⇒ 一个没见过的状态（拼错的、将来新增的）必须落到 `false`：
+ *     "我不认识它"绝不能被读成"它是终态、可以删"。
+ *     ★ 三态在这里被压成两态是**故意的**：`scanTerminalWorktrees` 的问法是
+ *       "这条任务还会不会再被更新"，而"不知道"对那个问题的安全答案是"会"。
+ */
+export function isTerminalTask(task) {
+  const status = task?.status
+  if (typeof status !== 'string') return false
+  /** ★ 镜像自 `src/types.ts` 的 `TERMINAL_TASK_STATUSES`（见上）。 */
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
+}
+
+/**
+ * ── ★★★★★ 终态扫描：一个**已经**终态的任务，此后不会再被更新 ────────────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED，本任务的由来）───────────────────────────────────
+ *
+ * 生产接线（`reclaimWorktreeAfterDelivery`）只在**终态转换那一刻**判一次。
+ * ⇒ 而"产物交付时还没被合流"是**常态**（`commitWorktree` 从不合进 `main`）——
+ *   那一刻的判据必然答 `keep / not-absorbed`，而它明写着"将在**下一次**终态转换时重判"。
+ * ★★ 而**下一次**对一条已经终态、此后不再变化的运行来说**永远不会来**：
+ *   一条 `completed` 的任务不会再被更新 ⇒ **没有任何时刻**会重判它
+ *   ⇒ 一棵产物早已被合流进主干的树，**永久**留在盘上。
+ *   这与"任务已终态"是两件事 —— 判据仍然是「产物已被吸收」，
+ *   变的只是"**谁**在什么时刻去问它"。
+ *
+ * ── ★★★ 三态仍然**只有一份真值** ──────────────────────────────────────────────
+ *   本函数一行"吸收与否"的推理都没有：它把每一棵树交给 `judgeWorktree`
+ *   （进而 `judgeWorktreeReclaimable`）⇒ 与 CLI、与生产接线**同一个**答案。
+ *
+ * ── ★★★ 它是**纯规划器**：它【不】删任何东西 ────────────────────────────────────
+ *   删除是**调用方**的下一步，而且**只在一个地方**做（`removeWorktree`）。
+ *   ★ 为什么这样分：判定正确与删除正确是两件事，而"顺手删了"会让
+ *     「这条臂测的是判定」与「这条臂测的是删除」同形 —— 出红时读不出是哪一半坏了。
+ *   ⇒ 所以：`scanTerminalWorktrees` 答"哪些可清"，调用方拿这个清单去删。
+ *
+ * ── ★★ 安全那一半：[非终态] 的任务【不判、不删】────────────────────────────────
+ *   一条还没结束的任务，它的树**正在被写** ⇒ 判定它没有意义（而删它是灾难）。
+ *   ⇒ 本函数在**判定之前**就把非终态剔掉（不是判完了再忽略结果）——
+ *     两者的区别在于"有没有去碰那棵树"。
+ */
+export function scanTerminalWorktrees({ repo = REPO_ROOT, tasks, mainRef }) {
+  const root = join(repo, '.agent-teams', 'worktrees')
+  /**
+   * ★★ W1：整次扫描**只解析一次**主干引用（理由与 `planReclaim` 同）。
+   *   ⇒ 解析不出来时**不是**逐棵树各自报 `undecidable`（那读起来像"这批树都判不了"），
+   *     而是把**原因**交出去，并让清单为空 —— 因为**一次判定都没发生**。
+   */
+  const trunk = resolveTrunkRef(repo, mainRef)
+  const scanned = []
+  const reclaimable = []
+  const kept = []
+  const undecidable = []
+  for (const task of tasks ?? []) {
+    /**
+     * ★ 非终态 ⇒ **连判都不判**（见上面那一节）。未知状态同样落在这里 ——
+     *   `isTerminalTask` 对不知道的状态答 `false`，而不是猜。
+     */
+    if (!isTerminalTask(task)) continue
+    if (typeof task?.id !== 'string' || task.id === '') continue
+    const worktree = join(root, worktreeDirName(task.teamId, task.id))
+    /**
+     * ★ 目录不存在 ⇒ **这条任务压根不在这张名单上**（而不是"判了个 absent"）。
+     *   它与"树在而判据说保留"是两件事，读的人要能分开。
+     */
+    if (!existsSync(worktree)) continue
+    /**
+     * ★ 没有可核验的主干 ⇒ 这一棵树**连判都不判**：判了也只能得到一个
+     *   带 `unresolved` 的 `undecidable`，而"整批都没比成"与"逐棵判不了"
+     *   是两件事（后者会诱使人去看那几棵树）。
+     */
+    if (trunk.status === 'unresolved') continue
+    const verdict = judgeWorktree({ repo, worktree, mainRef: trunk.ref })
+    scanned.push(verdict)
+    if (verdict.status === 'reclaimable') reclaimable.push(verdict)
+    else if (verdict.status === 'keep') kept.push(verdict)
+    else undecidable.push(verdict)
+  }
+  return { trunk, scanned, reclaimable, kept, undecidable }
+}
+
+/**
+ * 一行痕迹。★ 没有它，「清理过」与「没清理」在观测上同形。
+ *
+ * ── ★★★ 落点必须跟着 `repo` 走（t7 修；此前 `repo` 被【解构了却没用】）────────────
+ *
+ * MEASURED（t7，`scripts/gate-shared-artifact-writes.test.mjs` 臂 4）：
+ *   本函数此前签名收 `repo`，而函数体里写的是**模块级**的 `RECLAIM_LOG`
+ *   —— `repo` 一个字节都没被读过。⇒ 后果是一条**看起来被隔离、其实没有**的写：
+ *
+ *     `scripts/worktree-reclaim.test.mjs` 臂 12 传 `repo: f.repo`（一个 mkdtemp 私有树），
+ *     还专门写了一句「★ 落到一个临时路径（不污染真实仓库）」
+ *     —— ★ 而它实际写的是**仓库根的** `.agent-teams/reclaim-log.jsonl`。
+ *
+ * ★ 这正是本队记账最久的形态的一种：**一个参数在场，于是读的人以为那条路被堵住了**
+ *   —— 「写了 `repo:` 」与「真的写到 `repo` 去了」在源码上同形。
+ *   ★ 而它还有第二重危害：**并发**。多个夹具同时跑 ⇒ 它们全都在追加**同一个**共享文件
+ *     —— 那正是本判据（t68）存在的理由：两个动作在同一个共享资源上没有序关系。
+ *
+ * ── 修法：把落点**从参数算出来**，而不是从模块常量拿 ──────────────────────────────
+ *
+ * `join(repo, '.agent-teams', 'reclaim-log.jsonl')` —— 与 `RECLAIM_LOG` 的构造**同一个形状**
+ * （见上面它的定义：`join(ROOT, '.agent-teams', …)`），于是：
+ *
+ *   · 生产路径（不传 `repo`）⇒ `repo = REPO_ROOT` ⇒ 落点**逐字节等于**原来的 `RECLAIM_LOG`
+ *     ⇒ ★ 痕迹的用途（"清理过"读得出来）**一个字都没变**，我**没有**把它改成私有副本。
+ *   · 夹具路径（传 `repo: f.repo`）⇒ 落进那棵**私有树** ⇒ 不再与任何人共享。
+ *
+ * ★★ 为什么不是"把 `RECLAIM_LOG` 整个换成 tmpdir"：那是**错的修法** ——
+ *   这条痕迹的价值就在于它是**生产可读**的（`reclaim:worktrees` 跑完要在仓库里留一行）。
+ *   判据要的是"**别在共享树上写**"，而生产 CLI 的 `repo` **就是**它自己的仓库 ——
+ *   那不是"共享"，那是"它自己的落点"。★ 所以修的是**参数被忽略**，不是"别再写了"。
+ */
 export function recordReclaim({ repo = REPO_ROOT, result, reason }) {
   try {
-    mkdirSync(dirname(RECLAIM_LOG), { recursive: true })
-    appendFileSync(RECLAIM_LOG, `${JSON.stringify({
+    /**
+     * ★ 落点由 `repo` 算出（默认 `REPO_ROOT` ⇒ 与原 `RECLAIM_LOG` 逐字节相同）。
+     */
+    const logPath = join(repo, '.agent-teams', 'reclaim-log.jsonl')
+    mkdirSync(dirname(logPath), { recursive: true })
+    appendFileSync(logPath, `${JSON.stringify({
       at: new Date().toISOString(),
       reason,
       scanned: result.scanned,
@@ -332,6 +766,51 @@ export function recordReclaim({ repo = REPO_ROOT, result, reason }) {
   }
 }
 
+/**
+ * ── ★★★ 盘上**所有**团队的任务，以及读不出来的那些队（G8）──────────────────────────
+ *
+ * @returns `{ tasks, unreadable }`：
+ *   `tasks`      —— 所有能读到的 team.json 里的任务（每条的 `id` 已带 `teamId`，
+ *                   见下）；
+ *   `unreadable` —— 读不出来的队名。★ **不许静默跳过**：
+ *                   "读不到"与"没有活任务"在删除决策上后果相反。
+ *
+ * ★★ 为什么每条任务要补 `teamId`：`worktreeDirName(teamId, taskId)` 的目录名
+ *   带团队前缀（`task-<team>-<id>`），而 `team.json` 里的任务**不带 teamId**
+ *   （它就是那个文件所属的队）。⇒ 在这里补，而不是在 `planReclaim` 里猜。
+ *   ★ 而 `teamId` 缺失时目录名会退化成 `task-<id>`（`src/worktree.ts:193` 的
+ *     "不给 teamId 时保持旧形状"）—— 那会让活树匹配不上而被误删。
+ *     所以这里**一定**补上，并用真正的 `state.id`（sanitize 过的目录名），不是文件里的 name。
+ */
+function readAllTeamTasks(repo) {
+  const root = join(repo, '.agent-teams')
+  const tasks = []
+  const unreadable = []
+  let entries
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    /** ★ 整个状态目录不存在 ⇒ 没有队、也没有树。这**不是**"读不到"。 */
+    return { tasks, unreadable }
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === 'archive' || entry.name === 'worktrees') continue
+    const file = join(root, entry.name, 'team.json')
+    if (!existsSync(file)) continue
+    try {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      const id = typeof parsed?.id === 'string' && parsed.id !== '' ? parsed.id : entry.name
+      for (const task of Array.isArray(parsed?.tasks) ? parsed.tasks : []) {
+        if (task === null || typeof task !== 'object') continue
+        tasks.push({ ...task, teamId: id })
+      }
+    } catch {
+      unreadable.push(entry.name)
+    }
+  }
+  return { tasks, unreadable }
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 if (process.argv[1] && import.meta.url.endsWith(basenameSafe(process.argv[1]))) {
   const off = process.env[RECLAIM_OFF_ENV] === '1' || process.env[RECLAIM_OFF_ENV] === 'true'
@@ -341,8 +820,51 @@ if (process.argv[1] && import.meta.url.endsWith(basenameSafe(process.argv[1]))) 
     process.exit(0)
   }
   const apply = process.argv.includes('--apply')
-  const result = planReclaim({ apply })
+  /**
+   * ★ `--trunk <ref>`：显式指定主干引用。
+   *   ★ 不给 ⇒ 走 `resolveTrunkRef` 的声明式来源（主树检出的那条分支）。
+   *   ★★ 这条解析**不设缺省字面量** —— 旧版此处硬等价于 `mainRef: 'main'`，
+   *     而本仓的集成不在 `main` 上（落后 209 个提交）⇒ CLI 的清单一直是错的。
+   */
+  const trunkFlagIndex = process.argv.indexOf('--trunk')
+  const trunkFlag = trunkFlagIndex >= 0 ? process.argv[trunkFlagIndex + 1] : undefined
+  /**
+   * ── ★★★ G8：CLI **必须**把任务状态交给 planReclaim（2026-10-20 补）────────────
+   *
+   * MEASURED（t15 独立复核）：不加这一条时，`--apply` 会删掉一个 `in_progress`
+   * 任务的树 —— 因为 `planReclaim` 只做裸目录枚举，它不知道"这棵树还有人用"。
+   *
+   * ★ 为什么在 CLI 侧读 team.json 而不是让 `planReclaim` 自己读：
+   *   `planReclaim` 是一个**纯计划函数**（它现在的入参里连 `tasks` 都是可选的）。
+   *   让它在内部去扫盘会把"读状态"与"算计划"两件事缠在一起，而它们是
+   *   两个可以分别失败的动作：盘读不到 ≠ 没有活任务。
+   *   ⇒ CLI 负责读，读不到就**明确拒绝 apply**（见下面那段）。
+   */
+  const liveTasks = readAllTeamTasks(REPO_ROOT)
+  if (apply && liveTasks.unreadable.length > 0) {
+    console.log(`✘ 拒绝执行 --apply：有 ${liveTasks.unreadable.length} 个 team.json 读不出来`
+      + `（${liveTasks.unreadable.slice(0, 3).join(', ')}${liveTasks.unreadable.length > 3 ? ', …' : ''}）。`)
+    console.log('  ★ 读不到任务状态时，"这棵树属于一条活任务"这件事**判不了** ——')
+    console.log('    而判不了不等于可以删。先修好那些 team.json，或改用 --dry-run 看清单。')
+    process.exit(2)
+  }
+  const result = planReclaim({
+    apply,
+    tasks: liveTasks.tasks,
+    ...trunkFlag === undefined ? {} : { mainRef: trunkFlag },
+  })
   console.log(`回收扫描：${result.scanned} 个 worktree`)
+  /**
+   * ★★★ 主干引用这一行是**必须打的**：一份说不出"拿谁比的"的回收清单，
+   *   正是 W1 的形态（数字齐全、比较对象是错的）。
+   */
+  if (result.trunk.status === 'resolved') {
+    console.log(`  主干引用：${result.trunk.ref} @ ${result.trunk.commit.slice(0, 12)}`
+      + `（来源：${result.trunk.source === 'explicit' ? '调用方显式给出' : '主树检出的分支'}）`)
+  } else {
+    console.log(`  主干引用：✘ 解析不出来 —— ${result.trunk.why}`)
+    console.log('  ★ 没有主干就无从判定；这一次**没有**任何树被判定为可清。')
+  }
   console.log(`  可清 ${result.reclaimable.length} · 保留 ${result.keep.length} · 判不了 ${result.undecidable.length}`)
   console.log(`  预计回收 ${(result.projectedBytes / 1024 / 1024).toFixed(1)} MiB`)
   if (result.reclaimable.length > 0) {

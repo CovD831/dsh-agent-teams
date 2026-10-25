@@ -15,10 +15,31 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DELIVERY_OUTCOMES, TERMINAL_TASK_STATUSES, type DeliveryOutcome, type DeliveryRecord, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
 import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
+/**
+ * ── ★★★ #176（乙）：lead 身份的**唯一**判据（t98）──────────────────────────────────
+ * ★ 本模块**不再**自己写 `captainSessionId === <id>` —— 那是**12 处各自为政**的形态，
+ *   而它们必须**同时**变或**同时**不变（否则"两边不一致"本身就是缺陷）。
+ * ★ 纯函数，**不碰 ctx、不做 I/O**（活会话清单由调用方交进来）。
+ */
+import { sessionLeadsTeam, type LiveSessionRef, type TeamIdentity } from './lineage.ts'
+
+/** 把一个 team 记录折成本模块要的那两格身份面（**只读**，不复制别的字段）。 */
+function identityOf(team: TeamState): TeamIdentity {
+  return {
+    captainSessionId: team.captainSessionId,
+    /**
+     * ★ 成员 id **去掉 `removed` 的那些** —— 与 `findTeamByParticipant` 的既有口径
+     *   一致（"Removed members no longer have access to team-scoped tools"）。
+     *   ★ 判据的一致性很重要：若这里留着 `removed`，一个被移除的成员会被算成
+     *     "成员" ⇒ 它**不会**被认成 lead（那是对的方向），但 `stale` 成员会是另一回事。
+     */
+    memberIds: team.members.filter((member) => member.status !== 'removed').map((member) => member.id),
+  }
+}
 
 export {
   amendTaskContract,
@@ -565,89 +586,30 @@ export function describeDeliveries(summary: ReturnType<typeof summariseDeliverie
 }
 
 /**
- * The allowed task status transitions, keyed by current status.
- * Terminal statuses have no outgoing transitions.
+ * ── ★ M4：S-B（任务状态机）已挪到 `./state/tasks.ts` ─────────────────────────────
+ *
+ * `TASK_TRANSITIONS` · `transitionError` · `activateTaskAttempt` ·
+ * `beginTaskAttempt` · `cancelUnfinishedTask` · `invalidateTaskAttempt`
+ * —— 这六件（外加私有 helper `clearAttemptResult`）搬到了 `./state/tasks.ts`，
+ * 并由下面的 re-export **保持本模块的导出面逐条不变**。
+ *
+ * ★ 为什么两者缺一不可（M2/M3 都实测踩过）：
+ *   · **只 `export … from`** ⇒ 本文件内部若还有调用会报 TS2304（`export-from` 不建本地绑定）；
+ *   · **只 `import`** ⇒ 导出面塌掉（外部消费者取不到）。
+ *   ⇒ 本文件现在**两者都写**（见下）。
+ * ★ 实测：该块**零外部引用**（不需要本文件里任何其它声明）⇒ 前提成立。
  */
-export const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  pending: ['claimed', 'cancelled'],
-  claimed: ['in_progress', 'failed', 'cancelled'],
-  in_progress: ['completed', 'failed', 'cancelled'],
-  completed: [],
-  failed: [],
-  cancelled: [],
-}
 
-/**
- * Validate one task status transition.
- * @param current - the task's current status.
- * @param next - the requested status.
- * @returns the transition error, or undefined when allowed.
- */
-export function transitionError(current: TaskStatus, next: TaskStatus): string | undefined {
-  if (current === next) return undefined
-  if (!TASK_TRANSITIONS[current].includes(next)) {
-    return `task status cannot move from "${current}" to "${next}"`
-  }
-  return undefined
-}
+export {
+  TASK_TRANSITIONS,
+  transitionError,
+  activateTaskAttempt,
+  beginTaskAttempt,
+  cancelUnfinishedTask,
+  gateEvaluationRecordOf,
+  invalidateTaskAttempt,
+} from './state/tasks.ts'
 
-/** Execution results belong to one attempt; a retry must produce its own evidence. */
-function clearAttemptResult(task: TeamTask): void {
-  task.output = undefined
-  task.verdict = undefined
-  task.findings = undefined
-  task.changedPaths = undefined
-  task.acceptanceResults = undefined
-  task.commandsRun = undefined
-}
-
-/** Activate the task's current generation for one owner and return its capability id. */
-export function activateTaskAttempt(task: TeamTask, assignee: string): string {
-  const attemptId = randomUUID()
-  task.status = 'claimed'
-  task.assignee = assignee
-  task.attemptId = attemptId
-  task.handoffId = undefined
-  task.reassigning = false
-  clearAttemptResult(task)
-  task.updatedAt = Date.now()
-  return attemptId
-}
-
-/** Start a fresh task generation for one owner. */
-export function beginTaskAttempt(task: TeamTask, assignee: string): string {
-  task.attempt = (task.attempt ?? 0) + 1
-  return activateTaskAttempt(task, assignee)
-}
-
-/**
- * Revoke the current worker immediately. Clearing its capability makes old
- * updates stale; a separate handoff generation serializes async quiescence.
- */
-/** Cancel one unfinished task without returning it to the ready pool. */
-export function cancelUnfinishedTask(task: TeamTask, output?: string): void {
-  if (TERMINAL_TASK_STATUSES.includes(task.status)) return
-  task.status = 'cancelled'
-  task.attemptId = undefined
-  task.handoffId = undefined
-  task.reassigning = false
-  if (output !== undefined) task.output = output
-  task.updatedAt = Date.now()
-}
-
-export function invalidateTaskAttempt(
-  task: TeamTask,
-  nextAssignee?: string,
-  reassigning = false,
-): void {
-  task.attemptId = undefined
-  task.handoffId = randomUUID()
-  task.status = 'pending'
-  task.assignee = nextAssignee
-  task.reassigning = reassigning
-  clearAttemptResult(task)
-  task.updatedAt = Date.now()
-}
 
 /**
  * Create the team directory structure and the initial team record.
@@ -680,6 +642,80 @@ export async function readTeam(stateRoot: string, teamId: string): Promise<TeamS
     }
     throw error
   }
+}
+
+/**
+ * ── ★★★ t108：读一个队 —— **三态**，区分「区不在」与「区在但没这个队」 ─────────────
+ *
+ * ── 它存在的理由（`docs/RULING-READ-PATH-THREE-STATES.md` 的裁定"甲"）──────────────
+ *
+ * `readTeam` 把**两件不同的事**压成同一个 `undefined`：
+ * ```
+ *   ① 区（`stateRoot` 这个目录）**根本不存在**
+ *   ② 区在，但**里面没有这个队**
+ * ```
+ * ★ 而它们的补救动作**相反**：① 是"你连地方都找错了"（配置 / 工作区选错），
+ *   ② 是"那个队确实不在了"（被归档 / 从没建过）。
+ * ⇒ 合成 `undefined` 之后，**读的人分不出该去查哪个** —— 那是本仓记账最久的形态。
+ *
+ * ── ★★★ 为什么不改 `readTeam` 的签名（裁定"甲"，有实测依据）────────────────────────
+ *
+ * 实测：`readTeam` 有 **28 处**调用，而那 28 处的**区全部是确定的**
+ * （`workspaceOf(caller)` / `workspaceRegistry.list()` / `root` 传下来）
+ * ⇒ ★★ "区不存在"在**实际路径里不会发生**。
+ * ⇒ 若改签名，28 处 + 11 处类型声明会被迫回答一个其中 **27 处不可能被问到**的问题
+ *   —— ★ 那是**过度设计**，而 `readTeam` 保持一字不动。
+ *
+ * ── ★★ 坑①：不能靠 `catch` 的 ENOENT 来源分辨（t104/t107 实测，本任务复验）────────
+ *
+ * ```
+ *   A 区不存在        ⇒ readFile("<root>/NO-REGION/team.json") ⇒ code ENOENT
+ *   B team.json 不存在 ⇒ readFile("<root>/REGION/team.json")   ⇒ code ENOENT
+ *   ★★ 两者 code 相同 ⇒ 靠 code 分辨不出来
+ * ```
+ * ⇒ 所以本函数**先判区在不在**（`stat` 那个**目录**），**再**调 `readTeam`。
+ *
+ * ── ★★ 坑②：那个判断**自己失败** ⇒ 报 `no-region`，**不是** `no-team` ────────────────
+ *
+ * ★ 判据说不出区在不在时，"区在但没这个队"**没有被建立** ⇒ 只能报 `no-region`。
+ *   ⇒ 而"权限不足"与"真不存在"在这一格**同归宿**，因为对**调用方**而言
+ *     两者都是"这个区我读不了"（它们要做的动作相同：去查权限/去查路径）。
+ *   ★ 而它们**不**与 `no-team` 同归宿 —— 那才是本任务要分开的那一对。
+ *
+ * @param stateRoot - 已解析的绝对 state root（**区**的根）。
+ * @param teamId - 队的 sanitized id。
+ * @returns 三态之一；**不抛**（除既有 `readTeam` 对"读到了但内容非法"照旧抛）。
+ */
+export type ReadTeamResult =
+  | { readonly kind: 'found'; readonly team: TeamState }
+  /** ★ 区在，但**里面没有这个队**。 */
+  | { readonly kind: 'no-team' }
+  /** ★ **区本身不在**（或判不出在不在）。 */
+  | { readonly kind: 'no-region' }
+
+export async function readTeamEx(stateRoot: string, teamId: string): Promise<ReadTeamResult> {
+  /**
+   * ── ① **先判区在不在**（坑①：不能等 `readTeam` 的 ENOENT —— 两者同码）──────────────
+   * ★ `stat` 那个**目录**（不是 `team.json`）：这一问与"有没有这个队"**无关**。
+   */
+  try {
+    const stats = await stat(stateRoot)
+    /**
+     * ★ 存在但**不是目录** ⇒ 那不是一个"区" ⇒ 与"区不存在"同归宿。
+     *   ★ 若不判这一格，`readTeam` 会拿到 ENOTDIR（**不是** ENOENT）而**抛出去** ——
+     *     于是"路径写成了一个文件"会变成一次**异常**，而它与"区不在"是同一类问题。
+     */
+    if (!stats.isDirectory()) return { kind: 'no-region' }
+  } catch {
+    /** ★ 坑②：**判不出来** ⇒ `no-region`（不是 `no-team`）—— 见上面的长注释。 */
+    return { kind: 'no-region' }
+  }
+  /**
+   * ── ② 区**确实在** ⇒ 现在才问"有没有这个队" ──────────────────────────────────────
+   * ★ 走到这里时 `undefined` 的含义是**唯一**的：「区在，队不在」。
+   */
+  const team = await readTeam(stateRoot, teamId)
+  return team === undefined ? { kind: 'no-team' } : { kind: 'found', team }
 }
 
 /**
@@ -762,13 +798,30 @@ export async function recordRetiredMemberIds(stateRoot: string, memberIds: reado
 
 /**
  * Find the team owned by one captain session (at most one per captain).
+ *
+ * ── ★★★ #176（乙）：`liveSessions` —— 沿**活的** fork 链认队长（t98）───────────────
+ *
+ * ★ 缺省（`undefined`）⇒ **行为与今天逐字相同**（只认精确相等）。
+ *   ⇒ ★ 这是刻意的：本参数**只加一条路**，不改任何既有结论。
+ *
+ * ★★ 传了它 ⇒ 一个**队长 fork 出来的**会话也能认到自己带的队
+ *   （上游 #176：「a captain that continues in its fork still leads its team」）。
+ *
+ * ★ 为什么它是**可选参数**而不是本函数自己去枚举会话：
+ *   本模块（`state.ts`）**不持有 `ctx`** —— 它被工具层、调度器、HTTP 路由共同调用，
+ *   而那些调用点各有各的上下文。⇒ "谁能拿到活会话清单"**只有调用方知道**。
+ *   ★ 而把它做成必填会让**每一个**调用点都得先学会枚举会话 —— 那既越权，也会
+ *     在拿不到 `ctx` 的路径上（如 HTTP 路由）逼出一个编造的空清单。
+ *
  * @param stateRoot - resolved absolute state root directory.
  * @param captainSessionId - the owning session id.
+ * @param liveSessions - 活会话的 `{id, parentSession}` 清单（缺席 ⇒ 只认精确相等）。
  * @returns the team record, or undefined when the captain leads no team.
  */
 export async function findTeamByCaptain(
   stateRoot: string,
   captainSessionId: string,
+  liveSessions?: readonly LiveSessionRef[],
 ): Promise<TeamState | undefined> {
   let entries
   try {
@@ -783,7 +836,11 @@ export async function findTeamByCaptain(
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const team = await readTeam(stateRoot, entry.name)
-    if (team?.captainSessionId === captainSessionId) {
+    /**
+     * ★★ 收口：由 `sessionLeadsTeam` 一个地方回答"这个会话是不是这个队的队长"。
+     *   ★ `liveSessions === undefined` ⇒ 它内部落到"精确相等"那一支 ⇒ 与今天同结论。
+     */
+    if (team !== undefined && sessionLeadsTeam(captainSessionId, identityOf(team), liveSessions ?? [])) {
       if (found !== undefined && found.id !== team.id) {
         throw new Error(`captain session leads multiple active teams ("${found.id}", "${team.id}"); archive one before continuing`)
       }
@@ -797,13 +854,21 @@ export async function findTeamByCaptain(
  * Find the team in which one session is an active participant.
  * Captains match `captainSessionId`; members match their durable child session
  * id. Removed members no longer have access to team-scoped tools.
+ *
+ * ── ★★★ #176（乙）：`liveSessions` —— 队长那一半也走 fork 链（t98）────────────────
+ * ★ **成员那一半照旧精确匹配**（上游逐字：「Membership **keeps** its exact id match」）
+ *   —— 本参数**只影响"是不是队长"**那一半，不改成员的判定。
+ * ★ 缺席 ⇒ 与今天逐字相同。
+ *
  * @param stateRoot - resolved absolute state root directory.
  * @param agentSessionId - calling captain/member session id.
+ * @param liveSessions - 活会话清单（缺席 ⇒ 队长那半只认精确相等）。
  * @returns the team record, or undefined when the caller belongs to no team.
  */
 export async function findTeamByParticipant(
   stateRoot: string,
   agentSessionId: string,
+  liveSessions?: readonly LiveSessionRef[],
 ): Promise<TeamState | undefined> {
   let entries
   try {
@@ -818,8 +883,14 @@ export async function findTeamByParticipant(
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const team = await readTeam(stateRoot, entry.name)
-    const participates = team?.captainSessionId === agentSessionId
-      || team?.members.some((member) => member.id === agentSessionId && member.status !== 'removed') === true
+    /**
+     * ★ 两半**各自**判（口径不同，不许合并）：
+     *   · 队长那一半 ⇒ `sessionLeadsTeam`（可沿活的 fork 链）
+     *   · 成员那一半 ⇒ **精确匹配照旧**（上游：「Membership keeps its exact id match」）
+     */
+    const leadsAsCaptain = team !== undefined && sessionLeadsTeam(agentSessionId, identityOf(team), liveSessions ?? [])
+    const isMember = team?.members.some((member) => member.id === agentSessionId && member.status !== 'removed') === true
+    const participates = leadsAsCaptain || isMember
     if (participates && team !== undefined) {
       if (found !== undefined && found.id !== team.id) {
         throw new Error(`agent session belongs to multiple active teams ("${found.id}", "${team.id}"); the target team is ambiguous`)
@@ -1145,6 +1216,26 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+/** Whether a value is a tool-name list: a real array of real strings. */
+function isToolNameList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(name => typeof name === 'string')
+}
+
+/**
+ * Validate one persisted `MemberToolFilter` ({@link MemberToolFilter}).
+ *
+ * `deny` is mandatory (the captain-only deny list is always part of it);
+ * `allow` is optional but, when present, must be a tool-name list. Kept next
+ * to {@link isTeamMember} because it is a durable-record shape, not a policy.
+ */
+function isMemberToolFilter(value: unknown): value is { allow?: string[]; deny: string[] } {
+  if (!isRecord(value)) return false
+  const allow = value['allow']
+  const deny = value['deny']
+  if (allow !== undefined && !isToolNameList(allow)) return false
+  return isToolNameList(deny)
+}
+
 /** Validate one member record at the durable JSON boundary. */
 function isTeamMember(value: unknown): value is TeamMember {
   if (!isRecord(value)) return false
@@ -1162,6 +1253,14 @@ function isTeamMember(value: unknown): value is TeamMember {
     && (value['executionPrompt'] === undefined || typeof value['executionPrompt'] === 'string')
     && (value['fallback'] === undefined || (isRecord(value['fallback']) && typeof value['fallback']['provider'] === 'string' && typeof value['fallback']['model'] === 'string'))
     && (value['fallbackActive'] === undefined || typeof value['fallbackActive'] === 'boolean')
+    /**
+     * ★ managed activation 宿主上成员的限制与角色存在这里（descriptor 不再记录它们）。
+     *   校验口径与 `MemberToolFilter` 一致：`deny` 必填且是字符串数组，
+     *   `allow` 可选、出现时也必须是字符串数组 —— 否则读回来会被当成非法成员记录。
+     */
+    && (value['runtimeSetup'] === undefined || (isRecord(value['runtimeSetup'])
+      && typeof value['runtimeSetup']['persona'] === 'string'
+      && isMemberToolFilter(value['runtimeSetup']['toolFilter'])))
     && isFiniteNumber(value['joinedAt'])
     && (value['status'] === 'idle' || value['status'] === 'working' || value['status'] === 'removed')
 }
@@ -1285,6 +1384,13 @@ function isTeamState(value: unknown, expectedId: string): value is TeamState {
     && (value['haltedAt'] === undefined || isFiniteNumber(value['haltedAt']))
     && (value['reviewPolicy'] === undefined || isReviewPolicy(value['reviewPolicy']))
     && (value['escalated'] === undefined || typeof value['escalated'] === 'boolean')
+    /**
+     * ★★★ 2026-10-20：`shape` 三态 —— **缺席合法**（本格上线前建的队），
+     *   但写了必须是两个值之一。
+     * ★ 为什么不是 `typeof === 'string'` 就放过：一个拼错的 `'Dispatcher'`
+     *   与"没声明"在字符串上同形，而它们的补救动作不同（改数据 vs 不用改）。
+     */
+    && (value['shape'] === undefined || value['shape'] === 'dispatch' || value['shape'] === 'flat')
   if (!validShape) return false
 
   const members = value['members'] as TeamMember[]

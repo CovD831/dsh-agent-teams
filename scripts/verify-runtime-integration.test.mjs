@@ -342,8 +342,35 @@ test('① 另外五个调用点：task-created / task-update / task-update-settl
      *   会走 `completion.*`（变异 / 回测）并要求 changedPaths —— 那条通道与 runtime
      *   无关，却会让本臂以"update_task rejected"的形式红，读起来像 runtime 的错。
      */
+    /**
+     * ★★ t39：建任务时带上 `reviewed` —— 而它是一个【无关自变量】──────────────────────
+     *
+     * ★ 本臂测的是【另外五个 runtime 调用点】，**不是 dispatch**。
+     *   而 t39 把 `dispatch.plan-reviewed` 接到了 `create_task`（真正的派发那一刻）上 ——
+     *   于是不带 `reviewed` 时这里会被**正确地**拦住，本臂就走不到它要测的东西了。
+     *   ⇒ ★ 补上它，等于让输入只留下本臂真正要变的那一个自变量。
+     */
     const created = await callTool(f, 'agent_teams_create_task', {
       subject: 'impl', kind: 'work', assignee: 'worker',
+      reviewed: {
+        at: 1, by: 'probe',
+        /**
+         * ★★ 五问都要答 —— 而这不是本臂的自选动作，是判据的硬要求。
+         *   MEASURED：只答 `scope` 时判据报
+         *     「the `reviewed` stamp does not answer every required question —
+         *       missing: `prerequisite`, `move`, `acceptance`, `boundary`」
+         *   ⇒ ★ 而它的措辞值得记：「A stamp that answers 1 of 5 questions is not a review:
+         *     the unanswered ones were never asked, and **"never asked" is not
+         *     "asked and passed"**」—— 那是三态纪律在这一格上的落点。
+         */
+        checks: [
+          { id: 'scope', verdict: 'pass' },
+          { id: 'prerequisite', verdict: 'pass' },
+          { id: 'move', verdict: 'pass' },
+          { id: 'acceptance', verdict: 'pass' },
+          { id: 'boundary', verdict: 'pass' },
+        ],
+      },
     })
     assert.ok(typeof created.task_id === 'string', '任务必须真的被建出来（否则下面两条臂没有对象）')
 
@@ -457,7 +484,32 @@ test('① 任务级调用点的输入面：有等待记录时 `wait` 到位；�
   const seen = []
   const probeB = withProbe('runtime', (context) => { seen.push(context); return { ok: true } })
   try {
-    await callTool(f, 'agent_teams_create_task', { subject: 'keeps the position warm', inScope: ['docs/z.md'] })
+    /**
+     * ★★ t39：同样带 `reviewed` —— 本臂测的是【runtime 的 `wait` 读数】，
+     *   而 `dispatch.plan-reviewed` 与本臂无关（同上一条的理由）。
+     */
+    await callTool(f, 'agent_teams_create_task', {
+      subject: 'keeps the position warm', inScope: ['docs/z.md'],
+      reviewed: {
+        at: 1, by: 'probe',
+        /**
+         * ★★ 五问都要答 —— 而这不是本臂的自选动作，是判据的硬要求。
+         *   MEASURED：只答 `scope` 时判据报
+         *     「the `reviewed` stamp does not answer every required question —
+         *       missing: `prerequisite`, `move`, `acceptance`, `boundary`」
+         *   ⇒ ★ 而它的措辞值得记：「A stamp that answers 1 of 5 questions is not a review:
+         *     the unanswered ones were never asked, and **"never asked" is not
+         *     "asked and passed"**」—— 那是三态纪律在这一格上的落点。
+         */
+        checks: [
+          { id: 'scope', verdict: 'pass' },
+          { id: 'prerequisite', verdict: 'pass' },
+          { id: 'move', verdict: 'pass' },
+          { id: 'acceptance', verdict: 'pass' },
+          { id: 'boundary', verdict: 'pass' },
+        ],
+      },
+    })
   } finally {
     probeB.dispose()
   }
@@ -569,7 +621,44 @@ test('★ ② 硬要求（a）：真判据被换成"永远 blocked"⇒ 建任务
   const before = runtimeGateLogSnapshot().length
   try {
     /** ① 建任务 —— 不得被拒。 */
-    const created = await callTool(f, 'agent_teams_create_task', { subject: 'still allowed', inScope: ['docs/y.md'] })
+    /**
+     * ── ★★★ t39：这一条尤其要写清「谁该拦、谁不该拦」────────────────────────────────
+     *
+     * ★ 本臂断言的是：**一条被换成"永远 `blocked`"的 【runtime】 判据不得拦住建任务**。
+     *   ⇒ 而 `runtime` 位置的定义就是「⑤ 全程（跨步骤的过程约束；**告警，不直接拒任务**）」
+     *     （见 `src/gates/registry.ts` 的 `INSERTION_POINTS`，逐字）
+     *   ⇒ ★ 所以"建任务照常成功"是本臂要钉的东西，而它**与 t39 不冲突**。
+     *
+     * ★★ 而 `create_task` 上**同时有** `contract` 与 `dispatch` 两个位置 ——
+     *   而 `dispatch` 位置【该】拦（用户原话：「不带 `reviewed` ⇒ 派发【前】必须先审一遍」）。
+     *   ⇒ ★ 所以这里必须带 `reviewed`：本臂要证明的是【runtime 不拦】，
+     *     而不是"dispatch 也别拦" —— 后者是放宽用户那条规则，本任务明确禁止。
+     *
+     * ★ 一句话给下一个读到"建任务被拦"的人：
+     *   **`runtime` 该放行、`dispatch` 该拦 —— 而本臂只断前者。**
+     */
+    const created = await callTool(f, 'agent_teams_create_task', {
+      subject: 'still allowed', inScope: ['docs/y.md'],
+      reviewed: {
+        at: 1, by: 'probe',
+        /**
+         * ★★ 五问都要答 —— 而这不是本臂的自选动作，是判据的硬要求。
+         *   MEASURED：只答 `scope` 时判据报
+         *     「the `reviewed` stamp does not answer every required question —
+         *       missing: `prerequisite`, `move`, `acceptance`, `boundary`」
+         *   ⇒ ★ 而它的措辞值得记：「A stamp that answers 1 of 5 questions is not a review:
+         *     the unanswered ones were never asked, and **"never asked" is not
+         *     "asked and passed"**」—— 那是三态纪律在这一格上的落点。
+         */
+        checks: [
+          { id: 'scope', verdict: 'pass' },
+          { id: 'prerequisite', verdict: 'pass' },
+          { id: 'move', verdict: 'pass' },
+          { id: 'acceptance', verdict: 'pass' },
+          { id: 'boundary', verdict: 'pass' },
+        ],
+      },
+    })
     assert.equal(created.status, 'pending', '★ 一条 blocked 的 runtime 裁决不得拦住建任务')
 
     /** ② 成员上报 —— 不得被拒。★ attempt_id 用**当前那一个**（另写死的会立刻过期）。 */

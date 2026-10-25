@@ -26,6 +26,7 @@
  *     否则它们会分叉 —— 而分叉之后，"调用点放过了、记录说被拒了"会在日志里同形。
  */
 
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -195,7 +196,7 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     tools: { register(tool) { tools.set(tool.name, tool) } },
     subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'm', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'm' },
-    agents: { get() { return undefined } }, on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
+    agents: { list: () => [], get() { return undefined } }, on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
   const call = async (name, args) => (await tools.get(name).execute(args, {
@@ -203,7 +204,7 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
     signal: new AbortController().signal,
   }))
 
-  const created = await call('agent_teams_create_task', { subject: 'a work task with no runtime probe', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'a work task with no runtime probe', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   const outcome = String(created?.runtime_gates?.outcome)
   console.log(`    ℹ 真实路径 outcome = ${JSON.stringify(outcome.slice(0, 90))}`)
 
@@ -218,5 +219,72 @@ test('臂 5 ★★ 真实路径对拍：`agent_teams_create_task` 的 runtime_ga
   )
   assert.doesNotMatch(outcome, /^blocked:\s*$/, '★ 真实路径仍写出空的 `blocked: ` —— t66 的缺陷还在')
   assert.equal(created?.runtime_gates?.evaluated, 0, '★ 前提：这一轮确实没有任何运行判据适用')
-  assert.equal(created?.runtime_gates?.registered, 1, '★ 前提：runtime 位置确实挂着判据（否则那是"空位置"，属于臂 4）')
+  /** ★ t6：runtime 现在挂着**三条**判据（liveness + `runtime.stall` + 2026-10-20 的
+   *  `runtime.shape-execution`）。
+   *  本行断言的是**前提**「这个位置不是空的」，数字随接线变 ——
+   *  ★ 而它必须精确：一个 `> 0` 会让"有人摘掉两条"读不出来。 */
+  assert.equal(created?.runtime_gates?.registered, 3, '★ 前提：runtime 位置确实挂着判据（liveness + stall + shape-execution；否则那是"空位置"，属于臂 4）')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 6（★★★ 2026-10-21）：计数必须**进 outcome** —— 否则它在日志里一个字都没有
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('★★★ 臂 6：`stalled_count` / `shape_violation_count` 必须出现在 `outcome` 里', async () => {
+  /**
+   * ── 它补的是什么（MEASURED，`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-2）────────
+   *
+   * `runtime.stall` 在**真的**有任务停下时返回 `{ ok: true, stalled_count: 1, … }`，
+   * 而 `outcome` 只写 `ok` ⇒ **卡死这件事在日志里完全不出现**。
+   *
+   * ★★ runtime 位置的纪律是"裁决只被记录、不参与控制流"（契约 §5）
+   *   ⇒ `outcome` 就是它**唯一**的出口。
+   *   一个不进 `outcome` 的计数等于**没有**这个读数 —— "装了但从不生效"比没装更坏。
+   *
+   * 定向突变：把 `outcome: outcomeWithCounters` 改回 `outcome` ⇒ 本臂红。
+   */
+  const { evaluateRuntimeGates } = await import('../lib/tools/shared/entities.js')
+  const quiet = { logger: { debug() {}, info() {}, warn() {}, error() {} }, on() { return () => {} } }
+
+  /** ① 一个**真的停下**的任务（同一 (task,gate) 被拒 ≥ N 次）⇒ 计数必须出现。 */
+  const stalledTask = {
+    id: 't1', subject: 's', status: 'in_progress', attempt: 3, dependencies: [], createdAt: 1, updatedAt: 1,
+    stall: { repeats: { 'runtime.liveness': 3 } },
+  }
+  const stalled = await evaluateRuntimeGates(quiet, 'task-status', { team: { id: 't', tasks: [stalledTask] } })
+  assert.match(
+    String(stalled.outcome), /stalled_count=1/,
+    '★★★ 有任务停下 ⇒ `outcome` 里必须出现 stalled_count。'
+    + ' ★ 否则这条判据的裁决**唯一的出口**上没有它 —— 而 runtime 位置不参与控制流，'
+    + ' 所以"不出现在 outcome 里"等于"这个读数不存在"。',
+  )
+
+  /**
+   * ② **反向半边**：一条都没停下 ⇒ 计数是 `0`（**测到的零**），而**不是缺席**。
+   *
+   * ★★ 这里我第一版写反了（断言"不得出现"），而实测把它纠正过来：
+   *   `runtime.stall` 在**没停下时也返回 `stalled_count: 0`** ——
+   *   因为它真的**查过**（`examined: 1`）。⇒ 那是一个**读数**，不是"没测到"。
+   *
+   * ★★★ 而"没测到"长什么样，由下面的 ③ 单独钉：判据整个 `skipped` 时
+   *   **`outcome` 里一个计数都没有**。两者必须不同形 —— 这才是本臂真正要防的合流。
+   */
+  const clearTask = { id: 't2', subject: 's', status: 'in_progress', attempt: 1, dependencies: [], createdAt: 1, updatedAt: 1 }
+  const clear = await evaluateRuntimeGates(quiet, 'task-status', { team: { id: 't', tasks: [clearTask] } })
+  assert.match(
+    String(clear.outcome), /stalled_count=0/,
+    '★★ 查过、没有停下 ⇒ `stalled_count=0`（**测到的零**，是一个读数）',
+  )
+
+  /**
+   * ③ ★★★ 真正的"没测到"：这个事件上三条判据**全 skipped** ⇒
+   *   `outcome` 必须是 `notChecked: …`，且**一个计数都没有**。
+   *   ★ 与 ② 的 `stalled_count=0` **不同形** —— 那正是本文件的两条臂要分开的东西。
+   */
+  const notChecked = await evaluateRuntimeGates(quiet, 'task-created', { team: { id: 't', tasks: [] } })
+  assert.match(String(notChecked.outcome), /notChecked:/, '★ 全跳过 ⇒ notChecked 出口')
+  assert.doesNotMatch(
+    String(notChecked.outcome), /stalled_count=/,
+    '★★★ "没测到"里**不得**有计数 —— 否则它与"测到零个"同形',
+  )
 })

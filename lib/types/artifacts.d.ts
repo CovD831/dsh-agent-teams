@@ -1,0 +1,168 @@
+/**
+ * ── ★★★ t97（吸收上游 #161 的 S1）：**工作区字节身份** ──────────────────────────────
+ *
+ * 本文件是插件里**唯一**从磁盘读产物字节的模块。
+ *
+ * ── 为什么需要它（上游 #161 逐字）──────────────────────────────────────────────
+ *
+ * > 「A **passing review was not bound to the revision it judged**……
+ * >   it advertised "all gates passed" over **bytes that had since been edited
+ * >   or deleted**.」
+ *
+ * MEASURED（t97 开工实测）：本仓此前有 `baseRevision`，而它是**git 对象名**
+ *   （`tools.ts` 注释逐字：「base 是一个 git 对象名」）——
+ *   ★ 它**回答不了"漂了没有"**：`cherry-pick` / `rebase` 会改那个名字而**字节没变**
+ *     （T7 的教训），于是它在两个方向上都可能误判。
+ * ⇒ 所以这里算的是**内容**摘要（`sha256` of the file bytes）。
+ *
+ * ── ★★ 安全规则（**一条都不许丢**）────────────────────────────────────────────
+ *
+ *   ① **目录遍历不跟符号链接**，而每一个**显式点名**的路径都用 `realpath` 解析，
+ *      一旦**逃出工作区**就拒绝 —— 符号链接不得变成"读宿主机任意文件"，
+ *      符号链接**环**也不得变成无限遍历；
+ *   ② 一次**没能完整枚举**的读取（上限、读不了的目录/文件、非法路径）
+ *      产出一条**显式的** {@link ArtifactScopeGap}，
+ *      ★★ **而不是一份"看起来完整"的短清单**；
+ *   ③ 「读不出来」与「不存在」**分开记**；
+ *   ④ 插件状态与密钥**不得**因为一个宽范围而意外进入。
+ *
+ * ── ★★ 而判据层仍然是纯的 ────────────────────────────────────────────────────
+ *
+ * 本模块把 {@link ArtifactDigest} **值**交给判据层，而判据层**从不碰文件系统**
+ * （`mutation-guard.ts` 是同一条先例：「读文件、跑 git、算指纹全部由调用方注入」）。
+ *
+ * ── ★ 本任务（S1）的边界 ────────────────────────────────────────────────────
+ *
+ * 只做：算摘要 + 记下来 + 能回答那三个问题。
+ * ★ **不做**：`verdictDrift` / blocker-warning 分级 / blob 级 diff（那是 S3/S4）。
+ */
+import type { ArtifactDigest, ArtifactScopeGap, TeamState } from './types.ts';
+import type { DeliveryAudit } from './quality-gates.ts';
+/**
+ * 从**一个范围**展开出来的文件数上限。
+ *
+ * ★ 与上游同一个理由：判决是关于**一个修订**的，而对一棵大树做**无界**遍历
+ *   会让每次关门都很慢 ⇒ 到这里停 —— **并且说出来**（产出一条 gap），
+ *   因为**一份被静默截断的清单**会让清单之外的改动通过"未变"检查。
+ */
+export declare const MAX_EXPANDED_ARTIFACTS = 200;
+/** 一次范围读取的结果：读到了什么，以及什么没能读完。 */
+export interface ArtifactScopeRead {
+    readonly artifacts: ArtifactDigest[];
+    readonly gaps: ArtifactScopeGap[];
+}
+/**
+ * ── ★★★ 把工作区里的**具体路径**算成摘要（上游 `digestWorkspacePaths`）──────────────
+ *
+ * @param workspace - 工作区根（**由调用方给**，不猜）。
+ * @param paths - workspace 相对路径（POSIX）。
+ *
+ * ★★ 「读不出来」与「不存在」**分开记**：
+ *   · 不存在（`ENOENT`）⇒ **不报 gap**，也不产出 digest。
+ *     ★ 理由：一个**还没生成**的产物是正常状态（"这次还没跑"），
+ *       把它报成"审计不完整"会让**每一次**审计都带缺口 ⇒ 缺口失去信息量。
+ *     ★★ 而它**也不会**被静默当成"已绑定"：判决记的是**它当时读到的那些**
+ *       ⇒ 后来出现了，那个文件**不在** `reviewedArtifacts` 里 ⇒ 由 S3 的
+ *       范围展开去发现（那正是 `expandedScope` 那一格存在的理由）。
+ *   · 别的读失败（权限、是目录、逃出工作区）⇒ **记 gap**（那是真的读不了）。
+ */
+export declare function digestWorkspacePaths(workspace: string, paths: readonly string[]): Promise<ArtifactScopeRead>;
+/**
+ * ── ★★ 把范围**模式**展开成它们**当前**覆盖的具体文件（上游 `expandScopePaths`）──────
+ *
+ * ★ 支持两种形态（与 `pathMatchesScope` 同族）：
+ *   · 一个具体文件（`src/a.ts`）⇒ 它自己；
+ *   · 一个**目录**（以 `/` 结尾，或它确实是个目录）⇒ **递归**它的文件。
+ * ★★ 而递归**不跟符号链接**（`withFileTypes` + `isSymbolicLink()` 直接跳过）——
+ *   否则符号链接环会变成无限遍历，而那是一条**安全**规则，不是性能优化。
+ * ★ 超过 {@link MAX_EXPANDED_ARTIFACTS} ⇒ **停止并记一条 gap**（不静默截断）。
+ */
+export declare function expandScopePaths(workspace: string, patterns: readonly string[]): Promise<ArtifactScopeRead>;
+/**
+ * ── ★★★ S1 的**落点**：把一次判决**绑定**到当前范围 ────────────────────────────────
+ *
+ * 上游逐字：
+ * > 「Reviews/requirements/verification now **snapshot their scope at claim**,
+ * >   record the reviewed attempt, **the real digests** and the scope they bound at close」
+ *
+ * @returns `{ reviewedArtifacts, gaps }` —— ★ 而 `reviewedArtifacts` 的**在场/缺席**
+ *   是那三个问题里第一个的答案（缺席 ⇒ 早于内容绑定）。
+ */
+export declare function snapshotReviewedArtifacts(workspace: string, patterns: readonly string[]): Promise<{
+    readonly reviewedArtifacts: readonly ArtifactDigest[];
+    readonly gaps: readonly ArtifactScopeGap[];
+}>;
+/**
+ * ── ★★★ t99（S1 接线）：为**交付那一刻**构造一份审计 ──────────────────────────────
+ *
+ * ── 它补的是哪一根断线（t97 自己报的原文）────────────────────────────────────────
+ *
+ * > 「★★ `DeliveryResult.verdictBindings`【只在传了 `audit` 时出现】，
+ * >   而【当前没有任何生产调用方传它】…… ⇒ ★ **S1 交了"能回答"的能力，
+ * >   但那条线还没接上**，而同 t87 记过的形态一样：**机制建好了 ≠ 接线了**。」
+ *
+ * ★ 实测（t99 开工）：**三处**调用点（`status.ts` · `delivery.ts` · `quality-gates.ts:2600`）
+ *   全都写的是 `canDeclareDelivery(team)` —— ★ **一个都不传 `audit`**。
+ *
+ * ── ★★ 审计读的是**哪批字节**：判决自己绑过的那批（不是全仓）──────────────────────
+ *
+ * ★ 判据是"**它对哪些字节负责**"，而那正是每条判决任务落盘时记下的
+ *   `reviewedArtifacts[].path`（`update-task.ts` 在判决落盘那一刻用
+ *   `snapshotReviewedArtifacts` 拍的）。
+ * ⇒ 所以这里的输入是**那些路径的并集**，而**不是** `inScope` 或 `changedPaths`：
+ *   ★ 读多了会把**没人审过的字节**算进审计（于是 drifted/unbound 都失真）；
+ *   ★ 读少了会让**绑过的字节**读不到 ⇒ 落到 `drifted`（假警报）。
+ *
+ * ── ★ 为什么"没有判决绑定过任何路径" ⇒ 返回 `undefined` 而不是空审计 ──────────────
+ *
+ * ★ 空审计（`{artifacts: [], gaps: []}`）会被 `canDeclareDelivery` 当成**做过审计**，
+ *   于是它会给每条判决算出 `unbound` —— 而真相是**这次没有可审的对象**。
+ * ⇒ ★ 两者不同形：`undefined` = "**这次没做审计**"（`verdictBindings` 整格缺席），
+ *   空审计 = "审计了、但一条都没读到"。
+ * ★ 依据：`quality-gates.ts:2298` 的逐字注释 ——
+ *   「缺席 ⇒ `verdictBindings` **缺席**（"这次没审计"与"审计了、全有效"必须不同形）」。
+ *
+ * @param workspace - 工作区根（审计的边界；逃出它的路径由 `digestWorkspacePaths` 拒并记 gap）。
+ * @param team - 要审计的队（读它那些判决任务绑过的路径）。
+ * @returns 一份 `DeliveryAudit`；**没有任何判决绑过路径** ⇒ `undefined`。
+ */
+export declare function deliveryAuditFor(workspace: string, team: TeamState): Promise<DeliveryAudit | undefined>;
+/**
+ * ── ★★★ 工作区里【已存在的】测试文件（2026-10-20，补 t5）────────────────────────
+ *
+ * ── 为什么需要它 ────────────────────────────────────────────────────────────────
+ *
+ * `testFileBaselineOf` 要的是"开工那一刻这些测试文件是什么字节"。
+ * 而"这些"必须**先被枚举出来** —— 于是这一格回答：**哪些是测试文件**。
+ *
+ * ── ★ 两条口径，刻意写死在这里（而不是散在三处调用点）─────────────────────────
+ *
+ *   ① **只收已存在的文件**（`readdirSync` + `statSync`，不递归 symlink）
+ *      ⇒ 快照里**不会**出现"还没写的测试" ⇒ 于是**新写的测试不算 weakened**
+ *        （那是**加**，不是减 —— 见 `testFileBaselineOf` 的反面一节）
+ *   ② **按路径排序** ⇒ 同一棵树两次调用得到**逐字节相同**的清单
+ *      （不排序会让"清单顺序变了"看起来像"测试变了"）
+ *
+ * ── ★★ 边界：它扫的是【工作区的测试目录】，不是整个仓库 ──────────────────────────
+ *
+ *   实测本仓的测试全在 `scripts/**\/*.test.mjs`，没有别的形态。
+ *   ⇒ 扫 `scripts/` 一层浅递归，遇到目录就进、遇到 `*.test.mjs` 就收。
+ *   ★ 扫描上限与 `MAX_EXPANDED_ARTIFACTS` 同一纪律：**到界要报**，不静默截断。
+ */
+export declare function enumerateTestFiles(workspace: string, limit?: number): Promise<{
+    files: string[];
+    truncated: boolean;
+}>;
+/**
+ * 拍一份**测试文件基线**（开工那一刻的字节）。
+ *
+ * ★ 复用 `digestWorkspacePaths`（同一个 sha256、同一条"逃出工作区就拒"的纪律），
+ *   不新造第二条读字节的路径。
+ * ★★ 三态**原样往上传**：读不到 ⇒ `undefined`（**不是**空数组）。
+ *   调用方据此写不写 `testFileBaseline` —— 而写入侧缺席 = "没能拍"。
+ */
+export declare function snapshotTestFiles(workspace: string): Promise<{
+    baseline: readonly ArtifactDigest[] | undefined;
+    truncated: boolean;
+    gaps: readonly ArtifactScopeGap[];
+}>;

@@ -53,6 +53,7 @@ import { loadVerifyCommandRules } from '../lib/tools/shared/entities.js'
 import { registry } from '../lib/gates/index.js'
 import { checkRequires } from '../lib/gates/requires.js'
 import { registerAgentTeamsTools } from '../lib/tools.js'
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { createTeamDir } from '../lib/state.js'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -469,7 +470,7 @@ function pluginFixture(workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -530,7 +531,7 @@ test('★ 放行臂：一条【不可判】的契约被拒，而"可判率"判�
      */
     let rejected = null
     try {
-      const created = await call('agent_teams_create_task', { subject: 'ordinary work without verify' })
+      const created = await call('agent_teams_create_task', { subject: 'ordinary work without verify' , reviewed: reviewedStamp() })
       assert.equal(created.status, 'pending')
     } catch (error) {
       rejected = error.message
@@ -553,8 +554,7 @@ test('★ 放行臂：一条【不可判】的契约被拒，而"可判率"判�
         objective: 'the ratio is printed as a whole number',
         inScope: ['src/ratio.ts', 'lib/ratio.js', 'lib/types/ratio.d.ts'],
         acceptance: ['ratio is exact'],
-        verify: [fabricated],
-      })
+        verify: [fabricated], reviewed: reviewedStamp() })
     } catch (error) {
       fabricatedRejected = error.message
     }

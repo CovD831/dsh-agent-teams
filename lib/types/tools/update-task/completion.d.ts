@@ -68,6 +68,38 @@ export interface CompletionWiringResult {
     gates: GateEvaluation;
     /** ★ 段内算出、而**段外还要用**的那一格（`followUpMessage` 的调用点读它）。 */
     wantsCompleted: boolean;
+    /**
+     * ★★ 这一轮的**预算读数**（2026-10-12）。
+     *
+     * `exhaustedBy` 非空 ⇒ 这条链被自己的总预算截断了。★ 那是**基础设施**的事实，
+     * 不是任何成员的工作结论 —— 所以它必须由调用方**报出来**：不报的话，
+     * "预算停止"与"这些命令都超时了"在日志里完全同形，而两者的补救动作相反
+     * （一个要调预算/查为什么慢，一个要去看代码）。
+     */
+    budget: {
+        totalMs: number;
+        elapsedMs: number;
+        calls: number;
+        exhausted: boolean;
+        exhaustedBy: readonly string[];
+    };
+    /**
+     * ★★ 变异残留的**恢复**读数。
+     *
+     * ★ 缺席（`undefined`）与"什么都为空"**不同形**：前者是"这一次没有日志目录 /
+     *   没有残留"（正常），后者不可能。所以**只在真的发生过什么时才挂**。
+     */
+    mutationRecovery?: {
+        restored: readonly string[];
+        conflicts: readonly {
+            file: string;
+            reason: string;
+        }[];
+        failed: readonly {
+            file: string;
+            reason: string;
+        }[];
+    };
 }
 /**
  * 构造 completion 位置的 ctx、核对它、求值。

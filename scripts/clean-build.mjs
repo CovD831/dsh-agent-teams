@@ -69,7 +69,7 @@
  *       而不是按"绝不出现"断言（后者会是一条**恒真的**断言：它测不到东西）。
  */
 
-import { copyFile, mkdir, rename, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -155,8 +155,96 @@ async function carryForwardTscdownArtifacts() {
   }
 }
 
+/**
+ * ── 构建互斥锁的【读】：把「有 LOCK」拆成三态 ─────────────────────────────────────
+ *
+ * ★★★ 这一格是【合并后才暴露】的问题，而它由 integrator 在两条链合并时发现
+ *   （2026-10-10，独立复现）。原来的守卫只问"LOCK 在不在"，于是：
+ *
+ *   ① 它把一个【没有任何人写】的文件当成"另一个构建在跑" ——
+ *      全仓 grep 证实没有创建者，所以它只可能由人工或崩溃留下；
+ *   ② 没有任何路径删除它 ⇒ 一旦存在，**每一次构建都在第一步失败**，
+ *      而 `clear` 恰恰是唯一能复位它、又被它挡住的那个入口 ⇒ **永久死锁**；
+ *   ③ 守卫位于 `rm` 循环【之后】⇒ 它"拒绝"的时候，破坏已经造成。
+ *
+ * ── 修法的三条（对应上面三条）────────────────────────────────────────────────
+ *
+ *   ① LOCK 里写【持有者 pid】—— 它是"谁在跑"的机械形式，而不是一个布尔；
+ *   ② 持有者【已经不在了】⇒ 陈旧 ⇒ 清掉它继续（自愈）；
+ *   ③ 守卫移到 `rm` **之前**。
+ *
+ * ★ 为什么用 pid 而不是超时：超时依赖时钟，而"进程还在不在"是一个**可判定的事实**
+ *   （`process.kill(pid, 0)`）。时钟会因 load 而误判，pid 不会。
+ *
+ * ★ 三态必须不同形（本仓纪律）：
+ *   · 没有 LOCK               ⇒ `free`（继续）
+ *   · LOCK 在、持有者活着      ⇒ `held`（拒绝）
+ *   · LOCK 在、持有者死了      ⇒ `stale`（清掉并继续，**并说明**）
+ *   · LOCK 在、pid 读不出来    ⇒ ★ `unreadable` —— 不是 `free`。
+ *     一个坏的 LOCK 不许被当成"没有锁"（那就是"没测到并进通过"）。
+ *     ⇒ 它按 `held` 处理（保守），但措辞要说清是"读不出持有者"。
+ */
+async function readBuildLock() {
+  const lockFile = join(projectRoot, 'lib.tmp.LOCK')
+  if (!(await exists(lockFile))) return { state: 'free', lockFile }
+
+  let raw = ''
+  try {
+    raw = await readFile(lockFile, 'utf8')
+  } catch (error) {
+    return { state: 'unreadable', lockFile, why: `could not read it: ${String(error?.message ?? error)}` }
+  }
+  const pid = Number.parseInt(raw.trim(), 10)
+  if (!Number.isInteger(pid) || pid <= 0) {
+    /** ★ 读不出 pid ⇒ 保守（当持有），但说清是哪一种。 */
+    return { state: 'unreadable', lockFile, why: `it does not contain a usable pid (contains ${JSON.stringify(raw.slice(0, 40))})` }
+  }
+  /**
+   * ★ 持有者还在吗 —— `process.kill(pid, 0)` 不发信号，只问"这个 pid 存不存在"。
+   *   ESRCH ⇒ 没有这个进程 ⇒ 陈旧。
+   *   EPERM ⇒ 进程在，只是不是我的 ⇒ **活着**（不许把"不是我的"读成"死了"）。
+   */
+  try {
+    process.kill(pid, 0)
+    return { state: 'held', lockFile, pid }
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { state: 'stale', lockFile, pid }
+    if (error?.code === 'EPERM') return { state: 'held', lockFile, pid }
+    return { state: 'unreadable', lockFile, why: `could not probe pid ${pid}: ${String(error?.code ?? error)}` }
+  }
+}
+
 /** 清场：删掉上一次可能留下的残留，然后建一个新的空 lib.tmp。★ 全程不碰 lib/。 */
 async function clear() {
+  /**
+   * ── ★★★ 守卫必须在 `rm` **之前**（2026-10-10 修复）─────────────────────────────
+   *
+   * MEASURED：原版把守卫放在 rm 循环【之后】，于是"拒绝清理"发生时
+   * `lib.tmp` / `lib.old` **已经被删掉了** —— 一次拒绝造成了一半的破坏，
+   * 而它读起来像"我拦住了"。
+   * ⇒ 顺序是语义的一部分：**先问该不该动，再动。**
+   */
+  const lock = await readBuildLock()
+  if (lock.state === 'held' || lock.state === 'unreadable') {
+    const why = lock.state === 'held'
+      ? `held by live process ${lock.pid}`
+      : `it exists but its holder could not be determined (${lock.why})`
+    throw new Error(
+      `拒绝清理：另一个构建正在进行 (lib.tmp.LOCK ${why}) — ${lock.lockFile}\n`
+      + '  ⇒ 若你确信没有构建在跑，删掉那个文件后重试：rm ' + lock.lockFile,
+    )
+  }
+  if (lock.state === 'stale') {
+    /**
+     * ★ 陈旧 ⇒ **自愈**。而它不静默：说清"我清掉了一个谁的锁"。
+     *   否则下一个读到这条日志的人分不清"没有过锁"与"我清掉了一个陈旧的"。
+     */
+    process.stderr.write(
+      `[clean-build] 清除陈旧的构建锁：持有者 pid ${lock.pid} 已不在（${lock.lockFile}）\n`,
+    )
+    await rm(lock.lockFile, { force: true })
+  }
+
   for (const target of [stagingOutput, previousOutput]) {
     assertScoped(target)
     await rm(target, { recursive: true, force: true })
@@ -201,6 +289,7 @@ async function publish() {
     throw error
   }
   /** ③ 清理旧版。★ 失败不影响正确性，所以它【不许】让整个构建失败。 */
+  console.log(`[clean-build] published ${basename(buildOutput)}`)
   await rm(previousOutput, { recursive: true, force: true }).catch(() => undefined)
 }
 

@@ -28,6 +28,11 @@
  */
 
 import { checkRequires, createRequiresAuditPolicy, type RequiresAuditMode, type RequiresCheck } from './requires.ts'
+/**
+ * ★ 预算停止的认出（2026-10-12）。同层 import，零依赖的叶子模块 ——
+ *   见 `./budget-stop.ts` 文件头（为什么它不能住在 tools 层、为什么认 `name`）。
+ */
+import { isCompletionBudgetStop } from './budget-stop.ts'
 
 /**
  * 一条判据的裁决。**三态，不是两态。**
@@ -39,7 +44,30 @@ import { checkRequires, createRequiresAuditPolicy, type RequiresAuditMode, type 
 export type GateVerdict =
   | { ok: true; [produced: string]: unknown }
   | { ok: false; blockers: string[] }
-  | { ok: false; unmeasured: string }
+  | {
+    ok: false
+    unmeasured: string
+    /**
+     * ── ★★★ t21：「我说不出」是不是这个**任务**的错？─────────────────────────────
+     *
+     * `'refuse'`（缺省）—— 说不出 ⇒ 拒。保守档，向后兼容（逐字等于今天的行为）。
+     * `'tolerate'`        —— 说不出 ⇒ 不拒，但**留痕**（进 `observed.unmeasured`）。
+     *
+     * ★★ 为什么这个记号在**裁决**上、而不是只在注册上：同一条判据对**不同任务**
+     *   可以答出两种性质完全不同的"说不出"。实测（t21）：
+     *
+     *     `contract.task-atomicity` 在 `implementation` 上：契约既不写 verify 也不写
+     *        inScope ⇒ ★ 那是**契约的缺陷**（写类任务**被要求**有这两格）⇒ `refuse`
+     *     同一条判据在 `review` 上：`review` **不被要求**有 inScope ⇒
+     *        "没有 inScope"是**正当留白** ⇒ `tolerate`
+     *
+     *   ⇒ 若把记号钉在**注册**上（整条判据一个值），那么"对 review 容忍"必然
+     *     也意味着"对 implementation 容忍" —— 而那会**打开一条**
+     *     "判不了的契约静默进入工作"的路，正是本任务验收第 2 条禁止的。
+     *   ★ 落在裁决上，判据就能**逐任务**回答，而那才是它真正知道的事。
+     */
+    unmeasuredDisposition?: 'refuse' | 'tolerate'
+  }
 
 export type InsertionPoint = typeof INSERTION_POINTS[number]
 
@@ -110,6 +138,38 @@ export interface GateRunEntry {
    *   都是"没有拦住流程"，但成因与责任完全不同。
    */
   observed?: boolean
+  /**
+   * ── ★ 这一步【为什么没测成】───────────────────────────────────────────────────
+   *
+   * 它表示：这条判据**跑过了**（`verdict` 是它自己的结论），而它交出的那个
+   * 「我没测成」的**成因**是什么 —— 判据自己给出的那句话（普通 unmeasured），
+   * 或者框架替它记下的那句话（预算停止）。
+   *
+   * ★ 什么时候缺席（四态，刻意不合成一条规则）：
+   *
+   *     `verdict: 'unmeasured'`         ⇒ **必在场且非空**（它就是"没测成"这件事本身）
+   *     `verdict: 'blocked'`            ⇒ 允许缺席（拒绝的理由在 `GateEvaluation.blockers`
+   *                                       里，而且可能有多条；这里不重复抄）
+   *     `verdict: 'skipped'`            ⇒ 允许缺席（判据根本没跑，成因属于**位置/接线**
+   *                                       那一层，见 `requires.checks[].skipReason`）
+   *     `verdict: 'ok'`                 ⇒ 恒缺席（没有"没测成"可解释）
+   *
+   * ★★ 为什么只有 unmeasured 是硬的：`blocked` 的成因**已经**完整落在
+   *   `blockers[]`（每一条都带 `[gate.id]` 前缀），再抄一遍会造出第二个来源；
+   *   而 `skipped` 的成因属于 `requires` 那一面（`notApplicable` /
+   *   `inputSurfaceAbsent`），把它拉进逐条 `ran[]` 会让同一件事有两个形状。
+   *   ⇒ ★ 只把"现在真的要 grep 日志才读得到"的那一格搬上来。
+   *
+   * ★ 与 `produced` 差在哪：`produced` 说的是「判据**交出了**东西吗」
+   *   （一个关于**产物**的布尔，`ok` 才可能为 `true`）；这里的字符串说的是
+   *   「它**为什么没能给出**读数」。一个是"有产出"，一个是"没产出的成因" ——
+   *   两者不可能在同一条裁决上同时有内容，但**问题不同**，所以不许合流。
+   * ★ 与 `observed` 差在哪：`observed` 说的是「裁决**有没有被采纳**」
+   *   （观察模式放过了它，一条关于**路由**的布尔）；它**不**回答"为什么没测成"。
+   *   ⇒ 一条 unmeasured 可以同时带 `observed: true` 与 `reason`：前者说"放过"，
+   *   后者说"没测成的原因" —— 两件事都读得出来。
+   */
+  reason?: string
 }
 
 export interface GateEvaluation {
@@ -264,6 +324,30 @@ export const INSERTION_POINTS = Object.freeze([
   'completion',  // ③ 成员汇报完成
   'delivery',    // ④ 团队宣布交付
   'runtime',     // ⑤ 全程（跨步骤的过程约束；告警，不直接拒任务）
+  /**
+   * ── ⑥ `collection` ——— 一条信号【要不要进库】（★ t86 加）────────────────────────
+   *
+   * ★ **判的是【采集】，不是任务。** 前六个位置判的都是"这件事该不该被允许"，
+   *   而这一条判的是**"这条信号该不该被记下来"** ——
+   *   宾语从【任务】换成了【记录本身】。
+   *
+   * ★ 为什么它必须是**一个位置 + 注册判据**，而不是 `collect.ts` 里的几个 `if`：
+   *   · **可插拔** —— 加一条采集判据 = 改一行（写错启动即炸）；
+   *   · **可显示** —— UI 读得到 id + description ⇒ 能回答"采集为什么被拒了"；
+   *   · **可审计** —— 它与其他位置用**同一套**三态与同一个注册表，
+   *     于是"没采"不会被读成"采了没问题"。
+   *
+   * ★★ **它防的第一件事不是"采错的"，而是"采重复的"** ——
+   *   MEASURED（372 条台账）：唯一 `(component, kind)` 只有 **54** 对，
+   *   而 `dispatch·unwired` **161 条**、`completion·unwired` **157 条**，
+   *   两条占 **85.5%**；同一个 `unwired` 在 `dispatch` 上重复 **161 次**、
+   *   持续 **8 天**，而**当时没有任何机制发现这件事**。
+   *   ⇒ `collection.dedupe` 就是那个机制（读数面是 `CollectionHealth.redundancy`）。
+   *
+   * ★ 顺序：它是**最后一个**元素（前面六个的相对顺序一字未动）——
+   *   与 `admission` 那条的理由相同：数组顺序是给控制台与普查读的，不是流程判据。
+   */
+  'collection',  // ⑥ ★ 一条信号【要不要进库】—— 判的是采集，不是任务
 ])
 
 /**
@@ -285,11 +369,31 @@ export function blocked(...blockers: Array<string | string[]>): { ok: false; blo
   return { ok: false, blockers: list }
 }
 
-export function unmeasured(reason: string): { ok: false; unmeasured: string } {
+/**
+ * ── ★★★ t21：`unmeasured` 的第二个实参 —— 「我说不出」是不是这个**任务**的错？──────
+ *
+ * 见 `GateVerdict` 里那段长注释。判据**逐任务**回答；缺省 `'refuse'`（保守档）。
+ *
+ * ★ 为什么做成**可选第二实参**而不是新工厂（`toleratedUnmeasured(...)`）：
+ *   后者会让"说不出"有**两个入口**，而它们的差别只能靠读函数名分辨 ——
+ *   一个没注意到新工厂的作者会写出**静默更严格**的代码（今天的行为），
+ *   而那恰好是最难发现的一种：它不报错，只是拒得比该拒的多。
+ *   ⇒ 一个入口、一个可选记号：`unmeasured(why)` 与今天逐字相同，
+ *     `unmeasured(why, 'tolerate')` 是**显式**的、要在同一行里读到的声明。
+ */
+export function unmeasured(reason: string, disposition?: 'refuse' | 'tolerate'): { ok: false; unmeasured: string; unmeasuredDisposition?: 'refuse' | 'tolerate' } {
   if (typeof reason !== 'string' || reason.trim() === '') {
     throw new Error('unmeasured() must say what could not be measured')
   }
-  return { ok: false, unmeasured: reason }
+  /** ★ 拼错 ⇒ 抛（与 `assertVerdict` 同一条纪律：不许静默退回缺省）。 */
+  if (disposition !== undefined && disposition !== 'refuse' && disposition !== 'tolerate') {
+    throw new Error(`unmeasured() got an unknown disposition (${JSON.stringify(disposition)}); use 'refuse' (the default) or 'tolerate'`)
+  }
+  return {
+    ok: false,
+    unmeasured: reason,
+    ...disposition === undefined ? {} : { unmeasuredDisposition: disposition },
+  }
 }
 
 /** 校验一条裁决的形状。非法形状【抛错】而不是被当成通过 —— 一个形状错误的裁决是最危险的。 */
@@ -309,6 +413,17 @@ function assertVerdict(verdict: unknown, id: string): GateVerdict {
     }
     if (hasBlockers && hasUnmeasured) {
       throw new Error(`gate "${id}" returned both blockers and unmeasured; pick one — "found problems" and "could not measure" are different claims`)
+    }
+    /**
+     * ── ★★ t21：处置记号**拼错就抛**，不许静默退回缺省 ─────────────────────────────
+     *
+     * ★ 与 `requires` 的校验同一条纪律：一个形状不对的**可选**字段若被静默丢掉，
+     *   "我声明了容忍"与"我没声明"随后在行为上同形 —— 而缺省是 `'refuse'`（保守档），
+     *   所以静默退回意味着**一条故意的宽松消失了，而没人会发现**。
+     */
+    const disposition = v['unmeasuredDisposition']
+    if (disposition !== undefined && disposition !== 'refuse' && disposition !== 'tolerate') {
+      throw new Error(`gate "${id}" returned an unknown unmeasuredDisposition (${JSON.stringify(disposition)}); use 'refuse' (the default) or 'tolerate' — a typo must not silently fall back to the strict default, because then a deliberate tolerance would vanish without a reading`)
     }
   }
   return verdict as GateVerdict
@@ -459,7 +574,10 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
       if (byId.has(id)) {
         throw new Error(`gate "${id}" is already registered; unregister it first (silent replacement would make "swapped" and "both ran" look identical)`)
       }
-      byId.set(id, { id, point, description, gate, appliesTo, ...requires === undefined ? {} : { requires } })
+      byId.set(id, {
+        id, point, description, gate, appliesTo,
+        ...requires === undefined ? {} : { requires },
+      })
       return registration
     },
 
@@ -648,7 +766,51 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
           requiresChecks.push(checkRequires(reg, context))
           continue
         }
-        const produced = assertVerdict(await reg.gate(context), reg.id)
+        /**
+         * ── ★★★ 判据抛出：预算停止 ⇒ unmeasured；其余照旧穿出去（2026-10-12）─────────
+         *
+         * MEASURED（本轮，加总预算时当场发现的洞）：这一行此前是**裸**调用 ——
+         *
+         *     const produced = assertVerdict(await reg.gate(context), reg.id)
+         *
+         * 于是判据里任何抛出都会**穿出整条 completion**，绕过 `ok`/`blocked`/
+         * `unmeasured` 这套三态：成员收到一个异常，而不是一条裁决。
+         * 在总预算存在之前，`verify-rerun` 这一层几乎不会抛（它的执行器把超时
+         * 收敛成退出码 125），所以这个洞一直是**不被触发**的；总预算一进来，
+         * "抛"就成了这条链上一个正常的、预期会发生的退出方式。
+         *
+         * ── ★ 只在这一条上转成 unmeasured，别的抛出**原样再抛** ────────────────────
+         *
+         * 判据里的一个真 bug（解引用 null、类型错）与"今天这条链没跑完"必须不同形：
+         * 前者是"这段代码坏了"（开发期故障，必须吵）、后者是"没能测量"（读数）。
+         * 一并吞掉会**静默掉真实的开发期故障** —— 那是本仓反复记账的那种合流。
+         * ⇒ 判据由 `isCompletionBudgetStop` 给，而不是"catch 到什么算什么"。
+         *
+         * ★ 记账与既有的 unmeasured 支**逐字同形**：`requiresChecks` 照常收一笔
+         *   （输入面核对与判据跑没跑成无关）、`ran` 记 `verdict: 'unmeasured'`、
+         *   观察模式下并进 `observed.unmeasured` 而不是裁决 —— "留痕但不拒"
+         *   这一档的全部意义就是留痕。
+         */
+        let produced: unknown = undefined
+        let budgetStop: Error | undefined = undefined
+        try {
+          produced = assertVerdict(await reg.gate(context), reg.id)
+        } catch (error) {
+          if (!isCompletionBudgetStop(error)) throw error
+          budgetStop = error instanceof Error ? error : new Error(String(error))
+        }
+        if (budgetStop !== undefined) {
+          requiresChecks.push(checkRequires(reg, context, true))
+          const reason = `[${reg.id}] ${budgetStop.message}`
+          if (observing.has(reg.id)) {
+            observedUnmeasured.push(reason)
+            ran.push({ id: reg.id, verdict: 'unmeasured', observed: true, reason })
+          } else {
+            unmeasuredReasons.push(reason)
+            ran.push({ id: reg.id, verdict: 'unmeasured', reason })
+          }
+          continue
+        }
         const verdict = produced as Record<string, unknown>
         /**
          * ── ★ 输入面核对（t6）：在判据【已经说完话】之后核对一次 ────────────────
@@ -694,11 +856,34 @@ export function createGateRegistry(options: { readonly observeFromEnv?: string |
         const reason = `[${reg.id}] ${String(verdict['unmeasured'])}`
         if (observeOnly) {
           observedUnmeasured.push(reason)
-          ran.push({ id: reg.id, verdict: 'unmeasured', observed: true })
+          ran.push({ id: reg.id, verdict: 'unmeasured', observed: true, reason })
+          continue
+        }
+        /**
+         * ── ★★★ t21：这条判据的「说不出」该不该**拒**，由它**自己声明**──────────────
+         *
+         * 见 `GateVerdict` 里 `unmeasuredDisposition` 那段。要点复述：
+         *
+         *   `'tolerate'` ⇒ **不并进 `unmeasuredReasons`**（于是不影响裁决），
+         *                  但**并进 `observed.unmeasured`** —— ★ "留痕"是这一档的
+         *                  全部意义：它说的仍然是"这一步没被检查"，只是**不拒**。
+         *   `'refuse'`（缺省）⇒ 与今天**逐字相同**：并进 `unmeasuredReasons` ⇒ 位置级拒。
+         *
+         * ★★ 而"不拒"**绝不等于"丢掉"**：`observed.unmeasured` 是既有字段
+         *   （观察模式用的那一个），它本来就承担"开火了但裁决没被采纳"的语义 ——
+         *   而这里的形状**恰好是**那件事：判据开火了（它说了"我说不出"），
+         *   而它的裁决**按声明**没有被采纳。⇒ ★ 复用它是**对的**，不是将就：
+         *   新造一个平级字段会让"哪一个才是真的读数"变成要读两处才能回答的问题。
+         *   ★ 而它**同时**在 `ran` 里如实标着 `verdict: 'unmeasured'`，
+         *     于是"这条判据跑了"与"它的裁决有没有被采纳"两件事都读得出来。
+         */
+        if (verdict['unmeasuredDisposition'] === 'tolerate') {
+          observedUnmeasured.push(reason)
+          ran.push({ id: reg.id, verdict: 'unmeasured', observed: true, reason })
           continue
         }
         unmeasuredReasons.push(reason)
-        ran.push({ id: reg.id, verdict: 'unmeasured' })
+        ran.push({ id: reg.id, verdict: 'unmeasured', reason })
       }
       const collected: Record<string, Record<string, unknown>> = Object.fromEntries(outputs)
       const evaluated = registered - skipped

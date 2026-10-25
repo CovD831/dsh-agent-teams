@@ -4,7 +4,10 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { AgentTeamsSummary, openActivityPanel, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { getActivitySnapshotsSnapshot, subscribeActivitySnapshots } from './activity-monitor.ts'
 import { teamCardsForTurn } from './agent-teams-card-definition.ts'
-import { LEAD_ART } from './artwork.ts'
+/**
+ * ★ t80：`LEAD_ART` 的 import 已删 —— 聊天入口不再显示队长头像。
+ *   ★ **资源仍在** `artwork.ts`（`verify.mjs:311` 的打包契约钉着 `team-lead-v2.png`）。
+ */
 import css from './AgentTeamsCard.module.css'
 
 export function TeamChatEntry({ sessionId, t }: PropsRuntime<'conversation.session.header.actions'> & PropsLocale<'agentTeams'>) {
@@ -13,7 +16,7 @@ export function TeamChatEntry({ sessionId, t }: PropsRuntime<'conversation.sessi
   if (!team) return null
   return <button className={css.chatEntry} data-team-chat-entry type="button" title={t('workspace.focus')}
     onClick={() => openActivityPanel({ teamId: team.teamId, captainSessionId: sessionId, teamName: team.name, members: team.members })}>
-    <img src={LEAD_ART} alt="" aria-hidden />{t('workspace.focus')}
+    {t('workspace.focus')}
   </button>
 }
 

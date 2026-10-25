@@ -4,7 +4,7 @@
 // ★ 工具体本身一个字符都没改；变的只是"这些东西从哪来"。
 // ★ 本文件不 import src/tools.ts（会成环）。
 
-import { appendTeamEvent, captainSessionOf } from '../events.ts'
+import { appendTeamEvent, captainSessionOf, liveAgentOf } from '../events.ts'
 
 /**
  * ── ★★★ kind 需求表的**同步**读取（t54）─────────────────────────────────────────
@@ -116,29 +116,711 @@ function requiredGateIdsFor(kind: string | undefined): readonly string[] | undef
   return requirement.requiredGates
 }
 import { registry } from '../gates/index.ts'
+/** ★ t97：工作区字节身份（S1 —— 判决落盘时记下它绑定了哪些字节）。 */
+import { digestWorkspacePaths, snapshotReviewedArtifacts } from '../artifacts.ts'
+import { testFileBaselineOf, shouldSnapshotTestFiles } from '../quality-gates.ts'
 import { gitChangedPaths, observeWorkspaces, observedChangedPaths } from '../harness-compat.ts'
 import { isCurrentMail, mailboxPrompt } from '../mailbox.ts'
-import { appendTaskEvidence, repairCompletionVerdict, traceEvidenceConsumer } from '../quality-gates.ts'
-import { TERMINAL_TASK_STATUSES } from '../types.ts'
+import { appendTaskEvidence, compareVerifyProbe, judgeSelfReview, repairCompletionVerdict, taskKindOf, traceEvidenceConsumer } from '../quality-gates.ts'
+import { TERMINAL_TASK_STATUSES, VERDICT_KINDS, appendExecution } from '../types.ts'
+/**
+ * ★ `needsWorktreeFor`：判"这条任务**应当**有隔离树吗" —— 用来把
+ *   「本来就不建树」与「该建树而没建成」分开（后者是一个真缺陷）。
+ *   ★ 从 `types.ts` 取单一来源，**不在这里再写一份 kind 列表**。
+ */
+import { needsWorktreeFor } from '../types.ts'
+/**
+ * ★ 落终态时把 worktree 的改动提交成 commit（见下面那一格的注释）。
+ *   —— 缺口是实测出来的：只建树、不提交 ⇒ 46 棵 worktree 里目标文件一个都没有。
+ */
+import { commitWorktree, worktreeDirName } from '../worktree.ts'
+/**
+ * ★ 单独一行 import（**不是**加进上面那一行）—— 这是刻意的。
+ *
+ *   `scripts/worktree-commit.test.mjs` 的臂 7 逐字钉着那一行的形状
+ *   （`import { commitWorktree, worktreeDirName } from '../worktree.ts'`），
+ *   往里面加一个名字会让它变红 —— 而它红的理由**不是接线断了**，
+ *   只是 import 列表多了一项。
+ *
+ *   ★ 我可以去改那条断言（它会变成"钉列表形状"的不变量），但那是**另一个写域**
+ *     （`scripts/worktree-commit.test.mjs` 不在本任务的 inScope 里）。
+ *     ⇒ 正确的处置是**让实现去满足既有契约**，而不是改别人的夹具。
+ *   ★ 而这两行指向**同一个模块**，加载语义完全一致（ESM 会合并）。
+ */
+import { resolveTrunkRef } from '../worktree.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 /**
  * ★ t54：kind 需求表的**校验器**从判据那边借来（它是纯函数，不读盘）。
  * ★ 方向不会成环：`r5.ts` 只 import `../registry.ts` / `../requires.ts`。
  */
 import { parseKindRequirements, type KindRequirementsLoad } from '../gates/completion/kind-requirements.ts'
-import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
+import { appendGateTallies } from '../evolution/gate-tally.ts'
+import { auditGateRequires, changedLineNumbers, deriveCoverageInput, deriveScanDirs, diagnosticFields, evaluateRuntimeGates, inputSurfaceOf, memberOpenTask, mergeRerunIntoCommandsRun, observeMemberActivity, observeMemberConvergence, readWorkspaceFileSync, recordFriction, gateIdFromMessage, rejectOnContractGates, requireCaptain, requireCaptainTeam, requireFreshCaptainTeam, requireFreshParticipant, requireMember, requireParticipantTeam, requireTask, resolveBaseRevision, runInDetachedRevision, runVerifyCommand, runVerifyCommandCaptured, stateRootOf, teamLockKey, noteStall, clearStall, throwWithSurface, withInputSurfaceOnError, workspaceOf, writeWorkspaceFileSync, loadVerifyCommandRules, } from './shared/entities.ts'
 import { ContractAmendmentInput } from '../quality-gates.ts'
 import { wireDispatch, type DispatchWiringInput } from './update-task/dispatch.ts'
 import { wireCompletion } from './update-task/completion.ts'
-import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
+import { CAPTAIN_KEY, amendTaskContract, appendMailbox, createMessage, evaluateQualityCompletion, failureKindOf, gateEvaluationRecordOf, markMailboxDelivered, normalizeBlankOptionalTaskFields, readMailbox, releaseMailboxDelivery, transitionError, withTeamLock, writeTeam } from '../state.ts'
 import { steerCaptainReport } from '../tools.ts'
 import { CommandResult, ReviewVerdict } from '../types.ts'
 import { AgentTeamsRuntime, applyQualityFollowUp, parseAcceptanceResults, parseCommandResults, parseFindings } from './shared/entities.ts'
 import type { Context } from '@deepseek-ai/cordis'
+import { sessionLeadsTeam } from '../lineage.ts'
+import { identityOfTeam, liveRefsOf } from '../members.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { pathToFileURL } from 'node:url'
+
+/**
+ * ── ★★★ 可选地读队长会话：**绝不**让"读不到"变成"这次完成失败了" ────────────────
+ *
+ * MEASURED（本仓实测，十几次，跨四个成员与队长自己）：在工具的**返回值算完之后**
+ * 调 `ctx.agents.get(...)`，会抛
+ *   `cannot get required service "agents" in inactive context`
+ * 而**落盘已经完成**。机制在 host 的 cordis（`lib/index.js:688`）：取值器沿 fiber
+ * 树往上找 `fiber.store`，而 `store` **只在 fiber 处于 active 时存在**；本插件在
+ * 顶层 `inject` 里声明了 `agents`（`src/index.ts:56`），于是当**本处理器所属的
+ * fiber 已经不在运行**时，取值器走到"我自己就声明了它"这一支 ⇒ **当场抛，不再往上找**。
+ *
+ * ★ 而它为什么**有时不抛**：同一个处理器**先**返回结果、**后**执行这段投递，而
+ *   "会话何时结束"与"这段代码何时跑"的先后决定了这一次成功还是抛错 —— 产物都一样已交付。
+ *   ⇒ 同一句报错里混着"没做"与"做了但回执丢了"，调用方**无法分辨**，于是重试，
+ *     而重试又成功又失败 ⇒ 整轮卡在 complete 上。这正是运行里反复出现的那一格。
+ *
+ * ★ 处置：**按需**读，且失败时返回 `undefined` 而不是抛。这里的读是"把跟进消息
+ *   顺手推给队长"的**尽力而为投递**，不是终态转换的判据；消息仍在邮箱里，
+ *   下一条 status 会看到，所以没有事实丢失。
+ */
+function readCaptainSession(ctx: Context, sessionId: string | undefined): Parameters<typeof steerCaptainReport>[0] | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  /**
+   * ★ 这一层原先在这里有一份**本地**实现（只为了这个文件的一处调用）。
+   *   现统一到 `liveAgentOf`：同一格在本仓出现过三份，而三份各自的宽严不同 ——
+   *   那比一份都没有更坏，因为读起来像已经处理过了。
+   */
+  return liveAgentOf(ctx, sessionId)
+}
+/**
+ * ★★ 本文件**不再** import `rmSync`（defect 1 的修法）：
+ *   删除只有**一个**出处 —— `scripts/worktree-reclaim.mjs` 的 `removeWorktree`。
+ *   留一句 `rmSync` 在这里就是第二份实现，而它会把 `git worktree list` 里
+ *   那条记录留成 `prunable` 幽灵（目录没了、台账还在，且不会自己消失）。
+ *   ★ 删掉这个 import 本身也是那条纪律的**可执行形式**：想让删除回来，
+ *     就得先把这一行加回来 —— 而那一步看得见。
+ */
+import { pluginRoot } from './shared/entities.ts'
+
+/**
+ * ── ★★★ 交付完成后**按任务**回收它的那棵 worktree（t-concurrency-1-t2）───────────────
+ *
+ * ── 它防的是什么失效（MEASURED）─────────────────────────────────────────────────
+ *
+ * `scripts/worktree-reclaim.mjs` 与 `src/worktree.ts` 的 `judgeWorktreeReclaimable`
+ * 都是**写好了的**，而**全仓零调用方**：
+ *
+ *     $ grep -rn "judgeWorktreeReclaimable" src/          ⇒ 只有定义处
+ *     $ grep -rn "worktree-reclaim" src/                  ⇒ 0 处
+ *
+ * ⇒ 后果：`lib/` 里那份判定**从未在生产路径上被执行过一次**，
+ *   而盘上 46 棵 worktree 只得靠人手动 `--apply` 清 —— 用户原话是
+ *   「不能每次都让我手动清理，得有一个自动清理的机制」。
+ * ★ 而"一条没接线的判据"与"一条不存在的判据"，在"该不该删"这件事上**没有区别**。
+ *
+ * ── ★★★ 判据只有一份真值：**本函数不自己判断能不能删** ─────────────────────────────
+ *
+ * 能不能回收由 `judgeWorktreeReclaimable`（权威实现，`src/worktree.ts:528`）
+ * 说了算 —— 它是「已提交的部分被主干吸收」∧「未提交的源码没有一份是历史里不存在的」
+ * 两个条件的合取。**这里一行 `git` 都不跑**：
+ *
+ *   · ★ 不许 `git merge-base --is-ancestor`（那只是上面 (a) 那一半）；
+ *   · ★ 不许 `git status --porcelain` + 唯一 blob 的手写推理（那是 (b) 那一半）；
+ *   · ★ 不许多一份"吸收/唯一工作"的实现 —— 两份实现分叉时**没有任何东西会发现**，
+ *     而分叉的代价是删掉唯一的那份产物（本仓 `task-t64` 实测过：7 个源码文件
+ *     68KB/69KB 级，内容不在任何提交里）。
+ *
+ * ⇒ 本函数只做四件事：**读开关 → 加载模块 → 拿它的裁决 → 只对 `reclaimable` 落地删除**。
+ *
+ * ── ★★★★★ 入口条件（round-2 修复的那一格，MEASURED）──────────────────────────────
+ *
+ * **调用方在每一次终态转换、只要那棵树在，就调用本函数** —— 与"这一轮提交成了没有"无关。
+ *
+ * ★ 为什么这一格曾经是错的（round-1 的 blocker，reviewer 两次实测）：`commitWorktree`
+ *   **只在 worktree 里**提交、从**不**合进 `main` ⇒ 提交刚成功的那一刻，树 HEAD 是一个
+ *   全新 commit，按定义**不是** `main` 的祖先 ⇒ 权威判据必然答 `keep / not-absorbed`。
+ *   ⇒ 把入口设在"提交成功"那一支 = 把入口设在**唯一一个判据必然说不的时刻**。
+ * ★ 而**唯一可达**的"已吸收"形状是**没有新改动**的那一次（`commit === undefined`）：
+ *   产物早先已被合流、这次本来就没东西要提交 —— 它也**走不到**那个分支。
+ * ⇒ 修正：**树在 ⇒ 就判**。今天判 `keep` 是**正确的中间态**（产物还没合流），
+ *   而**下一次**这条任务落终态时会再判一次 —— 那时才删。
+ *   ★ 判据仍然只有 `judgeWorktree` 一条；本层**不**新增任何"吸收与否"的推理。
+ *
+ * ── ★★ 为什么**不**用 `planReclaim`（它是同一个脚本里的另一条）────────────────────
+ *
+ * `planReclaim` 扫的是**整棵** `<repo>/.agent-teams/worktrees/`（`listWorktrees(repo)`）
+ * ⇒ 它是"全仓大扫除"，它删的树与**这条任务**没有关系。
+ * ★ 而这里要的是**按任务**回收：只动 `this task` 那一棵。
+ * ⇒ 所以只用**纯裁决**那一半（`judgeWorktree`），删除由本函数自己对**那一条路径**做。
+ *
+ * ── ★★★ 只读裁决：判定这一步**不可能**删掉任何东西 ────────────────────────────────
+ *
+ * `judgeWorktree` 的可见副作用面**只有 `git` 的只读查询**：
+ *   `rev-parse` / `merge-base --is-ancestor` / `rev-list --count` /
+ *   `status --porcelain` / `hash-object` / `log --find-object`。
+ * 它【不】调用 `rmSync`、不写文件、不改仓库状态 —— 删除**只**发生在下面那一处，
+ * 且被 `verdict.status === 'reclaimable'` 门住。⇒ "判定"与"删除"是**两个**动作，
+ * 而不是"一次调用顺手删了"。
+ *
+ * ── ★★ 三态不同形，且 `undecidable` 绝不并进 `reclaimable` ────────────────────────
+ *
+ *   `reclaimable` ⇒ 删，并记一条 info（含模块自己的人话）。
+ *   `keep`       ⇒ **不删**，把模块自己的措辞记下来（`reason` / `detail` / `orphaned`）。
+ *   `undecidable`⇒ **不删**，记 `why` —— 「判不了」是**没测到**，不是"可以删"。
+ * ★ 任一情形都留下**一行可读的日志**：没有静默分支（那会让"没回收"与"没跑"同形）。
+ *
+ * ── ★★ 它【绝不】改判这条任务 ──────────────────────────────────────────────────
+ *
+ * 提交失败、模块加载不了、删除抛错 —— **一律只记 warn**，不 throw、不动 `task.status`、
+ * 不写 `task.deliveryFailure`。★ 回收是**记账之外**的清理，不是裁决：
+ * 把"清理没成"读成"交付失败"，会让成员去重做已经做对的工作（本仓记账过的那一类浪费）。
+ *
+ * @returns 一条**可读的**读数（也给夹具断言用）；任何失败都落在 `outcome: 'failed'`。
+ */
+export async function reclaimWorktreeAfterDelivery(options: {
+  /** 那条任务的隔离检出（`createTaskWorktree` 的确定性命名，调用方已算好）。 */
+  worktree: string
+  /** 主仓库根 —— 权威判据的 `repo`。 */
+  repo: string
+  /** 只用于日志：哪条任务被回收了。 */
+  taskId: string
+  /** 只用于日志：这条读数属于哪个已落终态的状态。 */
+  status: string
+  /**
+   * ── ★ 只用于**日志措辞**：这一轮的提交成了没有（`reclaimWorktreeAfterDelivery` 的入口）──
+   *
+   * `'committed'`          —— 刚交付了一个 commit（而它按定义**还没**被合流 ⇒ 今天多半是 `keep`）
+   * `'nothing-to-commit'`  —— 树是干净的（★ 这一格才是"已吸收"通常被发现的地方）
+   * `'commit-failed'`      —— 提交没成（★ 回收**仍然照判**：能不能删与记账成没成无关）
+   *
+   * ★★ 它**绝不**参与"能不能删" —— 那件事只有 `judgeWorktree` 说。
+   *   把它做成输入会让本层出现**第二条判据**，而那正是本任务要消灭的形态。
+   *   它只让日志能分出"刚交付、还没合流"与"没有新改动、只是重判"这两种情形。
+   */
+  commitOutcome?: 'committed' | 'nothing-to-commit' | 'commit-failed'
+  /** ★ 注入点：默认走 `pluginRoot()` 动态 import（见下）。 */
+  logger: { info: (message: string) => void; warn: (message: string) => void }
+  /** ★ 注入点（夹具用）：默认 `process.env`。 */
+  env?: Record<string, string | undefined>
+  /** ★ 注入点（夹具用）：默认动态 import 那个脚本。 */
+  loadJudge?: () => Promise<ReclaimJudgeModule>
+  /**
+   * ★ 注入点（夹具用）：默认走 {@link ReclaimJudgeModule.removeWorktree}。
+   *
+   * ★★ 签名【不变】（`(path: string) => void`）—— 既有的夹具臂照旧注入，
+   *   而**默认值**换了出处：它不再是这里的一句裸 `rmSync`，而是模块里那个
+   *   「连 git 台账一起清」的唯一出处（见 `removeWorktree` 的文件头）。
+   */
+  remove?: (path: string) => void
+  /**
+   * ★ 主干引用。**没有缺省值**（W1）。
+   *
+   *   旧注释逐字写着「主干引用（默认 `main`，与权威实现一致）」—— 而那句话本身
+   *   就是缺陷的一部分：本仓的集成**不在** `main` 上（实测落后 209 个提交），
+   *   所以"默认 main"意味着**判据永远在跟一个过期的引用比**。
+   *
+   *   ★ 现在缺省**不是**一个名字，而是一个问法：不给就由
+   *     `resolveTrunkRef(repo)` 从"主树自己检出在哪条分支"推出来。
+   *     ★ 而两处**生产**调用点都会先显式解析、再传进来 —— 那是这条链上唯一
+   *       能保证"比较对象是对的"的位置（见 `:1809` / `:2133` 两处的注释）。
+   */
+  mainRef?: string
+}): Promise<ReclaimOutcome> {
+  const { worktree, repo, taskId, status, logger } = options
+  const env = options.env ?? process.env
+  /**
+   * ── ★★★ 默认删除器：**等模块加载完**再取它（这里先留一个占位）──────────────────
+   *
+   * ★ 为什么不能就地写成 `options.remove ?? ((p) => rmSync(...))`：
+   *   删除的**唯一出处**是 `scripts/worktree-reclaim.mjs` 的 `removeWorktree`
+   *   （它同时删目录与 git 台账条目 —— 见那个函数的文件头）。
+   *   在这里再写一句 `rmSync` 就是**第二份实现**，而它会留下 `prunable` 幽灵
+   *   （本任务修的 defect 1 正是这么来的）。
+   *   ⇒ 所以默认值必须在拿到 `module` 之后才成立（见下面 `remove` 那一处赋值）。
+   *
+   * ★ 而 `options.remove` 这个注入点**签名不变**（`(path: string) => void`）：
+   *   既有夹具臂照旧注入，它们测的是"删除会不会发生"，与出处无关。
+   */
+  let remove = options.remove
+
+  /**
+   * ── ① 开关：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ **什么都不做**（连模块都不加载）────────
+   *
+   * ★ 名字来自**模块的导出**（`RECLAIM_OFF_ENV`），不是在这里重打一遍字面量：
+   *   两处各写一个字符串，改名那天会**静默分叉** —— 而分叉的表现是
+   *   "开关拨了却没停"，那正是本机制最不能出的错（自动删除若不能停，误判不可逆）。
+   *   ⇒ 所以在同一份 `import` 里把它取回来（见下面 `loadJudge`）。
+   */
+  let module: ReclaimJudgeModule
+  try {
+    module = await (options.loadJudge ?? loadWorktreeReclaimModule)()
+  } catch (error) {
+    /**
+     * ★ 模块加载不了 ⇒ 只记 warn，**不改判**。
+     *   ★ 而措辞必须说清"没有回收"，否则它与"回收了"在日志里同形。
+     */
+    logger.warn(
+      `agent-teams: could not reclaim the worktree for task "${taskId}" at ${worktree}: `
+      + `the reclaim judge module could not be loaded (${describeError(error)}) — the tree was left untouched`,
+    )
+    return { outcome: 'failed', worktree, why: 'module-unloadable' }
+  }
+
+  /**
+   * ★ 开关读的是**模块导出的那个名字**。`'1'` / `'true'` 都算开（与 CLI 守卫逐字一致）。
+   */
+  const offSwitch = module.RECLAIM_OFF_ENV
+  const off = env[offSwitch] === '1' || env[offSwitch] === 'true'
+  if (off) {
+    logger.info(
+      `agent-teams: worktree reclaim skipped for task "${taskId}" (${worktree}) because `
+      + `${offSwitch}=${String(env[offSwitch])} is set — the tree was left untouched `
+      + '(an automatic delete that cannot be stopped is irreversible when it misfires)',
+    )
+    return { outcome: 'skipped-off-switch', worktree, why: `off:${offSwitch}` }
+  }
+
+  /**
+   * ── ★★★ 默认删除器（现在可以定了）：模块里的 `removeWorktree` ────────────────────
+   *
+   * 它一条命令做完两件事：删目录、**清 git 的 worktree 台账**。
+   * ★ 此前这里是裸 `rmSync` —— 它只删目录，而 `git worktree list` 里那一条
+   *   会一直留着（标成 `prunable`），且**不会自己消失**。
+   *   ⇒ 那不是洁癖：此后每一次 `git worktree list` 都在报告一棵不存在的树，
+   *     而那与"我删干净了"在读数上同形。
+   * ★★ 走**同一个函数引用**（不是"再写一遍同样的删除"）：两份实现分叉时，
+   *   其中一份会把幽灵留下，而**没有任何东西会发现**（本仓记账过的形态）。
+   */
+  remove ??= (path: string) => module.removeWorktree({ repo, worktree: path })
+
+  /**
+   * ── ② 拿裁决 —— **只有**这一个来源（见上面"判据只有一份真值"）───────────────────
+   *
+   * ★ 它**不可能**删东西：`judgeWorktree` 里只有只读的 git 查询（见上面的逐条点名）。
+   *   删除在本函数里**另起一处**，且只在 `reclaimable` 那一支。
+   *
+   * ★ 判据自己抛错（例如 git 不在 PATH）也**不改判**：那是"没能测量"，
+   *   而不是"可以删"。⇒ 落 `failed` 并保持树不动。
+   */
+  let verdict: ReclaimVerdict
+  try {
+    verdict = await module.judgeWorktree({ repo, worktree, ...options.mainRef === undefined ? {} : { mainRef: options.mainRef } })
+  } catch (error) {
+    logger.warn(
+      `agent-teams: could not judge the worktree for task "${taskId}" at ${worktree} `
+      + `(${describeError(error)}) — that is "not measured", not "safe to delete"; the tree was left untouched`,
+    )
+    return { outcome: 'failed', worktree, why: 'judge-threw' }
+  }
+
+  /**
+   * ★ 人话一律**取自模块**（`human` / `reason` / `why` / `detail`），不在这里另写一句 ——
+   *   两处各说一遍会在模块改措辞时分叉，而分叉之后读日志的人分不出该做什么。
+   */
+  const spoken = verdict.human ?? verdict.reason ?? verdict.why ?? verdict.detail ?? '(the module gave no reason)'
+
+  /**
+   * ── ③ 三态：**只有 `reclaimable` 才删** ─────────────────────────────────────────
+   */
+  if (verdict.status === 'reclaimable') {
+    try {
+      remove(worktree)
+      logger.info(
+        `agent-teams: reclaimed the worktree for task "${taskId}" (${status}) — deleted ${worktree}; `
+        + `the judge said: ${spoken}`,
+      )
+      return { outcome: 'reclaimed', worktree, why: spoken }
+    } catch (error) {
+      /**
+       * ★ 删不掉（占用、权限）⇒ 只记 warn。
+       *   ★ 而它与"删掉了"必须**不同形** —— 否则盘上留着树、日志却说回收了。
+       */
+      logger.warn(
+        `agent-teams: could not reclaim the worktree for task "${taskId}" at ${worktree} `
+        + `(${describeError(error)}) — the judge said it was safe to delete, but the delete itself failed; `
+        + 'the tree was left on disk and this does NOT change the task result',
+      )
+      return { outcome: 'failed', worktree, why: 'delete-threw' }
+    }
+  }
+
+  /**
+   * ── ④ `keep` / `undecidable` ⇒ **不删**，把模块自己的话记下来 ────────────────────
+   *
+   * ★ 两态**不同形**（措辞分开），否则"有唯一产物被保住"与"根本判不了"同形。
+   * ★ 也不并进 `reclaimable`：这三个词里只有一个允许删除。
+   */
+  const heldKind = verdict.status === 'keep'
+    ? `held (${verdict.reason ?? 'unknown'})`
+    : 'could NOT be decided (not measured — this is NOT "safe to delete")'
+  /**
+   * ★★ "今天保住"**不是**失效 —— 它是"产物还没被主树吸收"的**正确**读数。
+   *
+   * ★ 而它必须**说清下一次会怎样**，否则读的人会以为这条接线没生效：
+   *   `keep / not-absorbed` 的成因是"那个 commit 还没被 integrator 合进主干"，
+   *   而**下一次**这条任务落终态时会**再判一次** —— 那时它就成了 `reclaimable`。
+   *   ⇒ 所以这一行里明写"将在下一次终态转换时重判"，而不是让它读起来像"没做"。
+   * ★ 而 `undecidable` **不许**借这句话蒙混过去：它是"没测到"，
+   *   与"吸收与否"是两件事 ⇒ 两者措辞分开（三态不同形）。
+   */
+  const outcomeNote = options.commitOutcome === undefined
+    ? ''
+    : options.commitOutcome === 'committed'
+      ? ' (this transition committed the deliverable; the trunk has not absorbed it yet, so this is the expected answer until an integrator merges it — it will be judged again at the next terminal transition)'
+      : options.commitOutcome === 'nothing-to-commit'
+        ? ' (this transition had nothing to commit, so this is a re-judgement of an existing tree)'
+        : ' (the deliverable commit did NOT succeed — that is a bookkeeping failure, and it does not by itself make this tree reclaimable)'
+  logger.info(
+    `agent-teams: worktree for task "${taskId}" at ${worktree} was NOT reclaimed: ${heldKind} — ${spoken}${outcomeNote}`,
+  )
+  return { outcome: verdict.status === 'keep' ? 'kept' : 'undecidable', worktree, why: spoken }
+}
+
+/** 一行错误消息（★ 不许把异常对象直接塞进模板串 —— 那会打出 `[object Object]`）。 */
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message
+  return String(error)
+}
+
+/**
+ * ── ★★★ D3：`commandsRun[i].status` 与 `exitCode` 的自相矛盾必须被拒 ─────────────
+ *
+ * MEASURED（`src/tools/shared/entities.ts:5554-5591` 的 `parseCommandResults`）：
+ *   它只做**形状**校验 —— `command` 是非空串、`status` ∈ {passed, failed}、
+ *   `exitCode` 是 number 就原样透传。★ 它**从不**把两者放在一起看。
+ *
+ * ⇒ 于是下面这一对都能落盘，而在读取端它们与一份**自洽**的证据同形：
+ * ```
+ *   { command, status: 'passed', exitCode: 1 }   // "通过了，而它退出码是 1"
+ *   { command, status: 'failed', exitCode: 0 }   // "它坏了，而它退出码是 0"
+ * ```
+ * ★ 而 `failureKindOf` 恰恰**只看 `exitCode`**（`src/state.ts:316-326`）——
+ *   ⇒ 一条自报 `status:'failed'` / `exitCode:0` 的命令既不会被算成
+ *     "交付物坏了"，又会被读成"它失败过" ⇒ 两个格子在讲两个不同的故事。
+ *
+ * ── ★★ 判据的三态（第三态是"缺席"，不是"一致"）────────────────────────────────
+ *
+ *   `exitCode === undefined`        ⇒ **不判**。老数据只是没记这一格，
+ *                                      不是矛盾 —— 把"没记"当"矛盾"会拒掉历史。
+ *   `passed` ∧ `exitCode !== 0`     ⇒ 矛盾（`passed:true` 说"它跑通了"）
+ *   `failed` ∧ `exitCode === 0`     ⇒ 矛盾（`failed:true` 说"它没跑通"）
+ *
+ * ★ 返回**一句话**（而不是布尔）—— 拒绝时必须说清是**哪一条**、**哪一格**矛盾，
+ *   否则读日志的人只看到"一条命令不一致"而不知道去改哪一行。
+ */
+export function commandRunConflict(results: readonly CommandResult[]): string | undefined {
+  for (const [index, item] of results.entries()) {
+    /**
+     * ★ 三态第一义：**没记**不是**矛盾**。
+     *   `parseCommandResults` 只在 `typeof exitCode === 'number'` 时才留这一格 ⇒
+     *   缺席意味着调用方没有交它 —— 那是"没测"，须放行（与 t42 同一条纪律：
+     *   "我没能检查"≠"它不行"）。
+     */
+    if (item.exitCode === undefined) continue
+    if (item.status === 'passed' && item.exitCode !== 0) {
+      return `commandsRun[${index}] reports status="passed" but exitCode=${item.exitCode}: a passed command cannot have a non-zero exit code`
+    }
+    if (item.status === 'failed' && item.exitCode === 0) {
+      return `commandsRun[${index}] reports status="failed" but exitCode=0: a failed command cannot have a zero exit code`
+    }
+  }
+  return undefined
+}
+
+/**
+ * ★★ `parseCommandResults` 的**薄包一层**：先交给既有解析器（形状 + 必填 `status`），
+ *    再判 status × exitCode 的一致性。
+ *
+ * ── 为什么是"包一层"而不是"改解析器" ───────────────────────────────────────────────
+ *
+ * `parseCommandResults` 住在 `src/tools/shared/entities.ts` —— 它**不在**本任务的
+ * inScope 里，而它还有别的调用方（终态补证据那一路）。
+ * ★ 而本条判据要的是「本工具**接受**的 commandsRun 必须自洽」——
+ *   那是 `update_task` 的**接受面**，不是那个共享解析器的语义。
+ * ★★ 所以校验放在接受面这一层：解析器的一个字都不动（既有那条
+ *   `commandsRun[i].status must be passed or failed` 的必填校验原样生效），
+ *   而两个入口（终态补证据 / 常规更新）都走这里。
+ */
+export function parseCommandResultsChecked(value: unknown): CommandResult[] | undefined {
+  const parsed = parseCommandResults(value)
+  if (parsed === undefined) return undefined
+  const conflict = commandRunConflict(parsed)
+  if (conflict !== undefined) throw new Error(conflict)
+  return parsed
+}
+
+/**
+ * ── ★★★★★ 扫一遍**已经终态**的任务，把它们早已被吸收的树收掉（defect 2）─────────────
+ *
+ * ── 它修的是什么缺陷（MEASURED，本任务的由来）───────────────────────────────────
+ *
+ * {@link reclaimWorktreeAfterDelivery} 只在**终态转换那一刻**被判一次。而它的
+ * `keep / not-absorbed` 那条读数里**自己写着**"将在下一次终态转换时重判"。
+ *
+ * ★★ 而对一条**已经**终态、此后不再更新的任务，那个"下一次"**永远不会来**：
+ *   没有 `update_task` 调用 ⇒ 没有终态转换 ⇒ 没有任何时刻会重判它
+ *   ⇒ 一棵产物早已被合流进主干的树，**永久**留在盘上，
+ *     而盘上的读数与"这条任务还在跑"同形。
+ *
+ * ── ★★★ 判据仍然只有一份真值 ────────────────────────────────────────────────────
+ *
+ * 本函数**一行"吸收与否"的推理都没有**：它把每一棵终态任务的树交给模块的
+ * `scanTerminalWorktrees`（它再交给 `judgeWorktree` → `judgeWorktreeReclaimable`）。
+ * ⇒ 与 CLI、与逐任务那条接线，三条路的答案来自**同一个函数引用**。
+ *
+ * ── ★★ 它在**名单层面**就保证"非终态不判、不删"─────────────────────────────────
+ *   `scanTerminalWorktrees` 在判定之前就把非终态剔掉（见模块里那一节）。
+ *   本层**不重做**那个筛选 —— 再筛一遍就是第二个出处。
+ *
+ * ── ★★ 三态不同形：只有 `reclaimable` 被删 ──────────────────────────────────────
+ *   `keep`（未吸收 / 有唯一产物）与 `undecidable`（没测到）**绝不**被删。
+ *   ★ 而它把三者的**数量**如实交出去（`kept` / `undecidable`），
+ *     否则"扫了 0 棵"与"扫了 20 棵但一棵都不该删"在读数上同形。
+ *
+ * ── ★★★ 它【不】改任何任务状态，而且【绝不】往外抛 ──────────────────────────────
+ *
+ * 模块加载失败、判据抛错、删除抛错 —— 一律只记一条**可读的 warn** 并记进读数。
+ * ★ 理由与逐任务那条逐字相同：回收是**记账之外**的清理，不是裁决。
+ *   把"清理没成"读成"交付失败"，会让成员去重做已经做对的工作。
+ * ★ 而"删不掉"必须留下可读痕迹（`failures`）——一个静默失败的删除与"没删"同形，
+ *   而盘上留下的那棵树没人会知道。
+ *
+ * @returns 一条**可读的**读数（也给夹具断言用）；任何失败都不改变它的返回形状。
+ */
+export async function reclaimTerminalWorktrees(options: {
+  /** 主仓库根 —— 权威判据的 `repo`，也是 `.agent-teams/worktrees/` 的父目录。 */
+  repo: string
+  /** 这一轮**落盘之后**的任务清单（★ 传 `fresh.tasks`，不是调用前那份）。 */
+  tasks: readonly { id: string; status: string }[]
+  /** 团队 id —— 路径名的那一位（见 `worktreeDirName`）。 */
+  teamId?: string
+  /** ★ 只用于日志。 */
+  logger: { info: (message: string) => void; warn: (message: string) => void }
+  /** ★ 注入点（夹具用）：默认 `process.env`。 */
+  env?: Record<string, string | undefined>
+  /** ★ 注入点（夹具用）：默认动态 import 那个脚本。 */
+  loadJudge?: () => Promise<ReclaimJudgeModule>
+  /**
+   * ★ 注入点（夹具用）：默认走 {@link ReclaimJudgeModule.removeWorktree}。
+   *   签名与 {@link reclaimWorktreeAfterDelivery} 的那一格**刻意保持一致**。
+   */
+  remove?: (path: string) => void
+  /**
+   * ★ 主干引用。**没有缺省值**（W1）—— 理由与
+   *   {@link reclaimWorktreeAfterDelivery} 上那一格逐字相同（见那里）。
+   */
+  mainRef?: string
+}): Promise<{ scanned: number; reclaimed: string[]; kept: number; undecidable: number; skipped: string }> {
+  const { repo, tasks, teamId, logger } = options
+  const env = options.env ?? process.env
+  /** ★ 这条读数**只在开关拨上时**非空 —— 见下。 */
+  const nothing = { scanned: 0, reclaimed: [] as string[], kept: 0, undecidable: 0 }
+
+  /**
+   * ── ① 开关：`AGENT_TEAMS_NO_RECLAIM=1` ⇒ **什么都不做**（连模块都不加载）────────
+   *
+   * ★ 名字来自**模块的导出**（`RECLAIM_OFF_ENV`），不是在这里重打一遍字面量：
+   *   两处各写一个字符串，改名那天会**静默分叉** —— 而分叉的表现是
+   *   "开关拨了却没停"，那正是本机制最不能出的错。
+   * ★★ 所以这里要**先**把模块加载起来才读得到那个名字 —— 这是本函数唯一一次
+   *   为了开关而加载模块的地方，而它是**必要**的（与逐任务那条同一个道理）：
+   *   一个用猜测的字面量去读的开关，在名字改了之后**只会静默失效**。
+   */
+  let module: ReclaimJudgeModule
+  try {
+    module = await (options.loadJudge ?? loadWorktreeReclaimModule)()
+  } catch (error) {
+    logger.warn(
+      'agent-teams: could not scan terminal tasks for reclaimable worktrees: '
+      + `the reclaim judge module could not be loaded (${describeError(error)}) — nothing was deleted`,
+    )
+    return { ...nothing, skipped: 'module-unloadable' }
+  }
+
+  const offSwitch = module.RECLAIM_OFF_ENV
+  const off = env[offSwitch] === '1' || env[offSwitch] === 'true'
+  if (off) {
+    /**
+     * ★ 一行可读的话，然后**什么都不碰**。
+     *   ★ 措辞必须说清"没有扫描"，否则"停了"与"扫了但没有可清的"同形 ——
+     *     而后者会让人以为机制在正常工作。
+      */
+    logger.info(
+      `agent-teams: terminal worktree scan skipped because ${offSwitch}=${String(env[offSwitch])} is set — `
+      + 'no worktree was judged and nothing was deleted '
+      + '(an automatic delete that cannot be stopped is irreversible when it misfires)',
+    )
+    return { ...nothing, skipped: `off:${offSwitch}` }
+  }
+
+  /**
+   * ── ② 纯规划：哪些终态的树**已被吸收** ─────────────────────────────────────────
+   *
+   * ★ 模块那一半是**纯规划器**（它不删）—— 删除是本函数下一步的事，且只有一处。
+   * ★ 判据抛错 ⇒ 不删任何东西（一个"没测得"的扫描不许被读成"没有可清的"）。
+   */
+  let verdict = { scanned: [] as readonly ReclaimVerdict[], reclaimable: [] as readonly ReclaimVerdict[], kept: [] as readonly ReclaimVerdict[], undecidable: [] as readonly ReclaimVerdict[] }
+  try {
+    verdict = module.scanTerminalWorktrees({
+      repo,
+      tasks: tasks.map((task) => ({ id: task.id, status: task.status, ...teamId === undefined ? {} : { teamId } })),
+      ...options.mainRef === undefined ? {} : { mainRef: options.mainRef },
+    })
+  } catch (error) {
+    logger.warn(
+      'agent-teams: could not scan terminal tasks for reclaimable worktrees: '
+      + `the judge threw (${describeError(error)}) — that is "not measured", not "nothing to reclaim"; nothing was deleted`,
+    )
+    return { ...nothing, skipped: 'judge-threw' }
+  }
+
+  /**
+   * ── ③ 只有 `reclaimable` 才删，而**每一条失败都要留痕** ────────────────────────
+   *
+   * ★ 路径取自判据自己的 `worktree` 那一格（**不重算** —— 重算就是第二个出处，
+   *   而两份路径分叉时删的是另一棵树）。
+   */
+  const remove = options.remove ?? ((path: string) => module.removeWorktree({ repo, worktree: path }))
+  const reclaimed: string[] = []
+  for (const entry of verdict.reclaimable) {
+    const path = entry.worktree
+    if (typeof path !== 'string' || path === '') {
+      logger.warn(
+        'agent-teams: a terminal worktree was judged reclaimable but the judge gave no path for it — '
+        + 'it was left untouched (deleting a path this layer computed would be a second source of truth)',
+      )
+      continue
+    }
+    try {
+      remove(path)
+      reclaimed.push(path)
+      logger.info(
+        `agent-teams: reclaimed a terminal task's worktree at ${path} — the judge said: `
+        + `${entry.human ?? entry.reason ?? entry.why ?? '(the module gave no reason)'}`,
+      )
+    } catch (error) {
+      /**
+       * ★ 删不掉 ⇒ 只记 warn，**不改判任何任务**、**不往外抛**。
+       *   ★ 而它与"删掉了"必须**不同形** —— 否则盘上留着树、日志却说回收了。
+       */
+      logger.warn(
+        `agent-teams: could not reclaim the terminal worktree at ${path} (${describeError(error)}) — `
+        + 'the judge said it was safe to delete, but the delete itself failed; '
+        + 'the tree was left on disk and this does NOT change any task result',
+      )
+    }
+  }
+
+  /**
+   * ★ 扫了 0 棵也留一行 —— 否则"扫描跑了、没有可清的"与"扫描根本没跑"同形。
+   */
+  logger.info(
+    `agent-teams: terminal worktree scan — judged ${verdict.scanned.length} terminal task tree(s): `
+    + `reclaimed ${reclaimed.length}, kept ${verdict.kept.length}, undecidable ${verdict.undecidable.length}`,
+  )
+
+  return {
+    scanned: verdict.scanned.length,
+    reclaimed,
+    kept: verdict.kept.length,
+    undecidable: verdict.undecidable.length,
+    skipped: '',
+  }
+}
+
+/** `scripts/worktree-reclaim.mjs` 里本调用方**真正用到**的那几格（见该模块的导出）。 */
+interface ReclaimJudgeModule {
+  /** ★ 关掉它的开关**名字**（本函数从这里取，不重打字面量）。 */
+  readonly RECLAIM_OFF_ENV: string
+  /** ★ 纯裁决 —— 只读，不删（见文件头的"只读裁决"那一节）。 */
+  readonly judgeWorktree: (options: {
+    repo: string
+    worktree: string
+    mainRef?: string
+  }) => ReclaimVerdict | Promise<ReclaimVerdict>
+  /**
+   * ── ★★★ 删除的**唯一出处**：删目录 ∧ 清 git 的 worktree 台账 ────────────────────
+   *
+   * ★ 为什么删除也要走模块（而不是在这里写 `rmSync`）：
+   *   裸 `rmSync` 会在 `git worktree list` 里留下一条 `prunable` 幽灵
+   *   （目录没了、台账还在，而且它不会自己消失）——
+   *   那正是本任务修的 defect 1，而它有**两处**删除点。
+   *   ⇒ 两份实现分叉时，"哪一处留下了幽灵"在下游完全读不出来。
+   *
+   * ★ 它是**同步**的：契约就是"删完才算完"，而调用方在它抛出时要留痕
+   *   （见下面 `reclaimable` 那一支的 catch）。★ 它会**抛**，绝不静默失败。
+   */
+  readonly removeWorktree: (options: { repo: string; worktree: string }) => void
+  /**
+   * ★★ 生产扫描器用的那一格（`scanTerminalWorktrees` → `isTerminalTask` 已在
+   *   模块内部用它）—— 这里只借 `worktreeDirName` 之外的那份**纯规划**能力：
+   *   见下面 `reclaimTerminalWorktrees`。
+   */
+  readonly scanTerminalWorktrees: (options: {
+    repo: string
+    tasks: readonly { id: string; status: string; teamId?: string }[]
+    mainRef?: string
+  }) => {
+    scanned: readonly ReclaimVerdict[]
+    reclaimable: readonly ReclaimVerdict[]
+    kept: readonly ReclaimVerdict[]
+    undecidable: readonly ReclaimVerdict[]
+  }
+}
+
+/** 权威裁决的三态 —— 字段**互不共用**（`reclaimable` 没有 `reason`，`undecidable` 没有 `detail`）。 */
+type ReclaimVerdict = {
+  readonly status: 'reclaimable' | 'keep' | 'undecidable'
+  /**
+   * ★★ 被判的那条**绝对路径** —— 由 `judgeWorktree` 原样填（见 `scripts/worktree-reclaim.mjs`）。
+   *
+   * ★ 为什么扫描器**必须**用它、而不自己再算一遍路径：
+   *   扫描器（`scanTerminalWorktrees`）已经在模块里用 `worktreeDirName` 算过一次
+   *   ⇒ 再算一遍就是第二个出处，而它与第一个分叉时删的是**另一条路径**
+   *   （那正是"删错树"这种最贵的失效的形态）。
+   *   ★ 这里只**读**它，不重算。
+   */
+  readonly worktree?: string
+  readonly reason?: string
+  readonly why?: string
+  readonly detail?: string
+  readonly human?: string
+}
+
+/** 本函数交出的读数。★ 四态**互不同形**：删了 / 保住了 / 判不了 / 没成。 */
+export interface ReclaimOutcome {
+  readonly outcome: 'reclaimed' | 'kept' | 'undecidable' | 'skipped-off-switch' | 'failed'
+  readonly worktree: string
+  readonly why?: string
+}
+
+/**
+ * ★ 默认装载：**动态 import + `pluginRoot()` 的运行时路径**
+ *   （与 `loadFrictionTriageModule` 同一种做法）。
+ *
+ * ★ 为什么必须动态：`scripts/` **在 `tsconfig` 的 `rootDir: src` 之外**
+ *   ⇒ 静态 `import '../../scripts/worktree-reclaim.mjs'` 会让 `tsc` 报
+ *   "not under rootDir"。★ 而这条路径**跟着安装走**（`pluginRoot()` 是宿主交出的
+ *   插件根），所以打包/搬目录之后仍然成立。
+ *
+ * ★★ 为什么**不** spawn `node scripts/worktree-reclaim.mjs --apply`：
+ *   那个 CLI 会把**整棵** `.agent-teams/worktrees/` 扫一遍并真删 ——
+ *   它会删掉**别的**任务的树（包括正在跑的那个团队自己）。
+ *   ⇒ 这里只要那个**纯函数**，一个字节的删除动作都从这条 import 里拿不到。
+ */
+async function loadWorktreeReclaimModule(): Promise<ReclaimJudgeModule> {
+  const target = pathToFileURL(join(pluginRoot(), 'scripts', 'worktree-reclaim.mjs')).href
+  return await import(/* @vite-ignore */ target) as ReclaimJudgeModule
+}
 import type { ToolsConfig } from './shared/entities.ts'
 
 /** 注册本文件的工具。共享实体由调用方（装配点）注入 —— 它们不是本文件的依赖。 */
@@ -206,6 +888,18 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               status: { type: 'string', enum: ['passed', 'failed'], required: true },
               exitCode: { type: 'number' },
               evidence: { type: 'string' },
+              /**
+               * ── ★★★ 这条命令失败的【是哪几条测试】—— 而它让"新增失败"可判定 ────────
+               *
+               * MEASURED（2026-10-10，`verifier` 在 t40 上逐环查出）：
+               *   此 schema 是 `additionalProperties: false` 且**不含** `failures`
+               *   ⇒ ★ 就算成员想如实交出"哪几条红了"，也会【在建参数那一刻被拒】。
+               *   ⇒ 于是 t19 那条判据（"新增失败 vs 仓库存量红"）永远拿到 `undefined`
+               *     ⇒ 永远 `undecidable` ⇒ ★ **17 条任务仍然不可达 completed**。
+               *
+               * ★ 所以它是 t19 生效的【必要一环】，而不是可选的补充字段。
+               */
+              failures: { type: 'array', items: { type: 'string' } },
             },
           },
           description: 'Verification evidence in contract order: {command, status:"passed"|"failed", exitCode?, evidence?}. Supply one item per verify command.',
@@ -217,18 +911,33 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           additionalProperties: false,
           properties: {
             /**
-             * ★★ t14：`update_task` 是**唯一**穿过两个位置的工具，所以它挂的是
-             *   两格**位置名**（`dispatch_input_surface` / `completion_input_surface`）
-             *   —— 那正是"哪一个位置缺哪一格"读得出来的依据（见
-             *   `withInputSurfaceOnError` 的 `field` 参数）。
+             * ── ★★★ t39：这里【只】声明 `completion_input_surface` ──────────────────────
              *
-             * ★ 它**不挂**泛用的 `input_surface`：成功路径上这个工具从不产出它
-             *   （在 `execute` 的返回对象里可以逐个字段核）。⇒ schema 也不许声明它，
-             *   否则"这个工具会返回这个字段"与"它从来不返回"在声明面同形 ——
-             *   而那正是本任务要消灭的形状。拒绝路径上边界**会**补一个泛用名，
-             *   但那次调用已经失败了，走的是 `error` 而不是工具结果值。
+             * ★ t14 当时它挂**两格**位置名（`dispatch_input_surface` /
+             *   `completion_input_surface`），因为它是**唯一**穿过两个位置的工具。
+             *
+             * ★★ 而 t39 之后它**只穿过一个位置**（`completion`）——
+             *   `dispatch` 的求值搬到了 `create_task`（真正的派发那一刻）。
+             *   ⇒ ★ 所以我从这一格拿掉了 `dispatchInputSurface: true`。
+             *
+             * ── 而拿掉它，正是【本文件自己上面那条规则】要求的 ─────────────────────────
+             *
+             * ★ 逐字（它本来说的是 `input_surface`）：
+             *   「它**不挂**泛用的 `input_surface`：成功路径上这个工具从不产出它
+             *     ⇒ schema 也不许声明它，否则"这个工具会返回这个字段"与"它从来不返回"
+             *     在**声明面**同形 —— 而那正是本任务要消灭的形状。」
+             *   ⇒ ★★ 同一条规则，换一个字段：`dispatch_input_surface` 现在
+             *     **成功路径上永不产出** ⇒ 它也不许被声明。
+             *
+             * ★ 而抓到这件事的是 `gate-tool-output-schema` 的**对账臂**（臂 4）：
+             *   实测它报「`agent_teams_update_task`: 源码产出面里有
+             *   `dispatch_input_surface`，而参考表没登记它」—— ⇒ ★ 两个方向都查，
+             *   所以"表比源码宽"与"表比源码窄"都不会漏。
+             *
+             * ★ 而拒绝路径上边界**仍会**补一个泛用名（`input_surface`），
+             *   但那次调用已经失败了，走的是 `error` 而不是工具结果值 —— 与 t14 同。
              */
-            ...diagnosticFields({ runtimeGates: true, dispatchInputSurface: true, completionInputSurface: true }),
+            ...diagnosticFields({ runtimeGates: true, completionInputSurface: true }),
             task_id: { type: 'string', required: true },
             status: { type: 'string', required: true },
             output: { type: 'string' },
@@ -273,7 +982,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           if (TERMINAL_TASK_STATUSES.includes(task.status)) {
             const appended = appendTaskEvidence(task, {
               ...args, findings: parseFindings(args.findings), changedPaths: normalizeBlankOptionalTaskFields(args).changedPaths,
-              acceptanceResults: parseAcceptanceResults(args.acceptanceResults), commandsRun: parseCommandResults(args.commandsRun),
+              acceptanceResults: parseAcceptanceResults(args.acceptanceResults), commandsRun: parseCommandResultsChecked(args.commandsRun),
             }, identity.name)
             if (appended) await writeTeam(stateRoot, fresh)
             return {
@@ -292,7 +1001,7 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           const input = normalizeBlankOptionalTaskFields(args)
           const findings = parseFindings(args.findings)
           const acceptanceResults = parseAcceptanceResults(args.acceptanceResults)
-          const commandsRun = parseCommandResults(args.commandsRun)
+          const commandsRun = parseCommandResultsChecked(args.commandsRun)
           /**
            * ── ★ 判据层（可插拔）────────────────────────────────────────────────────
            *
@@ -334,16 +1043,78 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * ★ 搬运**逐字**：`gate-update-task-injections` 逐条断言那 4 格注入仍在、
            *   且**右侧表达式逐字相同**（★ 那条护栏第一次实战就抓到我改了右侧）。
            */
-          const dispatchWiring = await wireDispatch({
-            task,
-            changedPaths: input.changedPaths,
-            caller: caller as unknown as DispatchWiringInput['caller'],
-            workspace,
-            registry: registry as unknown as DispatchWiringInput['registry'],
-          })
-          const dispatchContext = dispatchWiring.context
-          const dispatchInputSurface = dispatchWiring.inputSurface as { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
-          const dispatchGates = dispatchWiring.gates
+          /**
+           * ── ★★★ t39：`dispatch` 只在【成员真的开工】那一刻求值 ───────────────────────
+           *
+           * 用户原话（这条规则存在的理由，逐字）：
+           *   「带 `reviewed` ⇒ 放行；不带 ⇒ **派发【前】必须先审一遍**」
+           *
+           * ★★ 而"派发前"是**一个时刻**，不是一个状态 —— 本队的注册表把它定义得很清楚
+           *   （`INSERTION_POINTS`，逐字）：
+           *     `'dispatch'  // ② 派发前（成员开工）`
+           *
+           * ── 而本处此前【无条件】求值它 ⇒ 每一次 update_task 都过这道门 ──────────────────
+           *
+           * MEASURED（t10 实测，两次重跑逐条相同）：
+           *   ```
+           *   基线    : 1181 tests / 1124 pass / 21 fail
+           *   接线后  : 1181 tests / 1103 pass / 42 fail
+           *   ★ 11 条新增红，报错逐字同一个 `update_task rejected: [dispatch.plan-reviewed] …`
+           *   ```
+           * ★ 而那 11 条拦的是【完成任务】与【夹具造的任务】—— 它们根本不在派发那一刻。
+           *
+           * ★★★ 而它的一般形式（本队今晚第五次，与 t4 同族）：
+           * > **一条本意是"提醒"的规则，若落在【所有人都经过的求值点上】，
+           * >   而它的默认状态在真实语料里是绝大多数 ⇒ 那么它的默认状态就成了【拒绝】。**
+           *   ⇒ 本队 **39 条任务里 0 条**带 `reviewed` ⇒ "没审"是默认状态 ⇒ 每一次
+           *     状态转换都被拒。**判据没有错，落点错了。**
+           *
+           * ── ★ 修的是【求值点】，不是【规则】────────────────────────────────────────────
+           *
+           * ★ 判据那一半【一个字没动】：不带 `reviewed` 仍然 `blocked`，仍然拦得住。
+           *   ⇒ 变的只是【它在哪一刻被问】。
+           *
+           * ★★ 而"成员开工那一刻"在本工具里就是 `args.status === 'in_progress'`：
+           *   `update_task` 的状态取值是 `in_progress / completed / failed / cancelled`，
+           *   而后三者都是【收口】—— 一个已完成 / 已失败 / 已取消的任务**不在派发那一刻**。
+           *
+           * ★ 而【没换状态】的那次调用（只改 output / verdict）也不求值它：
+           *   那是一次**汇报**，不是一次派发。⇒ 这正是本任务开头那 11 条误拒的成因。
+           *
+           * ★★★ 而边界：这里**不放弃**求值 —— 它只是**不再无条件**。
+           *   条件成立时，下面那段拒绝逻辑逐字照旧（`blockers` 仍然拒）。
+           */
+          /**
+           * ── ★★★ 而修法是【把 `dispatch` 从 `update_task` 整个拿走】────────────────────
+           *
+           * ★ 我第一版收窄到 `args.status === 'in_progress'`（"成员开工"）—— 而那是**错的**，
+           *   理由是可核的：本队把一个任务交给成员，发生在 **`kickTeam`** 那一刻
+           *   （`create_task` 建完后调它，见那个文件里的 `await scheduler.kickTeam(...)`）。
+           *   ⇒ 而 `update_task(status='in_progress')` 是**成员报到说"我开工了"** ——
+           *     那是【成员→队长】的汇报，不是【队长→成员】的派发。
+           *
+           * ★★ 所以 `update_task` 里**没有任何一次**是"派发那一刻"：
+           *   `in_progress` 是报到、`completed` / `failed` 是收口、`cancelled` 是撤销。
+           *   ⇒ ★ 而用户那条规则问的是【派发前审过了吗】⇒ 它该问在派发的那一侧。
+           *
+           * ★★★ 而"这次调用不在派发那一刻"必须【可读】——
+           *   所以这里不是"跳过一次判据"，而是【这个工具不承载那个插入点】。
+           *   ⇒ 下面 `dispatchEvaluated` 为假时，整段既不求值、不拒绝、也不告警。
+           *
+           * ★ 而"那一半没被放宽"由 `create_task` 侧承接（见那里的接线）：
+           *   一个**真正被派发**而没有 `reviewed` 的任务仍然被拦。
+           */
+          /**
+           * ★★ 注意：这里【不再有任何 `dispatch` 的局部量】。
+           *   我先留过 `dispatchWiring/Context/InputSurface/Gates = undefined` 四个占位 ——
+           *   而它们是**有代价的**：`gate-index-assembly` 的调用点扫描器按
+           *   `const (\w*[Dd]ispatch\w*) = … inputSurfaceOf(` 找出口，
+           *   ⇒ ★ 它会找到 `dispatchInputSurface` 这个名字，然后去找
+           *     `dispatchInputSurface.missing`（缺格日志的锚），而那个日志已经搬走了
+           *     ⇒ 于是它报「dispatch 位置不再写缺格日志了」。
+           *   ⇒ ★ 一个恒为 `undefined` 的占位量，会让"这个位置还在这里"看起来成立。
+           *     ★ 删掉它（连同下游那处 `void dispatchInputSurface`），而不是留着。
+           */
           /**
            * ── ★ runtime 位置（跨步骤的过程约束，契约 §5）───────────────────────────
            *
@@ -351,55 +1122,133 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * ★ 它返回任何裁决都【不得阻止流程】—— 上面 dispatch 位置的拒绝逻辑在本
            *   调用点之后照常执行，本调用点对控制流零影响。理由见 `evaluateRuntimeGates`。
            */
+          /**
+           * ── ★★★ t39：这里【不再传 `updateGate`】──────────────────────────────────────
+           *
+           * ★ 它此前传的是 `dispatchGates` —— 而那个求值**已经搬到 `create_task`** 了
+           *   （`update_task` 的四种状态没有一次是派发）。⇒ 这一格在此**没有来源**。
+           *
+           * ★★ 而"没有来源"的正确处理是【整格缺席】，不是传一个 `undefined` ——
+           *   依据是本文件/本机制自己那条逐字的口径（`evaluateRuntimeGates` 上方）：
+           *   > 「★★ 读不到 ⇒ `wait` **整个字段缺席**，绝不是 `{}` 或半份观察。」
+           *   ⇒ ★ 同一条纪律：一个恒为 `undefined` 的注入格会让
+           *     "这个位置在这里"与"这个位置走了"在读数上同形。
+           *
+           * ★ 而下面 :961 那一处（`task-update-settled`）**仍然传** `completionGates` ——
+           *   因为 `completion` 那个位置**还在 `update_task` 上**（它没有搬）。
+           *   ⇒ 两处不同形是【对的】：它们承载的位置不同了。
+           *
+           * ★ 而"没人读它"这件事我核过：`grep -rn updateGate src/gates/` = 空，
+           *   而 `runtime/liveness` 的 `requires` 是 `['event', 'waits']` —— 不含它。
+           *   ⇒ 所以省略它**不改任何裁决**，只去掉一个误导性的在场。
+           */
           let runtimeGateRecord = await evaluateRuntimeGates(ctx, 'task-update', {
             team: fresh,
             task,
             update: { status: args.status, output: args.output, verdict: args.verdict as ReviewVerdict | undefined },
-            updateGate: dispatchGates,
             wantsCompleted: args.status === 'completed',
           }, clock)
-          if (dispatchGates.ok === false) {
-            /**
-             * ★★ t22：在卡点发生的此刻记账（含 ctx 快照 + 事件定位 + 机制状态）。
-             *   与 contract 那处同一条纪律：**旁路、不改裁决、失败只写 warn**。
-             */
-            const frictionMessage = dispatchGates.unmeasured !== undefined
-              ? `update_task rejected: the dispatch gate could not measure (${dispatchGates.unmeasured})`
-              : `update_task rejected: ${dispatchGates.blockers.join('; ')}`
-            void recordFriction({
-              stateRoot,
-              point: 'dispatch',
-              message: frictionMessage,
-              context: dispatchContext,
-              mechanismState: { inputSurface: dispatchInputSurface, gates: dispatchGates },
-              session: caller.session,
-              taskId: task.id,
-              teamId: team.id,
-              tool: 'agent_teams_update_task',
-              /**
-               * ★★★ t91：这条是**自动记录**的 —— 本分支就是拒绝路径。
-               *   ⇒ 它没有 resolution.state 是设计如此（判据拒绝的那一下没人做过决定）。
-               *   ★ 而声明它让分诊器把它从「台账待回填」里分出去 ——
-               *     否则那个数字把"不需要回填"与"还没回填"算成同一类。
-               */
-              auto: {
-                tool: 'agent_teams_update_task',
-                point: 'dispatch',
-                ...gateIdFromMessage(frictionMessage) === undefined ? {} : { gate: gateIdFromMessage(frictionMessage) as string },
-              },
-              ...dispatchGates.unmeasured === undefined ? {} : { couldNotObserve: [String(dispatchGates.unmeasured)] },
-            }).then((id) => {
-              if (id === undefined) ctx.logger.warn(`agent-teams: could not record the friction at the dispatch gate (${frictionMessage})`)
-            })
-            if (dispatchGates.unmeasured !== undefined) {
-              /**
-               * ★ 未测量与"发现问题"不同形（§3.4）。措辞必须分开 —— 读日志的人要能
-               *   看出"判据没能测量"，而不是"判据发现了问题"。
-               */
-              throwWithSurface(frictionMessage, dispatchInputSurface, 'dispatch_input_surface')
-            }
-            throwWithSurface(frictionMessage, dispatchInputSurface, 'dispatch_input_surface')
-          }
+          /**
+           * ── ★★ t14：三态，且 `skippedAll` 是判据 —— 与 `delivery.ts:118-130` 逐字同形 ──
+           *
+           * MEASURED（t13 实测撞上）：`ok:false` 有**两种**成因，而本处此前只读
+           * `ok === false` 就拒绝 ⇒ 全跳过那一支落进 `blockers.join('; ')` ⇒
+           * `[]` 拼出空串 ⇒ **抛出一句没有谓语的拒绝**：
+           *
+           *     update_task rejected:            ← ★ 拒绝后面是空的
+           *
+           * ★ 而成因是 t58 把全跳过从 `ok:true` 翻成了 `ok:false`（那是对的：
+           *   "没被检查"不该读成"通过了"）。但**调用方**把它读成了"被拒绝" ——
+           *   于是每一次「这个位置这一轮没有适用判据」（**正常情形**）都变成了假拒绝。
+           *
+           * ⇒ 正确的形状不是"把空串填上内容"，而是**整个拒绝逻辑都不进**：
+           *   一个安全约束**不触发**时，应当放行并留下"它没被检查"的痕迹，
+           *   而不是拒绝一切（`delivery.ts:96-100` 记的正是同一条）。
+           *
+           *     notChecked = ok:false && skippedAll 在场  ⇒ **放行** + warn（不拒绝）
+           *     ok:true                                    ⇒ 放行，不告警
+           *     blockers / unmeasured                      ⇒ 拒绝（下面的分支不变）
+           *
+           * ★ `unmeasured`（判据跑了、说测不了）**仍然拒绝** —— 它与全跳过的差别是
+           *   `evaluated`：① 是 0（一条都没跑），`unmeasured` 是 >= 1。两者不同形。
+           *
+           * ★ 为什么判据用 `skippedAll` 而不是 `evaluated === 0`：后者在**空位置**
+           *   （`registered === 0`）上也成立，而那是"这里本来就没有判据"，是正常情形。
+           *   `skippedAll` 才是注册表**显式**说的"这一步没被检查"。
+           */
+          /**
+           * ── ★★★ "这一步没能被检查"有两种成因，而【两种都不该是拒绝】（t42）──────────
+           *
+           * MEASURED（2026-10-09，`verifier` 在 t5 上给出【两个终态的拒绝原文】）：
+           *   ```
+           *   completed ⇒ rejected: the completion gate could not measure (…)
+           *   failed    ⇒ rejected: ★ 同一条，逐字相同
+           *   ```
+           *   ⇒ ★ 而那条判据**在自己的措辞里**写着 "so it is reported rather than refused"。
+           *   ⇒ 判据说"我是报告，不是拒绝"，而调用方读成了"rejected"。
+           *
+           * ★★ 两种成因（而旧代码只认第一种）：
+           *   · `skippedAll` —— 一条判据都没跑（"这里本来就没检查"）
+           *   · `unmeasured` —— 跑了而**这一步测不成**（"我试了，测不出来"）
+           *   ⇒ ★ 两者都是「我没能检查」，而不是「我检查了而它不行」。
+           *
+           * ★★★ 而"我检查了而它不行"是 `blockers` —— ★ 只有那一种才拒。
+           *   与 `delivery.ts:96-100` 的口径**逐字同源**：
+           *   「一个安全约束【不触发】时，应当【放行】并留下痕迹，而不是拒绝。」
+           */
+          /**
+           * ── ★★ t39：`undefined` 在这里【不是】"没被检查" ───────────────────────────────
+           *
+           * ★ `dispatchGates === undefined` 的唯一成因是【这一步不在派发那一刻】
+           *   （上面 `reachesDispatch` 为假）—— 而那是**正确的跳过**，
+           *   不是"我试着检查而检查不了"。
+           *
+           * ★★ 所以它不落 `dispatchNotChecked` 那一支（那是给"跑了而没测成"准备的），
+           *   而是**整段不求值**：既不拒绝、也不告警。
+           *   ⇒ ★ 给它发一条"没能被检查"的告警会让每一次状态更新都留一条噪音，
+           *     而那会把"派发这一步没到"读成"派发这一步检查失败了" —— 两者不同形。
+           */
+          /**
+           * ── ★★★ t39：`dispatch` 那一整段求值【从这里拿走了】────────────────────────────
+           *
+           * ★ 而这里【不再有任何】拒绝逻辑 —— 不是"放宽了判据"，是**这个工具不承载
+           *   那个插入点**（判据与它的三态一个字没动，见 `create_task` 侧的新接线）。
+           *
+           * ── 为什么 `update_task` 从来不是"派发那一刻"（逐条可核）─────────────────────
+           *
+           *   交活给成员发生在 **`kickTeam`**：`create_task` 建完后调它
+           *     ⇒ ★ 那是【队长 → 成员】的那一下。
+           *   `update_task` 的四种状态**各是另一件事**：
+           *     `in_progress`  ⇒ ★ 成员**报到**说"我开工了"（成员 → 队长）
+           *     `completed`    ⇒ 收口（成员 → 队长）
+           *     `failed`       ⇒ 收口
+           *     `cancelled`    ⇒ 撤销
+           *   ⇒ ★ 四次都不是派发。
+           *
+           * ── 而"无条件求值"的代价（t10 实测，两次重跑逐条相同）────────────────────────
+           *
+           *   ```
+           *   基线    : 1181 tests / 1124 pass / 21 fail
+           *   接线后  : 1181 tests / 1103 pass / 42 fail
+           *   ★ 11 条新增红，逐字都是 `update_task rejected: [dispatch.plan-reviewed] …`
+           *   ```
+           *   ★ 而它们拦的是【完成任务】与【夹具造的任务】。
+           *
+           * ★★ 一般形式（本队今晚第五次，与 t4 同族）：
+           * > 一条本意是"提醒"的规则，若落在【所有人都经过的求值点上】，
+           * > 而它的默认状态在真实语料里是绝大多数 ⇒ 那么它的默认状态就成了【拒绝】。
+           *   ⇒ 本队 39 条任务里 0 条带 `reviewed` ⇒ "没审"是默认 ⇒ 每一次状态转换都被拒。
+           *
+           * ── ★★ 而"没被检查"与"检查了而它不行"在这里**都不再需要**分辨 ──────────────────
+           *
+           * ★ t42 那段（`dispatchNotChecked` + 两态成因）在此**整体不再适用**，因为
+           *   这里已经没有任何 `dispatchGates` 可读。它没有丢 —— 它随插入点一起
+           *   搬到了 `create_task` 侧（那里现在才是那个位置唯一的求值处）。
+           *
+           * ★ 而本处下游那段【输入面缺格只说、不拒】的逻辑仍在，且仍以
+           *   `dispatchInputSurface` 为条件 —— 而它现在是 `undefined`
+           *   ⇒ ★ 那一条分支自然不跑（correct by construction），而不是被开关关掉。
+           */
           /**
            * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬）。它放在上面的拒绝逻辑【之后】，
            *   不是为了顺序好看：放在之前会让"核对报缺"看起来像拒绝的理由，
@@ -409,9 +1258,6 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * ★★ t3：这条日志**保留**（给人看）；结构化出口本体在下面返回值的
            *   `input_surface` 里（`dispatchInputSurface`）。两条并存，缺一不可。
            */
-          if (dispatchInputSurface !== undefined && dispatchInputSurface.incomplete > 0) {
-            ctx.logger.warn(`agent-teams: update_task reached the dispatch gate with an unfinished input surface (recorded, not rejected): ${dispatchInputSurface.missing.join('; ')}`)
-          }
           /**
            * ── ★ 注入面：让每条判据拿到它声明的输入（缺则缺席，不注入空值）─────────
            *
@@ -633,27 +1479,142 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
           const completionContext = completionWiring.context
           const completionInputSurface = completionWiring.inputSurface as { checked: number; incomplete: number; skipped: number; missing: string[] } | undefined
           const completionGates = completionWiring.gates
+          /**
+           * ── ★ 门禁裁决的使用读数：飞轮的第一份**真实**原料 ────────────────────────
+           *
+           * MEASURED（2026-10-23）：在本次接线之前，`UsageTally` / `tallyAdopt` /
+           * `tallyRecall` 在 `confidence.ts` **之外零引用** ⇒ 飞轮的四个裁决
+           * （promote / observe / archive / unmeasured）从来没有真实数据喂进去过。
+           * 本条把「这一轮完工门逐条得到了什么裁决」记成账，让 `confidenceOf` 第一次有输入。
+           *
+           * ── 为什么用 `void` ────────────────────────────────────────────────────
+           *
+           * 与上面 `void observe(...)` 同一条纪律：**记账是旁路**。
+           * `appendGateTallies` 自己 catch 一切、绝不抛（见其文件头）；
+           * 这里再 `void` 掉，是为了连"等它落盘"都不占完工路径的时序。
+           *
+           * ── 为什么**只接这一处** ───────────────────────────────────────────────
+           *
+           * `recalled` 是 confidence 的**分母**。若同一次求值在 dispatch / completion /
+           * delivery 各记一次，同一个裁决会被数 N 遍 ⇒ 曝光度虚高 ⇒ confidence 被
+           * 系统性压低 ⇒ 真正有效的判据反而进不了 promote。
+           * ⇒ 一个裁决只记**一次**，记在它真正生效的那一刻。
+           *
+           * ── `by` 为什么是 `caller.id` ─────────────────────────────────────────
+           *
+           * 它是这次完工的触发者。`contributors` 存的是**名单**而不是计数，
+           * 因为「≥2 contributors」要回答的是"是不是两个不同的人"——
+           * 而一个 `contributors: 3` 的计数回答不了"这 3 次是不是同一个人做的"。
+           *
+           * ── 时钟 ──────────────────────────────────────────────────────────────
+           *
+           * 用注入的 `clock()`（`config.now?.() ?? Date.now()`），不直接 `Date.now()`：
+           * 夹具要靠它复现 `firstSeenAt` 与「≥14 天」那条年龄条件。
+           */
+          void appendGateTallies({
+            stateRoot,
+            point: 'completion',
+            ran: completionGates.ran,
+            at: clock(),
+            by: caller.id,
+          })
           /** ★ `wantsCompleted` 在段内算出、而段外还要用 ⇒ 由模块交出来。 */
           const wantsCompleted = completionWiring.wantsCompleted
           /**
+           * ── ★★★ 2026-10-12：预算停止与变异恢复，必须【在日志里露头】───────────────
+           *
+           * ★ 这两条都是**基础设施**的事实，不是任何成员的工作结论。不报的话：
+           *   · 预算停止 ⇒ 判据报 unmeasured ⇒ 与"这些命令都超时了"同形，
+           *     而两者补救动作相反（调预算 / 查为什么慢 vs 去看代码）；
+           *   · 恢复发生 ⇒ 说明**上一次**崩在了就地变异中途，而这件事在
+           *     `team.json` 与会话里**一个字都没有**。
+           */
+          const completionBudget = completionWiring.budget
+          if (completionBudget.exhausted) {
+            ctx.logger.warn(
+              `agent-teams: the completion chain for task "${task.id}" hit its `
+              + `${Math.round(completionBudget.totalMs / 1000)}s wall-clock budget after ${completionBudget.calls} command(s) `
+              + `(${Math.round(completionBudget.elapsedMs / 1000)}s elapsed, stopped on: ${completionBudget.exhaustedBy.join(' | ') || 'n/a'}). `
+              + `The gates that could not run will report "could not measure" — that is a BUDGET stop, NOT a failing test.`,
+            )
+          }
+          const mutationRecovery = completionWiring.mutationRecovery
+          if (mutationRecovery !== undefined && mutationRecovery.restored.length > 0) {
+            ctx.logger.warn(
+              `agent-teams: restored ${mutationRecovery.restored.length} file(s) that this task's mutation run left in a mutated state: `
+              + `${mutationRecovery.restored.join(', ')} — byte-for-byte back to their pre-mutation content`,
+            )
+          }
+          if (mutationRecovery !== undefined && (mutationRecovery.conflicts.length > 0 || mutationRecovery.failed.length > 0)) {
+            ctx.logger.error(
+              `agent-teams: the mutation journal for task "${task.id}" could not be fully recovered — `
+              + `conflicts: ${mutationRecovery.conflicts.map((item) => item.file).join(', ') || 'none'}; `
+              + `failed: ${mutationRecovery.failed.map((item) => item.file).join(', ') || 'none'}. `
+              + `Those files were left EXACTLY as found, because rolling a conflict back would discard real work.`,
+            )
+          }
+          /**
            * ── ★ t13 的运行时出口：有判据、却一条都没跑 ────────────────────────────
            *
-           * `evaluated === 0 && registered > 0` 意味着这一轮**没有任何判据真的检查过**
-           * 这个完成动作，而 `ok` 仍为 true。**只告警、不拒绝** —— 拒绝会把"这个位置
-           * 这一轮没有适用判据"（正常情形）变成流程卡死，那正是 t13 明确要求保住的边界。
-           * 但它必须【可读】：否则一次静默全跳过只有 `ok: true` 留给读日志的人。
+           * ★★ t14：这条告警**已被下面的 `completionNotChecked` 取代** —— 见那里。
+           *   它此前用 `evaluated === 0 && registered > 0`，而那正是 t14 要消灭的那个
+           *   判据的"近似版"：它与 `skippedAll` 在**生产路径上**等价，但**在空位置以外的
+           *   场合不同形**（`registered === 0` 时它也成立，而那是正常情形）。
+           *   ★ 两条告警并存会让同一件事报两遍 —— 而"这两条日志说的是不是同一件事"
+           *     就变成一个要读两处才能回答的问题（`delivery.ts:132-137` 记的是同一条）。
            */
-          if (completionGates.evaluated === 0 && completionGates.registered > 0) {
-            ctx.logger.warn(
-              `agent-teams: update_task for task "${task.id}" reached completion with no gate evaluated (${completionGates.registered} registered, all skipped); this step was not checked`,
-            )
+          /**
+           * ── ★★ t14：三态，且 `skippedAll` 是判据 —— 与 `delivery.ts:118-130` 逐字同形 ──
+           *
+           * 理由与 dispatch 那一处**逐字相同**（见那里的长注释）：`ok:false` 有两种成因，
+           * 而"没被检查"必须**放行 + 留痕**，不是把空串填上内容再拒绝。
+           * ★ 两处逐字同形是刻意的：同一个事实在两个出口上用两句话，它们会随下一次
+           *   改动分叉，而分叉后的两次读数在断言层面同形。
+           */
+          /**
+           * ★★★ 与 dispatch 位置**逐字同形**（t42：两处必须同一口径）——
+           *   只修一处会让它们分叉，而分叉后「哪一处放行」在日志里同形。
+           *   ★ 而成因同样是两种：`skippedAll`（一条都没跑）与 `unmeasured`（跑了而测不成）。
+           */
+          /**
+           * ── ★★★ D1：第三种局面 —— `blockers` 与 `unmeasured` **同时**在场 ─────────────
+           *
+           * MEASURED（`src/gates/registry.ts:982-987`）：聚合体在存在 unmeasured 时
+           *   **原样透出 `blockers`** ⇒ 于是"一条判据发现了问题、另一条测不成"这一种
+           *   真实局面，求值结果是 `ok:false` ∧ `blockers.length > 0` ∧ `unmeasured !== undefined`。
+           *
+           * ★ 而在此之前本行只问「有没有两种"没能检查"的成因之一」——
+           *   于是那一格里**有 blocker 也被放行**：一次**真实的问题发现**被读成
+           *   "没能检查"，而两者的补救动作**相反**（前者去修，后者去补测量条件）。
+           *
+           * ★★ 所以第三个合取项是 `blockers.length === 0`：
+           *   只要有一条判据报出了问题，这一次就**必须**拒
+           *   （走 `!completionNotChecked && completionGates.ok === false` 那一支 ——
+           *    本行一旦为 true，那一支就被短路掉，于是 blocker 反被放行；
+           *    `noteStall` / `recordFriction` / `throwWithSurface` 全部照旧）。
+           *   ★ 引用**符号**而不是行号：行号随本文件每一次增删漂移，
+           *     而"走哪一支"这个事实不漂移。
+           *
+           * ★ 而**反向半边不许动**：`blockers` 为空时（纯 `unmeasured`，或 `skippedAll`）
+           *   仍然放行 + 告警 —— 那一半是 t42 的结论，本行**只收紧有 blocker 的那一半**。
+           */
+          const completionNotChecked = completionGates.ok === false
+            && (completionGates.skippedAll !== undefined || completionGates.unmeasured !== undefined)
+            && completionGates.blockers.length === 0
+          if (completionNotChecked) {
+            const why = completionGates.unmeasured !== undefined
+              ? `the completion step could not be measured (${completionGates.unmeasured})`
+              : `nothing was evaluated (${completionGates.registered} registered, all skipped)`
+            ctx.logger.warn(`agent-teams: update_task for task "${task.id}" reached completion and ${why}; the completion step was NOT checked — allowing it through, because "not checked" is not "refused"`)
           }
           /**
            * ★ 输入面缺格 ⇒ **只说、不拒**（先软后硬），放在拒绝逻辑**之前**是因为
            *   它与下面三个分支讲的不是同一件事，而"这次完成本来会被拒"与"这次完成
            *   的输入面没接完"必须都能读到 —— 只读到前者会让人以为是判据的结论。
-           *   与 t13 那条（`evaluated === 0`）也**不同形**：那是"判据一条都没跑"，
-           *   这是"判据跑了、而它要的某一格调用方没交"。
+           *   ★ t14：原来那句「与 t13 那条（`evaluated === 0`）不同形」的对照**已失效** ——
+           *     t13 那条告警已并入上面的 `completionNotChecked`，现在它与**这一条**比：
+           *     那是"判据一条都没跑"（且**已放行**），这是"判据跑了、而它要的某一格
+           *     调用方没交"。两者仍然不同形。
            *
            * ★★ t3：这条日志**保留**（给人看）；结构化出口本体在下面返回值的
            *   `input_surface` 里（`completionInputSurface`）。两条并存。
@@ -663,20 +1624,56 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
               `agent-teams: update_task for task "${task.id}" reached completion with an unfinished input surface (recorded, not rejected): ${completionInputSurface.missing.join('; ')}`,
             )
           }
-          if (completionGates.ok === false) {
+          /**
+           * ★★★ 拒绝逻辑整体包进 `!completionNotChecked &&`。
+           *   与 dispatch 那处同一条纪律：`frictionMessage` 与 `recordFriction(...)`
+           *   **在里面** —— 它们记的是「卡点」，而成因必须是一次**真实的拒绝**。
+           */
+          if (!completionNotChecked && completionGates.ok === false) {
             /**
              * ★★ t22：在卡点发生的此刻记账。★ 这一处尤其重要 —— 本轮被它拦住的
              *   次数最多（三道完工门），而事后补的材料恰恰读不出"当时缺的是哪一格"。
              */
-            const frictionMessage = completionGates.unmeasured !== undefined
-              ? `update_task rejected: the completion gate could not measure (${completionGates.unmeasured})`
-              : `update_task rejected: ${completionGates.blockers.join('; ')}`
+            /** ★ 同 dispatch 位置：只剩 `blockers` 一种成因（见那里的注释）。 */
+            const frictionMessage = `update_task rejected: ${completionGates.blockers.join('; ')}`
+            /**
+             * ── ★★★ C1：判「任务停下来了」而不是「判据报错了」───────────────────────
+             *
+             * ★ 位置：**在锁里**，且 `task` 就是权威的那一份 ⇒ 读到的 `task.stall`
+             *   与下面写回去的**同源**（再读一次盘就会读到另一个时刻的事实）。
+             *
+             * ★★ 顺序是刻意的：先 `noteStall`（把这次的次数落盘），再 `recordFriction`
+             *   （按那个次数决定这条记录是哪一类）。反过来会让记录读到**上一次**的
+             *   数字 —— 于是"第二次拒绝"这条记录会说自己是第一次，而卡点永远差一拍。
+             */
+            const stall = noteStall(task, 'completion', gateIdFromMessage(frictionMessage), Date.now())
+            /**
+             * ── ★★★ C1：这一次拒绝的读数必须【当场落盘】—— 否则判据根本不成立 ────────
+             *
+             * MEASURED（本任务第一版就撞了）：`noteStall` 只改了内存里的 `task`，
+             * 而下面的 `throwWithSurface` 会**在 `writeTeam` 之前**抛出去 ⇒
+             * `team.json` 里从来没有 `stall` ⇒ 下一次拒绝读到的仍是 `undefined`
+             * ⇒ **第一次永远判成第一次** ⇒ `stalled` 这个状态**永不可达**。
+             *
+             * ★ 而它是最难发现的一种坏法：`observeStall` 本身是纯函数、单测全绿、
+             *   `recordFriction` 也照常落一条记录 —— 只是**每一条都是 `rejection`**。
+             *   也就是"改动看起来装上了，而行为与改动前逐字相同"（差别只在多了一格字段）。
+             *
+             * ★★ 所以这里显式落盘，且**在抛出之前**：本判据的全部意义就是"跨调用"，
+             *   而跨调用 = 上一次的事实真的在盘上。
+             * ★ 放在锁里（本函数就是锁体）⇒ 与正在写的那一份**同源**，
+             *   不会与别人的并发改动互相覆盖。
+             */
+            await writeTeam(stateRoot, fresh)
             void recordFriction({
               stateRoot,
+              /** ★ t87：采集层写失败的告警出口（旁路；见 FrictionCapture.warn）。 */
+              warn: (message: string) => ctx.logger.warn(message),
               point: 'completion',
               message: frictionMessage,
               context: completionContext,
               mechanismState: { inputSurface: completionInputSurface, gates: completionGates },
+              stall,
               session: caller.session,
               taskId: task.id,
               teamId: team.id,
@@ -709,7 +1706,57 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
            * 判据【通过时】交出的产出：把判据层亲眼看到的 exitCode 并回 commandsRun，
            * 让落盘的是它看到的那个，而不是成员自报的。
            */
+          /**
+           * ── ★★★ C1：放行 ⇒ 忘掉那条 stall（与上面 `noteStall` **成对**）───────────
+           *
+           * ★ 不清它的后果是**单向**的：一条已经是 `stalled` 的记录留着，下一次
+           *   拒绝会读到 `count = 3 ≥ 2` ⇒ **第一次**拒绝就被判成卡点
+           *   ⇒ 于是每个任务最终都会变成卡点，而那正是本任务要消灭的
+           *   「把 82% 的事件算成卡点」的**计数版本**。
+           *
+           * ★ 位置：放在这里（判据放行之后、`evaluateQualityCompletion` 之前）——
+           *   它记的是「**这道门**放行了」这个事实，而不是"整条 update 成功"。
+           *   放在更后面会让后面任何一条拒绝都留下一个过期的 stall。
+           */
+          clearStall(task)
           const producedReruns = (completionGates.outputs['completion.verify-rerun']?.reruns ?? []) as CommandResult[]
+          /**
+           * ── ★★★ 序 4（2026-10-21）：同一条命令，**建契约时 vs 完成时**结论一样吗 ──────
+           *
+           * MEASURED（`docs/OUTPUTS-CONSUMER-AUDIT.md` 的 (a)-4）：同一条 verify 命令被跑两次
+           *   —— `contract.verify-command`（建契约）与 `completion.verify-rerun`（完成）。
+           *   盘上 **44 条**任务都同时带这两份读数，而**没有任何一处代码把它们放在一起看**。
+           *
+           * ★★ 最要紧的那种变化是 `failed → passed`：那说明**这条命令当初就判不出真假**，
+           *   而 `contract.verify-command` 存在的全部理由就是拦掉这种契约
+           *   （它自己的措辞逐字：「must be able to go green when the work was done
+           *   and red when it was not」）。⇒ 若建契约时它是 `failed` 而契约仍被接受，
+           *   那就是那条判据**在该说话的时候没说**。
+           *
+           * ★ 但本格**只报告、不拒绝**（施工单序 4 的建议）：两次不一致**可以**是正常进展
+           *   （"修好了一个坏测试"就是 failed → passed）。硬拒会把那种任务全拦下。
+           *   ★★ 而它**必须留痕** —— 一个静默的"不一致"与"没比过"同形。
+           */
+          try {
+            const probeAtContract = (task.gateEvaluations?.contract?.outputs?.['contract.verify-command']?.verifyProbe ?? undefined) as
+              | { command?: unknown; exitCode?: unknown; status?: unknown }[]
+              | undefined
+            const probeReading = compareVerifyProbe(probeAtContract, producedReruns as { command?: unknown; exitCode?: unknown; status?: unknown }[] | undefined)
+            if (probeReading.status === 'disagree') {
+              ctx.logger.warn(
+                `agent-teams: ${task.id} the verify command(s) judge differently now than when the contract was created `
+                + `(recorded, not rejected): ${probeReading.changed.map((c) => `${c.command} ${c.atContract}→${c.atCompletion}`).join('; ')}`
+                + (probeReading.changed.some((c) => c.atContract === 'failed' && c.atCompletion === 'passed')
+                  ? ' ★ a command that failed at contract time now passes — that command could not tell done from not-done when it was accepted'
+                  : ''),
+              )
+            } else if (probeReading.status === 'unmeasured') {
+              ctx.logger.warn(`agent-teams: ${task.id} the verify probe could not be compared (recorded, not rejected): ${probeReading.why}`)
+            }
+          } catch (reason: unknown) {
+            /** ★ 它是**记录**，不是裁决 —— 读失败不许掀翻这次更新。 */
+            ctx.logger.warn(`agent-teams: could not compare the verify probe for ${task.id} (recorded, not thrown): ${String(reason)}`)
+          }
           const mergedCommandsRun = producedReruns.length > 0
             ? mergeRerunIntoCommandsRun(commandsRun ?? task.commandsRun, producedReruns)
             : commandsRun
@@ -728,12 +1775,478 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             if (transition !== undefined) throw new Error(transition)
             task.status = args.status
           }
+          /**
+           * ── ★★★ 落终态时，把 worktree 上的改动【提交】成一个 commit ──────────────
+           *
+           * MEASURED（2026-10-10）：在此之前本插件**只建树、不提交** ——
+           * 46 棵 worktree 里目标文件一个都没有（worktree 是 checkout 产物，
+           * 只含已提交内容）。⇒ integrator **没有东西可合**，
+           * 「合并 ≥2 棵 worktree」在机制上无法成立。
+           *
+           * ── ★ 为什么落在这里（而不是成员自己提交）────────────────────────────────
+           *
+           * ① 成员**不知道**自己那棵树的绝对路径 —— 它只知道提示里那一行；
+           * ② "提交"是**记账动作**，与 attempt 的归属绑在一起 ——
+           *    那正是 `update_task` 这一层已有的东西（`task.attemptId`）；
+           * ③ 放在这里 ⇒ **不需要改成员人格**（成员照常只报 changedPaths），
+           *    产物自动获得载体。
+           *
+           * ── ★★ 三条可靠性约束 ────────────────────────────────────────────────────
+           *
+           * · **只有终态才提交**：in_progress 时提交会让"中途快照"与"交付"同形；
+           * · **失败不改判**：提交失败**不许**把一次合格的交付变成失败（那是两回事）
+           *   ⇒ 它只记进日志与 `deliveryFailure`，任务状态照旧；
+           * · **树不存在就跳过**：review/requirements 这类 kind 不建树
+           *   ⇒ 路径不存在 ⇒ 什么都不做，且不产出任何"我试过了"的读数。
+           *
+           * ── ★★ 路径从哪来（这一格是实测逼出来的）──────────────────────────────────
+           *
+           * MEASURED：`task.worktreePath` **不存在于 `TeamTask`** —— 它只活在
+           * 派发那一刻的内存 ticket 里，从未写进 `team.json`。
+           * ⇒ 本层**拿不到**它（第一版这么写，typecheck 当场报 TS2339）。
+           *
+           * ★ 而它**不需要**被持久化：`createTaskWorktree` 的命名是确定的
+           *   （`<repo>/.agent-teams/worktrees/task-<safeId>`）⇒ **可推导**。
+           *   推导比持久化更稳：少一份会漂移的拷贝（本仓记账过多次的形态）。
+           */
+          const landedTerminal = args.status !== undefined
+            && TERMINAL_TASK_STATUSES.includes(args.status)
+            && args.status !== 'cancelled'
+          if (landedTerminal) {
+            /**
+             * ★ 路径必须用【同一个函数】算 —— `worktreeDirName` 是建树与找树
+             *   共用的那一份真值。两处各写一遍会在团队前缀那一位上分叉
+             *   （而分叉的表现是"找不到树"，与"这条任务本来就不建树"同形）。
+             */
+            const worktree = join(workspace, '.agent-teams', 'worktrees', worktreeDirName(fresh.id, task.id))
+            /**
+             * ── ★★★ 不建树的那一半【也要留读数】（2026-10-10 实测补的）─────────────
+             *
+             * MEASURED（由 e2e-worker 在 t1 上抓到，而它是对的）：
+             *   本分支此前是裸的 `if (existsSync(...)) { … }` —— **条件为假时整段静默**：
+             *   不产 commit，也**不产任何读数**。
+             *
+             * ★★ 而"这条任务本来就不建树"与"该建树而没建成"在**读数上完全同形** ——
+             *    两者都是"没有 commit、没有日志、没有字段"。而处置完全相反：
+             *      · 前者（`work` / `review` / `requirements`）⇒ **设计如此**，什么都不做；
+             *      · 后者（`implementation` 却没有树）⇒ ★ 一个**真缺陷**，去查为什么没建。
+             *
+             * ⇒ 所以判据必须是 `needsWorktreeFor(task.kind)`（**应当**有树吗），
+             *   而**不是**"路径在不在"（实际有树吗）—— 后者把设计当成了故障。
+             *
+             * ★ kind 列表来自 `types.ts` 的单一来源，不在这里再写一份。
+             */
+            const shouldHaveWorktree = needsWorktreeFor(task.kind)
+            if (existsSync(join(worktree, '.git'))) {
+              const committed = commitWorktree({
+                worktree,
+                taskId: task.id,
+                ...task.attemptId === undefined ? {} : { attemptId: task.attemptId },
+                ...identity.name === undefined ? {} : { author: identity.name },
+              })
+              if (committed.ok === true && committed.commit !== undefined) {
+                /** ★ 提交 id 落进任务记录 ⇒「这个产物在哪」是**可追溯**的。 */
+                task.deliverableCommit = committed.commit
+                ctx.logger.info(
+                  `agent-teams: task "${task.id}" deliverable committed as ${committed.commit} `
+                  + `(${committed.filesChanged} file(s)) in ${worktree}`,
+                )
+              } else if (committed.ok === true) {
+                /** 没有改动 ⇒ 不产出空 commit。这也是一个**结论**，要能读出来。 */
+                ctx.logger.info(`agent-teams: task "${task.id}" had no worktree changes to commit`)
+              } else {
+                /**
+                 * ★ 提交失败**不改判**，而它**不静默**。
+                 *   一次合格的交付不该因为记账失败而变成 failed ——
+                 *   把前者读成后者，会让成员去重做已经做对的工作。
+                 */
+                ctx.logger.warn(`agent-teams: could not commit the worktree for task "${task.id}": ${committed.reason}`)
+                task.deliveryFailure = {
+                  at: Date.now(),
+                  attempt: task.attempt ?? 1,
+                  reason: `worktree commit failed: ${committed.reason}`,
+                }
+              }
+              /**
+               * ── ★★★★★ 每一次终态转换都判一次这棵树 —— **与"这次提交成了没有"无关** ────
+               *
+               * ── ★★★ 为什么它【不能】住在上面那三支里的任何一支（round-1 的 blocker）──
+               *
+               * MEASURED（reviewer 用 `reviewer-1/sequence.mjs` 与 `reviewer-1/refire.mjs`
+               *   两次实测，而 round-1 的实现确实是这样 —— 本条修复直接针对它）：
+               *
+               *   ① `commitWorktree` **只在 worktree 里**提交，它**从不**合进 `main`。
+               *      ⇒ 提交刚成功的那一刻，那棵树的 HEAD 是一个**全新**的 commit，
+               *        按定义**不是** `main` 的祖先 ⇒ 权威判据必然答 `keep / not-absorbed`。
+               *      ⇒ ★ 把回收挂在"提交成功"那一支上，等于把入口设在了
+               *        **唯一一个判据必然说"不"的时刻** ⇒ **删除在生产上不可达**。
+               *        （round-1 的夹具臂 12 之所以能绿，只因为它注入了一个 `post-commit`
+               *          钩子去**替 integrator 做合流** —— 而那是**产品从不做**的一步。
+               *          ★ 那条臂现在仍在，但它已被降级为"模拟**后续阶段**"，
+               *            而**发射**由无钩子的臂 15 证明。）
+               *
+               *   ② 而**唯一可达**的那种"已吸收"形状，恰恰是**没有新改动**的那一次
+               *      （`committed.commit === undefined`）：产物早先已被 integrator 合流，
+               *      而这次终态转换本来就没有东西要提交。
+               *      ⇒ ★ 藏在 `committed.commit !== undefined` 里 ⇒ 它也**永远走不到**。
+               *
+               * ⇒ 所以入口条件是：**树在 ⇒ 就判它**。
+               *   ★ 而"能不能删"**仍然只由 `judgeWorktree` 说** —— 本层一行 git 都不跑，
+               *     也**不**新增第二条判据（那正是本任务要消灭的形态）。
+               *
+               * ── ★★ 于是"今天不删"是一个**正确的中间态**，不是失效 ──────────────────
+               *
+               * 产物刚交付、还没合流 ⇒ 判据答 `keep / not-absorbed` ⇒ **今天不删**。
+               * 而这条接线在**下一次**这条任务落终态时会**再判一次** ——
+               * 那时 integrator 已经把那个 commit 合进 `main` ⇒ 判据答 `reclaimable`
+               * ⇒ **那一次**才删。
+               * ★ 这正是权威实现写在文件头的那条纪律：「判据不是『任务已终态』，
+               *   而是『产物已被主树吸收』」。⇒ 判据说留就留，重判是**下一次**的事。
+               *   MEASURED（臂 15）：一个**已合流**的树在落终态时被真的删掉；
+               *   而**没有**任何夹具注入的合流步骤参与那一臂。
+               *
+               * ── ★ 它**不改判**（这一格 round-1 通过了，不许回退）──────────────────
+               *
+               * 回收失败与交付失败是两件事：`reclaimWorktreeAfterDelivery` 只记日志，
+               * 这里**不** catch、**不**写 `deliveryFailure`、**不**动 `task.status`。
+               * ★ 而它的返回**不进任何字段**：读数是**日志**，
+               *   任务的真相仍然只有 `task` 那一份（改了它会与别处的记账分叉）。
+               */
+              /**
+               * ── ★★★ 生产调用点 ①：主干引用**在这里解析，然后显式传下去**（W1）──────
+               *
+               *   MEASURED（本任务的由来）：此前这里**不传** `mainRef`
+               *   ⇒ 判据落回它自己的缺省 `'main'`，而本仓的集成不在 `main` 上
+               *     （实测 `main` 落后集成分支 HEAD **209** 个提交）
+               *   ⇒ **同一个判据、同一棵树**，把引用换成集成分支后 8 棵树的裁决
+               *     从 `keep` 翻成 `reclaimable`。
+               *   ⇒ 也就是说：这个调用点此前一直在拿一个过期的引用做**删除**决策。
+               *
+               *   ★ 为什么解析放在**这里**而不是留在判据里：
+               *     判据不知道"这个仓库把什么当作主干"（那是仓库的**约定**，不是 git 的事实）。
+               *     本调用点知道 workspace、也知道这次判定的上下文
+               *     ⇒ 由它把"比谁"定下来、并把结论**显式**交给判据。
+               *   ★ 而解析失败 ⇒ 照传 `undefined`，判据会答 `undecidable`（不是"可以删"）。
+               */
+              const trunkRef = resolveTrunkRef(workspace)
+              const reclaimed = await reclaimWorktreeAfterDelivery({
+                worktree,
+                repo: workspace,
+                taskId: task.id,
+                status: String(args.status),
+                ...trunkRef.status === 'resolved' ? { mainRef: trunkRef.ref } : {},
+                /**
+                 * ★ 把"这一轮提交成了没有"如实交出去 —— 它**只影响日志措辞**
+                 *   （"刚交付"与"没有新改动，只是重判"是两种不同的情形），
+                 *   **绝不**影响能不能删：那件事只有 `judgeWorktree` 说了算。
+                 */
+                commitOutcome: committed.ok === true
+                  ? committed.commit === undefined ? 'nothing-to-commit' : 'committed'
+                  : 'commit-failed',
+                logger: ctx.logger,
+              })
+              /** ★ 显式 `void` 掉：它只用于上面那一行的日志，**不进**任务记录（见上）。 */
+              void reclaimed
+            } else if (shouldHaveWorktree) {
+              /**
+               * ── ★★★ 该建树而树不在 ⇒ 这是一个【真缺陷】，不是"不需要"───────────────
+               *
+               * 与上面那支（本来就不该建树）**必须不同形** ——
+               * 否则"设计如此"会把"建树失败"永久盖住。
+               *
+               * ★ 而它同样**不改判**：任务是不是合格由判据说了算，
+               *   一次记账环境的问题不该把合格的交付变成 failed。
+               *   但它必须**可读**（日志 + `deliveryFailure`），否则没人会去查。
+               */
+              ctx.logger.warn(
+                `agent-teams: task "${task.id}" is kind="${task.kind ?? 'work'}" (which should have an '
+                + 'isolated worktree) but its worktree is missing at ${worktree}; `
+                + 'its deliverable could not be committed and cannot be reached by an integrator',
+              )
+              task.deliveryFailure = {
+                at: Date.now(),
+                attempt: task.attempt ?? 1,
+                reason: `no isolated worktree at ${worktree} for kind "${task.kind ?? 'work'}", so the deliverable was not committed (there is nothing for an integrator to merge)`,
+              }
+            }
+          }
           if (args.output !== undefined) task.output = args.output
+          /**
+           * ── ★★★ 自审拒斥（协议第 7 条 `Never approve your own implementation`）──────
+           *
+           * BEFORE：这条规则**只有文字**。全仓 `src/` 里 grep `selfReview` / `self-review`
+           *   零命中 ⇒ 它是那 21 个可判据点里"形态上完全可判、却零校验"的三条之一。
+           *
+           * MEASURED（本轮，盘上全部 team.json）：可判的 13 条审查任务里 **4 条是真自审**，
+           *   且**全部**判 `verdict=pass`（`mutation-quality` 的 t4 / t8 / t12 / t14，
+           *   同一身份 `ledger` 既实现又审查）。⇒ 它不是"可能被违反"，它已被违反四次且都过了。
+           *
+           * ── ★ 为什么判据放在**这里**（`task.verdict` 赋值之前）────────────────────
+           *
+           * 这是"一条审查结论就要落盘"的唯一时刻。放到别处（比如 delivery 时）会
+           * 晚一步：那时 `verdict=pass` 已经在盘上，而**它本身**就是被禁止的那件事。
+           * 与 t97 的 `reviewedArtifacts` 同一条纪律：记录/裁决必须在卡点发生时做。
+           *
+           * ── ★★ 只拒 `pass`，不拒 `needs_revision` / `reject` ──────────────────────
+           *
+           * 协议禁的是"判自己**通过**"（approve），不是"给自己提意见"。
+           * 一条自审说 needs_revision 是**安全方向**的 —— 它会触发 repair + 下一轮审查，
+           * 而下一轮仍然被这条判据盯着。⇒ 反向半边：只拦"给自己盖章"。
+           *
+           * ── ★★ 判不了 ⇒ 放行但必须可读 ─────────────────────────────────────────────
+           *
+           * 三态见 `judgeSelfReview` 的注释。判不了时**不拒**（那些情形已被别的判据管），
+           * 但 `undecidable` 要落进日志 —— 否则"判过了、没问题"与"判不了、放过去了"同形。
+           */
+          if (args.verdict === 'pass') {
+            const selfReview = judgeSelfReview({ team: fresh, task, reviewerName: identity.name })
+            if (!selfReview.ok) {
+              /**
+               * ★★ 措辞**刻意**不用 `update_task rejected:` —— 那个前缀是**判据门**
+               *   （`completionGates.blockers`）的签名，`gate-update-task-unmeasured`
+               *   臂 5 数它只许出现一处。自审拒斥不是判据门，它是**身份规则**。
+               *   ⇒ 混用前缀会让"门没过"与"这件事本身不许做"在日志里同形，
+               *     而两者补救动作相反（前者放宽契约或补证据，后者换人）。
+               */
+              throw new Error(`self-review is not allowed: ${selfReview.error ?? 'a review may not approve its own implementation'}`)
+            }
+            if (selfReview.undecidable !== undefined) {
+              ctx.logger.debug(`agent-teams: self-review judgement for ${task.id} was undecidable: ${selfReview.undecidable}`)
+            }
+          }
           if (args.verdict !== undefined) task.verdict = args.verdict as ReviewVerdict
+          /**
+           * ── ★★★ t97（吸收上游 #161 的 **S1**）：判决落盘时记下**它绑定了哪些字节** ────────
+           *
+           * 上游 #161 的原始缺陷（逐字）：
+           * > 「A **passing review was not bound to the revision it judged**……
+           * >   it advertised "all gates passed" over **bytes that had since been edited
+           * >   or deleted**.」
+           *
+           * ★★ 为什么**必须**在这里做，而不是事后补：判决落盘的那一刻是**唯一**能知道
+           *   "它当时看的是哪批字节"的时刻。事后任何时候再读盘，读到的都是**另一批**
+           *   （这正是 f-0014 那条纪律：「记录必须在卡点发生时做，事后补是补不上的」）。
+           *
+           * ── ★ 只对 `VERDICT_KINDS` 那几类记 ─────────────────────────────────────────
+           *
+           * 只有 review / requirements / verification 的"完成"是**关于某个修订的判决**
+           * （它们的结论说"这批字节行不行"）。
+           * ★ 而 `implementation` / `repair` / `integration` 的完成是"我把活干了"，
+           *   `work` 是"我做完了研究" —— 它们**不判决任何字节**，
+           *   给它们也记一份契约绑定是**造一个不存在的语义**。
+           *
+           * ── ★★★ 后果（用户已批准）：**所有历史判决立刻落 `unauditable gap`** ────────────
+           *
+           * 今天盘上的判决**都没有** `reviewedArtifacts`（本格是本次新加）
+           * ⇒ 它们无法回答"我判的是哪批字节"
+           * ⇒ 按上游口径必须被报成「**早于内容绑定**」，**而不是**"对当前字节的一次通过"。
+           * ★★ **那【是正确行为】，不是 bug** —— 它变严，是因为此前它在**读一个它没有的信息**。
+           * ★ 别在事后把这条判据说成"突然变严"：它只是**第一次说真话**。
+           *
+           * ★ 失败/读不完整 **不阻塞**这一次更新：本格是**记录**，不是裁决
+           *   （与 `gateEvaluation` / `recordFriction` 同一条纪律：先软后硬）。
+           *   ★★ 而"读不完整"这件事**另外记着**（`reviewedArtifacts` 只含真的读到的那些）
+           *     —— 一份被静默截断的清单会让清单外的改动通过"未变"检查。
+           */
+          if (args.verdict !== undefined && VERDICT_KINDS.includes(taskKindOf(task))) {
+            try {
+              /**
+               * ★ 绑定的是**这条任务声明的范围**（`inScope`）——
+               *   那正是"它对哪些字节负责"。★ 缺席则退化为 `changedPaths`（它实际动了什么）。
+               */
+              const scopePaths = (task.inScope ?? task.changedPaths ?? []).slice()
+              const snapshot = await snapshotReviewedArtifacts(workspace, scopePaths)
+              task.reviewedArtifacts = snapshot.reviewedArtifacts
+            } catch (reason) {
+              /**
+               * ★★ 采集失败 **不**让这次更新失败（它是记录，不是裁决）。
+               *   而**也不写一个空数组** —— 空数组会说"它没绑定任何字节"，
+               *   而真相是"我们没能读出来" ⇒ ★ 两者补救动作相反（后者要去查读失败的原因）。
+               */
+              ctx.logger.warn(`agent-teams: could not snapshot reviewed artifacts for ${task.id} (recorded, not thrown): ${String(reason)}`)
+            }
+          }
           if (findings !== undefined) task.findings = findings
           if (input.changedPaths !== undefined) task.changedPaths = input.changedPaths
           if (acceptanceResults !== undefined) task.acceptanceResults = acceptanceResults
           if (commandsRun !== undefined) task.commandsRun = commandsRun
+          /**
+           * ── ★★★ 测试文件被改松了吗（2026-10-20，补 t5 —— 完成侧的那一半）──────────
+           *
+           * ── 它拦的是什么（三条重判据都拦不住的一条路径）─────────────────────────
+           *
+           * ```
+           *   1. 真跑 `pnpm test`   —— 退出码 0 是**真的**
+           *   2. 同一轮改松断言     —— `expect(x).toBe(3)` → `toBe(2)`
+           *   3. 三条判据全部沉默：
+           *      · completion.verify-rerun  不管（退出码确实是真的）
+           *      · completion.r5            不管（它只管【新增】测试的父/子红绿）
+           *      · completion.mutation      不管（重活，且只在被触发时跑）
+           * ```
+           * ⇒ 我们为「测试**强不强**」建了三条重判据，而「测试**被改松了没**」
+           *   这一道几乎零成本的关，**没有任何人管**。
+           *
+           * ── ★ 形态与上面 `reviewedArtifacts` 那一段**逐字对齐** ─────────────────────
+           *
+           *   · 位置：同一个锁内（既有形态，见那段注释的 MEASURED）
+           *   · 失败**不阻塞**这次更新（它是**记录**，不是裁决 —— 与 gateEvaluation /
+           *     recordFriction 同一条"先软后硬"纪律）
+           *   · 读不出来**不写一个空数组**（空数组会说"它没被改"，而真相是"我们没能读出来"）
+           *
+           * ── ★★ 与那条路径的**一处关键不同**：它**会拒绝** ─────────────────────────
+           *
+           *   `reviewedArtifacts` 只是记录（`unbound` 是给下游读的）。
+           *   而这一条**必须表态** —— 它是本轮补的那道"关"。
+           *   ★ 三态各自的处置**不同形**：
+           *     `weakened`   ⇒ **拒绝**这次完成（指名是哪几个文件）
+           *     `intact`     ⇒ 放行
+           *     `unmeasured` ⇒ **放行**，但在 output 里留痕
+           *       ★★ 为什么判不了也放行：先软后硬 —— 本仓那条纪律是"新机制先别误伤"。
+           *         而**它必须留痕**：一个静默放行的 unmeasured 与 intact 同形，
+           *         那正是本条存在的理由要防的东西。
+           */
+          if (args.status !== undefined && TERMINAL_TASK_STATUSES.includes(args.status)
+            && args.status !== 'cancelled' && shouldSnapshotTestFiles(taskKindOf(task))) {
+            try {
+              const paths = (task.testFileBaseline ?? []).map((artifact) => artifact.path)
+              if (paths.length > 0) {
+                const now = await digestWorkspacePaths(workspace, paths)
+                /**
+                 * ★★ 读不到 ⇒ 传 `undefined` 给判据（`unmeasured`），**不是**空 Map。
+                 *   一个空 Map 会让每一个**已删的**测试文件都判 weakened ——
+                 *   那可能对，但**不是从读数里得出的**（它是从"读失败"推出来的）。
+                 */
+                const current = now.gaps.length > 0 ? undefined : new Map(now.artifacts.map((a) => [a.path, a.digest]))
+                const reading = testFileBaselineOf(task.testFileBaseline, current)
+                if (reading.verdict === 'weakened') {
+                  throw new Error(
+                    `task ${task.id}: the test files that existed when this attempt started have been changed or removed `
+                    + `(${reading.weakened.join(', ')}) — a green test run on weakened tests is not evidence. `
+                    + 'Restore those files, or declare the change explicitly in the task record.',
+                  )
+                }
+                if (reading.verdict === 'unmeasured') {
+                  /**
+                   * ★ 留痕：读不出来**必须看得见** —— 否则它与 `intact` 同形。
+                   *   与 `input_surface` / `observed.*` 同一条纪律：放过，但留名。
+                   */
+                  ctx.logger.warn(`agent-teams: ${task.id} test-file baseline could not be compared (recorded, not rejected): ${reading.why}`)
+                }
+              }
+            } catch (reason: unknown) {
+              /**
+               * ★ 上面那条 `weakened` 的拒绝**必须**穿出去 —— 它不是"读失败"。
+               *   其余异常（读盘炸了等）**不阻塞**：本格是记录，不是裁决。
+               */
+              if (reason instanceof Error && reason.message.startsWith(`task ${task.id}: the test files`)) throw reason
+              ctx.logger.warn(`agent-teams: could not compare the test-file baseline for ${task.id} (recorded, not thrown): ${String(reason)}`)
+            }
+          }
+          /**
+           * ── ★★★ t19：这一次执行发生了 ⇒ **记进历史**（有序、只追加）─────────────────
+           *
+           * 用户的原话（本格存在的理由）：
+           *   「一个收敛的循环，在用户眼里读成一串互不相干的红色失败」。
+           *
+           * ── ★★ 位置是刻意的：**在这一代的每一格都已经落定之后** ────────────────────
+           *
+           * ★ 若放在赋值**之前**，元素里记的就是**上一个**状态 —— 于是每一条历史
+           *   都比事实**晚一步**，而"它失败过两次然后通过了"这句话会读成
+           *   "它失败过三次"（收敛的那一次被记成前一次的重复）。
+           *   （与 C1 的 `noteStall` 必须排在 `recordFriction` 之前是同一条纪律，
+           *     只是方向相反：那里要的是**这一次**的次数，这里要的是**这一次**的结果。）
+           *
+           * ── ★★★ 而它**不只是** `status` 一格（D2 修的就是这一格只满足了一半）──────
+           *
+           * MEASURED（本文件的由来）：本块此前住在 `task.status = args.status` 之后、
+           *   而 `task.verdict` / `task.acceptanceResults` / `task.commandsRun` 的赋值
+           *   **都在它后面**。⇒ 一次终态更新写进历史的
+           *   `verdict` / `failureKind` 读的是**上一代**的值：
+           *     · `failureKind === 'inconclusive'`（上一代的 `needs_revision`）
+           *       而这一次是 `failed` + `acceptanceResults` 里有一条 failed；
+           *     · 上一代没有 `verdict` ⇒ 这一次的 `needs_revision` 在历史里**根本没有**。
+           *   ★ 而"归因记到上一代"在读取端与"这一代就是这么回事"**完全同形** ——
+           *     两者都是一条合法形状的 `failureKind`，无人能分辨。
+           *
+           * ★★ 所以本块的位置判据是【本代的全部输入都已落定】：
+           *   `status` · `verdict` · `acceptanceResults` · `commandsRun` 四格都在它之前赋值。
+           *   `round` 不属于这一代（它由 `create_task` 定、本工具从不写）⇒ 无需等待，
+           *   但它与其它几格**一起**抄才构成一代的完整读数。
+           *
+           * ── ★ 为什么**只有落了终态**才追加 ─────────────────────────────────────────
+           *
+           * 一次 `in_progress` 的中间更新**不是一次执行** —— 它没有结论。
+           * ⇒ 若也记，历史里会塞满"还在跑"的元素，而"跑了几次"这个问句就废了
+           *   （它会等于"更新了几次"）。★ 判据是 `TERMINAL_TASK_STATUSES`。
+           *
+           * ── ★★ 而 `cancelled` 也记 ────────────────────────────────────────────────
+           *
+           * 一条被中止的任务**确实跑到过终态**，而"它被中止了、没通过"是一个
+           * 与"它还在跑"不同形的事实。⇒ 它进历史；读取端从 `status` 读得出它是中止。
+           */
+          if (args.status !== undefined && TERMINAL_TASK_STATUSES.includes(args.status)) {
+            appendExecution(task, {
+              at: Date.now(),
+              /** ★ 与 `TeamTask.attempt` 同一套编号；缺省 0（还没开始任何一代）。 */
+              attempt: task.attempt ?? 0,
+              ...task.attemptId === undefined ? {} : { attemptId: task.attemptId },
+              status: task.status,
+              /**
+               * ★★ `round` / `verdict` / `failureKind` **抄进历史**，而不是让读取端
+               *   去读 `TeamTask` 上那一格 —— 因为那几格是**单值**，会被下一轮覆盖。
+               *   ⇒ 不同步抄的话，"第 1 轮是 needs_revision"这件事下一轮就没了，
+               *     而"它失败过两次然后通过"正是要靠这几格才读得出来。
+               */
+              ...task.round === undefined ? {} : { round: task.round },
+              ...task.verdict === undefined ? {} : { verdict: task.verdict },
+              /**
+               * ★ 成因分类用**既有的那一份**（`failureKindOf`），不在这里重算 ——
+               *   与 t12 的 status 出口**同源**，于是"这条失败是哪一种"只有一个答案。
+               * ★ 只在 `failed` 上算：其余终态没有"失败成因"可言（`failureKindOf`
+               *   对非 failed 任务给的是缺省，抄进来会是一条**假事实**）。
+               */
+              ...task.status === 'failed' ? { failureKind: failureKindOf(task) } : {},
+              ...identity.name === undefined ? {} : { by: identity.name },
+            })
+          }
+          /**
+           * ── ★★★ S1：completion 判据结果【落盘到 task】（此前：求值 → 裁决 → 丢弃）────
+           *
+           * MEASURED（t69，队长复核）：`completionGates` 在上面的裁决里用完之后
+           * **没有任何地方持久化** —— F3 自记「ran[] 产出即被丢弃，零消费」。
+           * 本行是唯一新增：把求值结果**原样投影**进 `task.gateEvaluation`
+           * （投影规则见 `gateEvaluationRecordOf`；三态纪律见 `types.ts` 该字段的注释）。
+           *
+           * ★ 三态由**这里**保证：本格只在【真的求值过】时写入 —— 而代码走到这里
+           *   本身就意味着 `wireCompletion` 已跑（终态补证据那条路在 `:889` 提前返回了）。
+           *   ⇒ 【没求值】（一次 in_progress 的中间更新不会走到这？—— 不，
+           *     中间更新也走这里。区分见下）与【求值了】的分界线是**本行的在场**：
+           *     任何一次非终态补证据的 update_task 都会产生一条记录，
+           *     而一条【从未被 update_task 判过 completion】的任务上这个字段缺席。
+           *
+           * ★ 硬约束③（不许改裁决语义）：本行**只写**，不读 —— `gateEvaluation`
+           *   不参与任何 if/throw；`completion.ts` 一个字没改。
+           *
+           * ★ 与 `executions[]` 的分工：历史（executions）记【那次尝试的结果】，
+           *   本格记【最近一次求值的判据明细】—— 明细大、且只对"现在读"有意义，
+           *   放进 executions 会把每一次尝试的完整 ran[] 永久堆进 team.json。
+           *   ★ 代价如实记下：retry 会清掉上一代的读数（`clearAttemptResult`），
+           *     而"上一代判据说了什么"只在**当场日志**里 —— 那是刻意的取舍
+           *     （与 `output` / `verdict` 同一代际策略）。
+           */
+          /**
+           * ★ S1 的**单段**字段（既有读者 `snapshot.ts` / `status.ts` 依赖它）—— 原样保留。
+           */
+          task.gateEvaluation = gateEvaluationRecordOf(completionGates)
+          /**
+           * ── ★★ t81：**同时**进按段字段的 `completion` 那一格 ──────────────────────────
+           *
+           * ★ 两格在 completion 段上**冗余但一致**（与 `auto.gate` / `auto.gates` 同一取舍）：
+           *   旧格保留是因为既有读者在读它；新格是 UI 的**首选**读法（它与 contract/dispatch
+           *   两段同住一个字段，UI 才能一次遍历六段）。
+           * ★ 只在**真的求值过**时才写 —— 这里本来就只在求值路径上，与 S1 同一条前提。
+           */
+          ;(task.gateEvaluations ??= {}).completion = task.gateEvaluation
           task.updatedAt = Date.now()
           const priorDependencies = new Map(fresh.tasks.map(item => [item.id, [...item.dependencies]]))
           const followUp = (task.status === 'failed' && (task.verdict === 'needs_revision' || task.verdict === 'reject'))
@@ -753,6 +2266,91 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
             ))
           }
           await writeTeam(stateRoot, fresh)
+          /**
+           * ── ★★★★★ 终态转换是**唯一**必然发生的时刻 ⇒ 在这里扫一遍已终态的任务（defect 2）──
+           *
+           * ── 它补的是上一段那根线的**缺口** ────────────────────────────────────────
+           *
+           * 逐任务那条回收（上面的 `reclaimWorktreeAfterDelivery`）只判**这条**任务、
+           * 且只在它落终态的那一刻判。而它答 `keep / not-absorbed` 时**自己就写着**
+           * "将在**下一次**终态转换时重判"。
+           *
+           * ★★ 而对一条**已经**终态、此后不再被更新的任务，那个"下一次"**永远不会来**：
+           *   没有更新 ⇒ 没有终态转换 ⇒ 没有任何时刻会重判它 ⇒ 一棵产物早已被合流
+           *   进主干的树**永久**留在盘上。这与"任务已终态"是两件事 ——
+           *   判据仍然是「产物已被吸收」，变的只是"谁在什么时刻去问它"。
+           *
+           * ── ★ 为什么**必须**落在这里（`writeTeam` 之后）────────────────────────────
+           *
+           * 判据读的是**盘上**的 `team.json` 吗？不是 —— 它读的是**git**。
+           * 但"这条任务已终态"这件事是**本工具刚写下去的**，而扫描的输入就是它。
+           * ⇒ 放在 `writeTeam` **之前**会让"扫描看到的世界"与"落盘的世界"不一致
+           *   （一次崩溃之后，日志里说扫过、而盘上那条任务还没落终态）。
+           *   ⇒ 所以：**先落盘，再扫描**。
+           *
+           * ── ★★ 它【只】在终态转换时跑 ────────────────────────────────────────────────
+           *
+           * 一次全扫要判**每一条**终态任务的树（每条判据都是几次 git 查询）——
+           * 挂在**每一次** `update_task` 上会让一个高频动作变成一次全仓扫。
+           * ★ 而"刚刚发生了一次终态转换"正是**必然会发生**的那个时刻：
+           *   它是这件事被触发的唯一天然时机（与文件头那条"自动化必须挂在必然发生的
+           *   时刻"逐字一致）。
+           *
+           * ── ★★ 它【不】影响本工具的返回值，也【不】改任何任务记录 ────────────────────
+           *
+           * `void` 掉读数（与上面 `reclaimWorktreeAfterDelivery` 同一写法）；
+           * 传的是 `fresh.tasks`（**已落盘**的那一份，不是调用前那份）；
+           * 而它自己保证不抛、不写 `task.status` / `task.deliveryFailure`。
+           * ★ 少一样，一次清理就会变成一次**改判** —— 那是本仓记过的那类最贵的浪费。
+           */
+          if (landedTerminal) {
+            /**
+             * ── ★★★ 回收扫描**不许挂在完成路径上** ──────────────────────────────────
+             *
+             * MEASURED（本仓实测）：这一扫要 **19.6 秒**（29 棵 worktree × 约 37 个
+             * git 子进程 —— `execFileSync` 是**同步**的），而它原来写的是
+             * `const scan = await reclaimTerminalWorktrees(…)` 紧跟一句 `void scan`。
+             *
+             * ★ 那个 `void` 是**症状**：写它的人**想要**"发了就不管"，而 `await`
+             *   让它在**返回之前**跑完。`void` 在这里没有任何作用 —— 一个 `await`
+             *   过的值再 `void`，只是把一句"我本想异步"的意图留在了代码里。
+             *
+             * ★ 后果就是用户看到的那一幕：`complete` / `update_task` **卡住十几秒**
+             *   甚至更久，而 **team.json 早就写完了**。调用方以为失败、去重试，
+             *   而每次重试**再付一次 19.6 秒** ⇒ 看起来就是"卡在 complete 上"。
+             *   ★ 而它还持有团队的写锁窗口，所以别的成员一起被拖慢。
+             *
+             * ★ 处置：**真的**不阻塞 —— 扫描在后台跑，完成路径立刻返回。
+             *   它本来就不产出完成所必需的任何读数（唯一的消费是那句 `void scan`），
+             *   所以推迟它**不改变任何裁决**，只改变"谁等谁"。
+             *   ★ 而失败必须**被记下来**而不是被吞掉：一个静默失败的后台任务
+             *     与"没有后台任务"同形，那正是本仓反复记过的形态。
+             */
+            /**
+             * ── ★★★ 生产调用点 ②：同一条链上的第二个"判据该比谁"（W1）───────────────
+             *
+             *   ★ 它与 ① 是**两处**，因为它们在两条不同的路径上跑
+             *     （终态转换那一刻 / 终态扫描），而缺陷在**两处都**存在。
+             *     ★ 只修一处等于留下一半 —— 那正是 G8 的形状
+             *       （同一判据、两条路径语义不同）。
+             *   ★ 另：`resolveTrunkRef` 在这里**同步**跑一次（几次 `rev-parse`），
+             *     远小于这个后台扫描本身的 19.6s 量级；它不进被 `void` 掉的那个
+             *     promise ⇒ 解析失败也不会让完成路径抛错。
+             */
+            const scanTrunkRef = resolveTrunkRef(workspace)
+            const scanTask = reclaimTerminalWorktrees({
+              repo: workspace,
+              tasks: fresh.tasks,
+              teamId: fresh.id,
+              logger: ctx.logger,
+              ...scanTrunkRef.status === 'resolved' ? { mainRef: scanTrunkRef.ref } : {},
+            })
+            void scanTask.catch((error: unknown) => {
+              ctx.logger?.warn?.(
+                `agent-teams: background terminal-worktree scan failed for team "${fresh.id}" — nothing was deleted: ${describeError(error)}`,
+              )
+            })
+          }
           /**
            * ── ★★ 成员提交一次更新 ⇒ 顺手**读一遍它的会话日志**（这是第二个观察时刻）──
            *
@@ -860,18 +2458,59 @@ export function register(ctx: Context, clock: any, runtime: AgentTeamsRuntime, s
              *   · 都齐            ⇒ 字段在场，`incomplete: 0`
              *   · 有缺格          ⇒ 字段在场，`incomplete: N` + `missing` 名单
              *   · 这个位置没判据  ⇒ 字段不出现（**不是** `ok`）
+             *
+             * ★★ t39：这里【去掉了 `dispatch_input_surface`】那一行 ——
+             *   它此前是 `...dispatchInputSurface === undefined ? {} : …`，而
+             *   `dispatchInputSurface` 现在是恒 `undefined`（求值搬走了）
+             *   ⇒ ★ 那一行**永远展开成 `{}`** ⇒ 它是一行**死代码**。
+             *   ⇒ 而"一行永远不会产出的代码"与"一行产出对了的代码"在读数上同形
+             *     ⇒ ★ 删掉它，而不是留着（留着会让下一个人以为这个工具仍产出那一格）。
              */
-            ...dispatchInputSurface === undefined ? {} : { dispatch_input_surface: dispatchInputSurface },
             ...completionInputSurface === undefined ? {} : { completion_input_surface: completionInputSurface },
           }
         })
         if (followUpMessage !== undefined) {
-          const captain = ctx.agents.get(team.captainSessionId as SessionId)
+          /**
+           * ── ★★★ 这一段会抛，而抛在**写入之后** ────────────────────────────────────
+           *
+           * MEASURED（本仓实测，十几次）：`ctx.agents.get(...)` 在这里抛
+           *   `cannot get required service "agents" in inactive context`
+           * 而**紧接着的落盘已经完成**。于是调用方看到"失败"，去重试，
+           * 而重试**又成功又失败**，来回几次之后整轮就卡在 complete 上。
+           *
+           * ★ 机制在 host 的 cordis（`lib/index.js:688`）：取值器沿 fiber 树往上找，
+           *   而 `fiber.store` **只在 fiber 处于 active 时存在**。本插件在顶层
+           *   `inject` 里声明了 `agents`（`src/index.ts:56`），所以当**本处理器所属的
+           *   fiber 已经不在运行时**，取值器走到"我自己就声明了它"这一支 ⇒ 当场抛，
+           *   **不再往上找**。
+           *
+           * ★ 而更关键的是**为什么它有时不抛**：本处理器**先**返回结果、**后**执行这一段。
+           *   会话结束与这段代码谁先谁后，决定了这一次是成功还是抛错 —— 而**产物已经交付**。
+           *   ⇒ 一句"失败"里混着"没做"与"做了但回执丢了"两件事，而调用方无法分辨。
+           *
+           * ★ 处置：把这次读取**降级成可选**（见 `readCaptainSession`）。它做的事是
+           *   "把跟进消息顺手推给队长"—— 是**尽力而为的投递**，不是这次终态转换的判据。
+           *   读不到就**跳过**，并把"没投递"如实记进日志，**绝不让它把一次已经落盘的
+           *   完成判成失败**。消息本身仍在邮箱里（下一条 status 会看到），没有事实丢失。
+           */
+          const captain = readCaptainSession(ctx, team.captainSessionId)
           if (captain !== undefined && steerCaptainReport(captain, CAPTAIN_KEY, followUpMessage.content, mailboxPrompt(team.id, CAPTAIN_KEY, [followUpMessage]))) {
             await withTeamLock(teamLockKey(stateRoot, team.id), () => markMailboxDelivered(stateRoot, team.id, CAPTAIN_KEY, [followUpMessage!.id]))
           }
+          else if (captain === undefined) {
+            ctx.logger?.info?.(
+              `agent-teams: follow-up steer for team "${team.id}" was NOT delivered — the captain session could not be read in this context `
+              + '(cannot get required service "agents" in inactive context). The completion itself HAS landed; the message is still in the mailbox '
+              + 'and will be delivered by the next status read. This is a delivery miss, not a completion failure.',
+            )
+          }
         }
-        await scheduler.kickTeam(workspace, team.id, team.captainSessionId === caller.id ? caller : undefined)
+        /**
+         * ── ★★★ #176（乙）：队长那一半走活的 fork 链（t98）─────────────────────────
+         * ★ 这里决定那次 kick 带不带 `caller` 作为队长 —— 认不出来 ⇒ 传 `undefined`
+         *   ⇒ 那条 kick 会以**另一个身份**发出去（或干脆不派）。
+         */
+        await scheduler.kickTeam(workspace, team.id, sessionLeadsTeam(caller.id, identityOfTeam(team), liveRefsOf(ctx)) ? caller : undefined)
         return updated
       },
     })))

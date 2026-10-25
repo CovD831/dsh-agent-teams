@@ -51,35 +51,24 @@
   transform: translateY(0) scale(0.98);
 }
 
-.badge:focus-visible,
-.iconButton:focus-visible,
-.memberRow:focus-visible,
-.membersToggle:focus-visible,
-.sectionToggleTitle:focus-visible,
-.dagNode:focus-visible {
+.badge:focus-visible, .iconButton:focus-visible, .memberRow:focus-visible, .membersToggle:focus-visible, .sectionToggleTitle:focus-visible, .dagNode:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: 2px;
 }
 
-.badgeDot,
-.panelDot {
+.badgeDot, .panelDot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--dsw-alias-label-tertiary);
 }
 
-.badgeDot[data-busy='true'],
-.panelDot[data-busy='true'] {
+.badgeDot[data-busy='true'], .panelDot[data-busy='true'] {
   background: var(--dsw-alias-state-business-primary);
   animation: agentTeamsPulse 1.25s ease-in-out infinite;
 }
 
-.badgeCount,
-.memberCount,
-.teamStats,
-.stageLabel,
-.taskId {
+.badgeCount, .memberCount, .teamStats {
   font-variant-numeric: tabular-nums;
 }
 
@@ -103,8 +92,7 @@
   will-change: transform;
 }
 
-.panel[data-dragging],
-.panel[data-resizing] {
+.panel[data-dragging], .panel[data-resizing] {
   user-select: none;
   box-shadow:
     0 16px 38px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 29%, transparent),
@@ -133,8 +121,7 @@
   touch-action: none;
 }
 
-.panelHead:active,
-.panel[data-dragging] .panelHead {
+.panelHead:active, .panel[data-dragging] .panelHead {
   cursor: grabbing;
 }
 
@@ -260,8 +247,7 @@
   transition: border-color 120ms ease, opacity 120ms ease;
 }
 
-.resizeHandle:hover::after,
-.panel[data-resizing] .resizeHandle::after {
+.resizeHandle:hover::after, .panel[data-resizing] .resizeHandle::after {
   background-color: var(--dsw-alias-state-business-primary);
   border-color: var(--dsw-alias-state-business-primary);
   opacity: 0.95;
@@ -427,16 +413,6 @@
   min-width: 0;
 }
 
-.sectionTitle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
 .sectionHint {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
@@ -464,8 +440,7 @@
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));
 }
 
-.captainAvatar,
-.memberAvatar {
+.captainAvatar, .memberAvatar {
   position: relative;
   display: inline-flex;
   flex: none;
@@ -478,8 +453,7 @@
   height: 46px;
 }
 
-.leadAvatar,
-.memberArt {
+.leadAvatar, .memberArt {
   border: 0;
   border-radius: 0;
   object-fit: contain;
@@ -497,8 +471,7 @@
   height: 40px;
 }
 
-.captainInfo,
-.memberInfo {
+.captainInfo, .memberInfo {
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -508,16 +481,14 @@
   gap: 2px;
 }
 
-.captainLine,
-.memberLine {
+.captainLine, .memberLine {
   display: flex;
   min-width: 0;
   align-items: center;
   gap: 6px;
 }
 
-.captainName,
-.memberName {
+.captainName, .memberName {
   overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 12.5px;
@@ -527,8 +498,7 @@
   white-space: nowrap;
 }
 
-.captainRole,
-.memberRole {
+.captainRole, .memberRole {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 10px;
@@ -537,8 +507,7 @@
   white-space: nowrap;
 }
 
-.captainSummary,
-.memberStatusLine {
+.captainSummary, .memberStatusLine {
   overflow: hidden;
   color: var(--dsw-alias-label-secondary);
   font-size: 10.5px;
@@ -557,32 +526,42 @@
   white-space: nowrap;
 }
 
-/* Inline member model badge: compact neutral pill inside memberLine. Bounded
-   shrinkable width keeps long routes ellipsized in place, so the pill never
-   forces horizontal overflow in the normal 388px panel or compact viewport. */
+/**
+ * ★★★ R2：模型的**行内文字**，不再是药丸（用户的投诉是"badge-like elements"）。
+ *
+ * MEASURED（用户 2026-10-11）原话：「整个东西挺冗余的，比如它做一些 badge 之类的东西」。
+ * 模型这条事实**装得下**一行文字，所以它就该是一行文字 —— 边框 + 圆角 + 底色
+ * 三件套只为"它是个标签"服务，而那个含义已经在**位置**（名字右边）里了。
+ *
+ * ★ 保留的：完整路由仍在 `title` / `aria-label` / `data-member-model` 上
+ *   （可核，不是靠肉眼），可见的是末段（`compactModelLabel`）。
+ * ★ 保留 bounds：长路由仍然就地省略号，不许把面板撑破（`min-width: 0` + 省略号）。
+ */
 .memberModel {
-  display: inline-flex;
   flex: 0 1 auto;
-  align-items: center;
   min-width: 0;
-  max-width: 132px;
-  padding: 0 6px;
+  max-width: 148px;
   overflow: hidden;
-  box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 999px;
-  background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 600;
+  font-size: 9.5px;
   line-height: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.captainState,
-.memberState {
+/* ★ 打开成员会话的箭头：只做"这一行可以展开"的指示，不承载颜色含义。 */
+.memberRow > .memberInfo .memberLine > svg:last-child {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 140ms ease;
+}
+
+.memberRow[aria-expanded='true'] .memberLine > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.captainState {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -594,8 +573,7 @@
   white-space: nowrap;
 }
 
-.captainState[data-busy='true'],
-.memberState[data-activity='working'] {
+.captainState[data-busy='true'] {
   color: var(--dsw-alias-state-business-primary);
 }
 
@@ -610,129 +588,6 @@
 @keyframes agentTeamsDot {
   0%, 100% { opacity: 0.25; }
   50% { opacity: 1; }
-}
-
-.progressOverview {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.progressTitle {
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
-.progressSegments {
-  display: flex;
-  gap: 3px;
-}
-
-.progressSegments > span,
-.progressEmpty {
-  flex: 1;
-  height: 5px;
-  border-radius: 2px;
-  background: var(--dsw-alias-border-l3);
-}
-
-.progressEmpty {
-  display: block;
-  width: 100%;
-}
-
-.progressSegments > span[data-state='running'] {
-  background: var(--dsw-alias-state-business-primary);
-}
-
-.progressSegments > span[data-state='blocked'] {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.progressSegments > span[data-state='completed'] {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.progressSegments > span[data-state='failed'] {
-  background: var(--dsw-alias-state-error-primary);
-}
-
-.progressSegments > span[data-state='cancelled'] {
-  opacity: 0.55;
-}
-
-.progressLegend {
-  display: flex;
-  gap: 10px;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
-}
-
-.progressLegend > span[data-state='running'] {
-  color: var(--dsw-alias-state-business-primary);
-}
-
-.progressLegend > span[data-state='blocked'] {
-  color: var(--dsw-alias-state-warn-primary);
-}
-
-.progressLegend > span[data-state='completed'] {
-  color: var(--dsw-alias-state-success-primary);
-}
-
-.progressSummary {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 7%, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 15px;
-}
-
-.progressSummary[data-state='warning'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
-}
-
-.progressSummary[data-state='completed'] {
-  background: color-mix(in srgb, var(--dsw-alias-state-success-primary) 8%, var(--dsw-alias-bg-layer-1));
-}
-
-.progressSummary[data-state='discarded'] {
-  background: var(--dsw-alias-button-ghost-active-fill);
-}
-
-.progressSummary > span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.progressSummaryDot {
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-business-primary);
-}
-
-.progressSummary[data-state='warning'] .progressSummaryDot {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.progressSummary[data-state='completed'] .progressSummaryDot {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.progressSummary[data-state='discarded'] .progressSummaryDot {
-  background: var(--dsw-alias-label-tertiary);
 }
 
 .membersToggle {
@@ -826,8 +681,6 @@
 
 .memberRow {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) auto;
-  gap: 8px;
   align-items: center;
   width: 100%;
   min-width: 0;
@@ -844,8 +697,7 @@
   transition: background-color 120ms ease, transform 120ms ease;
 }
 
-.memberRow:hover,
-.memberRow[data-activity='working'] {
+.memberRow:hover, .memberRow[data-activity='working'] {
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1));
 }
 
@@ -934,95 +786,10 @@
   50% { transform: rotate(7deg); }
 }
 
-.memberState {
-  margin-left: auto;
-}
-
 .memberCount {
   color: var(--dsw-alias-label-tertiary);
   font-size: 10.5px;
   line-height: 16px;
-}
-
-.assignmentLine {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  padding: 0 6px 0 60px;
-}
-
-.assignmentLabel {
-  flex: none;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
-}
-
-.assignmentTasks {
-  display: flex;
-  flex: 1;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
-}
-
-.assignmentChip {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  min-height: 16px;
-  padding: 0 5px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-label-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  font-weight: 600;
-  line-height: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.assignmentChip[data-state='running'] {
-  background: var(--dsw-alias-state-business-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='completed'] {
-  background: var(--dsw-alias-state-success-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='blocked'] {
-  background: var(--dsw-alias-state-warn-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='failed'] {
-  background: var(--dsw-alias-state-error-primary);
-  color: var(--dsw-alias-label-primary-inverted);
-}
-
-.assignmentChip[data-state='cancelled'] {
-  color: var(--dsw-alias-label-tertiary);
-  text-decoration: line-through;
-}
-
-.unreadPill {
-  flex: none;
-  color: var(--dsw-alias-state-business-primary);
-  font-size: 9.5px;
-  font-weight: 600;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
-.taskEmpty {
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 9.5px;
-  line-height: 14px;
 }
 
 /* compact dependency DAG */
@@ -1115,8 +882,7 @@
   transition: border-color 140ms ease, background-color 140ms ease, opacity 140ms ease;
 }
 
-.dagNode:hover,
-.dagNode[data-focused='true'] {
+.dagNode:hover, .dagNode[data-focused='true'] {
   border-color: var(--dsw-alias-state-business-primary);
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 6%, var(--dsw-alias-bg-layer-1));
 }
@@ -1274,9 +1040,11 @@
   color: var(--dsw-alias-label-primary-inverted);
 }
 
-.taskDetailLine,
-.taskDetailMeta {
+.taskDetailLine {
   color: var(--dsw-alias-label-secondary);
+}
+
+.taskDetailLine, .taskDetailMeta {
   font-size: 9.5px;
   line-height: 14px;
 }
@@ -1405,8 +1173,7 @@
   background: var(--dsw-alias-bg-module-platform);
 }
 
-.planSectionToggle,
-.planCardHeader {
+.planSectionToggle, .planCardHeader {
   box-sizing: border-box;
   width: 100%;
   border: 0;
@@ -1425,8 +1192,7 @@
   padding: 7px 9px;
 }
 
-.planSectionToggle:hover,
-.planCardHeader:hover {
+.planSectionToggle:hover, .planCardHeader:hover {
   background: color-mix(in srgb, var(--dsw-alias-button-ghost-active-fill) 46%, transparent);
 }
 
@@ -1496,8 +1262,7 @@
   gap: 1px;
 }
 
-.planCardIdentity strong,
-.planTaskSummary {
+.planCardIdentity strong, .planTaskSummary {
   overflow: hidden;
   color: var(--dsw-alias-label-primary);
   font-size: 10px;
@@ -1507,8 +1272,7 @@
   white-space: nowrap;
 }
 
-.planCardIdentity > span,
-.planCardMeta {
+.planCardIdentity > span, .planCardMeta {
   overflow: hidden;
   color: var(--dsw-alias-label-tertiary);
   font-size: 8.5px;
@@ -1568,15 +1332,17 @@
   border: 0;
 }
 
-.planCardBody label,
-.planNewTask label {
+.planCardBody label, .planNewTask label {
   display: flex;
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 9px;
+}
+
+.planCardBody label {
+  gap: 4px;
 }
 
 .planCardBody label small {
@@ -1585,10 +1351,7 @@
   line-height: 11px;
 }
 
-.planCard input,
-.planCard textarea,
-.planCard select,
-.planNewTask input {
+.planCard input, .planCard textarea, .planCard select, .planNewTask input {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
@@ -1603,9 +1366,7 @@
   transition: border-color 160ms ease, box-shadow 160ms ease;
 }
 
-.planCard input,
-.planCard select,
-.planNewTask input {
+.planCard input, .planCard select, .planNewTask input {
   min-height: 32px;
   padding: 6px 8px;
 }
@@ -1616,10 +1377,7 @@
   resize: vertical;
 }
 
-.planCard input:focus-visible,
-.planCard textarea:focus-visible,
-.planCard select:focus-visible,
-.planNewTask input:focus-visible {
+.planCard input:focus-visible, .planCard textarea:focus-visible, .planCard select:focus-visible, .planNewTask input:focus-visible {
   border-color: var(--dsw-alias-state-business-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary) 16%, transparent);
 }
@@ -1685,8 +1443,7 @@
   gap: 6px;
 }
 
-.planModelTriggerCopy strong,
-.planModelTriggerCopy span {
+.planModelTriggerCopy strong, .planModelTriggerCopy span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1788,12 +1545,7 @@
   font-weight: 650;
 }
 
-.planActions,
-.planApproveRow,
-.planNewTask,
-.planConfirm,
-.planApproveActions,
-.planSecondaryActions {
+.planActions, .planApproveRow, .planNewTask, .planConfirm, .planApproveActions, .planSecondaryActions {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1815,10 +1567,7 @@
   justify-content: flex-end;
 }
 
-.planActions button,
-.planNewTask button,
-.planApproveRow button,
-.planConfirm button {
+.planActions button, .planNewTask button, .planConfirm button {
   flex: none;
   min-height: 30px;
   padding: 5px 10px;
@@ -1832,22 +1581,28 @@
   transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
 
-.planActions button:hover:not(:disabled),
-.planNewTask button:hover:not(:disabled),
-.planApproveRow button:hover:not(:disabled),
-.planConfirm button:hover:not(:disabled) {
+/* `.planApproveRow button` resets min-height/background/color below, so those
+ * three are declared only by the sibling list above — not duplicated here. */
+.planApproveRow button {
+  flex: none;
+  padding: 5px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 9.5px;
+  font-weight: 600;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.planActions button:hover:not(:disabled), .planNewTask button:hover:not(:disabled), .planApproveRow button:hover:not(:disabled), .planConfirm button:hover:not(:disabled) {
   border-color: var(--dsw-alias-label-tertiary);
 }
 
-.planActions button:active:not(:disabled),
-.planNewTask button:active:not(:disabled),
-.planApproveRow button:active:not(:disabled),
-.planConfirm button:active:not(:disabled) {
+.planActions button:active:not(:disabled), .planNewTask button:active:not(:disabled), .planApproveRow button:active:not(:disabled), .planConfirm button:active:not(:disabled) {
   transform: scale(0.98);
 }
 
-.planActions button[data-danger],
-.planConfirm button[data-danger] {
+.planActions button[data-danger], .planConfirm button[data-danger] {
   color: var(--dsw-alias-state-error-primary);
 }
 
@@ -1981,31 +1736,28 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.planSecondaryActions > button,
-.planApproveActions > button[data-danger] {
+.planSecondaryActions > button {
   border-color: var(--dsw-alias-border-l2);
   background: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-label-primary);
 }
 
-.planSecondaryActions > button[data-danger],
+/* `color` is reset to the error token below, so it is not declared here. */
 .planApproveActions > button[data-danger] {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-button-ghost-active-fill);
+}
+
+.planSecondaryActions > button[data-danger], .planApproveActions > button[data-danger] {
   color: var(--dsw-alias-state-error-primary);
 }
 
-.planSectionToggle:focus-visible,
-.planCardHeader:focus-visible,
-.planActions button:focus-visible,
-.planNewTask button:focus-visible,
-.planApproveRow button:focus-visible,
-.planConfirm button:focus-visible {
+.planSectionToggle:focus-visible, .planCardHeader:focus-visible, .planActions button:focus-visible, .planNewTask button:focus-visible, .planApproveRow button:focus-visible, .planConfirm button:focus-visible {
   outline: 2px solid var(--dsw-alias-state-business-primary);
   outline-offset: -2px;
 }
 
-.planActions button:disabled,
-.planNewTask button:disabled,
-.planApproveRow button:disabled {
+.planActions button:disabled, .planNewTask button:disabled, .planApproveRow button:disabled {
   cursor: default;
   opacity: 0.55;
 }
@@ -2101,10 +1853,6 @@
     width: 15px;
   }
 
-  .assignmentLine {
-    padding-left: 53px;
-  }
-
   .planFlow li {
     gap: 4px;
     font-size: 8px;
@@ -2188,27 +1936,84 @@
 /* Native grid and its children must query the same workspace container.
  * The legacy team's nested container made the grid switch before its children
  * at widths where the workspace padding straddled a breakpoint. */
-.team[data-workspace-team] { container-type: normal; container-name: none; padding: 0; border: 0; background: transparent; }
+.team[data-workspace-team] { container-type: normal; container-name: none; padding: 0; border: 0; background: transparent; width: 100%; max-width: 100%; }
+.team[data-workspace-team] .delegationSection,
+.team[data-workspace-team] .dependencySection,
+.team[data-workspace-team] .memberSlot,
+.team[data-workspace-team] .memberBlock { width: 100%; max-width: 100%; }
 .team[data-workspace-team] .teamHead { flex-wrap: wrap; gap: 8px; padding-bottom: 18px; }
 .team[data-workspace-team] .teamName { font-size: 15px; }
 .team[data-workspace-team] .teamStats { flex-wrap: wrap; }
 .team[data-workspace-team] .delegationSection { min-width: 0; }
 .team[data-workspace-team] .dependencySection { min-width: 0; }
-.team[data-workspace-team] .dagNodeLabel { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; }
+.team[data-workspace-team] .dagNodeLabel { display: block; width: 100%; min-width: 0; white-space: normal; overflow: hidden; overflow-wrap: break-word; line-height: 1.4; }
 .team[data-workspace-team] .sectionHead { flex-wrap: wrap; gap: 6px; }
 .team[data-workspace-team] .sectionHint { white-space: normal; }
-.team[data-workspace-team] .memberLine { flex-wrap: wrap; }
-.team[data-workspace-team] .memberStatusLine { white-space: normal; }
-.team[data-workspace-team] .taskDetailSubject { white-space: normal; }
-.team[data-workspace-team] .dagViewport { padding-bottom: 12px; }
-@container (min-width: 1000px) {
-  .team[data-workspace-team] { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(0, 1.35fr); column-gap: 32px; align-items: start; }
-  .team[data-workspace-team] > .teamHead { grid-column: 1 / -1; }
-  .team[data-workspace-team] > :not(.teamHead):not(.delegationSection):not(.dependencySection) { grid-column: 1 / -1; }
-  .team[data-workspace-team] .dependencySection { margin: 0; border-top: 0; border-left: 1px solid var(--dsw-alias-border-l2); padding: 0 0 0 28px; }
-  .team[data-workspace-team] .captainNode { padding-top: 0; }
-  .team[data-workspace-team] .dagCanvas[data-layout='parallel'] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 行不许换行撑高。宽屏也不再拆成左窄右空的两列。 */
+.team[data-workspace-team] .memberLine { flex-wrap: nowrap; }
+.team[data-workspace-team] .memberStatusLine { white-space: nowrap; }
+@container (max-width: 520px) {
+  .team[data-workspace-team] .memberRow { grid-template-columns: 46px 16px minmax(0, 1fr) auto; }
+  .team[data-workspace-team] .memberStatusTail { width: auto; max-width: 72px; }
+  .team[data-workspace-team] .memberRole,
+  .team[data-workspace-team] .memberModel { display: none; }
+  .team[data-workspace-team] .memberName { flex-grow: 1; flex-shrink: 1; flex-basis: auto; min-width: 0; }
 }
+.team[data-workspace-team] .memberBlock[data-member-expanded='true'] .memberStatusLine,
+.team[data-workspace-team] .memberSubagentNote,
+.team[data-workspace-team] .memberExpandedRole,
+.team[data-workspace-team] .memberExpandedModel,
+.team[data-workspace-team] .memberExpandedDoing {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+  text-overflow: unset;
+  overflow-wrap: break-word;
+}
+/* 子代理行必须先有确定宽度。label 上的 width:100% 会和网格的 minmax(0,1fr)
+ * 互相参照，中文的最小内容宽度是一个字，于是展开后每个字独占一行。 */
+.team[data-workspace-team] .memberSubagents,
+.team[data-workspace-team] .memberSubagentList,
+.team[data-workspace-team] .memberSubagent,
+.team[data-workspace-team] .memberSubagentOpen,
+.team[data-workspace-team] .memberExpandedFacts {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.team[data-workspace-team] .memberSubagentLabel {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: normal;
+  text-overflow: unset;
+  overflow-wrap: break-word;
+}
+.team[data-workspace-team] .memberSubagentDoing,
+.team[data-workspace-team] .memberSubagentMode {
+  flex: none;
+  width: auto;
+  white-space: nowrap;
+}
+.team[data-workspace-team] .taskDetail,
+.team[data-workspace-team] .taskDetailHead,
+.team[data-workspace-team] .taskDetailSubject {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.team[data-workspace-team] .taskDetailSubject {
+  overflow: visible;
+  white-space: normal;
+  text-overflow: unset;
+  overflow-wrap: break-word;
+}
+.team[data-workspace-team] .dagViewport { padding-bottom: 12px; width: 100%; }
 .team[data-workspace-team] .dagNode { padding: 10px 11px; border-radius: 9px; }
 .team[data-workspace-team] .dagNodeHead { font-size: 10px; margin-bottom: 7px; }
 .team[data-workspace-team] .dagNodeLabel { font-size: 12px; letter-spacing: 0; }
@@ -2219,7 +2024,7 @@
 .team[data-workspace-team] .captainSummary { font-size: 12px; line-height: 1.6; }
 .team[data-workspace-team] .captainState { font-size: 11px; }
 .team[data-workspace-team] .memberName { font-size: 13px; }
-.team[data-workspace-team] .memberRole, .team[data-workspace-team] .memberState, .team[data-workspace-team] .memberCount { font-size: 11px; }
+.team[data-workspace-team] .memberRole, .team[data-workspace-team] .memberCount { font-size: 11px; }
 .team[data-workspace-team] .memberStatusLine { font-size: 12px; line-height: 1.6; }
 .team[data-workspace-team] .taskDetailSubject { font-size: 13px; line-height: 1.6; }
 .team[data-workspace-team] .taskDetailLine, .team[data-workspace-team] .taskDetailMeta { font-size: 12px; line-height: 1.6; }
@@ -2231,7 +2036,888 @@
   .team[data-workspace-team]:has(> [data-staging-editor]) > .delegationSection { grid-column: 2; grid-row: 2; }
   .team[data-workspace-team]:has(> [data-staging-editor]) > .dependencySection { grid-column: 2; grid-row: 3; border-left: 0; padding: 24px 0 0; }
 }
-.team[data-workspace-team] .memberBlock[data-selected-member] .memberRow { outline: 1px solid var(--dsw-alias-state-business-primary); outline-offset: 3px; }
 .team[data-workspace-team] .dagOwner { white-space: nowrap; max-width: 105px; }
 /* The page scrolls as a whole; an overlay approval bar would cover form saves. */
 .team[data-workspace-team] .planApproveRow { position: static; }
+
+/* ── Member row: 16px status dot + fixed-width status tail (t13) ─────────────── */
+
+/* ★ The member row grid gains one leading 16px slot for the status dot, so the
+ *   dot column and the fixed-width tail align across every member row. */
+.memberRow {
+  grid-template-columns: 46px 16px minmax(0, 1fr) 96px;
+  gap: 6px;
+}
+
+/**
+ * ★ First-party member status dot: 16px, fixed, colour from host tokens only.
+ *   `stalled` is amber because a dead session with open work is a thing to act
+ *   on, not a green "still going" — see memberDotTone for the reading order.
+ */
+.memberDot {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px solid var(--dsw-alias-bg-layer-1);
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberDot[data-tone='running'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.memberDot[data-tone='stalled'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.memberDot[data-tone='delivered'] {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.memberDot[data-tone='idle'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberDot[data-tone='dormant'] {
+  background: transparent;
+  border-color: var(--dsw-alias-border-l3);
+}
+
+/* ★ Fixed-width status tail so every member row's status aligns vertically. */
+.memberStatusTail {
+  display: inline-flex;
+  flex: none;
+  width: 96px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* ── Terminal tones reuseable by every task surface (t13) ────────────────────── */
+
+.dagNode[data-state='converging'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 52%, var(--dsw-alias-border-l2));
+}
+
+.dagNode[data-state='converging'] .dagNodeDot {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.dagNode[data-state='unmeasured'] .dagNodeDot {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.taskDetailBadge[data-state='converging'] {
+  border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 42%, var(--dsw-alias-border-l2));
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 8%, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.taskDetailBadge[data-state='unmeasured'] {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ★★★ R2：成员行 —— 轮次**行内** + 展开后的子代理层
+ *
+ * 用户对第一屏的要求（原话）：
+ *   · "the first screen should show durable roles"
+ *   · "clicking one expands to show the subagents working underneath it"
+ *   · "together with round information" —— 轮次**搬到**这一屏
+ *   · 整体是**减法**："整个东西挺冗余的，比如它做一些 badge 之类的东西"
+ *
+ * ⇒ 这里新增的两块都**不使用**药丸/徽章形状：边框+圆角+底色三件套只在
+ *   "它是一个可以点的控件"或"它是一色块"时才出现，其余一律是行内文字。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* ── 轮次行：跟成员行走同一个缩进，读起来是"这一行的补充"，不是另一块面板 ───── */
+.memberRoundLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 6px 0 72px;
+}
+
+.memberRoundMark {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/**
+ * ★ 轮次的语气色 —— 与任务面的三态**同一套** token，不另立一套：
+ *   converging(琥珀) / failed(红) / unmeasured(中性) / running(蓝) / completed(绿)。
+ */
+.memberRoundTone {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.memberRoundLine[data-tone='converging'] .memberRoundTone {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.memberRoundLine[data-tone='failed'] .memberRoundTone {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberRoundLine[data-tone='unmeasured'] .memberRoundTone, .memberRoundLine[data-tone='cancelled'] .memberRoundTone {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberRoundLine[data-tone='running'] .memberRoundTone {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.memberRoundLine[data-tone='completed'] .memberRoundTone {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+/* ★ 轮次里的任务 id：**文字**，不是 chip —— 点它是为了定位，不是为了看颜色块。 */
+.memberRoundTasks {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memberRoundTask {
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  line-height: 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.memberRoundTask:hover {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+}
+
+.memberRoundTask[data-tone='converging'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.memberRoundTask[data-tone='failed'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberRoundTask[data-tone='cancelled'] {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+/* ── 展开层：成员底下的活子代理。缩进再深一级，读起来是"它底下"而不是"另一个成员" ── */
+.memberSubagents {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 3px 6px 5px 72px;
+}
+
+.memberSubagentList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memberSubagent {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+/**
+ * ★ 子代理的状态点**小一号**（8px）而且**没有**成员点那圈描边：
+ *   一眼要分得出"这是一个成员"与"这是成员底下的一个子代理"。
+ *   两处同形会让层级消失，而层级正是这一层的全部内容。
+ */
+.memberSubagentDot {
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberSubagentDot[data-tone='working'] {
+  background: var(--dsw-alias-state-business-primary);
+}
+
+.memberSubagentDot[data-tone='idle'] {
+  background: var(--dsw-alias-label-tertiary);
+}
+
+.memberSubagentDot[data-tone='unknown'] {
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l3);
+}
+
+.memberSubagentOpen {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.memberSubagentOpen:hover .memberSubagentLabel {
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+}
+
+.memberSubagentLabel {
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberSubagentDoing {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.memberSubagentMode {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+/**
+ * ★ `could-not-measure` 与"确实没有"**必须不同形**（本仓三态纪律）。
+ *   两者都是文字提示，但只有"没读成"那一格带成因（在 `title` 上），
+ *   而它的措辞本身也不同（`subagent.unmeasured` vs `subagent.none`）。
+ */
+.memberSubagentNote {
+  display: block;
+  overflow: hidden;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberSubagentNote[data-subagent-readout='could-not-measure'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+/* ★ 打开成员会话：一个**文字**动作，不是药丸。 */
+.memberOpenSession {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 9.5px;
+  line-height: 15px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.memberOpenSession:hover:not(:disabled) {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.memberOpenSession:disabled {
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ★★★ R2：成员行在面板里的**位置槽**（面板读 `data-activity` / `data-member-model`）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ★ 这个槽不做视觉，只做**语义挂点**：宿主语义色（business color）与模型探针
+ *   挂在这里，于是 `MemberRow` 可以只负责"画一行"，而"这一行是什么状态、跑在
+ *   哪个路由上"这两件**可核**的事实在面板这一层仍然可读。
+ */
+.memberSlot {
+  display: block;
+  min-width: 0;
+}
+
+/**
+ * ★ 槽的**布局契约**：`.memberModel` 那一格是"就地省略号、不许撑破面板"的
+ *   排版口径，而"这一行有没有模型"是面板这一层才知道的事。
+ *   所以面板按**同一条口径**给槽加上这个类（面板给行留位置，行只负责画）。
+ * ★ 而**读数**（`data-member-model` / `role="img"` / 完整路由的 `title`）
+ *   仍然只有 `MemberRow` 那一份 —— 同一个事实不留两次读数。
+ */
+/**
+ * ★★★ R4：这里原来有一条 `.memberSlot[data-has-model='true']` 规则 —— **删掉了**。
+ *
+ * `grep -rn "data-has-model" src/client/*.tsx` ⇒ **0 处**：那条属性从来没有任何
+ * 地方写过，所以这条规则**永远不可能匹配**。一条死的规则比没有规则更坏 ——
+ * 它把一个**没人做的事**说成了一件已经做完的事。
+ */
+
+/**
+ * ★ 终态提示（"计划已放弃 / 团队已停止"）：一句**团队级**的话，不是药丸。
+ *   它站在成员列表之上，先说话 —— 于是下面每一行不必各自解释一次。
+ */
+.teamTerminalNote {
+  margin: 0;
+  padding: 2px 10px 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * S3: per-member gate verdicts — compact band + per-constraint detail on expand
+ *
+ * ★ 复用 **`memberRound*` 同一套 token**（warn/error/success/label），不另立颜色系统。
+ * ★ `absent` 用中性灰 + 不占 contrast强度的 `·`，与「通过」的绿色 `✓` 不同形 ——
+ *   这是「读不出」与「全通过」在**视觉上也**必须可分的那一条（反向半边 A）。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberGateBand {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+.memberGateMark {
+  flex: none;
+  font-weight: 700;
+}
+
+.memberGateText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+/* `absent`：读了但读不出 ⇒ 中性灰。★ 绝不给 success 色（那会被读成"通过"）。 */
+.memberGateBand[data-member-gate-tone='absent'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* `skipped`：跑过但一条都没跑 ⇒ 中性灰 + ⊘。★ 与 completed 的绿 ✓ 不同形（反向半边 B）。 */
+.memberGateBand[data-member-gate-tone='skipped'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberGateBand[data-member-gate-tone='ok'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.memberGateBand[data-member-gate-tone='blocked'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberGateBand[data-member-gate-tone='unmeasured'] {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* `observed`：确实开火了但被观察模式放过 ⇒ 琥珀底纹 + ✗（它会与设计蒙混平滑）。 */
+.memberGateBand[data-member-gate-tone='observed'] {
+  color: var(--dsw-alias-state-warn-primary);
+  background: var(--dsw-alias-state-warn-secondary);
+}
+
+/* ── 展开层：逐条约束 ─────────────────────────────────────────────────────── */
+
+.memberGateList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 0 0 0 60px;
+  list-style: none;
+}
+
+.memberGateItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 9.5px;
+  line-height: 14px;
+}
+
+.memberGateTask {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dsw-alias-label-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.memberGateTask:hover {
+  text-decoration: underline;
+}
+
+.memberGateNote {
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.memberGateEntries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.memberGateEntry {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.memberGateEntryMark {
+  flex: none;
+  font-weight: 700;
+}
+
+.memberGateEntryId {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.memberGateEntry[data-verdict='ok'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.memberGateEntry[data-verdict='skipped'] .memberGateEntryMark {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.memberGateEntry[data-verdict='blocked'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.memberGateEntry[data-verdict='unmeasured'] .memberGateEntryMark {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ★ 观察模式：開火而被放过 ⇒ 琥珀底纹，与「真拦下」的红不同形。 */
+.memberGateEntry[data-observed='true'] {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--dsw-alias-state-warn-secondary);
+}
+
+.memberGateEntry[data-observed='true'] .memberGateEntryMark {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ v4（甲）：纵向两行式 · 简约 · 去徽章 ─────────────────────────────────
+ *
+ * 用户裁定：「像现在这种徽章之类的，肯定是要去除的」「简约的，简洁的，高级的」
+ * 队长裁定排版：**纵向两行式**（内容按阶段推进的一串，纵向最自然；
+ *   而 360px 容器下横向四列每列只有 90px —— 几何上不成立）。
+ *
+ * ★ 这一节**整段覆盖**上面那套"头像 + 网格四列"的皮肤，而不是去改它 ——
+ *   于是回滚只需要删掉这一节。
+ * ★ 去掉的：头像（`memberAvatar` 整块）· 立绘 · 徽章 · 卡片围栏。
+ * ★ 保留的唯一图元：一颗 **3.5px 状态点** —— 它是**信息**（liveness 三态），不是装饰。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+/* ★ 两行式：第 1 列是状态点，第 2 列是**两行内容**（不再有三列/四列）。 */
+.team[data-workspace-team] .memberRow,
+.memberRow {
+  grid-template-columns: 3.5px minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 1px;
+  min-height: 0;
+  padding: 5px 0;
+  border-radius: 0;
+  align-items: start;
+}
+
+/* ★ 一行 = 一个按钮，但**不要**底纹块：hover 只用极轻的底色，不做卡片。 */
+.memberRow:hover, .memberRow[data-activity='working'] {
+  background: color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent);
+}
+
+/* ★★ 唯一保留的图元：**3.5px** 状态点。它是信息，所以留着；但它不占一列宽。 */
+.memberDot {
+  width: 3.5px;
+  height: 3.5px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 50%;
+}
+
+/* ★ 行 1：名字（500）+ 状态短语（400）+ 折叠箭头，**同一行**。 */
+.memberLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.memberName {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* ★ 状态短语移到行 1 右端：`margin-left: auto` 把它推到最右，箭头跟在它后面。 */
+.memberLine > .memberStatusLine {
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-secondary);
+  text-align: right;
+}
+
+/* 行 1 的箭头：不参与挤压。 */
+.memberRow > .memberInfo > .memberLine > svg:last-child {
+  flex: none;
+}
+
+/* ★ 行 2：`第 N 轮 · 阶段 · 测试`，10.5px / 400，超出**省略号**（截断在 JS 侧按优先级做）。 */
+.memberStageLine {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ★ 两行内容之间不用分割线（分割线只用在同一行与下一行之间，见下）。 */
+.memberInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* ★★ 分割：**1px #2b3036 细线**，不用卡片围栏。 */
+.memberBlock {
+  border-bottom: 1px solid #2b3036;
+  padding: 2px 0;
+}
+
+.memberBlock:last-child {
+  border-bottom: 0;
+}
+
+/* ★ 去头像后，`memberBranch` 那根"分支线"也不再需要（它是给头像列做视觉连线的）。 */
+.memberBranch,
+.memberBranch::before {
+  display: none;
+}
+
+/* ── 展开层：按阶段分组（文字为主，无卡片、无底纹块）────────────────────────── */
+
+.memberStageGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px 0;
+}
+
+.memberStageHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.memberStageMark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+  font-size: 10.5px;
+}
+
+.memberStageName {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.memberStageCount {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+}
+
+/* ★★ 六态**只用语义色**，且六者**色不同形**（符号之外的第二重区分）。 */
+.memberStageHead[data-stage-state='passed'] .memberStageMark { color: var(--dsw-alias-state-success-primary); }
+.memberStageHead[data-stage-state='observed'] .memberStageMark { color: var(--dsw-alias-state-error-primary); }
+.memberStageHead[data-stage-state='running'] .memberStageMark { color: var(--dsw-alias-state-business-primary); }
+.memberStageHead[data-stage-state='skipped'] .memberStageMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageHead[data-stage-state='registered'] .memberStageMark { color: var(--dsw-alias-label-tertiary); }
+.memberStageHead[data-stage-state='pending'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+
+.memberStageRows {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0 0 0 17px;
+  list-style: none;
+}
+
+.memberStageRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+.memberStageRowMark {
+  flex: none;
+  width: 11px;
+  text-align: center;
+}
+
+.memberStageRowId {
+  flex: none;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.memberStageRowDesc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 400;
+}
+
+/* ★★ 六态在**逐条**上同样只用语义色，且与段头同表。 */
+.memberStageRow[data-gate-state='passed'] .memberStageRowMark { color: var(--dsw-alias-state-success-primary); }
+.memberStageRow[data-gate-state='observed'] .memberStageRowMark { color: var(--dsw-alias-state-error-primary); }
+.memberStageRow[data-gate-state='running'] .memberStageRowMark { color: var(--dsw-alias-state-business-primary); }
+.memberStageRow[data-gate-state='skipped'] .memberStageRowMark { color: var(--dsw-alias-label-tertiary); }
+/**
+ * ★★ 队长（2026-10-16）：`registered` 的规则**只有一处** —— 见下方 v4 那一节。
+ *   此前这里还有一条 `registered → label-tertiary`，与 `skipped` 同色；
+ *   t80 在文件**末尾**又加了一条 `registered → border-l3`，靠 CSS「后者胜出」生效。
+ *   ⇒ ★ 那是**靠顺序生效**：谁把末尾那条移到前面，○ 就静默变回与 ⊘ 同色。
+ *   而"同色"与"不同色"在截图里都是两个灰符号 —— 正是本仓反复栽的形态。
+ *   ⇒ 删掉这条死规则，让 `registered` 的颜色**只有一处可读**。
+ */
+.memberStageRow[data-gate-state='pending'] .memberStageRowMark { color: var(--dsw-alias-border-l3); }
+
+/* ★ 观察中的判据：段头/逐条都带一个可读标记（不是只靠颜色）。 */
+.memberStageRow[data-gate-observing='true'] .memberStageRowId {
+  font-style: italic;
+}
+
+/**
+ * ★★ 未读标记：头部/头像去掉之后，`data-unread` 这个**事实**留在行 1 上。
+ *   ★ 不复用 `memberAvatar[data-unread]` 那颗圆点（它随头像整块走了）；
+ *     这里只要一个**不带装饰**的最小标记 —— 一个 4px 的点，与状态点同色系。
+ */
+.memberUnread {
+  flex: none;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-business-primary);
+  align-self: center;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t80：六态**两两不同色**，尤其是 ○(registered) 与 ⊘(skipped) ────────────
+ *
+ * MEASURED（队长实测 `ActivityPanel.module.css:2775-2776`）：改前两者**同为**
+ * `var(--dsw-alias-label-tertiary)` ⇒ 在屏幕上同一个灰 ⇒
+ * 「**注册了但本轮没跑**」与「**跳过了**」分不出来 —— 而这两件事的处置**相反**：
+ *   · `registered`（○）—— 这一格**没有读数**（甲方案边界：结果不落盘）；
+ *   · `skipped`（⊘）—— 判据**跑了、按设计闭嘴**（`appliesTo` 把它挡在门外）。
+ * ⇒ ★ 本仓纪律：**不同的事实不许同形**；而"同色"就是同形的一种。
+ *
+ * ★ 修法：`registered` 用**更暗的边框色**（`--dsw-alias-border-l3`，它本来就是
+ *   `pending` · 用的那一族，即"还没有东西"），`skipped` 保持 `label-tertiary`
+ *   （它是**有结论**的：跑了、跳过了）。于是三者在色上也分开了：
+ *     ✓ 绿（通过） · ⊘ 三级灰（跳过，有结论） · ○ 边框灰（没读数） · · 更暗（未开始）
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberStageRow[data-gate-state='registered'] .memberStageRowMark { color: var(--dsw-alias-border-l3); }
+.memberStageHead[data-stage-state='registered'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+
+/* ★ 未读数的整块用同一个"没有东西"的色系 —— 与"跑了但有结论"的块分开。 */
+.memberStageSummary[data-gate-block-summary='silent'] .memberStageMark { color: var(--dsw-alias-border-l3); }
+.memberStageSummary[data-gate-block-summary='ran'] .memberStageMark { color: var(--dsw-alias-state-success-primary); }
+
+/* ── 两块（ran / silent）与它们的摘要行 ─────────────────────────────────────── */
+
+.memberStageBlocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.memberStageSummary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.memberStageSummaryText {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ★ "其余 N 条在别的段" 那一段的明细：★ 换行显示，因为它是【一行人看】的清单。 */
+.memberStageSummaryDetail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ★ 任务 id 按钮并进第 2 行之后的位置：跟在文字后面，不抢溢出。 */
+.memberStageTasks {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-left: 6px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ t80 缺陷③：队长头像去掉之后，**网格的头像列也要去掉** ──────────────────
+ *
+ * ★ 只删 DOM 不删列 = 左边留一条 48px 的空槽。那比"有头像"更糟：
+ *   它看起来像"图没加载出来"，是另一种误导（而本仓纪律：去掉一件东西要
+ *   连它的**占位**一起去掉，否则读的人看到的是一个新的、没有名字的缺口）。
+ * ★ 两处都改：宽侧边栏的 3 列 → 2 列，窄态本来就 2 列 → 1 列。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.captainNode {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+@media (max-width: 640px) {
+  .captainNode {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ── ★★★ B6：职责**另起一行**（改前它与名字挤在同一行被截断）────────────────────
+ *
+ * 用户报的形态：名字右边跟一长串被截断的英文。
+ * ⇒ 名字一行、职责一行；而**折行由 JS 按列数做**（`wrapByColumns`），
+ *   CSS 这边只负责"它是一块、每行不换行、超出用省略号收尾"。
+ * ★ 为什么不靠 CSS 的 `word-break` 自动折：中文没有空格，浏览器会**按字符**折 ——
+ *   而"按字符折"与"按列折"在**行数**上不等价（中文一个字 2 列）⇒ 行数会估错。
+ *   这里要的是**可预判的行数**（反向半边 C 要的是"逐行列数读数"），所以折行放 JS。
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.memberRoleLine {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  min-width: 0;
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ★ 每个折行片段一行；`nowrap` + `ellipsis` 是**兜底**（JS 已经按列折过）。 */
+.memberRoleRow {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

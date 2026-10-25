@@ -61,6 +61,7 @@ import { toolsCode, toolsSource } from './tools-source.mjs'
 
 import { kindRequirementsTable } from './kind-requirements-table.mjs'
 import { parseKindRequirements } from '../lib/gates/completion/r5.js'
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** ★ 被测对象：从**编译产物**进（与仓库里 25 个测试同构），且只从 lib/ 进。 */
@@ -94,7 +95,7 @@ function pluginFixture(workspace) {
       sendMessage: async () => 'msg-0',
       [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0',
     },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -262,8 +263,29 @@ test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路
   *   当成本表，会让新位置在**没人记得改这句**的时候静默地不被普查。
   */
   const positions = ['admission', 'contract', 'dispatch', 'completion', 'delivery', 'runtime']
-  const declared = gateModuleViews().filter((gate) => gate.hasRequires)
-  assert.equal(declared.length, 11, `★ 11 条判据都必须声明输入面（实测 ${declared.length}）`)
+  /**
+   * ── ★★★ 判据总数不写死（2026-10-10 修）─────────────────────────────────────
+   *
+   * MEASURED：这条断言此前写的是 `assert.equal(declared.length, 11, …)` ——
+   *   而**判据数是一个会长大的量**。注册表从 11 长到 13（新增
+   *   `dispatch.plan-reviewed` 等）之后，这条臂就永久红了，
+   *   而它红的原因**与"判据有没有声明输入面"无关**。
+   *
+   * ★★ 更坏的是它的**形态**：本臂的本意是"**每一条**判据都必须声明输入面"，
+   *   写死数字把它变成了"判据数必须恰好是 11" —— 后者是一条**恒假型**断言
+   *   （任何一个新判据都会让它红），而恒假的断言与没有断言同形。
+   *
+   * ⇒ 修法：只留**本意**那一半，并把"有多少条"降级成**读数**印出来（不作判据）。
+   *   ★ 它仍然抓它该抓的：一条新判据**没声明**输入面 ⇒ declared 比 views 少
+   *     ⇒ 下面那条立刻红。
+   */
+  const views = gateModuleViews()
+  const declared = views.filter((gate) => gate.hasRequires)
+  assert.ok(views.length > 0, '★ 注册表里必须有判据 —— 一个空表会让本条恒真')
+  assert.equal(
+    declared.length, views.length,
+    `★★ 每一条判据都必须声明输入面（实测 ${declared.length}/${views.length}）`,
+  )
   for (const gate of declared) {
     assert.ok(positions.includes(gate.point), `★ ${gate.id} 的 point 必须是五个位置之一`)
     assert.ok((gate.requires ?? []).length > 0, `★ ${gate.id} 声明了空数组，本臂对它没有分辨力`)
@@ -283,8 +305,7 @@ test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路
 
   const created = await capture(() => call('agent_teams_create_task', {
     subject: 'v', kind: 'implementation', objective: 'o', inScope: ['src/a.ts', 'lib/a.js'],
-    acceptance: ['a'], verify: ['node -e "process.exit(0)"'],
-  }))
+    acceptance: ['a'], verify: ['node -e "process.exit(0)"'], reviewed: reviewedStamp() }))
   assert.equal(typeof created.value?.task_id, 'string', '★ create_task 必须照常返回（真实入口、真实落库）')
 
   const status = await capture(() => call('agent_teams_status', { team_id: 'team' }))
@@ -314,11 +335,18 @@ test('★ 臂 1（①）：走真实工具入口 —— 一条声明了真实路
     const evaluation = await auditViaRegistry(point, probe.context)
     allChecks.push(...evaluation.requires.checks.map((check) => ({ point, ...check })))
   }
-  assert.equal(allChecks.length, 11, '★ 五个位置合起来必须正好是那 11 条判据（一条不多、一条不少）')
+  /**
+   * ★★ 与上面那条同一个病（2026-10-10 修）：写死 `11` 把"每一条判据都被核对到"
+   *   变成了"判据总数恰好是 11"。**从注册表读**才是这条的本意。
+   */
+  assert.equal(
+    allChecks.length, gateModuleViews().length,
+    `★ 五个位置合起来必须正好是注册表里那 ${gateModuleViews().length} 条判据（一条不多、一条不少）`,
+  )
   const undeclared = allChecks.filter((check) => check.skipReason === 'undeclared' || check.undeclared !== undefined)
   assert.deepEqual(
     undeclared.map((check) => check.id), [],
-    '★ 不许有任何一条判据走到 `undeclared` —— 那意味着它的输入面没人核（11 条全部已经声明）',
+    '★ 不许有任何一条判据走到 `undeclared` —— 那意味着它的输入面没人核（注册表里每一条都已声明）',
   )
   /**
    * ★ 而在**全空的 ctx**上，适用的判据必须报出它声明的**每一格**。
@@ -750,7 +778,7 @@ test('★ 臂 4b（③）：真实入口上的噪音读数 —— 不适用的�
    *   的判据产生** —— 不许因为"这次调用走了另一个分支"而冒出一片。
    */
   const empty = await fixtureWith({})
-  const emptyRead = await empty.capture(() => empty.call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] }))
+  const emptyRead = await empty.capture(() => empty.call('agent_teams_create_task', { subject: 'w', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] , reviewed: reviewedStamp() }))
   /**
    * ★ `kind=work` 的契约：`inScope` 是**允许缺席**的（设计如此，见 build-artifact-scope
    *   文件头）。所以这里**不许**因为 `task.inScope` 不在就冒出一条告警 ——
@@ -852,8 +880,7 @@ test('★ 臂 5（④）：核对报缺时流程【照常走完】—— 五个�
   const contractFixture = await fixtureWith({})
   const created = await contractFixture.capture(() => contractFixture.call('agent_teams_create_task', {
     subject: 'soft', kind: 'implementation', objective: 'o', inScope: ['src/a.ts', 'lib/a.js'],
-    acceptance: ['a'], verify: ['node -e "process.exit(0)"'],
-  }))
+    acceptance: ['a'], verify: ['node -e "process.exit(0)"'], reviewed: reviewedStamp() }))
   assert.equal(typeof created.value?.task_id, 'string', '★ contract 位置：核对不许拒绝建任务（先软后硬）')
   outcomes.push(['contract', created.warnings])
 
@@ -1146,7 +1173,7 @@ test('★ 臂 7（⑤）：第四种形态排查 —— 断言有没有"恒真/�
     })
     try {
       const runFor = {
-        contract: () => fixture.capture(() => fixture.call('agent_teams_create_task', { subject: 'x', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] })),
+        contract: () => fixture.capture(() => fixture.call('agent_teams_create_task', { subject: 'x', kind: 'work', inScope: ['src/a.ts', 'lib/a.js'] , reviewed: reviewedStamp() })),
         dispatch: () => fixture.capture(() => fixture.call('agent_teams_update_task', { task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'] }, 'member-1').catch(() => undefined)),
         completion: () => fixture.capture(() => fixture.call('agent_teams_update_task', { task_id: 't1', status: 'in_progress', output: 'x', attempt_id: 'a1', changedPaths: ['src/a.ts'] }, 'member-1').catch(() => undefined)),
         delivery: () => fixture.capture(() => fixture.call('agent_teams_status', { team_id: 'team' })),

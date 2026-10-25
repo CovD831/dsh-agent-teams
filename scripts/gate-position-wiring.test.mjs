@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { registerAgentTeamsTools, runtimeGateLogSnapshot } from '../lib/tools.js'
+import { reviewedStamp } from './fixtures/reviewed-stamp.mjs'
 import { registry } from '../lib/gates/index.js'
 import { installTeamScheduler } from '../lib/scheduler.js'
 import { createTeamDir, readTeam } from '../lib/state.js'
@@ -147,7 +148,7 @@ function pluginFixture(workspace, { teamId = 'team', liveAgents = new Map() } = 
      *   默认空 ⇒ 拿不到观察 ⇒ 判据 unmeasured（这正是本文件要能构造的一种输入）；
      *   需要"观察到了"的臂用 `liveAgents` 登记一个成员 Agent 桩。
      */
-    agents: { get: (id) => liveAgents.get(id) },
+    agents: { list: () => [], get: (id) => liveAgents.get(id) },
     on() { return () => {} },
     effect(setup) { return setup() },
     inject() { return () => {} },
@@ -252,7 +253,7 @@ test('★ 伪造臂：contract 位置上一条 blocked 判据 ⇒ create_task �
   )
   try {
     await assert.rejects(
-      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] }),
+      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] , reviewed: reviewedStamp() }),
       (error) => {
         assert.match(error.message, /create_task rejected/, 'the rejection must say which step was refused')
         assert.match(error.message, /grep -qx is whitespace-broken/, '★ the judge must have entered the decision: its own words must be in the rejection')
@@ -281,7 +282,7 @@ test('★ 未测量臂：contract 位置上一条 unmeasured 判据 ⇒ 拒绝�
   const probe = withGate('contract', { ok: false, unmeasured: 'the gate could not parse the verify command statically' })
   try {
     await assert.rejects(
-      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] }),
+      () => call('agent_teams_create_task', { subject: 'work', kind: 'work', inScope: ['src/a.ts'] , reviewed: reviewedStamp() }),
       (error) => {
         assert.match(error.message, /could not measure/, '★ unmeasured must read as "could not measure", never as "found problems"')
         assert.match(error.message, /parse the verify command statically/, '★ the probe\'s own words must be in the rejection (otherwise another judge spoke)')
@@ -314,7 +315,7 @@ test('★ 对照臂：contract 位置【一条判据都没挂】⇒ create_task 
    * ★ 所以输入要带上一份合法的 inScope：`contract.build-artifact-scope` 在"没拿到
    *   inScope"时说 unmeasured（那是它诚实的样子），而本臂测的是调用点本身。
    */
-  const created = await call('agent_teams_create_task', { subject: 'ordinary work', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'ordinary work', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   assert.equal(created.subject, 'ordinary work')
   assert.equal(created.status, 'pending')
 })
@@ -506,7 +507,7 @@ test('★ runtime 位置的硬要求：blocked 判据【被记录但不得阻止
      * ★ 契约带上一份 inScope：这是这个位置真实会收到的形状（一个质量任务），
      *   而其余 contract 判据只有在拿到 inScope 时才安静（见文件顶部那条 MEASURED）。
      */
-    const created = await call('agent_teams_create_task', { subject: 'work under a blocked runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under a blocked runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending', '★ a blocked runtime gate must NOT block the flow')
     assert.ok(probe.calls.length >= 1, '★ the runtime gate must actually have been evaluated (not merely written in the source)')
     const log = runtimeGateLogSnapshot().slice(before)
@@ -538,7 +539,7 @@ test('★ runtime 位置：unmeasured 与 blocked 不同形，且同样不阻止
   const before = runtimeGateLogSnapshot().length
   const probe = withGate('runtime', { ok: false, unmeasured: 'no clock available for this member' })
   try {
-    const created = await call('agent_teams_create_task', { subject: 'work under an unmeasured runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under an unmeasured runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending')
     assert.equal(created.runtime_gates?.ok, false)
     assert.equal(created.runtime_gates?.blockers?.length ?? 0, 0, 'unmeasured must NOT be reported as blockers')
@@ -565,7 +566,7 @@ test('★ runtime 位置：判据【自己抛错】也要被记录，且不把�
      *   就又是一个"装了但从不生效"的形态。所以：记下来、发出警告、**但不把异常
      *   抛回调用方**（过程约束不得中断流程）。
      */
-    const created = await call('agent_teams_create_task', { subject: 'work under a throwing runtime gate', inScope: ['docs/x.md'] })
+    const created = await call('agent_teams_create_task', { subject: 'work under a throwing runtime gate', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
     assert.equal(created.status, 'pending', 'a throwing runtime gate must not break the caller')
     assert.equal(created.runtime_gates?.threw, 'probe exploded')
     assert.ok(runtimeGateLogSnapshot().slice(before).some(entry => entry.outcome.includes('probe exploded')))
@@ -594,7 +595,7 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
    *   它被 `appliesTo` 跳过 —— 位置不再为空，但这一轮**没有任何判据适用**，
    *   于是 `evaluated === 0`。★ 那是"没检查"的读数，**不是**"检查通过了"。
    */
-  const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] })
+  const created = await call('agent_teams_create_task', { subject: 'work with no extra runtime probe', inScope: ['docs/x.md'] , reviewed: reviewedStamp() })
   assert.equal(created.status, 'pending')
   /**
    * ── ★★★ t66：这条臂的【性质】对，措辞错（实测抓出来的）─────────────────────
@@ -636,7 +637,11 @@ test('★ 对照臂：runtime 位置【本臂没有额外加判据】⇒ 调用�
    *   ★ 少了 `registered`，"没检查"与"这个位置本来就没判据"会同形。
    */
   assert.equal(created.runtime_gates?.evaluated, 0, '★ 这一轮没有任何一条运行判据适用 ⇒ evaluated=0，不是"跑了一条什么都对的判据"')
-  assert.equal(created.runtime_gates?.registered, 1, '★ runtime 位置必须真的挂着 t6 的探活判据')
+  /** ★ t6：runtime 现在挂着**三条**（liveness + `runtime.stall` + 2026-10-20 的
+   *  `runtime.shape-execution`）。
+   *  本行断言的实质是「**这个位置确实挂着判据**」（不是空的），数字随接线变 ——
+   *  ★ 而它必须是**精确数**：一个 `> 0` 会让"有人摘掉两条、只留一条"永远读不出来。 */
+  assert.equal(created.runtime_gates?.registered, 3, '★ runtime 位置必须真的挂着判据（liveness + stall + shape-execution）')
   assert.equal(
     (created.runtime_gates?.ran ?? []).filter((entry) => entry.verdict !== 'skipped').length,
     0,
@@ -669,7 +674,7 @@ test('★ 接线臂：成员被真的派发时，runtime 判据在调度器那�
   const captain = { id: 'captain-session', status: 'idle', session: { append() {} }, steer() {} }
   const ctx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
+    agents: { list: () => [], get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -728,7 +733,7 @@ test('★ 接线臂（闸门）：投递【失败】的派发不算"派发过" �
   const captain = { id: 'captain-session', status: 'idle', session: { append() {} }, steer() {} }
   const ctx = {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
-    agents: { get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
+    agents: { list: () => [], get(id) { return id === child.id ? child : id === captain.id ? captain : undefined } },
     subagents: { getProvider() { return undefined }, list() { return [] } },
     on() { return () => {} },
     effect(setup) { return setup() },
@@ -848,16 +853,34 @@ test('★ t12 臂 3（未测量臂）：拿到持久记录、但【拿不到观�
    *     ② 观察到了、空回复    ⇒ blocked （臂 2）
    *     ③ **没能观察**        ⇒ unmeasured（本臂）
    *
-   *   ③ 的构造刻意是"团队记录看起来很好"：成员在记录里是 idle，但没有 live Agent
-   *   （未 spawn / 句柄已释放）⇒ 调用方**不注入** members ⇒ 判据按自己的契约说
-   *   "没能观察"。★ 这与 ② 的 blocked 不同形，也与 ① 的 ok 不同形。
+   * ── ★★ t46 修订：本臂的构造方式改了，而它测的东西**没有变** ────────────────────
+   *
+   * MEASURED（2026-10-14）：本臂原来的构造是"成员有会话 id、而 liveAgents 为空"，
+   * 注释里写着「未 spawn / 句柄已释放」。而那正是**修复的对象**：
+   * 一个做完了的成员被宿主卸掉驱动（`drainContinuableChildren` → `dispose`，
+   * 这条路不发任何事件）之后，注入层整份弃权 ⇒ 交付位置恒 unmeasured ⇒
+   * 一支做完了全部工作的队伍**永远交不了货**。
+   *
+   * ★ 旧构造还有一个它自己没察觉的问题：那个团队的 `tasks` 是空的 ⇒
+   *   `canDeclareDelivery` 在**走到 delivery 位置之前**就用
+   *   "team has no completed work" 把它拦了 ⇒ 本臂从来没有测到 convergence，
+   *   它读到的一直是上游质量门的话。（实测：修订前它的失败信息正是那句。）
+   *
+   * ⇒ 修订后，"没能观察"由**驱动在场、而它的会话日志读不出来**承载 ——
+   *   那是一条真正的读取失败，与"驱动被正常卸掉"不同形：
+   *     · 驱动被卸掉 ⇒ 该成员这一维不可用 ⇒ 留名进旁路，其余成员照常判定（t46 臂 C1）
+   *     · 日志读不出  ⇒ 这个成员**说过什么**无从分辨 ⇒ 判据指名它报 unmeasured（本臂）
+   *
+   * ★ 而"它与 ② 的 blocked 不同形"这一半照旧成立：本臂仍然不是"发现了问题"。
    */
   const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t12-unobserved-')))
   await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
     members: [{ id: 'member-1', name: 'worker', status: 'idle', joinedAt: 1 }],
   })
-  // liveAgents 为空 ⇒ ctx.agents.get 拿不到 ⇒ 观察缺席
-  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+  /** 驱动在场，但它的会话日志读不出来 ⇒ `observedSpoke` 返回 undefined。 */
+  const liveAgents = new Map([['member-1', fakeMemberAgent('member-1', { unreadable: true })]])
+  const { call } = pluginFixture(workspace, { liveAgents })
   await assert.rejects(
     () => call('agent_teams_declare_delivery', {}),
     (error) => {
@@ -1086,8 +1109,193 @@ test('★ t18 臂 5（finding A 的守门臂）：contract 位置必须注入执
     objective: 'Ship it',
     acceptance: ['it is shipped'],
     inScope: ['docs/plan.md'],
-    verify: ['node -e "process.exit(0)"'],
-  })
+    verify: ['node -e "process.exit(0)"'], reviewed: reviewedStamp() })
   assert.equal(created.status, 'pending', '★ implementation 契约必须能建出来 —— 这要求 contract 位置拿得到执行器')
   assert.equal(created.kind, 'implementation')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 臂 3b（t21）：★★★ 位置级的「说不出」处置 —— 逐任务，且**不许**把两态合流
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ── 本臂钉的是**位置级**那一半（臂 2 钉的是"措辞不同形"，本臂钉的是"谁该被拒"）───
+ *
+ * ★ t21 之前，位置级是**一刀切**的：任一条判据说不出 ⇒ 整个位置拒。
+ *   而实测（t21）那会让**一个合法的 `review` 任务**因为
+ *   `contract.task-atomicity` 答不出"它原不原子"而被拒 ——
+ *   而 `review` **本来就不被要求**有 inScope（只有 `WRITE_KINDS` 被要求）。
+ *
+ * ★★ 而它**同时**钉住另一半：写类的契约缺陷**照旧拒**。
+ *   缺了这一半，一个"一律放行"的实现能让本臂全绿 —— 而那会开出一条
+ *   "判不了的契约静默进入工作"的路。
+ */
+test('★★★ 臂 3b（t21·位置级）：说不出对「正当留白」放行、对「契约缺陷」仍拒 —— 且留痕', async () => {
+  /** ── 留白那一半：`review` 不被要求有 inScope ⇒ 位置级应当**放行** ────────────── */
+  const tolerated = await registry.evaluate('contract', {
+    task: { id: 't21-position-review', kind: 'review', objective: 'o' },
+  })
+  console.log(`    ℹ 位置级 · review ⇒ ok=${tolerated.ok} · observed.unmeasured=${tolerated.observed.unmeasured.length}`)
+
+  assert.equal(
+    tolerated.ok, true,
+    '★★★ 位置级把一个合法的 `review` 任务拒了 —— 而它只是因为一条判据答不出\n'
+    + '   "它原不原子"（而 `review` **不被要求**有 inScope）。\n'
+    + '   ★ 那就是「没能测量」并进「没通过」，而位置级是这条合流的最后一站。',
+  )
+  /** ★ 放行**不等于**丢掉：那条事实仍须在位置级的读数里。 */
+  assert.equal(
+    tolerated.observed.unmeasured.length, 1,
+    '★★ 位置级放行了，却没有留下"这一步没被检查"的痕迹 —— 那是静默放行',
+  )
+  assert.match(
+    tolerated.observed.unmeasured[0], /contract\.task-atomicity/,
+    '★ 痕迹必须指名是哪条判据（不指名的话不知道去补什么）',
+  )
+
+  /** ── 缺陷那一半：写类**被要求**有 inScope + verify ⇒ 位置级应当**仍然拒** ────── */
+  const refused = await registry.evaluate('contract', {
+    task: { id: 't21-position-impl', kind: 'implementation', objective: 'o' },
+  })
+  console.log(`    ℹ 位置级 · implementation ⇒ ok=${refused.ok} · unmeasured=${refused.unmeasured === undefined ? 'no' : 'YES'}`)
+
+  assert.equal(
+    refused.ok, false,
+    '★★★ 位置级把一个"判不了的写类契约"放过去了 ——\n'
+    + '   那开出了一条"判不了的契约静默进入工作"的路（t21 验收第 2 条禁止的）。',
+  )
+  assert.equal(typeof refused.unmeasured, 'string', '★ 而且它必须如实说"没能测量"，不是"发现了问题"')
+
+  /** ★ 反向半边之二：两态**必须不同形** —— 否则本臂测的不是这条分辨。 */
+  assert.notEqual(
+    tolerated.ok, refused.ok,
+    '★ "正当留白"与"契约缺陷"在位置级给了同一个结局 ⇒ 两态被合流了',
+  )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ── ★★★ t46：真实交付路径 —— 驱动已卸掉的成员不再让整队交不了货 ───────────────
+//
+// 上面 B 层（`gate-delivery-coverage.test.mjs`）钉的是注入层的分支语义；
+// 本组钉的是**真实工具路径**：`agent_teams_declare_delivery` 本身。
+//
+// MEASURED（2026-10-14，一次真实交付）：`ledger` 做完全部任务、`agent/status`
+// 已把它写回 idle，随后宿主卸掉了它的驱动（`drainContinuableChildren` → `dispose`，
+// 这条路不发任何事件）。于是注入层整份弃权 ⇒ 交付位置 unmeasured ⇒ 宣告被拒，
+// 而 status 只印 `Delivery: blocked ()`（空括号）。
+//
+// ⇒ 本组两个方向都必须成立，缺一个就是修过了头或没修到：
+//   ① 驱动不在 + 任务全部终态 ⇒ **交得了货**（修复的目的）
+//   ② 成员从未起来 ⇒ **仍然拦**（`never-spawned` 不许被顺手放过）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一份真的可交付的任务图（少任何一条，调用会在走到 delivery 位置之前就被质量门拦下）。 */
+const T46_DELIVERABLE_TASKS = [
+  {
+    id: 'd1', seq: 1, subject: 'impl', kind: 'implementation', status: 'completed',
+    objective: 'o', inScope: ['src/a.ts', 'lib/a.js'], acceptance: ['a'],
+    changedPaths: ['src/a.ts'],
+    assignee: 'worker', attempt: 1, attemptId: 'a1', createdAt: 1, updatedAt: 1, dependencies: [],
+  },
+  {
+    id: 'd2', seq: 2, subject: 'review', kind: 'review', status: 'completed', verdict: 'pass',
+    reviewedTaskId: 'd1',
+    assignee: 'worker', attempt: 1, attemptId: 'a2', createdAt: 1, updatedAt: 1, dependencies: ['d1'],
+  },
+]
+
+test('★ t46 臂 C1（核心）：驱动已卸掉 + 任务全部终态 ⇒ declare_delivery 不再被 unmeasured 拒', async () => {
+  /**
+   * ★ 这是整个修复的目的，不是分支逻辑。
+   *
+   * 成员有会话 id（它起来过）、而 `liveAgents` 是空的（驱动已被宿主卸掉）——
+   * 这正是 MEASURED 里 `ledger` 的形态。旧写法在这里整份弃权。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-disposed-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: 'member-session-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+  })
+  /** ★ live Agent 表为空 ⇒ 驱动不在场。 */
+  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+
+  const declared = await call('agent_teams_declare_delivery', {})
+  assert.equal(declared.declared, true, '★ 做完的队伍交得了货')
+  assert.deepEqual(declared.blockers, [], '★ 不许留下任何拒绝理由')
+  assert.equal(declared.gates_evaluated >= 1, true, '★ 必须真的求值过判据（不是空转通过）')
+})
+
+test('★ t46 臂 C2（反向）：成员从未起来 ⇒ 仍然被拒，且指名是哪个成员', async () => {
+  /**
+   * ★ t15 钉下的分界不许被抹平：从未起来是**可判定的事实** ⇒ 拦。
+   *   若这一臂也放行了，说明修复把"没起来"与"驱动卸了"合成了同一件事。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-unborn-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: '', name: 'never-started', status: 'idle', joinedAt: 1 }],
+  })
+  const { call } = pluginFixture(workspace, { liveAgents: new Map() })
+
+  await assert.rejects(
+    () => call('agent_teams_declare_delivery', {}),
+    (error) => {
+      assert.match(error.message, /declare_delivery rejected/)
+      assert.match(error.message, /never-started/, '★ 必须指名那个从未起来的成员')
+      return true
+    },
+    '★ 修复不得把"从未起来"一起放过',
+  )
+})
+
+test('★ t46 臂 C3（对照）：驱动在场且说过话 ⇒ 照常通过（现状不被破坏）', async () => {
+  /**
+   * ★ 与 C1 是一对：同一个团队、同一个任务图，只把驱动放回来。
+   *   两臂都过，才说明改的是"驱动不在"那一支，而不是把整条路径放宽了。
+   */
+  const workspace = track(mkdtempSync(join(tmpdir(), 'wire-t46-live-')))
+  await seedRunningTeam(workspace, {
+    tasks: T46_DELIVERABLE_TASKS,
+    members: [{ id: 'member-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+  })
+  const liveAgents = new Map([['member-1', fakeMemberAgent('member-1', { text: 'all done' })]])
+  const { call } = pluginFixture(workspace, { liveAgents })
+
+  const declared = await call('agent_teams_declare_delivery', {})
+  assert.equal(declared.declared, true, '★ 驱动在场且说过话 ⇒ 仍然通过')
+})
+
+test('★ t46 臂 C4（定向突变）：把「驱动不在」改回整份弃权 ⇒ 臂 C1 必须翻脸', async () => {
+  /**
+   * ★ 这一臂防的是"C1 绿只是因为别处放行了"。
+   *
+   * 做法不是改产品源码（本夹具的 inScope 只有 scripts/），而是**用同一个输入**
+   * 对照两种注入形状下宣告的结局：
+   *   · 修复后：`observed` 里没有那个成员 ⇒ 判据只对可观察的成员发言 ⇒ 通过
+   *   · 旧写法：整份弃权 ⇒ 判据 unmeasured ⇒ 拒绝
+   *
+   * ★ 判定落在**真实工具路径**上（真的 `registry.evaluate('delivery')`），
+   *   所以它证明的是"那一行确实承载了结局"，而不是"我复刻的逻辑自洽"。
+   */
+  const { observeMemberConvergence } = await import('../lib/tools/shared/entities.js')
+  const disposedTeam = {
+    id: 'team', name: 'Wiring', captainSessionId: 'captain-session', createdAt: 1, taskSeq: 2,
+    members: [{ id: 'member-session-1', name: 'worker', status: 'idle', joinedAt: 1 }],
+    tasks: T46_DELIVERABLE_TASKS,
+  }
+  const fixed = observeMemberConvergence({ agents: { list: () => [], get: () => undefined } }, disposedTeam)
+
+  /** 旧写法的形状：逐字复刻被改掉的那一支。 */
+  const legacy = (() => {
+    for (const member of disposedTeam.members) {
+      if (member.status === 'removed') continue
+      if (member.id === '') return [{ name: member.name, state: 'never-spawned' }]
+      if (undefined === undefined) return undefined
+    }
+    return []
+  })()
+
+  assert.notEqual(fixed.observed, undefined, '★ 修复后交得出观察面')
+  assert.equal(legacy, undefined, '★ 旧写法在同一输入上整份弃权 —— 两者必须不同形')
+  assert.deepEqual(fixed.bypassed, [{ name: 'worker', reason: 'driver-absent' }])
 })

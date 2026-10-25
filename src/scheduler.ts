@@ -16,15 +16,24 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
-import { deliverToMember } from './members.ts'
+import { liveAgentOf } from './events.ts'
+import { deliverToMember, deliverToMemberDetailed } from './members.ts'
+import { sessionLeadsTeam } from './lineage.ts'
+import { identityOfTeam, liveRefsOf } from './members.ts'
 import { isCurrentMail, mailboxPrompt } from './mailbox.ts'
-import { createTaskWorktree, worktreePromptLine } from './worktree.ts'
+import { createTaskWorktree, describeBaseline, provisionWorktreeDependencies, worktreePromptLine } from './worktree.ts'
+import { snapshotTestFiles } from './artifacts.ts'
+import { shouldSnapshotTestFiles } from './quality-gates.ts'
+import type { BaselineResolution, UpstreamTaskInput } from './worktree.ts'
+import { restartQueueFrom } from './tools/shared/entities.ts'
 import {
   markMailboxDelivered,
   discardMailboxMessages,
   beginTaskAttempt,
   CAPTAIN_KEY,
   claimMailboxDelivery,
+  dependencyStatuses,
+  describeDependencyOutcomes,
   findTeamByParticipant,
   invalidateTaskAttempt,
   readTeam,
@@ -34,38 +43,121 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
-/**
- * ── ★★ 持住 hold_dispatch 的那一半（t50）─────────────────────────────────────────
- *
- * ★ 为什么 scheduler 要读**重载排队**这件事：
- *
- *   t49 让"被拒的重载"进入「已申请」，并把读数（`hold_dispatch`）交到 `status` 上。
- *   而那时**强制点还没落地** —— 派发判定在 `src/scheduler.ts`，不在 t49 的 inScope。
- *   ⇒ 于是形状是：captain **看得到**"不要派发"，而调度器**还不会自己拒绝**。
- *
- * ★★ 而"看得到"是不够的 —— 那正是用户那句话要消灭的东西：
- *
- *   「凭经验决定何时触发」= 靠人执行的规则，而该项目文档已证明这类规则会腐烂。
- *
- *   ⇒ 一条"captain 看到 hold_dispatch 后应当克制"的规则，**就是**靠人执行的规则。
- *     它今天成立，因为 captain 记得；而它会在某一次忙碌里失效，
- *     而失效的那一次**不留痕迹**（没有任何读数会说"你本该不派发"）。
- *
- *   ⇒ 所以这一半必须在**机制**里：`nextReadyTask` 自己拒绝。
- */
-import { restartQueueFrom } from './tools/shared/entities.ts'
 import type { TaskStatus, TeamMember, TeamState, TeamTask } from './types.ts'
 /**
  * ★ t28：终态判定用**唯一那份真值**（`types.ts`），不在本模块重写一遍列表。
  *   「哪些状态是终态」是一条会变的规则；两份拷贝会漂移 —— 而漂移的那一天，
  *   scheduler 与 state 会对同一个任务给出相反的答案，且两者读起来都很正常。
  */
-import { TERMINAL_TASK_STATUSES } from './types.ts'
+import { TERMINAL_TASK_STATUSES, needsWorktreeFor } from './types.ts'
 
 /** Per-dependency output cap in the assignment prompt. */
 export const DEPENDENCY_OUTPUT_MAX_CHARS = 2_000
 /** Combined dependency-output budget in the assignment prompt. */
 export const DEPENDENCY_OUTPUTS_TOTAL_MAX_CHARS = 12_000
+
+/**
+ * ── ★★★ 一次邮箱投递的**硬上限** ────────────────────────────────────────────────
+ *
+ * MEASURED：投递外层套着 `serializeMember`，而那条队列是**链式**的 ——
+ * 一次不返回，`release()` 就永不执行，**之后所有**对同一成员的写入永久排队；
+ * 又因为 `withTeamLock(teamLockKey…)` 在它内部，**整个团队**的写入一起卡住。
+ * 表现出来就是工具调用"卡在 complete / reassign_task 上"。
+ *
+ * ★ 30 秒是**取决于用途**的：投递是"把一条已经在邮箱里的消息推给一个活着的会话"，
+ *   正常是毫秒级。超过 30 秒它不是慢，而是**那个会话已经不接东西了** ——
+ *   此时正确的处置是把消息**留在邮箱**（`releaseMailboxDelivery`），
+ *   让下一次扫描再试，而不是**无限期占着队列**。
+ */
+export const DELIVER_TIMEOUT_MS = 30_000
+
+/**
+ * ── ★★★ t24：`missingIgnored` 是【候选】，不是【该注入的清单】────────────────────
+ *
+ * MEASURED（t24，captain 工作区实测）—— 候选恰好是这四个：
+ *
+ *     .DS_Store        12K
+ *     .agent-teams    4.7G   ← ★ 本仓自己的运行时状态（而且它里面有所有 worktree！）
+ *     .pnpm-store     1.1G   ← 共享包仓
+ *     node_modules    1.6G   ← 唯一真正该注入的那一件
+ *     ─────────────────────
+ *     合计            ~6.9G/棵      而当时磁盘可用仅 8.2G
+ *
+ * ⇒ ★ **照 `missingIgnored` 原样接上去会立刻爆盘** —— 而它"看起来"完全正常：
+ *   一个"把缺的东西补上"的循环，逐条都说得通，合起来是自我复制 + 撑爆磁盘。
+ *
+ * ── 为什么是【带理由的排除】而不是一个静默的 filter ─────────────────────────────
+ *
+ * ★ 静默过滤的后果与本队记账过的那条同形：**"我决定不注入它"与"它不在候选里"
+ *   在读数上同形** ⇒ 于是"排除清单错了"永远不会被发现。
+ * ⇒ 每一条排除都带一句**可读的理由**，而理由会被打出来（调用方那里）。
+ *
+ * ── 而这份清单是【闭集 + 默认注入】而不是【开集 + 默认排除】─────────────────────
+ *
+ * ★ 默认必须是"注入"：候选里出现一个我们不认识的新条目时，正确的动作是
+ *   **试图注入它**（那是 `missingIgnored` 的结论），而不是静默丢掉它。
+ *   一个"默认排除"的白名单会让下一个依赖**静默地不在 worktree 里** ——
+ *   而那正是本机制要消灭的那个失败（成员因缺依赖失败，却读成"工作没做出来"）。
+ *
+ * ★ 而要拦的是那两类**有明确理由不该进 worktree 的**：本仓运行时状态（自我复制）
+ *   与共享包仓（注入无意义）。它们用名字 + 理由显式列在这里。
+ */
+export interface DependencyInjectionPlan {
+  /** 真的要注入的条目（候选减去带理由排除的）。 */
+  injected: string[]
+  /** 被排除的条目 + **可读的理由**（不许静默）。 */
+  excluded: Array<{ entry: string; reason: string }>
+}
+
+/**
+ * 不注入的顶层条目 —— **闭集，每条带理由**。
+ *
+ * ★ 理由不是给人看的注释，它是**读数的一部分**：它会被打出来，而"为什么没注入"
+ *   决定了下一步该做什么（自我复制 ⇒ 别管它；包仓 ⇒ 别管它）。
+ */
+const REFUSED_DEPENDENCY_ENTRIES: ReadonlyArray<{ entry: string; reason: string }> = [
+  {
+    entry: '.agent-teams',
+    /**
+     * ★ 这一条尤其严重：`.agent-teams` 是**正在被写的运行时状态**，
+     *   而且它里面**装着所有 worktree**（每棵都有自己的目录）。
+     *   ⇒ 注入它 = **把一个目录拷进它自己里面**，而且是 4.7G × N。
+     */
+    reason: 'refused: this is this repository\'s own live runtime state (it contains every worktree, '
+      + 'including this one) — copying it into a worktree is self-replication, not a dependency',
+  },
+  {
+    entry: '.pnpm-store',
+    reason: 'refused: this is the shared package store — a content-addressed cache that is shared on purpose; '
+      + 'copying it per worktree buys nothing and costs gigabytes',
+  },
+  {
+    entry: '.DS_Store',
+    reason: 'refused: Finder metadata, not a dependency',
+  },
+]
+
+/**
+ * 把 `missingIgnored` 的【候选】变成【该注入的清单】。
+ *
+ * ★ 这是唯一一处做这个决定的地方 —— 而它的输入仍是 `missingIgnored`（唯一来源），
+ *   没有另读 `.gitignore`（那是 git 的事，t24 边界）。
+ */
+export function planDependencyInjection(candidates: readonly string[]): DependencyInjectionPlan {
+  const refused = new Map(REFUSED_DEPENDENCY_ENTRIES.map(item => [item.entry, item.reason]))
+  const injected: string[] = []
+  const excluded: Array<{ entry: string; reason: string }> = []
+  for (const entry of candidates) {
+    const reason = refused.get(entry)
+    if (reason === undefined) {
+      /** ★ 默认注入：不认识的新条目按候选的意思来（见上面"为什么不是默认排除"）。 */
+      injected.push(entry)
+      continue
+    }
+    excluded.push({ entry, reason })
+  }
+  return { injected, excluded }
+}
 
 export interface SchedulerConfig {
   readonly stateDir: string
@@ -77,8 +169,27 @@ export interface SchedulerConfig {
    * ★ 这是 R5 / 回测唯一的父版本来源。判据层在成员【汇报完成】时需要它，
    *   而那时派发已经结束 ⇒ 由调用方在这里记下来。
    *   不回调 ⇒ 判据说"我没能测量"（诚实），**不会**拿一个猜的版本去比较。
+   *
+   * ── ★★★ 第三个参数 `stateRoot`：把"团队住在哪"由【调用方猜】改成【调度器交】──
+   *
+   * MEASURED（2026-10-10 实测，本轮）：只有 `taskId` / `base` 时，调用方
+   * （`tools.ts` 的 `persistTaskBaseRevision`）**必须自己推出 stateDir 的根**，
+   * 而它手上没有 workspace ⇒ 两版实现都锚错了地方：
+   *   · 第一版 `process.cwd()` ⇒ 跟着**宿主进程的工作目录**走。实测宿主 cwd 是
+   *     profile 目录（`profiles/desktop`），而团队住在用户的仓库里
+   *     ⇒ `readdir` 不抛错、只是候选集为空 ⇒ **零错误、零日志、零迹象**；
+   *   · 第二版 `pluginRoot()` ⇒ 那是**插件自己的**目录，与 workspace **无关**；
+   *     两者相等**当且仅当插件恰好装在 workspace 里**（本机正是这个巧合）。
+   * ⇒ 两版的共同错误不是"层数算错了"，而是**这一格上根本没有可用的锚点**：
+   *   调用方拿不到 workspace，就永远只能猜。
+   *
+   * ★ `stateRoot` 已经在 `kickMember` 的作用域里（`stateRootOf(workspace, config)`），
+   *   而它与 web 路由 / 判据读的是**同一个**解析结果 ⇒ 这里交出去，锚点就只剩一个。
+   * ★ 为什么是"追加第三个位置参数"而不是改成一个对象：既有调用方只有一处
+   *   （`tools.ts`），位次追加是最小改动；而 `stateRoot` 声明为**必填**，
+   *   于是任何旧的两参实现会在**编译期**报错，而不是静默拿到一个错的值。
    */
-  readonly onWorktree?: (taskId: string, base: string) => void
+  readonly onWorktree?: (taskId: string, base: string, stateRoot: string) => void
   /**
    * ── ★ runtime 位置的接线点：一个成员【真的被派发出去】了 ─────────────────────
    *
@@ -206,6 +317,32 @@ export interface DispatchTicket {
   readonly profileProtocol?: string
   readonly profileSeedId?: string
   readonly dependencyOutputs: readonly DependencyOutput[]
+  /**
+   * ── ★★★ 直接依赖的**终态全貌**（一句话；全 completed 时是空串）──────────────────
+   *
+   * 与 {@link dependencyOutputs} **并存而不是替换**，理由是 `src/state.ts:336` 逐字写的：
+   * `unsatisfiedDependencies`（闸门）与 `dependencyStatuses`（证据）「两者**必须**都能
+   * 被读到……合成一个"能开工 + 一个布尔"会让第二件事消失」。
+   *
+   * ★ 两者的**问题不同**，所以两份都要在票里：
+   *   · `dependencyOutputs` —— 上游**交出了什么**（传递闭包里的终态任务 + 它们的 output）；
+   *     它按【任务】铺开，下游据此接着干。
+   *   · 本格 —— 我这条任务的**每一条直接依赖**落在哪一态、算不算了结；
+   *     它按【我声明的 dependencies 原序】铺开，下游据此知道"我欠不欠前置条件"。
+   *   ⇒ 只印其中一份，都会让另一件事在派发文本里消失。
+   *
+   * ★ 空串语义：**全 completed 时为空**（见 `describeDependencyOutcomes`）——
+   *   一个每次派发都出现的"上游都做完了"是噪音，而噪音会教人忽略真正要看的那一行。
+   */
+  readonly dependencyOutcomes: string
+  /**
+   * ── ★★★ 直接上游的产物读数（t5）：建树基线的输入 ──────────────────────────────
+   *
+   * ★ 在**票里**算，而不是在建树那一刻再读一次队状态：两者之间隔着 `await`
+   *   （`writeTeam` 与一整个 `createTaskWorktree`），期间上游可能被 reassign 或
+   *   回收。票里的这一格是"决定派发那一刻的上游成品"，而它正是判据要的那个口径。
+   */
+  readonly upstreamBaselines: readonly UpstreamTaskInput[]
   readonly executionPrompt?: string
   readonly kind?: string
   readonly round?: number
@@ -236,6 +373,13 @@ export interface DispatchTicket {
    *   把这两件事混起来，一次"环境不支持"就会伪装成"这一步不需要"。
    */
   readonly worktreeUnavailable?: string
+  /**
+   * ── ★★★ 建树基线的**出处**（t5）────────────────────────────────────────────────
+   *
+   * 在场 ⇔ 真的建出了树。它是"这棵树里看得见什么"的唯一读数，而此前那一格
+   * **不存在** —— 读的人只能假设"基线 = 主树 HEAD"，而在有上游产物时那假设是错的。
+   */
+  readonly worktreeBaseline?: BaselineResolution
 }
 
 function taskProfileSeedId(task: TeamTask): string | undefined {
@@ -245,6 +389,50 @@ function taskProfileSeedId(task: TeamTask): string | undefined {
 
 function teamProfileProtocol(team: TeamState): string | undefined {
   return team.profile?.protocol
+}
+
+/**
+ * ── ★★★ 一条任务的**直接上游**（t5）：它们是建树基线的唯一来源 ──────────────────
+ *
+ * `docs/WORKTREE-BASE-DEFECT.md`：依赖边此前只表达**顺序**，不表达**可见性** ——
+ * 于是下游的树从主树 HEAD 建，上游的提交**不在**里面 ⇒ 下游在旧代码上干活，
+ * 且两者写域重叠时下游会整文件覆盖掉上游的修复（实测 94 条实现→实现边里
+ * 60 条写域重叠、47 条上游真的提交了）。
+ *
+ * ── 为什么只取【直接】边，而不是全祖先 ─────────────────────────────────────────
+ *
+ * 递归会让"可见性"从一个可核对的**局部**性质变成一次闭包推理。而直接边已经
+ * 足够，理由是**归纳的**：B 依赖 A ⇒ B 的树含 A 的产物 commit ⇒ B 自己的产物
+ * commit 是 A 的后代 ⇒ C 依赖 B ⇒ C 的树含 B（因而也含 A）。
+ * ★ 而这条归纳**只在每一层都真的按产物定基线时成立** —— 所以这里宁可少收，
+ *   也不要把"我以为它含了"当成读数。
+ *
+ * ── ★ 反向半边：没有依赖边 ⇒ 返回空数组 ────────────────────────────────────────
+ *
+ * 空数组是**有意义**的：它让 `resolveWorktreeBaseline` 走 `source: 'trunk'`，
+ * 也就是"这条任务的上游就是主干本身"。⇒ 与之并行的任务**看不见**彼此的产物，
+ * 那是**对的**（它们之间没有边），而这一格必须与"有边但上游没提交"不同形
+ * （后者是 `[{kind:'not-committed'}]`，见 `describeBaseline` 的措辞）。
+ */
+export function collectUpstreamBaselines(
+  tasks: readonly TeamTask[],
+  task: TeamTask,
+): readonly UpstreamTaskInput[] {
+  const byId = new Map(tasks.map(candidate => [candidate.id, candidate]))
+  return task.dependencies.map((dependencyId) => {
+    const dependency = byId.get(dependencyId)
+    if (dependency === undefined) {
+      /**
+       * ★ 未知依赖 id ⇒ `unreadable`，**不是** `not-committed`。
+       *   两者后果相反：前者要人去查"那条任务怎么没了"，后者是"它确实没产出"。
+       *   （`unsatisfiedDependencies` 也把未知 id 当阻塞 —— 同一条纪律。）
+       */
+      return { taskId: dependencyId, unreadable: 'it is not in this team any more' }
+    }
+    return dependency.deliverableCommit === undefined
+      ? { taskId: dependency.id }
+      : { taskId: dependency.id, deliverableCommit: dependency.deliverableCommit }
+  })
 }
 
 /**
@@ -395,11 +583,11 @@ function teamLockKey(stateRoot: string, teamId: string): string {
 
 function liveCaptain(ctx: Context, captainSessionId: string, supplied?: Agent): Agent | undefined {
   if (supplied !== undefined && supplied.id === captainSessionId) return supplied
-  return ctx.agents.get(captainSessionId as SessionId)
+  return liveAgentOf(ctx, captainSessionId)
 }
 
 function liveMember(ctx: Context, member: TeamMember): Agent | undefined {
-  return ctx.agents.get(member.id as SessionId)
+  return liveAgentOf(ctx, member.id)
 }
 
 function isMemberAvailable(ctx: Context, member: TeamMember): boolean {
@@ -408,31 +596,27 @@ function isMemberAvailable(ctx: Context, member: TeamMember): boolean {
   return live === undefined || live.status === 'idle'
 }
 
+function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
+  return tasks.find(task => task.assignee === memberName
+    && (task.status === 'claimed' || task.status === 'in_progress'))
+}
+
 /**
  * ── ★★ 派发的第三个闸门：重载排队（t50）─────────────────────────────────────────
  *
  * ★ 它与 `halted` / `phase === 'staged'` **并列**，理由是同一条：
  *   三者都回答"此刻**不该**开新工作"，而它们各有各的成因 ⇒ 必须**分别**判。
  *
- * ── 三态（与 `status` 报出的那一份逐字同源）───────────────────────────────────
- *
- *   `waiting` —— 已申请重载，且**还等得到** ⇒ 不派发（每派发一个新任务就把它推得更远）
- *   `stuck`   —— 已申请，但等待名单里有**不在任务表里**的任务（永远不会收口）
- *                ⇒ 也不派发（★ 而它**要上报**：那一等不会有结果，得有人介入）
- *   无申请    —— 照常派发（★ 反向半边：不许退化成恒不派发）
- *
  * ── ★ 为什么它【不是】halted ────────────────────────────────────────────────────
  *
  *   `halted` 是一个**持久**的、由人设的状态（团队被叫停）；而重载排队是
- *   **暂时**的、由机制设的、且**会自己解开**（收口后自动重载 ⇒ 申请被消费）。
- *   ⇒ 把它们合成一个字段会让"等人叫停"与"等一个必然会过去的窗口"同形 ——
- *     而这两件事该做的动作完全相反（前者要人，后者只要等）。
+ *   **暂时**的（换完版本就没了）。把两者合成一个状态，会让"等人拍板要不要继续"
+ *   与"等这一次交接做完"在日志里**同形**。
  *
- * ── ★ 为什么它【也不】复用 `hold_dispatch` 那个布尔 ─────────────────────────────
- *
- *   `hold_dispatch` 是**出口**（给 captain 读的）；这里要的是**原因**
- *   （`waiting` 还是 `stuck`）。⇒ 两边都从 `restartQueueFrom` 算，
- *   而不是一处算完把结果传给另一处 —— 那样传丢了就问不出"为什么不派发"。
+ * ★★★ MEASURED（2026-10-09，captain 实测）：本函数与它的三处调用曾被
+ *   `t24` 的【整文件 `cp` 覆盖】**静默删除** —— 而"它一直不在"与
+ *   "它刚被删掉"在代码里同形，所以没有任何读数会说。
+ *   ⇒ 本次恢复，并补一条臂钉住它（删掉 ⇒ 臂红）。
  */
 function dispatchHeldByReload(tasks: readonly TeamTask[]): { held: boolean; state: string; detail: string } {
   const state = restartQueueFrom(tasks.map((task) => ({ id: task.id, status: task.status })))
@@ -451,11 +635,6 @@ function dispatchHeldByReload(tasks: readonly TeamTask[]): { held: boolean; stat
    *   把它们合成一条会让"再等一会儿"与"叫人来"同形 —— 而那正是本队记过的那条。
    */
   return { held: true, state: 'stuck', detail: state.reason }
-}
-
-function ownedOpenTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
-  return tasks.find(task => task.assignee === memberName
-    && (task.status === 'claimed' || task.status === 'in_progress'))
 }
 
 function nextReadyTask(tasks: readonly TeamTask[], memberName: string): TeamTask | undefined {
@@ -536,6 +715,9 @@ ${executionPrompt}
 `}
 Completed dependency results:
 ${formatDependencyOutputs(ticket.dependencyOutputs)}
+${ticket.dependencyOutcomes === '' ? '' : `
+${ticket.dependencyOutcomes}
+`}
 
 Task: ${ticket.taskId}${seed} — ${ticket.subject}${description}
 ${contract === '' ? '' : `\nContract:\n${contract}\n`}
@@ -644,10 +826,39 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         })
         if (unread.length > 0) {
           const prompt = mailboxPrompt(team.id, member.name, unread)
-          const signal = new AbortController().signal
-          const accepted = config.dispatch === undefined
-            ? await deliverToMember(ctx, captain, member.id, prompt, signal, 'steer')
-            : await config.dispatch(captain, team.id, member.name, prompt, signal, 'steer')
+          /**
+           * ── ★★★ 投递必须**有上限**，否则它会把整条成员队列钉死 ─────────────────────
+           *
+           * MEASURED（本仓实测）：这里原来写的是 `new AbortController().signal`，
+           * 而全文件**创建了 2 个 AbortController、`.abort()` 出现 0 次**
+           * （`grep -c` 当场可数）。⇒ 那个 signal **永远不可能触发**，是死重：
+           * 代码**看起来**有取消能力，而实际一步都取消不了。
+           *
+           * ★ 而它与本函数外层的 `serializeMember(queueKey, …)` 合起来就卡死了：
+           *   队列是**链式**的（`previous.then(() => gate)`，见 `serializeMember`），
+           *   只要**一次** `deliverToMember` 不返回，`gate` 就永不 `release()`，
+           *   于是**之后所有**对同一成员的写操作全部**永久排队**。
+           *   ⇒ 而 `withTeamLock(teamLockKey…)` 在它内部 ⇒ **整个团队的写入**一起卡住。
+           *
+           * ★ 表现出来就是用户看到的那一幕：`reassign_task`、`update_task`、
+           *   `complete` **看起来"卡在工具调用上"**，而落盘**可能早就完成了** ——
+           *   于是重试既成功又失败，来回几次之后整轮就再也推不动。
+           *
+           * ★ 处置：给投递一个**真实的**上限。超时**不算投递成功**（`accepted = false`），
+           *   消息**留在邮箱里**由下一次扫描再投 —— 这正是 `else` 那一支已经在做的
+           *   `releaseMailboxDelivery`，所以没有事实丢失，只是**不再无限期占着队列**。
+           */
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), DELIVER_TIMEOUT_MS)
+          let accepted: boolean
+          try {
+            accepted = config.dispatch === undefined
+              ? await deliverToMember(ctx, captain, member.id, prompt, controller.signal, 'steer')
+              : await config.dispatch(captain, team.id, member.name, prompt, controller.signal, 'steer')
+          }
+          finally {
+            clearTimeout(timer)
+          }
           if (accepted) {
             await withTeamLock(teamLockKey(stateRoot, team.id), () => (
               markMailboxDelivered(stateRoot, team!.id, member!.name, unread.map(message => message.id))
@@ -660,18 +871,25 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           return
         }
 
+        /**
+         * ── ★★★ 测试文件基线：**在锁外**拍（2026-10-20，补 t5）───────────────────────
+         *
+         * ★★ 理由与 `claim.ts` 那处逐字相同：`withTeamLock` 串行化**整个团队**的
+         *   写操作，而下面这个锁里要做的是"构造派工票"这件**关键路径**上的事。
+         *   在锁内遍历目录 + 读 200 个文件的字节，会把所有人一起拖住 ——
+         *   而这只是一条**记录**，不是裁决。
+         *
+         * ★ 口径：它拍的是"**即将派出去那一刻**"的字节（成员还没开工）
+         *   ⇒ 与"开工那一刻"的距离是一次锁等待，而那正是要的边界。
+         */
+        const testFileSnapshot = await snapshotTestFiles(workspace)
         const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async (): Promise<DispatchTicket | undefined> => {
           const fresh = await readTeam(stateRoot, team!.id)
           if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged') return undefined
           /**
-           * ── ★★ t50：**机制自己拒绝**（这一处才是"不派发"真正生效的地方）──────────
-           *
-           * ★ 前两处挡的是"扫描"，而这一处挡的是**取票** —— 即真正把一个任务
-           *   交给某个成员的那一步。⇒ 三处都判，缺任何一处都能被绕过。
-           *
-           * ★ 而它与 `halted` **同一形状**（`return undefined` = 这次不发），
-           *   却带着**不同成因的读数**（见 `dispatchHeldByReload`）——
-           *   于是"为什么不派发"问得出来，而不是一句"没派发"。
+           * ★ t50：第三处 —— 票从队列里取出之前再判一次。
+           *   此处与上两处**同一读数、不同位置**：上两处挡"开始扫描"，
+           *   这一处挡"把已经选好的票送出去"（两者之间隔着 await，状态可能变）。
            */
           const held = dispatchHeldByReload(fresh.tasks)
           if (held.held) {
@@ -707,7 +925,15 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             output: task.output, verdict: task.verdict, findings: task.findings,
             changedPaths: task.changedPaths, acceptanceResults: task.acceptanceResults, commandsRun: task.commandsRun,
           } : undefined
-          const attemptId = beginTaskAttempt(task, currentMember.name)
+          /**
+           * ★ 只在**写类 kind** 上写基线（与 `claim.ts` 同一口径）——
+           *   非写类传 `undefined` ⇒ 一个键都不写 = "没能拍"，**不是**"没有测试文件"。
+           */
+          const attemptId = beginTaskAttempt(
+            task,
+            currentMember.name,
+            shouldSnapshotTestFiles(task.kind) ? testFileSnapshot.baseline : undefined,
+          )
           // A recovered generation is parked before delivery. This makes each
           // (member, attempt) recovery idempotent even if every status poll
           // sees a disposed handle. Fresh pending work remains unparked so a
@@ -751,6 +977,13 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
               task.id,
               (message) => ctx.logger.warn(message),
             ),
+            /**
+             * ★ 每一条**直接**依赖落在哪一态（见 {@link DispatchTicket.dependencyOutcomes}）。
+             *   ★ 在票里算，与 `dependencyOutputs` 同源、同一刻 —— 两者之间不许隔着
+             *     一次 `await`（那会让两份读数看两个不同时刻的队状态）。
+             */
+            dependencyOutcomes: describeDependencyOutcomes(dependencyStatuses(fresh.tasks, task.dependencies)),
+            upstreamBaselines: collectUpstreamBaselines(fresh.tasks, task),
           }
         })
         if (ticket === undefined) return
@@ -765,12 +998,46 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
          *   地方干活"的前置条件，不是可选装饰。此前"warn 后继续"的写法把隔离
          *   变成了提示 —— 成员在共享工作区干活，而没有任何一步会拒绝它。
          */
-        const needsWorktree = ticket.kind === 'implementation' || ticket.kind === 'repair'
+        /**
+         * ★★ 真值来自 `types.ts`（t20 建的单一来源），不在这里再写一份。
+         *
+         * 此前这一行与 `resolveBaseRevision` 各写一份同样的 kind 判断 ——
+         * 而两份实现会分叉：判据说"本该有基准"、而调度器从没建过那棵树，
+         * 在日志里读起来像"记录丢了"。⇒ 现在两边都从 `needsWorktreeFor` 取。
+         *
+         * ★ MEASURED（本次并入实测）：t24 的 `src/scheduler.ts` 覆盖了那一行，
+         *   把它退回硬编码 —— 因为两个任务改同一个文件、而并入是整文件的。
+         *   ⇒ ★ "整文件覆盖"会让【另一处已经落地的修复】静默消失。
+         */
+        const needsWorktree = needsWorktreeFor(ticket.kind)
         let worktreePath: string | undefined
         let worktreeMissingIgnored: readonly string[] | undefined
         let worktreeUnavailable: string | undefined
+        let worktreeBaseline: BaselineResolution | undefined
         if (needsWorktree) {
-          const created = createTaskWorktree({ repo: workspace, taskId: ticket.taskId })
+          /**
+           * ★ `teamId` 必须传：任务 id 按团队重新计数（每个团队的 t1 都叫 t1），
+           *   而只用 `task-<id>` 会让新团队命中上一轮的树 —— 实测过，
+           *   见 `worktreeDirName` 上面那段。
+           *
+           * ── ★★★ t5：基线由【上游产物】定，不再是主树 HEAD ────────────────────
+           *
+           * `ticket.upstreamBaselines` 是这条任务的直接上游。`resolveWorktreeBaseline`
+           * 会挑其中最早那个可解析的产物 commit 当起点；没有可用产物时**退回**
+           * 主树 HEAD（那是"上游没提交"的正确行为，不是降级）。
+           *
+           * ★ 空数组（这条任务没有依赖边）⇒ 基线仍是主树 HEAD，而这是**对的** ——
+           *   并行任务之间本就没有可见性关系。两种情形在 `baseline.source` 上
+           *   给出同一个 `'trunk'`，但在 `baseline.upstream` 上不同形
+           *   （`[]` vs `[{kind:'not-committed'}]`），且 `describeBaseline` 的措辞
+           *   把"没有上游依赖"与"有上游而它没提交"写成两句不同的话。
+           */
+          const created = createTaskWorktree({
+            repo: workspace,
+            taskId: ticket.taskId,
+            teamId: team.id,
+            upstream: ticket.upstreamBaselines,
+          })
           if (created.ok !== true && created.unsupported === true) {
             /**
              * ── ★ 这个仓库【没有】隔离能力 ⇒ 降级派发，但留下痕迹 ──────────────
@@ -815,6 +1082,27 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
              *   回滚，而两者在日志里看不出区别。
              */
             ctx.logger.warn(`agent-teams: refusing to dispatch task "${ticket.taskId}" to "${ticket.memberName}": no isolated worktree (${created.reason})`)
+            /**
+             * ── ★★★ t43：这一处也【必须留痕】（2026-10-10 实测补的）──────────────
+             *
+             * MEASURED：t40 被 reassign 之后，`attempt` 推进 · `handoff` 被清 ·
+             *   ★ 而 `deliveryFailure` **没有写** —— 因为【拒绝发生在投递之前】，
+             *   走到了这一格，而不是回滚那一格。
+             *   ⇒ ★ 于是"worktree 建不出来 ⇒ 拒绝派发"与"从来没派过"
+             *     在 `team.json` 上【完全同形】—— 与那条 warn 的处境一模一样。
+             *
+             * ★★ 而这一格比投递失败那一格【更值得留痕】：
+             *   它是一个【结构性的拒绝】（隔离退化成提示是它要防的事），
+             *   而"我不知道为什么这个成员一直不干活"正是它造成的。
+             */
+            await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
+              const fresh0 = await readTeam(stateRoot, team!.id)
+              const t0 = fresh0?.tasks.find(candidate => candidate.id === ticket.taskId)
+              if (t0 !== undefined) {
+                t0.deliveryFailure = { at: Date.now(), attempt: ticket.attempt, reason: `no isolated worktree: ${created.reason}` }
+              }
+              if (fresh0 !== undefined) await writeTeam(stateRoot, fresh0)
+            })
             await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
               const fresh = await readTeam(stateRoot, team!.id)
               if (fresh === undefined) return
@@ -844,6 +1132,28 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           } else {
             worktreePath = created.path
             worktreeMissingIgnored = created.missingIgnored
+            worktreeBaseline = created.baseline
+            /**
+             * ── ★★★ t5：基线的三态**必须读得出来**（这一行就是那条验收）───────────
+             *
+             * `docs/WORKTREE-BASE-DEFECT.md` 的第二个形态：基线此前是一个**位置**
+             * （永远是主树 HEAD），没有任何读数能回答"这棵树里看得见上游吗"。
+             *
+             * ⇒ 现在每一次建树都留一句，而 `describeBaseline` 把三态写成**三句
+             *   不同的话**：
+             *
+             *     · 上游已提交   ⇒ `baseline is upstream deliverable t3@abc1234`
+             *     · 上游没提交   ⇒ `... (N upstream task(s), none of them has a
+             *                       readable deliverable commit)` 或 `not committed: t3`
+             *     · 上游读不到   ⇒ `unreadable: t3 (its deliverable commit "abc"
+             *                       does not resolve in <repo> (...))`
+             *     · 没有依赖边   ⇒ `... (this task has no upstream dependency)`
+             *
+             * ★ 用 `info` 而不是 `warn`：前两种是**正常**结果。把"上游没提交"
+             *   报成 warn 会让每一次正常派发都留一条噪音，而噪音会让人开始忽略
+             *   warn —— 那时第三条（真的读不到）也一起被忽略。
+             */
+            ctx.logger.info(`agent-teams: task "${ticket.taskId}" worktree baseline — ${describeBaseline(created.baseline)}`)
             /**
              * ★ 把这个任务的【隔离基准】交回调用方。
              *
@@ -853,8 +1163,65 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
              *
              * ★ 只有真的建出 worktree 才回调：没有隔离就没有父版本，判据应当
              *   说"我没能测量"，而不是拿一个猜出来的版本去比较。
+             *
+             * ★ t18 补：第三个参数 `stateRoot` —— 调用方要把这个 `base` 落进
+             *   **耐久态**（`team.json` 的 `baseRevision`），那就必须知道团队住在哪。
+             *   而这正是调度器手上已经有、调用方**推不出来**的那一格
+             *   （`stateRootOf(workspace, config)`，本函数体第一行）。
+             *   ⇒ 交出去，而不是让调用方拿 `process.cwd()` / `pluginRoot()` 去猜。
              */
-            config.onWorktree?.(ticket.taskId, created.base)
+            config.onWorktree?.(ticket.taskId, created.base, stateRoot)
+            /**
+             * ── ★★★ t24：依赖按需注入的【生产调用方】────────────────────────────
+             *
+             * MEASURED（t24 之前）：`provisionWorktreeDependencies` 全仓**只有夹具在调**
+             * ⇒ 每个 worktree 各自 `pnpm install` ⇒ 装什么、装成什么样**各不相同**
+             * ⇒ 「两个成员各自验证」这个前提**不成立**；而磁盘是 579M × N
+             * （所以并发上限被磁盘卡住，而不是被成员数卡住）。这正是本队记账最久的
+             * 形态：**机制建好了，中间那一格没接上。**
+             *
+             * ★ 时机**必须**在建树之后、派发之前：
+             *   · 建树之前 ⇒ 没有 worktree 可写（而且 `missingIgnored` 还不存在）
+             *   · 派发之后 ⇒ 成员已经可能开始跑命令了 —— 那正是"环境没准备好"被
+             *     误报成"工作没做出来"的那条路
+             *   ⇒ 所以它紧跟在 `onWorktree` 之后、`assignmentPrompt` 之前。
+             *
+             * ★★ 而 entries **不是** `missingIgnored` 原样 —— 见 `planDependencyInjection`
+             *   上面那段：那份是【候选】，不是【该注入的清单】。
+             */
+            const plan = planDependencyInjection(created.missingIgnored)
+            if (plan.injected.length > 0) {
+              const provisioned = provisionWorktreeDependencies({
+                repo: workspace,
+                worktree: created.path,
+                entries: plan.injected,
+              })
+              /**
+               * ★ 读数三态（与判据层同一条纪律）：**注入成功 / 没注成 / 没需要注**
+               *   必须说得出是哪一种。而"没注成"要指名是哪一件 + 为什么。
+               */
+              if (provisioned.failed.length > 0) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" could not prepare ${provisioned.failed.length} `
+                  + `dependencies in its isolated worktree: `
+                  + provisioned.failed.map(entry => `${entry.entry} (${entry.reason})`).join('; '),
+                )
+              }
+              for (const excluded of plan.excluded) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" did NOT inject "${excluded.entry}" `
+                  + `into its isolated worktree: ${excluded.reason}`,
+                )
+              }
+            } else if (plan.excluded.length > 0) {
+              /** ★ 一件都不注 ⇒ 【也要留读数】（"没复制" ≠ "没发生什么"）。 */
+              for (const excluded of plan.excluded) {
+                ctx.logger.warn(
+                  `agent-teams: task "${ticket.taskId}" did NOT inject "${excluded.entry}" `
+                  + `into its isolated worktree: ${excluded.reason}`,
+                )
+              }
+            }
           }
         }
         const dispatched: DispatchTicket = {
@@ -864,13 +1231,38 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             ? {}
             : { worktreeMissingIgnored },
           ...worktreeUnavailable === undefined ? {} : { worktreeUnavailable },
+          ...worktreeBaseline === undefined ? {} : { worktreeBaseline },
         }
 
         const prompt = assignmentPrompt(dispatched, config.stateDir, team.id)
-        const signal = new AbortController().signal
-        const accepted = config.dispatch === undefined
-          ? await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)
-          : await config.dispatch(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
+        /**
+         * ★★★ 同一个死重 pattern（见上面邮箱投递那一处的长注释）：这一行原来也是
+         *   `new AbortController().signal`，而全文件的 `.abort()` 出现 0 次 ⇒
+         *   一个**永远不会触发**的 signal。这里的后果同形 —— 派发也在
+         *   `serializeMember` 的链式队列里，一次不返回就把该成员的后续写入全部钉死。
+         *   ⇒ 给一个真实上限；超时走**已有的**失败分支（带成因），消息留在邮箱。
+         */
+        const controller = new AbortController()
+        const signal = controller.signal
+        const timer = setTimeout(() => controller.abort(), DELIVER_TIMEOUT_MS)
+        let delivered: { ok: true } | { ok: false, reason: string }
+        try {
+          /**
+           * ★★★ t43：把投递结果【带成因】地取回来 —— 见下面的失败分支。
+           *   ★ 旧写法 `accepted = await deliverToMember(…)` 丢掉成因，
+           *     而 `if (accepted) {…}` 之外【什么都不记】⇒ 静默回滚。
+           */
+          delivered = config.dispatch === undefined
+            ? await deliverToMemberDetailed(ctx, captain, ticket.memberId, prompt, signal)
+            : await (async () => {
+              const ok = await config.dispatch!(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId)
+              return ok ? { ok: true as const } : { ok: false as const, reason: 'the configured dispatch hook returned false' }
+            })()
+        }
+        finally {
+          clearTimeout(timer)
+        }
+        const accepted = delivered.ok
         if (accepted) {
           /**
            * ★ runtime 位置的接线（t6）：投递【被接受之后】才记录这次派发。
@@ -921,6 +1313,16 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             task.attemptId = undefined
             parkedAttempts.delete(ticket.memberId)
           }
+          /**
+           * ★★★ t43：把【投递失败】写进记录 —— 而它是本格存在的全部理由。
+           *
+           * ★ 它必须落在这里（回滚处），因为那是【唯一知道"这次派发试过而没有送达"】的位置。
+           * ★ 而它带 `attempt`：一条旧的失败原因与"这次又失败了"必须不同形。
+           * ★ 而它在成功派发时【不被清】—— 见下面 `onDispatched` 那一支（那里会删它）。
+           */
+          if (!delivered.ok) {
+            task.deliveryFailure = { at: Date.now(), attempt: ticket.attempt, reason: delivered.reason }
+          }
           task.handoffId = undefined
           task.reassigning = false
           task.updatedAt = Date.now()
@@ -940,7 +1342,12 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
       parkedAttempts.delete(agent.id)
       return
     }
-    if (located.captainSessionId === agent.id) {
+    /**
+     * ── ★★★ #176（乙）：队长那一半走活的 fork 链（t98）───────────────────────────
+     * ★ 传 `liveRefsOf(ctx)` ⇒ 一个**队长 fork 出来的**会话也认得出自己带的队。
+     *   ★ 缺席/枚举不可用 ⇒ 退回精确相等（与今天同结论）。
+     */
+    if (sessionLeadsTeam(agent.id, identityOfTeam(located), liveRefsOf(ctx))) {
       // Captain takeover is scoped to the captain's current turn. Unlike a
       // durable member, the captain has no scheduler lane that can resume an
       // abandoned attempt later. Returning unfinished captain-owned work to

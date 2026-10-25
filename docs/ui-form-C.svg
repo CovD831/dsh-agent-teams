@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" font-family="-apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif">
+<rect width="1200" height="400" fill="#1a1d21"/>
+<style>
+  .bg{fill:#1a1d21} .card{fill:#22262b;stroke:#33383e;stroke-width:1}
+  .hdr{fill:#2a2f36} .t{fill:#e6e8ea;font-size:12px} .dim{fill:#8b939c;font-size:10px}
+  .ok{fill:#5fbf7f} .bad{fill:#e06c6c} .skip{fill:#8b939c} .live{fill:#e0a35c}
+  .obs{fill:#e0a35c} .mono{font-family:'SF Mono',Menlo,monospace}
+  .tabon{fill:#2f3a46;stroke:#4d6bfe;stroke-width:1} .taboff{fill:#22262b;stroke:#33383e;stroke-width:1}
+  .ln{stroke:#33383e;stroke-width:1} .bar{fill:#4d6bfe} .bar2{fill:#e0a35c}
+</style>
+<rect width="1200" height="400" class="bg"/>
+<rect x="0" y="0" width="1200" height="28" rx="0" class="hdr"/>
+<text x="14" y="19" class="t" font-weight="600">样张 C：同一份数据，按容器宽度【自动重排】</text>
+<text x="20" y="54" class="dim" font-weight="600">① 侧边栏 360px → 纵向</text>
+<rect x="20" y="66" width="360" height="250" rx="4" class="card"/>
+<text x="32" y="88" class="t" font-weight="600">t77 · implementation</text>
+<circle cx="38" cy="100" r="3" class="ok"/>
+<text x="50" y="104" class="dim">contract</text>
+<text x="368" y="104" class="ok" text-anchor="end" font-size="12">✓✓✓</text>
+<circle cx="38" cy="122" r="3" class="ok"/>
+<text x="50" y="126" class="dim">dispatch</text>
+<text x="368" y="126" class="ok" text-anchor="end" font-size="12">✓✓⊘</text>
+<circle cx="38" cy="144" r="3" class="live"/>
+<text x="50" y="148" class="dim">completion</text>
+<text x="368" y="148" class="live" text-anchor="end" font-size="12">●○○○</text>
+<circle cx="38" cy="166" r="3" class="dim"/>
+<text x="50" y="170" class="dim">delivery</text>
+<text x="368" y="170" class="dim" text-anchor="end" font-size="12">○○</text>
+<text x="32" y="198" class="skip" font-size="9">★ 窄时只给"点 + 计数"，不展开逐条</text>
+<text x="32" y="214" class="skip" font-size="9">★ 展开态改为【点进去看】，占满整个面板</text>
+<text x="410" y="54" class="dim" font-weight="600">② 主区/宽容器 ≥1000px → 横向四列</text>
+<rect x="410" y="66" width="760" height="250" rx="4" class="card"/>
+<text x="422" y="88" class="t" font-weight="600">t77 · implementation · 第 1 轮</text>
+<text x="422" y="102" class="t" font-weight="600">contract</text>
+<line x1="422" y1="116" x2="592" y2="116" class="ln"/>
+<circle cx="426" cy="126" r="2.5" class="ok"/>
+<text x="434" y="130" class="dim" font-size="9">verify-command</text>
+<circle cx="426" cy="142" r="2.5" class="ok"/>
+<text x="434" y="146" class="dim" font-size="9">build-artifact</text>
+<circle cx="426" cy="158" r="2.5" class="ok"/>
+<text x="434" y="162" class="dim" font-size="9">task-atomicity</text>
+<text x="606" y="102" class="t" font-weight="600">dispatch</text>
+<line x1="606" y1="116" x2="776" y2="116" class="ln"/>
+<circle cx="610" cy="126" r="2.5" class="ok"/>
+<text x="618" y="130" class="dim" font-size="9">worktree</text>
+<circle cx="610" cy="142" r="2.5" class="ok"/>
+<text x="618" y="146" class="dim" font-size="9">plan-reviewed</text>
+<circle cx="610" cy="158" r="2.5" class="ok"/>
+<text x="618" y="162" class="dim" font-size="9">changed-paths</text>
+<text x="790" y="102" class="t" font-weight="600">completion</text>
+<line x1="790" y1="116" x2="960" y2="116" class="ln"/>
+<circle cx="794" cy="126" r="2.5" class="ok"/>
+<text x="802" y="130" class="dim" font-size="9">verify-rerun</text>
+<circle cx="794" cy="142" r="2.5" class="ok"/>
+<text x="802" y="146" class="dim" font-size="9">r5</text>
+<circle cx="794" cy="158" r="2.5" class="ok"/>
+<text x="802" y="162" class="dim" font-size="9">mutation</text>
+<circle cx="794" cy="174" r="2.5" class="ok"/>
+<text x="802" y="178" class="dim" font-size="9">backtest</text>
+<text x="974" y="102" class="t" font-weight="600">delivery</text>
+<line x1="974" y1="116" x2="1144" y2="116" class="ln"/>
+<circle cx="978" cy="126" r="2.5" class="ok"/>
+<text x="986" y="130" class="dim" font-size="9">coverage</text>
+<circle cx="978" cy="142" r="2.5" class="ok"/>
+<text x="986" y="146" class="dim" font-size="9">convergence</text>
+<text x="20" y="350" class="obs">★ C 的关键：不是"两个视图"，而是【一份数据 + 两套布局】—— 一个组件，两个断点</text>
+<text x="20" y="372" class="skip" font-size="10">★ 好处：不需要新 slot、不需要切换交互；坏处：要维护两套排版</text>
+</svg>

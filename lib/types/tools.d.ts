@@ -20,7 +20,19 @@ export { RESTART_ESCAPE_HATCH_ENV, applyQualityFollowUp, arbitrateRestart, arbit
  * ★ 不导出它们，修法就只能靠"读 live 读数"去测 —— 而那正是 f-0027 记的
  *   「读错位置的出口」（命令行进程那次加载必然报 current，测不到任何东西）。
  */
-moduleFreshnessFrom, stampCommitOf, currentHead, readStamp, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
+moduleFreshnessFrom, stampCommitOf, currentHead, 
+/**
+ * ★ `isAncestorOf` 与上面几个同一理由导出：它决定 `commitBehind` 那一格，
+ *   而"构建时的提交是不是 HEAD 的祖先"必须能被夹具【精确驱动】——
+ *   ★ 否则它的三态（是 / 不是 / 判不了）只能靠 live 读数去碰。
+ */
+isAncestorOf, 
+/**
+ * ★★★ 同样导出：它是 `commitBehind` 那第三个维度 —— 「这两个提交之间，
+ *   构建的输入变了吗」。而它的三态（变了 / 没变 / 问不出来）必须能被夹具
+ *   逐格钉住，否则"每提交一次一条假红"这个形态只能靠 live 读数去碰。
+ */
+buildInputsChangedBetween, readStamp, moduleFreshnessMessage, restartArbitrationMessage, restartEscapeHatchFromEnv, } from './tools/shared/entities.ts';
 export type { AgentTeamsRuntime, BaseRevisionResolution, ModuleFreshness, RestartArbitration, StagedPlanMutation, ToolsConfig, } from './tools/shared/entities.ts';
 export { steerCaptainReport } from './members.ts';
 /**
@@ -200,11 +212,20 @@ export declare function stagedPlanFeedbackContext(teamName: string): string;
 /** 构建产物的指纹文件（`scripts/git-artifacts.mjs` 写的那一份）。 */
 /** 读盘上当前的 stamp 的 `output` 摘要；拿不到 ⇒ `undefined`（**不是**空串）。 */
 /**
- * 插件根目录 —— 与 `STATE_DIR_FOR_BASE_PERSIST` 同一种做法（`__dirname` 的上两级）。
+ * 插件根目录 —— `pluginRoot()`（`tools/shared/entities.ts`）返回的**项目根**，
+ * 也就是 `lib/` 的父目录。
+ *
+ * ★ 与 `buildGate` / `sessionDirsOf` 同族：这里要的是**插件自己**的根，
+ *   不是用户的工作区根 —— 两者是**不同的东西**，而它们恰好在"插件装在
+ *   workspace 里"时相等（本机正是这个巧合）。
+ *   （★ 说清曾经的错误：曾经把这一族结论**顺手推广**到了 `onWorktree` 的落盘锚点上
+ *    —— 那一处要的是 workspace，不是插件根 ⇒ `pluginRoot()` 在那里是错的。
+ *    两版实测见本文件里那段 `STATE_DIR_FOR_BASE_PERSIST` 的墓志铭。）
  *
  * ★ 为什么不用 `process.cwd()`：插件的产物位置与**用户的工作目录**无关，
  *   而 stamp 在插件的 `lib/` 里。用 cwd 会在"用户在别处起会话"时读错地方，
  *   而那会**静默**把 `unknown` 变成常态（于是这条读数永远不报）。
+ *   ★ 同一个理由是上面那个缺陷的成因：cwd 读错地方时，失败**不是抛错而是静默**。
  */
 /** 加载时记下的 output 摘要（**进程级、只在模块求值时写一次** —— 这正是被检测的对象）。 */
 /**
@@ -618,7 +639,11 @@ export declare function resetWaitRecords(): void;
  * 落一条卡点记录。
  *
  * ★ 路径：`<stateRoot>/frictions/<id>.json` —— 与既有 12 条**同一个目录、同一种形状**。
- *   `stateRoot` 的锚点与 `onWorktree` 的落盘共用 `STATE_DIR_FOR_BASE_PERSIST`。
+ *   `stateRoot` 的锚点与 `onWorktree` 的落盘**不是**同一个来源：这里用的是
+ *   `stateRootOf(workspaceOf(captain), config)`（会话给的 workspace），
+ *   而落盘那一处用的是调度器交出来的 `stateRoot`。★ 两者都由 workspace 推出，
+ *   但**别把它们说成"同一个变量"** —— 曾经正因为这样说过，才把 `pluginRoot()`
+ *   这种"插件根"锚点误当成了 workspace 锚点。
  *
  * ★ 这一层只做 I/O，**不改任何裁决** —— 与 `inputSurfaceOf` 同一条纪律（旁路数据）。
  */

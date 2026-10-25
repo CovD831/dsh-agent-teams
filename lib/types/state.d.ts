@@ -13,6 +13,13 @@
  * @module dsh-agent-teams/state
  */
 import { type DeliveryOutcome, type DeliveryRecord, type TaskStatus, type TeamMessage, type TeamState, type TeamTask } from './types.ts';
+/**
+ * ── ★★★ #176（乙）：lead 身份的**唯一**判据（t98）──────────────────────────────────
+ * ★ 本模块**不再**自己写 `captainSessionId === <id>` —— 那是**12 处各自为政**的形态，
+ *   而它们必须**同时**变或**同时**不变（否则"两边不一致"本身就是缺陷）。
+ * ★ 纯函数，**不碰 ctx、不做 I/O**（活会话清单由调用方交进来）。
+ */
+import { type LiveSessionRef } from './lineage.ts';
 export { amendTaskContract, buildCoverageMatrix, canDeclareDelivery, classifyChangedPath, collectChangedPaths, defaultQualityDeliveryGraph, describeQualityLoop, evaluateQualityCompletion, hasValidQualityTaskFields, isQualityKind, isTaskRevision, normalizeBlankOptionalTaskFields, pathMatchesScope, planQualityFollowUp, qualityPlanningPrompt, resumeTeamState, sanitizeReviewAcceptance, sanitizeReviewObjective, taskKindOf, validateCreateTask, } from './quality-gates.ts';
 export type { ContractAmendmentInput } from './quality-gates.ts';
 /** Mailbox key of the captain. */
@@ -297,28 +304,20 @@ export declare function summariseDeliveries(tasks: readonly TeamTask[]): {
  */
 export declare function describeDeliveries(summary: ReturnType<typeof summariseDeliveries>): string;
 /**
- * The allowed task status transitions, keyed by current status.
- * Terminal statuses have no outgoing transitions.
+ * ── ★ M4：S-B（任务状态机）已挪到 `./state/tasks.ts` ─────────────────────────────
+ *
+ * `TASK_TRANSITIONS` · `transitionError` · `activateTaskAttempt` ·
+ * `beginTaskAttempt` · `cancelUnfinishedTask` · `invalidateTaskAttempt`
+ * —— 这六件（外加私有 helper `clearAttemptResult`）搬到了 `./state/tasks.ts`，
+ * 并由下面的 re-export **保持本模块的导出面逐条不变**。
+ *
+ * ★ 为什么两者缺一不可（M2/M3 都实测踩过）：
+ *   · **只 `export … from`** ⇒ 本文件内部若还有调用会报 TS2304（`export-from` 不建本地绑定）；
+ *   · **只 `import`** ⇒ 导出面塌掉（外部消费者取不到）。
+ *   ⇒ 本文件现在**两者都写**（见下）。
+ * ★ 实测：该块**零外部引用**（不需要本文件里任何其它声明）⇒ 前提成立。
  */
-export declare const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>>;
-/**
- * Validate one task status transition.
- * @param current - the task's current status.
- * @param next - the requested status.
- * @returns the transition error, or undefined when allowed.
- */
-export declare function transitionError(current: TaskStatus, next: TaskStatus): string | undefined;
-/** Activate the task's current generation for one owner and return its capability id. */
-export declare function activateTaskAttempt(task: TeamTask, assignee: string): string;
-/** Start a fresh task generation for one owner. */
-export declare function beginTaskAttempt(task: TeamTask, assignee: string): string;
-/**
- * Revoke the current worker immediately. Clearing its capability makes old
- * updates stale; a separate handoff generation serializes async quiescence.
- */
-/** Cancel one unfinished task without returning it to the ready pool. */
-export declare function cancelUnfinishedTask(task: TeamTask, output?: string): void;
-export declare function invalidateTaskAttempt(task: TeamTask, nextAssignee?: string, reassigning?: boolean): void;
+export { TASK_TRANSITIONS, transitionError, activateTaskAttempt, beginTaskAttempt, cancelUnfinishedTask, gateEvaluationRecordOf, invalidateTaskAttempt, } from './state/tasks.ts';
 /**
  * Create the team directory structure and the initial team record.
  * @param stateRoot - resolved absolute state root directory.
@@ -331,6 +330,61 @@ export declare function createTeamDir(stateRoot: string, state: TeamState): Prom
  * @param teamId - the team's sanitized id.
  */
 export declare function readTeam(stateRoot: string, teamId: string): Promise<TeamState | undefined>;
+/**
+ * ── ★★★ t108：读一个队 —— **三态**，区分「区不在」与「区在但没这个队」 ─────────────
+ *
+ * ── 它存在的理由（`docs/RULING-READ-PATH-THREE-STATES.md` 的裁定"甲"）──────────────
+ *
+ * `readTeam` 把**两件不同的事**压成同一个 `undefined`：
+ * ```
+ *   ① 区（`stateRoot` 这个目录）**根本不存在**
+ *   ② 区在，但**里面没有这个队**
+ * ```
+ * ★ 而它们的补救动作**相反**：① 是"你连地方都找错了"（配置 / 工作区选错），
+ *   ② 是"那个队确实不在了"（被归档 / 从没建过）。
+ * ⇒ 合成 `undefined` 之后，**读的人分不出该去查哪个** —— 那是本仓记账最久的形态。
+ *
+ * ── ★★★ 为什么不改 `readTeam` 的签名（裁定"甲"，有实测依据）────────────────────────
+ *
+ * 实测：`readTeam` 有 **28 处**调用，而那 28 处的**区全部是确定的**
+ * （`workspaceOf(caller)` / `workspaceRegistry.list()` / `root` 传下来）
+ * ⇒ ★★ "区不存在"在**实际路径里不会发生**。
+ * ⇒ 若改签名，28 处 + 11 处类型声明会被迫回答一个其中 **27 处不可能被问到**的问题
+ *   —— ★ 那是**过度设计**，而 `readTeam` 保持一字不动。
+ *
+ * ── ★★ 坑①：不能靠 `catch` 的 ENOENT 来源分辨（t104/t107 实测，本任务复验）────────
+ *
+ * ```
+ *   A 区不存在        ⇒ readFile("<root>/NO-REGION/team.json") ⇒ code ENOENT
+ *   B team.json 不存在 ⇒ readFile("<root>/REGION/team.json")   ⇒ code ENOENT
+ *   ★★ 两者 code 相同 ⇒ 靠 code 分辨不出来
+ * ```
+ * ⇒ 所以本函数**先判区在不在**（`stat` 那个**目录**），**再**调 `readTeam`。
+ *
+ * ── ★★ 坑②：那个判断**自己失败** ⇒ 报 `no-region`，**不是** `no-team` ────────────────
+ *
+ * ★ 判据说不出区在不在时，"区在但没这个队"**没有被建立** ⇒ 只能报 `no-region`。
+ *   ⇒ 而"权限不足"与"真不存在"在这一格**同归宿**，因为对**调用方**而言
+ *     两者都是"这个区我读不了"（它们要做的动作相同：去查权限/去查路径）。
+ *   ★ 而它们**不**与 `no-team` 同归宿 —— 那才是本任务要分开的那一对。
+ *
+ * @param stateRoot - 已解析的绝对 state root（**区**的根）。
+ * @param teamId - 队的 sanitized id。
+ * @returns 三态之一；**不抛**（除既有 `readTeam` 对"读到了但内容非法"照旧抛）。
+ */
+export type ReadTeamResult = {
+    readonly kind: 'found';
+    readonly team: TeamState;
+}
+/** ★ 区在，但**里面没有这个队**。 */
+ | {
+    readonly kind: 'no-team';
+}
+/** ★ **区本身不在**（或判不出在不在）。 */
+ | {
+    readonly kind: 'no-region';
+};
+export declare function readTeamEx(stateRoot: string, teamId: string): Promise<ReadTeamResult>;
 /**
  * Synchronously read one team record while a continuable child is being
  * composed. Harness requires child setup contributions to be synchronous;
@@ -354,20 +408,43 @@ export declare function readRetiredMemberIds(stateRoot: string): Promise<Set<str
 export declare function recordRetiredMemberIds(stateRoot: string, memberIds: readonly string[]): Promise<void>;
 /**
  * Find the team owned by one captain session (at most one per captain).
+ *
+ * ── ★★★ #176（乙）：`liveSessions` —— 沿**活的** fork 链认队长（t98）───────────────
+ *
+ * ★ 缺省（`undefined`）⇒ **行为与今天逐字相同**（只认精确相等）。
+ *   ⇒ ★ 这是刻意的：本参数**只加一条路**，不改任何既有结论。
+ *
+ * ★★ 传了它 ⇒ 一个**队长 fork 出来的**会话也能认到自己带的队
+ *   （上游 #176：「a captain that continues in its fork still leads its team」）。
+ *
+ * ★ 为什么它是**可选参数**而不是本函数自己去枚举会话：
+ *   本模块（`state.ts`）**不持有 `ctx`** —— 它被工具层、调度器、HTTP 路由共同调用，
+ *   而那些调用点各有各的上下文。⇒ "谁能拿到活会话清单"**只有调用方知道**。
+ *   ★ 而把它做成必填会让**每一个**调用点都得先学会枚举会话 —— 那既越权，也会
+ *     在拿不到 `ctx` 的路径上（如 HTTP 路由）逼出一个编造的空清单。
+ *
  * @param stateRoot - resolved absolute state root directory.
  * @param captainSessionId - the owning session id.
+ * @param liveSessions - 活会话的 `{id, parentSession}` 清单（缺席 ⇒ 只认精确相等）。
  * @returns the team record, or undefined when the captain leads no team.
  */
-export declare function findTeamByCaptain(stateRoot: string, captainSessionId: string): Promise<TeamState | undefined>;
+export declare function findTeamByCaptain(stateRoot: string, captainSessionId: string, liveSessions?: readonly LiveSessionRef[]): Promise<TeamState | undefined>;
 /**
  * Find the team in which one session is an active participant.
  * Captains match `captainSessionId`; members match their durable child session
  * id. Removed members no longer have access to team-scoped tools.
+ *
+ * ── ★★★ #176（乙）：`liveSessions` —— 队长那一半也走 fork 链（t98）────────────────
+ * ★ **成员那一半照旧精确匹配**（上游逐字：「Membership **keeps** its exact id match」）
+ *   —— 本参数**只影响"是不是队长"**那一半，不改成员的判定。
+ * ★ 缺席 ⇒ 与今天逐字相同。
+ *
  * @param stateRoot - resolved absolute state root directory.
  * @param agentSessionId - calling captain/member session id.
+ * @param liveSessions - 活会话清单（缺席 ⇒ 队长那半只认精确相等）。
  * @returns the team record, or undefined when the caller belongs to no team.
  */
-export declare function findTeamByParticipant(stateRoot: string, agentSessionId: string): Promise<TeamState | undefined>;
+export declare function findTeamByParticipant(stateRoot: string, agentSessionId: string, liveSessions?: readonly LiveSessionRef[]): Promise<TeamState | undefined>;
 /** Build a fresh message record. */
 export declare function createMessage(from: string, to: string, content: string): TeamMessage;
 /**

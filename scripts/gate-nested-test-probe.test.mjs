@@ -30,6 +30,24 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * ★ 递归标记的唯一出处（见 `scripts/fixtures/nested-test-env.mjs`）。
+ *
+ * ★★ 本文件的**分工**与别处不同，写清楚免得被读成"漏改"：
+ *
+ *   · `runIn(..., { stripContext: true })` 的**默认那一半** —— 就是本文件自己
+ *     大部分调用点要的"剥干净"—— 走共享件 `recursionFreeEnv()`。
+ *   · 而**机制臂**（臂 2/4 以及 scaffold 里生成的 outer 套件）**必须显式**
+ *     把 `NODE_TEST_CONTEXT: 'child-v8'` 带上去：那**正是被测机制本身**，
+ *     不是疏漏。共享件不替谁做这件事，也不该做 —— 一个"帮你顺手清掉"的
+ *     共享件会让这几条臂失去被测对象（本仓记过的"机制臂被自己的脚手架抹掉"）。
+ *
+ * ★ `stripContext: false` 那一档**保留原样**：它同样是一个**机制**读数（臂 4 的
+ *   定向突变：靠继承 ⇒ 连**外层自己**都被跳过），所以它要的是"原样继承"，
+ *   而不是"干净"。共享件在这里既不该被调用，也不该被绕过 —— 它就是"不动"。
+ */
+import { recursionFreeEnv } from './fixtures/nested-test-env.mjs'
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /** 在临时目录里搭一个"内层套件 + 外层套件"的最小现场。 */
@@ -72,12 +90,13 @@ function runIn(dir, command, { stripContext = true } = {}) {
    * ★★ 本文件**自己**就跑在 `node --test` 下 ⇒ 它是 `NODE_TEST_CONTEXT` 的子进程
    *   ⇒ 它起的子进程**会继承那一格** ⇒ 内层 `node --test` 被**静默跳过**。
    *
-   * ⇒ 凡是要观察"内层到底跑没跑"的调用都必须**显式剥掉那一格**，
+   * ⇒ 凡是要观察"内层到底跑没跑"的调用都必须**显式剥掉那些标记**，
    *   否则本文件测的是"我自己被嵌套"，而不是"那个套件本身能不能跑"。
    * ★ 而臂 2/4 要**保留**它（那正是被测机制）⇒ 那里显式传 `stripContext: false`。
+   * ★ 剥的那一份现在来自共享件（`scripts/fixtures/nested-test-env.mjs`）：
+   *   迁移前这里只删 `NODE_TEST_CONTEXT` 一个键，共享件按同族处理。
    */
-  const env = { ...process.env }
-  if (stripContext) delete env.NODE_TEST_CONTEXT
+  const env = stripContext ? recursionFreeEnv(process.env) : { ...process.env }
   try {
     return { code: 0, out: execFileSync('/bin/sh', ['-c', command], { cwd: dir, encoding: 'utf8', env }) }
   } catch (error) {
@@ -255,6 +274,7 @@ test('★★ 臂 4（★ 机制臂，我第一版写错了方向）：跳过由 
     /**
      * ★ 这一路**显式**带上 ctx（而不是靠 `stripContext:false` 的继承）——
      *   理由同 scaffold 里那段：靠继承会让**被观察的那一层自己**被跳过。
+     * ★ 这一半是**机制臂**（"带着标记 ⇒ 被跳过"），所以它显式构造，**不走**共享件。
      */
     const withCtx = (() => {
       const env = { ...process.env, NODE_TEST_CONTEXT: 'child-v8' }
@@ -264,7 +284,15 @@ test('★★ 臂 4（★ 机制臂，我第一版写错了方向）：跳过由 
         return { code: error.status ?? -1, out: String(error.stdout ?? '') + String(error.stderr ?? '') }
       }
     })()
-    const withoutCtx = runIn(dir, 'env -u NODE_TEST_CONTEXT node --test inner.test.mjs')
+    /**
+     * ★ 反向那一半走共享件（`runIn` 默认已用它）而不是再写一个 `env -u`：
+     *   迁移前这里是 shell 级的 `env -u NODE_TEST_CONTEXT`，它只摘**一个**键
+     *   （同族的 `NODE_OPTIONS` 仍然会漏给子进程）⇒ 与别处的口径不一致。
+     *   换成共享件之后，"什么算标记"这件事在全仓只有一处说法。
+     * ★ 而这条命令**本身**（`node --test inner.test.mjs`）一字未动 ——
+     *   换的只是它从哪一份环境里起。
+     */
+    const withoutCtx = runIn(dir, 'node --test inner.test.mjs')
     assert.equal(withCtx.out, '', '★ 带着 ctx 起 ⇒ 内层被静默跳过（输出为空）')
     assert.match(
       withoutCtx.out, /INNER RAN/,

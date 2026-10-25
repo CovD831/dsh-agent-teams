@@ -278,3 +278,218 @@ C 有重组词【且】要搬的东西已存在 ← t39/t30
   一类是"真的坏了"，另一类是"我读错了地方"。
   ★ 而今天有三次（t86/t92/t98），**分开它们就救回了一整批工作。**
 ```
+
+---
+---
+
+# 验收记录 —— t11（integration · attempt 1）
+
+> **本节由 t11 追加，不改动上文任何一行。** 上文是 2026-10-08 那一轮的交接；
+> 本节是 2026-10-11 加固轮（team `agent-teams-hardening`）的**终态验收读数**。
+> ★ 追加而非重写，因为上文本身是被验收的交付物之一。
+
+## 0. 一句话
+
+**`pnpm build` 绿（exit 0），但本轮的判据套件【没有】相对于 pristine 基线变绿 ——
+实测新增 10 条红、修复 11 条红，而 pin 台账从 19 条缩到 17 条。
+⇒ 一个诚实的部分交付，不是一个假绿。**
+
+## 1. 验收对象
+
+| 项 | 值 |
+|---|---|
+| task | `t11` — Integrate the delivered changes and confirm the repo is green against its own gates |
+| kind | `integration` |
+| attempt | 1（`attempt_id = 18ad8574-c477-4a4a-a085-991ae89cf0ea`） |
+| HEAD | `08db8dc77bc443467015177e1add84c6c8da7eb7`（`08db8dc fix(ui): the member clock showed 'waiting 12 hours' for a member doing nothing`） |
+| pristine 基线 | `ba5b23a430095b17960893e340a78fd1528e70df`（t1 的六份文档提交；抽成独立 worktree 实测，不是沿用别人的读数） |
+| 交付物 | 本轮 24 个任务的合并产物，落在 HEAD 上 |
+
+## 2. verify 命令与退出码（本次实测，逐条原始读数）
+
+| # | 命令 | exit | 读数 |
+|---|---|---|---|
+| 1 | `pnpm build` | **0** | `lib/client.js 278.51 kB / gzip 63.73 kB`，`Build complete in 32ms`（终态复跑） |
+| 2 | `node scripts/git-artifacts.mjs` | **0** | `Git artifacts match source and build settings.`（`pnpm build` 末步重写 stamp 后一致） |
+| 3 | `node --test --test-reporter=tap scripts/*.test.mjs` | **1** | `# tests 1575 / # pass 1514 / # fail 25 / # skipped 36` |
+| 4 | 同一条在健全基线 worktree `/tmp/t11-base`（`ba5b23a` + `pnpm build`） | 1 | `# tests 1441 / # pass 1378 / # fail 26 / # skipped 37` |
+
+★ 契约只点名 `pnpm build` 一条命令，**它 exit 0**；第 3/4 行是本条验收的
+「按集合比对分类每一条红」那一条判据所必需的对照读数。
+
+## 3. 失败分类 —— **按【集合比对】，不是按计数**
+
+★ 方法论：`fail` 的**计数**在两条分支之间不可比（1514/25 vs 1378/26 —— 计数几乎相同，
+而那两个集合并不相同）。⇒ 分类只能靠**逐一具名的差集**。
+
+```
+ADDED   at HEAD vs pristine ba5b23a : 10 条
+REMOVED at HEAD vs pristine ba5b23a : 11 条
+COUNTS  25 (HEAD)  vs  26 (pristine)
+```
+
+### 3.1 新增（10 条）—— ★ 这些是本轮改动**造成**的红
+
+| 夹具 | 臂 | 实测机制 |
+|---|---|---|
+| `scripts/build-atomic.test.mjs` | 臂 2 反向臂 | `ReferenceError: LAB is not defined` |
+| `scripts/build-atomic.test.mjs` | 臂 3 三态臂 | `ReferenceError: cpSync is not defined` |
+| `scripts/gate-stale-module.test.mjs` | 臂 1 对照臂 | 盘上 stamp 与加载时不一致 ⇒ 本机 `lib/` 是**构建后**的，读数按设计分形 |
+| `scripts/gate-stale-module.test.mjs` | 臂 4 边界臂 | 同上（stamp 一致性面） |
+| `scripts/gate-stale-module.test.mjs` | 臂 6 出口臂 | 同上 |
+| `scripts/verify-runtime-integration.test.mjs` | ② 硬要求（b） | `status.evaluated` 实测 **2**，期望 **1** |
+| `scripts/verify-runtime-integration.test.mjs` | ③ 有状态（伪造臂） | 同上，`2 !== 1` |
+| `scripts/verify-runtime-integration.test.mjs` | ③ 有状态（噪声臂） | 同上，`2 !== 1` |
+| `scripts/verify-runtime-integration.test.mjs` | ④ 三态在真实路径上分形 | 同上，`2 !== 1` |
+| `scripts/verify-unified-pipeline.test.mjs` | 臂 1（P4 · 注册） | 注册表净增实测 **3**，期望 **2** |
+
+★★ **归因是逐条核到提交的，不是猜的**（这是本条验收唯一有分量的部分）：
+
+* `build-atomic.test.mjs` 在 `ba5b23a..HEAD` 之间**只被一个提交改过**：
+  `88d1bdd merge: land eight worktree deliverables so dependents can actually run`（+83 行）。
+  该提交的**两处缺陷**是明确的源码级错误 ——
+  `cpSync` 在 163 行被解构进另一个作用域、却在 339 行使用；
+  `LAB` 在 343 行声明、却在 275/280 行被引用。
+  ⇒ **这不是 flake，是两条 `ReferenceError`**，且该文件在 pristine 上 **0 fail**（实测 `# pass 9 # fail 0`）。
+
+* `verify-runtime-integration.test.mjs` 与 `verify-unified-pipeline.test.mjs` 的**文件本身**
+  在本轮**一个字都没被改过**（`git log ba5b23a..HEAD -- <file>` 为空）。
+  ⇒ 它们的红只能来自**源码侧的新行为**：探活判据在同一真实路径上被求值 **2** 次
+  （t4 的 memberLiveness 与 t6 的 stall sentinel 各自挂了一条），
+  而注册表比记账值多了 **1** 条。
+  两者在 pristine 上均 **0 fail**（实测 `19/0` 与 `11/0`）。
+
+* `gate-stale-module.test.mjs` 的 4 条红与之同类：该夹具断言「盘上 stamp 与加载时一致」，
+  而在一个**刚 `pnpm build` 过**的工作树里 `lib/` 必然比加载时新。
+  ★ 如实标注：这三条**依赖构建态**，在此前的读数里也曾被记作 load-sensitive；
+  它们在 pristine（同样构建过）上为 `23 pass / 1 fail`，而 HEAD 为 `20 / 4`，
+  所以**差集是 3 条，仍然算新增**。
+
+### 3.2 已消除（11 条）—— ★ 这些是本轮**修好**的红
+
+`gate-baseline-known-failures` 臂 4、`gate-task-atomicity` 臂 9、`moment-facts` 臂 1、
+`plan-review-tier` 臂 11、`verify-reload` 臂 2/3/6/7、`build-atomic` 臂 5（还原臂）、
+`verify-task-atomicity` 臂 6、`worktree-reclaim` 臂 11。
+
+★ 其中若干条（`moment-facts` 臂 1、`verify-task-atomicity` 臂 6）在本仓库的
+既有记账里被标注为「在独立 worktree 里恒红，因为 `.agent-teams/` 是 gitignored」——
+而本次 pristine 对照恰恰是在独立 worktree 里跑的，**这正是它们出现在「已消除」一侧的原因**，
+而不是「被修好了」。⇒ 如实记录：这 11 条里有**两条是环境差而非真修复**，
+其余 9 条是真消除。**净账：新增 10、消除 11，但其中 -2 为环境差 ⇒ 真净消 -1，真净增 +10。**
+
+## 4. pin 台账（`scripts/fixtures/baseline-known-failures.json`）—— **缩了**
+
+| 读数 | 值 |
+|---|---|
+| `ba5b23a` 上的条数 | **19** |
+| HEAD 上的条数 | **17** |
+| 方向 | **缩小（shrunk）**，19 → 17 |
+
+* 台账自述 `_retired_at: t7（2026-10-11）：19 条 → 17 条`，并**逐条附了退场理由与绿读数**
+  （`gate-tool-split` 臂 3 与 `gate-shared-artifact-writes` 臂 4，各附反证）。
+* 台账只被**一个**提交改过（`88d1bdd`），与本轮其余交付同批落地。
+* ⇒ **验收第 2 条满足**：台账确实缩小，且不需要「逐条解释未缩小的条目」。
+
+★★ **而这里有一件必须写明的、不体面的事实：**
+台账**缩了 2 条**，而**实测红集合同期净增 10 条**。
+⇒ 「台账缩小」是一个**真的、可核的**读数；但它**不**等于「基线变好」。
+两者同时为真，正是本仓库 `_adding` 那段所禁止的事的形状 ——
+**台账缩小的那 2 条与本轮新红的 10 条没有关系**，不是同一批东西。
+把「19→17」读成「本轮把基线净改善了 2 条」是**误读**。
+
+## 5. 写域纪律（changedPaths ⊂ 声明的 inScope）
+
+方法：读 `.agent-teams/agent-teams-hardening/team.json`，对 25 个任务里**有 changedPaths 的 23 个**
+逐一做子集判定。
+
+| 结果 | 数 |
+|---|---|
+| 有 changedPaths 的任务 | 23 |
+| **越界写入** | **1** |
+
+**唯一的越界：`t1`（completed）**，6 个路径全部越界：
+`docs/DISPATCH-RULES.md`、`docs/PENDING-RESTARTS.md`、`docs/ORPHAN-CENSUS.md`、
+`docs/PENDING-FRICTION-REFORM.md`、`docs/RESEARCH-RESTART-FREE.md`、`docs/T14-STALE-BASE-AUDIT.md`。
+
+★★ **而归因是明确的，且不是「谁乱写」**：实测 `t1` 的 `kind / objective / inScope / acceptance / verify`
+**全部为 `undefined`** —— 该任务是以一段 staged-plan 简写创建的，契约字段**从未落盘**。
+⇒ 一份 `inScope` **为空**的契约，无法判定任何写入是否越界。
+★ 这正是 t1 自己在完成报告里记录的那条契约缺口（「claim 返回空契约 ⋯ 无法修订」），
+也是本轮加固要消灭的那一类形状（**看起来在场、其实是空的**）。
+
+⇒ 如实结论：**没有一条越界写入可以归因于成员不守写域**；
+唯一越界是**契约本身的缺陷**，且该缺陷已被本轮 t22/t26 的改动正面处理。
+
+其余 22 个任务：**0 越界**。（含 t4 已申报并经批准的两个产物路径，
+以及 t20 经 captain 修订后声明的 7 条客户端路径。）
+
+## 6. 共享树的遗留改动 —— 全部有解释，0 条不明
+
+`git status --short`（含 `--untracked-files=all`）实测：
+
+| 路径 | 类别 | 解释（按 mtime 与生成器核过） |
+|---|---|---|
+| `docs/frictions.html` | ` M` | **本轮生成物**（12:42 重生成）；由 `scripts/frictions-html.mjs` 从卡点台账生成，对应 t9 的经验汇总 |
+| `docs/judgements.html` | ` M` | 同上（12:42），同一生成器族 |
+| `docs/MODULE-RELOAD.md` | ` M` | 10-09 23:35 —— **早于本轮**，属上一轮遗留的未提交文档改动 |
+| `.archify/workflow-gate-pipeline-20261008-124459/*`（6 个） | `??` | 10-08 12:48 —— **早于本轮**，流水线脚手架目录 |
+| `docs/gate-pipeline.html`、`docs/gate-pipeline.workflow.json`、`docs/mechanisms.html` | `??` | 10-08/10-09 —— **早于本轮**，同族生成物 |
+
+⇒ **0 条不明遗留**。三条 ` M` 中两条是本轮生成的 HTML（源是已跟踪的 `.mjs` 生成器，
+所以「源改了而产物没提交」本身是一条**应由 repo 自己决定**的记账问题，
+不是本次集成的越界写入）；其余全部早于本轮开工时间。
+
+★ 另记一笔：`git stash list` 有 **2** 条 —— 与 `docs/DISPATCH-RULES.md` §10.1 记录的
+2026-10-09 09:01:56 / 09:06:30 事故一致，**早于本轮约 2 天**；本轮全程未执行任何 `git stash`。
+
+## 7. 残余风险（★ 按契约要求逐条写明）
+
+1. **★★ 最大的残余风险：`pnpm build` 绿【不证明】运行中的宿主执行了新代码。**
+   一次 rebuild **可证地不会重跑** 插件的 `apply()`（`docs/NEW-TEAM-PLAN.md` §11.2）。
+   ⇒ 本轮全部交付在**构建产物层面**可核（`lib/client.js` 体积 229.74 kB → 278.51 kB 等），
+   而**「用户现在看到的行为变了」这件事本次验收没有也无法证明**。
+   要证明它，需要一次真正的宿主重载，而那不在本任务范围内。
+
+2. **10 条新增红**（§3.1）**尚未修复**，其中两条 `ReferenceError` 是明确的源码级缺陷
+   （`build-atomic.test.mjs` 的 `LAB` / `cpSync`），另外 5 条指向一个**真实的行为回归**：
+   探活判据在同一真实路径上被求值 **2** 次（期望 1 次）。
+   ⇒ **它们不是本轮任何一条验收判据的产物，但它们确实由本轮改动引入。**
+   ★ 判断：这构成**下游不该照常推进**的理由。
+
+3. **`verify-unified-pipeline` 臂 1**：注册表净增 3 条而记账值为 2 ⇒ **有一条接线未记账**。
+   该臂自己的措辞是「多出来 ⇒ 有别的接线没被记账」。⇒ 记账漂移，未修。
+
+4. **`gate-reviewed-passthrough` 臂 3 的红是一条【过期的等待标记】，不是缺陷。**
+   该臂断言「接收方 `CreateTaskInput` **还没**声明 `reviewed`」，并明说
+   「若已声明则本臂当场红，且该臂应被删掉或改成『已连接』」。
+   实测已声明（`src/quality-gates.ts:82`），引入提交是 `fb1d977 fix(t11): validateCreateTask…`。
+   ★ **注意任务号撞名**：那个 `t11` 是本仓库**上一轮**的 reviewed-stamp 任务，
+   **与本轮的 t11（integration）不是同一个任务**。
+   ⇒ 该红属**断言腐化**（应另立任务修断言），且它**早于**本轮基线之外，
+   在本套分类里被计入「已消除/环境差」一侧的相邻格，**不是**本轮引入的红。
+
+5. **pin 台账的 `_measured_caveat` 仍然成立**：名单会随队友并发 `build` 抖动
+   （同一提交、零碰撞的读数曾得 30/31/39 条），因为 `lib/` 被并发改写成不同中间态。
+   ⇒ 本节的集合比对是**某一时刻的快照**（我串行跑的，无并发 build），不是不变量。
+
+6. **环境**：`registerAgentTeamsTools` 在本机**无法离线加载**
+   （`unsupported Harness subagent contract` —— 缺 retired-member guard hook，
+   见 `src/members.ts:625`）。⇒ 本轮的**服务端守卫类**断言多有赖于源码阅读与定向突变，
+   而非一次真正执行的工具调用。这一条在 t16/t20 的报告里已被多次如实标注。
+
+## 8. 交付完整性的诚实结论
+
+**这是一个诚实的部分交付，不是一个假绿。**
+
+* ✅ **`pnpm build` exit 0** —— 契约唯一点名的命令，通过。
+* ✅ **失败已按集合比对逐条分类**（10 新增 / 11 消除，每条归因到提交）。
+* ✅ **pin 台账缩小**（19 → 17），且已说明「缩 2 ≠ 基线变好 2」。
+* ✅ **遗留改动 0 条不明**。
+* ✅ **写域越界只有 1 处，且归因于空契约（契约缺陷）而非成员违纪**。
+* ❌ **判据套件在 HEAD 上仍然是红的（25 fail），且其中 10 条由本轮改动引入。**
+  ⇒ 「repository is green against its own gates」这一条**没有达成**。
+
+⇒ 按本仓库的立身之规（**诚实的部分交付优于假绿**），
+本记录不把 exit 0 的 build 读成「仓库绿了」。
+`pnpm build` 是**一条**判据（可归因、且通过），而它**不是**「绿」的全部含义 ——
+本节的第 3 与第 5 段就是那两者之间的差额。

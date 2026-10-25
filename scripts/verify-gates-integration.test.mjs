@@ -385,11 +385,25 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
    *   的假 run 会被判 unmeasured（"没报告可读摘要"）—— 那是我造的输入不完整，
    *   不是判据的缺陷。这里给出真实形状的 node:test spec 输出。
    */
+  /**
+   * ★ 基线必须同时交回**行覆盖**（2026-10-14）。
+   *
+   * MEASURED（t7 归因回退那次）：本臂的三个替身此前只交回 `exitCode` + `stdout`，
+   * 一份**没有行覆盖**的基线。判据在变异循环之前先解析覆盖，指不出覆盖就整批
+   * `unmeasured` ⇒ 于是这条臂测的其实是"基线没交覆盖"，三个形状全都塌成
+   * 同一个 `unmeasured`：对照臂读不到 ok、伪造臂读不到 blocked。
+   *
+   * ★ 真实的 `node --test` 基线（判据自己会加 `--experimental-test-coverage`）
+   *   是**带**覆盖报告的；这里补上的是**输入**，让它与真实形状一致。
+   *   测试与三处断言一字未动。
+   */
+  const executedLines = { 'src/a.ts': [1, 2, 3, 4] }
   const runWith = (failed, failingFile) => async () => ({
     exitCode: failed > 0 ? 1 : 0,
     stdout: failed > 0
       ? `\n✖ ${failingFile} (1.2ms)\nℹ tests 1\nℹ pass 0\nℹ fail ${failed}\n`
       : `\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n`,
+    ...(failed > 0 ? {} : { executedLines }),
   })
 
   // 对照臂：模拟的"套件"在源码被改动后失败（读到 mutated 文本 ⇒ 报红），
@@ -404,7 +418,7 @@ test('② mutation 三臂：变异体存活 ⇒ blocked / 缺执行器 ⇒ unmea
     },
     // 源码被注入变异体（≠ 原始文本）⇒ 测试失败 ⇒ 杀死。
     runTest: async () => (lastWritten === null
-      ? { exitCode: 0, stdout: '\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n' }
+      ? { exitCode: 0, stdout: '\n✔ ok (1.2ms)\nℹ tests 1\nℹ pass 1\nℹ fail 0\n', executedLines }
       : { exitCode: 1, stdout: '\n✖ src/a.ts (1.2ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1\n' }),
   })
 
@@ -730,6 +744,46 @@ test('④ 每条判据只 import registry.ts（或另一个纯函数模块），
          *     仍然不许出现 `completion/r5.ts imports "./mutation.ts"`。
          */
         || specifier === './kind-requirements.ts'
+        /**
+         * ── ★ t59：`quality-gates/` 的**纯谓词**（路径与文本判定，一个纯函数模块）──
+         *
+         * ★ 加这一行**不是放宽**，而是与上面 `kind-requirements.ts`（t54）
+         *   和 `budget-stop.ts`（2026-10-12）**同一个先例**，且是**第 4 个同类实例**：
+         *   它在 `src/gates/` 外、**不是判据**（不 export `id`/`point`/`gate`）、
+         *   **零 `node:` import**、不带一条判据的语义。
+         *
+         * ★★ 它**比上面那条 `../../quality-gates.ts` 更该在这里**：
+         *   后者**带 I/O**（`quality-gates.ts:7` import `node:fs`），
+         *   而它**不带** —— ★ **这正是 t59 拆分的全部目的**：
+         *   `src/gates/{admission,dispatch}/*.ts` 的 4 个文件此前都 import
+         *   `quality-gates.ts` 的 `normalizeWorkspacePath`，于是**传递闭包带上了 I/O**，
+         *   而「判据不 import I/O」这条不变量**在闭包上破了**
+         *   （`gates/runtime/stall.ts` 逐字：「那条纯度是**载荷**，不是风格」）。
+         *
+         * ⇒ 放行它，是为了让那 4 条判据**拿得到纯谓词，又够不到 I/O**。
+         *   ★ 拦"判据之间互相调用"的能力**一个字都没变**。
+         */
+        || specifier === '../../quality-gates/predicates.ts'
+        /**
+         * ── ★ 2026-10-12：预算停止的记号（`../budget-stop.ts`）──────────────────
+         *
+         * ★ 这一行**不是放宽**，而是 `./kind-requirements.ts` 那条先例的**又一个实例**：
+         *   它在 `src/gates/` 下、**不是判据**（不 export id / point / gate）、
+         *   **零 import**、也不带任何一条判据的语义。
+         *
+         * ★ 为什么它必须存在（依赖方向逼出来的，不是偏好）：
+         *   认出这个记号的两个地方是 `registry.ts` 与 `completion/mutation.ts`
+         *   （都在 gates 层），而**抛出它的是 tools 层**（`runWithinBudget`）。
+         *   若把记号定义在 tools 层，gates 就必须反向 import tools ——
+         *   而那违反本仓的单向纪律（见 `src/gates/runtime/stall.ts` 的注释：
+         *   「gates 层今天不 import 任何 tools/」）。
+         *   ⇒ 记号只能住在一个**两层都顺向引得到**的叶子模块里。
+         *
+         * ★★ 而"判据之间不许互相调用"这条能力**一个字都没变**：
+         *   仍然不许 `completion/r5.ts imports "./mutation.ts"` ——
+         *   本行放行的是一个**共享的纯函数模块**，与 `./kind-requirements.ts` 同类。
+         */
+        || specifier === '../budget-stop.ts'
       if (!allowed) offenders.push(`${rel} imports "${specifier}"`)
     }
   }

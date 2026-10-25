@@ -297,7 +297,41 @@ test('臂 3 ★ 对照臂：基准绿 + 选测跑通 + 全量绿 ⇒ ok', async 
   assert.equal(accepted.baseline.label, '54eddb4 (parent/HEAD)')
   assert.equal(accepted.full.exitCode, 0)
   assert.equal(accepted.full.status, 'passed')
-  assert.ok(Object.keys(accepted.outputs ?? {}).length === 0 || true)
+  /**
+   * ── ★★★ t25 修：这一行本来是 `assert.ok(Object.keys(accepted.outputs ?? {}).length === 0 || true)` ──
+   *
+   * MEASURED（t25）：那个 `|| true` 让它**无条件通过** —— 与没有这一行在观测上完全相同。
+   * ★★ 而它**连要测的东西都搞错了**：`accepted` 是**判据自己的**裁决，
+   *   它的键是 `["ok","baseline","selection","full"]`，**没有** `outputs`；
+   *   `outputs` 是**注册表**收走产出的那一格（见本文件臂 3b 那一组，
+   *   那里的 `evaluation.outputs['completion.backtest']` 才是它）。
+   *   ⇒ 原本那句读的是 `(undefined ?? {})` ⇒ 长度恒 0 ⇒ 即使没有 `|| true`，
+   *     它也只在"这个字段不存在"时成立 —— 一条**测错了对象**的断言。
+   *
+   * ── 修法：把它变成**有方向的**断言，测这半边真正该测的东西 ──────────────────
+   *
+   * ★ 本臂（臂 3）的定位是**对照臂**："完全合法的输入必须过，且**交出可落盘的结果**"
+   *   （见它自己的标题）。而"可落盘的结果"就是**这三段读数**。
+   * ⇒ 断言它们**都在场且形状对**，而不是断言某个不存在的字段为空。
+   *
+   * ★★ 定向性：把 `baseline` / `selection` / `full` 任一格去掉（或改成 `undefined`），
+   *   本断言立刻红 —— 见 `scripts/gate-tautology-sweep.test.mjs` 的臂 5（植入缺陷跑一次）。
+   */
+  for (const part of ['baseline', 'selection', 'full']) {
+    assert.ok(
+      accepted[part] !== undefined && accepted[part] !== null,
+      `★ 通过时必须交出「${part}」这一段读数 —— 否则"通过了"这三个字读的人无从复核。实际键：${JSON.stringify(Object.keys(accepted))}`,
+    )
+  }
+  /**
+   * ★ 而它**不许**带 `outputs`：那是**注册表**的格，不是判据裁决的格。
+   *   ⇒ 两者混用会让"判据交出的东西"与"注册表收走的东西"在读数上同形。
+   */
+  assert.equal(
+    'outputs' in accepted, false,
+    '★ 判据自己的裁决里不该有 `outputs` —— 那一格是注册表的（见臂 3b）。'
+    + '两者同形会让"判据交出了什么"与"注册表收走了什么"读不出区别',
+  )
 })
 
 test('臂 3b ★ 对照臂：通过时交出①基准②选测（含盲区）③全量，而不是一句"通过了"', async () => {
@@ -539,7 +573,7 @@ test('★ t18 臂 2（★ 行为臂）：两种"没有父版本"必须【真的�
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     tools: { register(tool) { tools.set(tool.name, tool) } },
     subagents: { getProvider() { return undefined }, list() { return [] }, sendMessage: async () => 'msg-0', [Symbol.for('dsh.subagent.queuePrompt')]: async () => 'msg-0' },
-    agents: { get() { return undefined } },
+    agents: { list: () => [], get() { return undefined } },
     on() { return () => {} }, effect(setup) { return setup() }, inject() { return () => {} },
   }
   registerAgentTeamsTools(ctx, { stateDir: '.agent-teams', memberProvider: 'spawn', maxMembers: 8, profiles: {}, fallback: undefined })
