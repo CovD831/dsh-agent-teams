@@ -770,6 +770,60 @@ export const CLAIMS = Object.freeze([
       + '而它属于**观感**，按 §27.4 的纪律不进判据。',
   },
   // ── §28 画法：四个可测的错 + 三条借来的画法（2026-10-22 第四轮）────────────
+  // ── §29 系统要自己完成：判据的读者是队长（2026-10-25）──────────────────────
+  {
+    id: 'R29.1', section: 29, status: 'gap',
+    claim: '计划阶段之前，队长**先复述**需求并给出**管线图**（不是摘要，是可核对的每步输入/输出/判据）',
+    check: { kind: 'manual' },
+    note: '★ 现状实测：`grep -riE "restate|recap|paraphrase" src/` ⇒ **0 命中**；'
+      + '`src/index.ts` 队长协议 10 条无一条要求复述，第 3 条的 "Present the plan" **无形状约束**。'
+      + '★★ 形状要求见 §29.3 —— "再讲一遍"不算复述，可核对的管线图才算。',
+  },
+  {
+    id: 'R29.2', section: 29, status: 'gap',
+    claim: '对抗审查由**独立成员**跑，并断言 `reviewerId ≠ plan.authorId`',
+    check: { kind: 'manual' },
+    note: '★ 五问本体已存在（`scripts/friction-triage.mjs:971` `adversarialReview()`），'
+      + '但它由**队长自己的进程**调用 ⇒ 不独立。`src/tools/review-plan.ts:222` 只 import 纯函数，'
+      + '**不 spawn**。缺的是「下发给独立成员」这一步。',
+  },
+  {
+    id: 'R29.3', section: 29, status: 'gap',
+    claim: '「等裁断」是**可恢复的 parked**，不是终态 `blocked`；等待期间其余任务可推进',
+    check: { kind: 'manual' },
+    note: '★ `src/types.ts` 无 `parked`。今天的 `blocked` 是终态语义，会让依赖任务连带死 —— '
+      + '这正是用户逐字反对的「阻塞执行」。',
+  },
+  {
+    id: 'R29.4', section: 29, status: 'gap',
+    claim: '双向钢人存在，且**只在最强正反观点可能变了时**重做（T1/T2/T3 至少一条成立）',
+    check: { kind: 'manual' },
+    note: '★ `grep -riE "steelman|strawman|双向钢人" src/` ⇒ **0 命中**，完全未实现。'
+      + '★★ T1/T2/T3 触发条件是**提案**（§29.5），未裁定。',
+  },
+  {
+    id: 'R29.5', section: 29, status: 'unverified',
+    claim: '交付物是「我替你判了什么」的回执，不是「要你判什么」的清单',
+    check: { kind: 'manual' },
+    note: '★ 这是**定位判决**，机制层（回执的数据结构）随 §29.1 / §29.3 一起落地；'
+      + '在此之前只能按阅读判，不能机械判。',
+  },
+  {
+    id: 'R29.6', section: 29, status: 'gap',
+    claim: '机制可插拔：一条机制 = 一个**可注册的提示词段** + 至少一条判据',
+    check: { kind: 'manual' },
+    note: '★ 判据层**已经**可插拔（`src/gates/registry.ts` 的 register/unregister/observe/list）。'
+      + '★★ 但**提示词层完全写死**：`src/index.ts:159-169` 是 10 条硬编码字符串，整体注入、不可拆删换。'
+      + '⇒ 要做可插拔机制，**必须先把这 10 条拆成可注册的段**，而不是在它下面加第 11 条。',
+  },
+  {
+    id: 'R29.7', section: 29, status: 'gap',
+    claim: '`profiles.protocol` 能真的定制协议，而不是 240 字符摘要',
+    check: { kind: 'manual' },
+    note: '★ 实测反证：`src/profiles.ts:21` `PROFILE_PROTOCOL_PROMPT_LIMIT = 240`，'
+      + '`:331` `protocolSummary()` 做 `slice(0, 240)` ⇒ 这个字段**形似可配置、实际不可配**。'
+      + '★★ 它会让读配置的人以为协议已可定制 —— 与「两件不同的事不许同形」（§4）同族。',
+  },
   {
     id: 'R28.1', section: 28, status: 'met',
     claim: '「像不像一间房间」落成**四个可测的数**：座位间距、排距、每行人数、桌面/地板对比度',
